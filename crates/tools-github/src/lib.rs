@@ -1345,9 +1345,19 @@ impl<Credentials, Transport> GitHubPullRequestCreateExecutor<Credentials, Transp
     ) -> Result<CorrelatedToolExecutorEvidence, GitHubExecutorError> {
         let correlation = invocation.correlation();
         report_transport_failure(&failure, &correlation);
+        let detail = self.failure_detail(&failure)?;
+        Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        }))
+    }
+
+    fn failure_detail(
+        &self,
+        failure: &GitHubTransportFailure,
+    ) -> Result<ToolExecutionErrorDetail, GitHubExecutorError> {
         let detail = match failure {
             GitHubTransportFailure::InvalidCredential => self.credential_detail.clone(),
-            GitHubTransportFailure::Rejected { status, .. } if status_is_definitive(status) => {
+            GitHubTransportFailure::Rejected { status, .. } if status_is_definitive(*status) => {
                 self.rejected_detail.clone()
             }
             GitHubTransportFailure::GraphQlRejected | GitHubTransportFailure::EgressRejected => {
@@ -1364,9 +1374,7 @@ impl<Credentials, Transport> GitHubPullRequestCreateExecutor<Credentials, Transp
                 return Err(infrastructure(CommitOutcome::Ambiguous));
             }
         };
-        Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
-            detail: Some(detail),
-        }))
+        Ok(detail)
     }
 }
 
@@ -2931,20 +2939,27 @@ fn nested_bool(value: &serde_json::Value, path: &[&str]) -> Result<bool, GitHubT
 }
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         io::{self, Write},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, OnceLock},
     };
 
-    use signalbox_application::ToolCatalog;
+    use signalbox_application::{
+        ToolCatalog, ToolExecutionServiceError, ToolExecutionServiceOutcome,
+    };
     use signalbox_domain::{
-        SessionId, ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-        ToolDispatchGeneration, ToolName, ToolRequestId, TurnAttemptId, TurnId,
+        SessionId, ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd,
+        ToolAttemptId, ToolDispatchGeneration, ToolExecutionErrorKind, ToolName, ToolRequestId,
+        TurnAttemptId, TurnId,
     };
     use signalbox_model_runtime::CredentialAccessFailure;
 
-    use super::*;
+    use super::{test_support::*, *};
 
     const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
     const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
@@ -2968,8 +2983,10 @@ mod tests {
     const GITHUB_FILE_CEILING: usize = 3_000;
     const FILES_BEYOND_CEILING: usize = 3_001;
     const CLIENT_ERROR_STATUS: u16 = 422;
+    const FORBIDDEN_STATUS: u16 = 403;
     const REDIRECT_STATUS: u16 = 302;
     const SERVER_ERROR_STATUS: u16 = 503;
+    const BAD_GATEWAY_STATUS: u16 = 502;
     const SYNTHETIC_TOKEN: &str = "github_pat_synthetic_fixture_secret";
     const SYNTHETIC_UNICODE_TOKEN: &str = "github_pat_synthétic_fixture_secret";
     const SYNTHETIC_UNICODE_PREFIX: &str = "github_pat_synth";
@@ -3069,27 +3086,18 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedTelemetry {
-        fn text(&self) -> String {
-            String::from_utf8(
-                self.0
-                    .lock()
-                    .expect("captured telemetry lock is available")
-                    .clone(),
-            )
-            .expect("captured telemetry is UTF-8")
-        }
+    thread_local! {
+        /// Telemetry captured on this thread alone.
+        static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
+
+    /// Appends every formatted event to the emitting thread's own buffer.
+    #[derive(Clone, Copy, Default)]
+    struct CapturedTelemetry;
 
     impl Write for CapturedTelemetry {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("captured telemetry lock is available")
-                .extend_from_slice(buffer);
+            CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().extend_from_slice(buffer));
             Ok(buffer.len())
         }
 
@@ -3102,8 +3110,43 @@ mod tests {
         type Writer = Self;
 
         fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
+            *self
         }
+    }
+
+    /// Installs the capturing subscriber once for the whole test process, and
+    /// clears whatever this thread captured earlier.
+    ///
+    /// It must be global rather than thread-scoped. `tracing` caches each
+    /// callsite's interest process-wide, but `set_default` binds a subscriber
+    /// to one thread, so a sibling test that reaches a callsite first on
+    /// another thread registers it against no subscriber at all -- recording it
+    /// as uninteresting for every thread, including the one that installed a
+    /// capture. The event then is not merely written late; it is never emitted,
+    /// and the assertion reads an empty buffer.
+    ///
+    /// Writes are routed per thread so concurrent tests never read each other's
+    /// events, which keeps assertions on both presence and absence honest.
+    fn capture_telemetry_for_this_thread() {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(CapturedTelemetry)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global telemetry subscriber is installed");
+        });
+        CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().clear());
+    }
+
+    /// Returns the telemetry captured on this thread.
+    fn captured_telemetry() -> String {
+        CAPTURED_TELEMETRY
+            .with(|captured| String::from_utf8(captured.borrow().clone()))
+            .expect("captured telemetry is UTF-8")
     }
 
     fn dispatch_correlation() -> ToolAttemptDispatchCorrelation {
@@ -3125,45 +3168,24 @@ mod tests {
         error: &CredentialAccessError,
         correlation: &ToolAttemptDispatchCorrelation,
     ) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_credential_access_failure(error, correlation);
-        });
-        output.text()
+        capture_telemetry_for_this_thread();
+        report_credential_access_failure(error, correlation);
+        captured_telemetry()
     }
 
     fn capture_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_credential_value_failure(correlation);
-        });
-        output.text()
+        capture_telemetry_for_this_thread();
+        report_credential_value_failure(correlation);
+        captured_telemetry()
     }
 
     fn capture_transport_failure(
         failure: &GitHubTransportFailure,
         correlation: &ToolAttemptDispatchCorrelation,
     ) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_transport_failure(failure, correlation);
-        });
-        output.text()
+        capture_telemetry_for_this_thread();
+        report_transport_failure(failure, correlation);
+        captured_telemetry()
     }
 
     fn catalog() -> CompiledToolCatalog {
@@ -3408,6 +3430,186 @@ mod tests {
         assert_eq!(body["body"], arguments.body());
         assert_eq!(body["head"], arguments.head());
         assert_eq!(body["base"], arguments.base());
+    }
+
+    fn create_executor()
+    -> GitHubPullRequestCreateExecutor<SyntheticCredentials, RecordingCreateTransport> {
+        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
+            .expect("configured repository is admitted");
+        GitHubPullRequestCreateTools::try_new(
+            SyntheticCredentials,
+            RecordingCreateTransport::default(),
+            GitHubEgressPolicy::github_api_only(),
+            repository,
+        )
+        .expect("creation suite constructs")
+        .into_parts()
+        .1
+    }
+
+    /// INV-025: a rejection GitHub answered definitively closes creation as a
+    /// known failure, so the workflow reports the denial instead of stalling
+    /// in reconciliation for an effect that never happened.
+    #[test]
+    fn inv_025_definitive_create_rejection_is_a_known_failure() {
+        let executor = create_executor();
+        let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
+
+        assert_eq!(
+            executor.failure_detail(&GitHubTransportFailure::rejected(FORBIDDEN_STATUS)),
+            Ok(expected)
+        );
+    }
+
+    /// INV-025: a server-side rejection cannot establish whether the pull
+    /// request was created, so it surfaces as an ambiguous commit rather than
+    /// a definite failure the agent would retry into a duplicate pull request.
+    #[test]
+    fn inv_025_server_side_create_rejection_is_an_ambiguous_commit() {
+        let executor = create_executor();
+        let error = executor
+            .failure_detail(&GitHubTransportFailure::rejected(BAD_GATEWAY_STATUS))
+            .expect_err("a server-side rejection cannot establish the commit outcome");
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+    }
+
+    /// Answers a creation dispatch with one fixed transport rejection, and
+    /// records that it was reached.
+    ///
+    /// Counting dispatches is what makes the tests below about the *server's*
+    /// rejection: an executor that failed before dispatch — on credentials,
+    /// egress policy, or argument decoding — can produce the same `KnownFailed`
+    /// evidence and the same commit-ambiguous error, so without this the
+    /// assertions would hold for a path that never left the process.
+    #[derive(Clone, Debug)]
+    struct RejectingCreateTransport {
+        status: u16,
+        dispatches: Arc<Mutex<usize>>,
+    }
+
+    impl RejectingCreateTransport {
+        fn new(status: u16) -> (Self, Arc<Mutex<usize>>) {
+            let dispatches = Arc::new(Mutex::new(0));
+            (
+                Self {
+                    status,
+                    dispatches: Arc::clone(&dispatches),
+                },
+                dispatches,
+            )
+        }
+    }
+
+    impl GitHubTransport for RejectingCreateTransport {
+        async fn execute(
+            &mut self,
+            _operation: GitHubOperation,
+            _credential: &CredentialValue,
+            _policy: &GitHubEgressPolicy,
+        ) -> Result<GitHubResult, GitHubTransportFailure> {
+            *self
+                .dispatches
+                .lock()
+                .expect("dispatch counter lock is available") += 1;
+            Err(GitHubTransportFailure::rejected(self.status))
+        }
+    }
+
+    /// INV-025: a definitively rejected creation reaches the workflow as
+    /// `KnownFailed` *evidence* carrying the sanitized rejection detail.
+    ///
+    /// The classifier tests above call `failure_detail` directly, so they stay
+    /// green if `failure_evidence` stops wrapping the detail in `KnownFailed`
+    /// and emits completion or another terminal shape instead — a regression
+    /// that would report a denial as something else entirely. This drives the
+    /// executor through a real correlated invocation so the bound evidence
+    /// variant is what is asserted.
+    #[tokio::test]
+    async fn inv_025_definitive_create_rejection_binds_known_failure_evidence() {
+        let (transport, dispatches) = RejectingCreateTransport::new(FORBIDDEN_STATUS);
+        let outcome = create_pull_request_evidence(transport).await;
+        let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
+
+        assert_eq!(
+            *dispatches
+                .lock()
+                .expect("dispatch counter lock is available"),
+            1,
+            "the evidence must come from exactly one real server rejection"
+        );
+
+        assert_eq!(
+            outcome.evidence,
+            Some(ToolExecutorEvidence::KnownFailed {
+                detail: Some(expected.clone())
+            })
+        );
+        // Committing is not the claim on its own: evidence mapped to the wrong
+        // terminal observation still commits, leaving the durable attempt
+        // marked completed or ambiguous while both the recorder and the
+        // outcome shape look right. Assert the relation this path claims — the
+        // same definitive detail, ending the attempt known-failed.
+        let Ok(ToolExecutionServiceOutcome::ObservationCommitted(ended)) = outcome.result else {
+            panic!(
+                "definitive evidence commits an observation rather than stalling the batch, \
+                 got {:?}",
+                outcome.result
+            )
+        };
+        let ToolAttemptEnd::KnownFailed { error } = ended.end() else {
+            panic!(
+                "a definitive rejection ends the attempt known-failed, got {:?}",
+                ended.end()
+            )
+        };
+        assert_eq!(error.kind(), ToolExecutionErrorKind::ExecutionFailed);
+        assert_eq!(error.detail(), Some(&expected));
+    }
+
+    /// INV-025: the same path refuses to bind *any* evidence when GitHub
+    /// answered ambiguously, so an effect that may have happened is never
+    /// reported as a definitive outcome the agent would retry.
+    #[tokio::test]
+    async fn inv_025_server_side_create_rejection_binds_no_evidence() {
+        let (transport, dispatches) = RejectingCreateTransport::new(BAD_GATEWAY_STATUS);
+        let outcome = create_pull_request_evidence(transport).await;
+
+        assert_eq!(
+            *dispatches
+                .lock()
+                .expect("dispatch counter lock is available"),
+            1,
+            "the ambiguity must come from exactly one real server rejection"
+        );
+        assert_eq!(outcome.evidence, None);
+        // Absence of evidence is not the claim. "No evidence, no commit" is
+        // equally true when `failure_evidence` returns a *definite* executor
+        // error, and when dispatch fails before that method is reached at all
+        // — in either case the server rejection stopped being classified as
+        // commit-ambiguous while these assertions stayed green. The
+        // classification lives on the executor error the service nests inside
+        // its own, so inspect that rather than the shape around it.
+        let Err(ToolExecutionServiceError::ExecutorCrashClassification { executor_error, .. }) =
+            outcome.result
+        else {
+            panic!(
+                "an unresolvable ambiguous effect must reach crash classification, got {:?}",
+                outcome.result
+            )
+        };
+        assert_eq!(
+            executor_error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            },
+            "a server-side rejection of a mutating call stays commit-ambiguous"
+        );
     }
 
     #[test]

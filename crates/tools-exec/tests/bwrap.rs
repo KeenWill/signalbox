@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecutionConfinement, OutputEncoding,
     ProcessOutcome, ProcessSpawnFailure, SandboxedCommandRunner, TokioProcessRunner,
@@ -29,8 +30,7 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
         .and_then(std::path::Path::parent)
         .ok_or("tools-exec manifest is not nested under the workspace root")?
         .canonicalize()?;
-    let process_runner =
-        TokioProcessRunner::try_new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))?;
+    let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
     let mut runner = SandboxedCommandRunner::try_new(process_runner, root)?;
     let arguments = ExecArguments {
         program: String::from("test"),
@@ -56,6 +56,51 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     let nested_result = runner.try_run(nested_arguments).await?;
 
     assert_real_bwrap_result(nested_result, ci)?;
+
+    // The other probes hold whether or not the network namespace is unshared,
+    // so none of them would notice `--unshare-net` disappearing from the
+    // profile. A network namespace of its own is the one containment property
+    // that separates this sandbox from a process that can post the workspace to
+    // an arbitrary host, and its direct observable is the interface table: a
+    // freshly unshared namespace carries the loopback device and nothing else,
+    // whereas sharing the host's namespace exposes every host interface.
+    let network_arguments = ExecArguments {
+        program: String::from("sh"),
+        arguments: vec![
+            String::from("-c"),
+            String::from(
+                "grep -q '^ *lo:' /proc/net/dev && test \"$(grep -c : /proc/net/dev)\" -eq 1",
+            ),
+        ],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let network_result = runner.try_run(network_arguments).await?;
+
+    assert_real_bwrap_result(network_result, ci)?;
+
+    // The interface table proves `lo` exists, not that it works. A fresh
+    // namespace can carry a loopback device that is still down, and a workspace
+    // test binding a local server would then fail with `ENETUNREACH` while the
+    // probe above still passed. Bind a listener and connect to it, so loopback
+    // is asserted usable rather than merely present. A missing `python3` shows
+    // up as a typed spawn failure rather than a silent pass.
+    let loopback_arguments = ExecArguments {
+        program: String::from("python3"),
+        arguments: vec![
+            String::from("-c"),
+            String::from(
+                "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(1); c=socket.create_connection(s.getsockname()); c.close(); s.close()",
+            ),
+        ],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let loopback_result = runner.try_run(loopback_arguments).await?;
+
+    assert_real_bwrap_result(loopback_result, ci)?;
 
     let missing_arguments = ExecArguments {
         program: String::from("signalbox-exec-definitely-missing-target"),
@@ -170,12 +215,38 @@ fn procfs_children_available() -> bool {
         let Ok(task) = task else {
             return false;
         };
-        if std::fs::read_to_string(task.path().join("children")).is_err() {
-            return false;
+        let read = std::fs::read_to_string(task.path().join("children"));
+        match classify_task_children_read(&read) {
+            TaskChildrenReadOutcome::Observed => observed_task = true,
+            // /proc/<pid>/task enumerates live threads at read_dir time, but
+            // a thread can exit before its children file is read: the tid
+            // directory (and the file inside it) then vanishes mid-scan and
+            // the read fails with ENOENT. That race means "this thread has
+            // no children anymore", not "procfs task-children support is
+            // missing" -- skip it and keep scanning rather than flipping the
+            // whole verdict to unavailable.
+            TaskChildrenReadOutcome::ThreadExited => continue,
+            TaskChildrenReadOutcome::Unavailable => return false,
         }
-        observed_task = true;
     }
     observed_task
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TaskChildrenReadOutcome {
+    Observed,
+    ThreadExited,
+    Unavailable,
+}
+
+fn classify_task_children_read(read: &std::io::Result<String>) -> TaskChildrenReadOutcome {
+    match read {
+        Ok(_) => TaskChildrenReadOutcome::Observed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            TaskChildrenReadOutcome::ThreadExited
+        }
+        Err(_) => TaskChildrenReadOutcome::Unavailable,
+    }
 }
 
 #[test]
@@ -215,4 +286,36 @@ fn real_bwrap_refusal_is_rejected_in_ci() {
 #[test]
 fn real_bwrap_refusal_remains_typed_evidence_outside_ci() {
     assert_eq!(real_bwrap_refusal_policy(false), Ok(()));
+}
+
+#[test]
+fn task_children_read_success_is_observed() {
+    assert_eq!(
+        classify_task_children_read(&Ok(String::new())),
+        TaskChildrenReadOutcome::Observed
+    );
+}
+
+#[test]
+fn task_children_read_missing_file_is_treated_as_thread_exit_race() {
+    let vanished = Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "thread exited mid-scan",
+    ));
+    assert_eq!(
+        classify_task_children_read(&vanished),
+        TaskChildrenReadOutcome::ThreadExited
+    );
+}
+
+#[test]
+fn task_children_read_other_errors_remain_genuine_unavailability() {
+    let denied = Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "no access to task children",
+    ));
+    assert_eq!(
+        classify_task_children_read(&denied),
+        TaskChildrenReadOutcome::Unavailable
+    );
 }

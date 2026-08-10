@@ -40,8 +40,13 @@ use signalbox_conversation_import_codex::{
 use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FastMode as DomainFastMode,
+    DecideToolRequestRejectedResult, DecideToolRequestResult,
+    DelegationMessageDirection as DomainDelegationMessageDirection,
+    DelegationOutcomeKind as DomainDelegationOutcomeKind,
+    DelegationOutcomeReason as DomainDelegationOutcomeReason,
+    DelegationProvenance as DomainDelegationProvenance, DelegationWait,
+    DelegationWaitMode as DomainDelegationWaitMode, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FastMode as DomainFastMode,
     FastModeOverlay as DomainFastModeOverlay, FrozenModelSelection, Goal, GoalBlockProvenance,
     GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
     GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
@@ -52,14 +57,15 @@ use signalbox_domain::{
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
-    ModelSettingsPrecedence as DomainModelSettingsPrecedence, PerInputConfigurationChoices,
-    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
-    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
-    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
-    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ModelSettingsPrecedence as DomainModelSettingsPrecedence, ParentTerminationCommandSource,
+    PerInputConfigurationChoices, ReasoningLevel as DomainReasoningLevel,
+    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
+    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
+    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
+    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -120,6 +126,10 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
+    session_delegation::{
+        DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
+        ProcessDelegationRequestRejection,
+    },
     session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
     session_placement::{SessionPlacementRepository, SessionPlacementRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
@@ -134,6 +144,7 @@ use signalbox_process_protocol::{
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     DelegationOutcome as WireDelegationOutcome, DelegationPolicy as WireDelegationPolicy,
     DelegationProvenance as WireDelegationProvenance, DelegationReason as WireDelegationReason,
+    DelegationToolRequestState as WireDelegationToolRequestState,
     DelegationWaitMode as WireDelegationWaitMode,
     DescendantTerminationScope as WireDescendantTerminationScope,
     EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
@@ -169,6 +180,7 @@ use signalbox_process_protocol::{
     content_fragments, decode_client_line, encode_server_line,
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
+use signalbox_tools_sessions::{AwaitSessionPortOutcome, DeliveredChildResult};
 use sqlx::{PgPool, Row};
 use tokio::{
     io::{
@@ -189,11 +201,13 @@ use crate::{
         ReviewOrchestrationInternalCause, ReviewOrchestrationRuntimeError,
         execute_review_orchestration_request, read_review_orchestration_request,
     },
+    session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError},
     usage_limits::context_compaction_usage_exceeds_configured_limits,
 };
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const DELEGATION_DELIVERY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
@@ -206,7 +220,6 @@ const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
-const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -474,6 +487,10 @@ fn nudge_delegation_wake(
     if matches!(event, DispatchedOutboxEventKind::DelegationWake(_)) {
         let _ = eligibility_nudge.nudge(session);
     }
+}
+
+fn nudge_delegation_issuer(eligibility_nudge: &impl EligibilityNudge, session: SessionId) {
+    let _ = eligibility_nudge.nudge(session);
 }
 
 fn observe_outbox_metrics_once(
@@ -762,6 +779,7 @@ async fn serve_connection(
         };
         drop(frame_buffer_permit);
         handle_request(
+            &mut reader,
             &mut writer,
             version,
             request_id,
@@ -823,18 +841,6 @@ async fn acquire_snapshot_reader_permit(
     }
 }
 
-async fn acquire_review_orchestration_snapshot_permit(
-    budget: Arc<Semaphore>,
-    shutdown: &mut watch::Receiver<bool>,
-) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
-    tokio::select! {
-        () = wait_for_shutdown(shutdown) => Ok(None),
-        permit = budget.acquire_many_owned(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS) => permit
-            .map(Some)
-            .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed),
-    }
-}
-
 fn conversation_import_request_requires_permit(
     request: &ClientRequest,
     import_state: ConversationImportState,
@@ -864,6 +870,9 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::CompactSession { .. }
         | ClientRequest::ReadTranscript { .. }
         | ClientRequest::FollowSession { .. }
+        | ClientRequest::SpawnSession { .. }
+        | ClientRequest::AwaitSession { .. }
+        | ClientRequest::SendSessionMessage { .. }
         | ClientRequest::ListSessionMetadata { .. }
         | ClientRequest::ListConversations { .. }
         | ClientRequest::ListModelAliases {}
@@ -987,10 +996,114 @@ async fn acquire_review_command_permit_while_buffered(
     Ok(Some((frame_buffer_permit, review_command_permit)))
 }
 
+/// One closed snapshot-reader admission class, decided for every request before
+/// dispatch.
+///
+/// The decision lives here rather than in each dispatch arm because a verb that
+/// forgets to reserve capacity does not fail: it quietly spends the connections
+/// [`RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS`] holds back for the outbox
+/// dispatcher and mutations. An exhaustive match makes a later verb state its
+/// class instead of inheriting one by omission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotReaderAdmission {
+    /// The request holds no pooled connection across statements: it either
+    /// touches no database or completes in one statement on a pooled
+    /// connection it returns immediately.
+    NotRequired,
+    /// The request holds one pooled connection across its database phase — a
+    /// multi-statement read, a `REPEATABLE READ` transaction, or a spool.
+    OneConnection,
+}
+
+impl SnapshotReaderAdmission {
+    const fn for_request(request: &ClientRequest) -> Self {
+        match request {
+            ClientRequest::ListSessions {}
+            | ClientRequest::ReadGoal { .. }
+            | ClientRequest::ReadTranscript { .. }
+            | ClientRequest::FollowSession { .. }
+            | ClientRequest::ListSessionMetadata { .. }
+            | ClientRequest::ListConversations { .. }
+            | ClientRequest::ReadImportedConversation { .. }
+            // The metadata point read is not one statement: it opens a
+            // transaction, sets `REPEATABLE READ ONLY`, selects, and commits.
+            | ClientRequest::ReadSessionMetadata { .. }
+            // Each review read opens its own `REPEATABLE READ` transaction, and
+            // the findings listing opens two and then walks the finding graph.
+            | ClientRequest::ReadReviewTarget { .. }
+            | ClientRequest::ReadReviewRun { .. }
+            | ClientRequest::ReadReviewFinding { .. }
+            | ClientRequest::ListReviewFindings { .. }
+            // The coherent orchestration snapshot reads every adapter fact
+            // inside one `REPEATABLE READ` transaction on a single connection.
+            | ClientRequest::ReadReviewOrchestration { .. } => Self::OneConnection,
+            ClientRequest::CreateSession { .. }
+            | ClientRequest::CreateSessionFromTemplate { .. }
+            | ClientRequest::ListTemplates {}
+            | ClientRequest::UpdateSessionPlacement { .. }
+            | ClientRequest::AttachGoal { .. }
+            | ClientRequest::ResumeGoal { .. }
+            | ClientRequest::StopGoal { .. }
+            | ClientRequest::SupersedeGoal { .. }
+            | ClientRequest::SubmitInput { .. }
+            | ClientRequest::CompactSession { .. }
+            | ClientRequest::SpawnSession { .. }
+            | ClientRequest::AwaitSession { .. }
+            | ClientRequest::SendSessionMessage { .. }
+            | ClientRequest::ListModelAliases {}
+            | ClientRequest::ListModelCapabilities {}
+            | ClientRequest::ReplaceSessionMetadata { .. }
+            | ClientRequest::ReplaceSessionDefaults { .. }
+            | ClientRequest::ReadSessionDefaults { .. }
+            | ClientRequest::ImportConversation { .. }
+            | ClientRequest::BeginConversationImport { .. }
+            | ClientRequest::AppendConversationImport { .. }
+            | ClientRequest::CommitConversationImport {}
+            | ClientRequest::AbortConversationImport {}
+            | ClientRequest::CreateSessionFromImportedFrontier { .. }
+            | ClientRequest::ReconcileTurn { .. }
+            | ClientRequest::CreateReviewTarget { .. }
+            | ClientRequest::StartReviewRun { .. }
+            | ClientRequest::ActivateReviewPass { .. }
+            | ClientRequest::CompleteReviewPass { .. }
+            | ClientRequest::RecordReviewFindings { .. }
+            | ClientRequest::RecordReviewFindingEvent { .. }
+            | ClientRequest::ReserveReviewExternalLink { .. }
+            | ClientRequest::AttachReviewExternalLink { .. }
+            | ClientRequest::StartReviewOrchestration { .. }
+            | ClientRequest::RecordReviewImportOutcome { .. }
+            | ClientRequest::RecordReviewConcernOutcome { .. }
+            | ClientRequest::RecordReviewJudgmentPlan { .. }
+            | ClientRequest::RecordReviewJudgmentEffect { .. }
+            | ClientRequest::RecordReviewRepairOutcomes { .. }
+            | ClientRequest::RecordReviewPublicationOutcomes { .. }
+            | ClientRequest::StopTurn { .. }
+            | ClientRequest::DecideToolRequest { .. } => Self::NotRequired,
+        }
+    }
+}
+
+/// The snapshot-reader capacity one request holds, or `None` when shutdown
+/// cancelled the wait and the request goes unanswered.
+async fn admit_snapshot_reader(
+    request: &ClientRequest,
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<Option<OwnedSemaphorePermit>>, ProcessConnectionError> {
+    match SnapshotReaderAdmission::for_request(request) {
+        SnapshotReaderAdmission::NotRequired => Ok(Some(None)),
+        SnapshotReaderAdmission::OneConnection => {
+            Ok(acquire_snapshot_reader_permit(budget, shutdown)
+                .await?
+                .map(Some))
+        }
+    }
+}
+
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
-    if available < REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS {
+    if available == 0 {
         return None;
     }
     usize::try_from(available).ok()
@@ -1101,7 +1214,12 @@ impl ConversationImportState {
     }
 }
 
-async fn handle_request<Writer>(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "request execution keeps connection I/O and durable correlation explicit"
+)]
+async fn handle_request<Reader, Writer>(
+    reader: &mut Reader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -1111,6 +1229,7 @@ async fn handle_request<Writer>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
+    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
@@ -1124,6 +1243,15 @@ where
         canonical_review_request_digest(&mut request)
     } else {
         None
+    };
+    let Some(snapshot_permit) = admit_snapshot_reader(
+        &request,
+        Arc::clone(&services.snapshot_reader_budget),
+        &mut shutdown,
+    )
+    .await?
+    else {
+        return Ok(());
     };
     match request {
         ClientRequest::CreateSession {
@@ -1208,12 +1336,7 @@ where
         ClientRequest::ReadImportedConversation {
             imported_conversation_id,
         } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_read_imported_conversation(
@@ -1227,12 +1350,7 @@ where
             .await
         }
         ClientRequest::ListSessions {} => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
@@ -1283,12 +1401,7 @@ where
             .await
         }
         ClientRequest::ReadGoal { session_id } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_read_goal(
@@ -1429,12 +1542,7 @@ where
             .await
         }
         ClientRequest::ReadTranscript { session_id } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_read_transcript(
@@ -1449,12 +1557,7 @@ where
             .await
         }
         ClientRequest::FollowSession { session_id } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_follow_session(
@@ -1477,12 +1580,7 @@ where
             page_size,
             after_session_id,
         } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_list_session_metadata(
@@ -1508,12 +1606,7 @@ where
             page_size,
             after,
         } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_list_conversations(
@@ -1551,8 +1644,18 @@ where
             .await
         }
         ClientRequest::ReadSessionMetadata { session_id } => {
-            handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
-                .await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_session_metadata(
+                writer,
+                version,
+                request_id,
+                session_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ReplaceSessionMetadata {
             command_id,
@@ -1923,12 +2026,7 @@ where
             .await
         }
         request @ ClientRequest::ReadReviewOrchestration { .. } => {
-            let Some(snapshot_permit) = acquire_review_orchestration_snapshot_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             run_until_shutdown(
@@ -1947,17 +2045,60 @@ where
             .unwrap_or(Ok(()))
         }
         ClientRequest::ReadReviewTarget { target_id } => {
-            handle_read_review_target(writer, version, request_id, target_id, &services.pool).await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_review_target(
+                writer,
+                version,
+                request_id,
+                target_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ReadReviewRun { run_id } => {
-            handle_read_review_run(writer, version, request_id, run_id, &services.pool).await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_review_run(
+                writer,
+                version,
+                request_id,
+                run_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ReadReviewFinding { finding_id } => {
-            handle_read_review_finding(writer, version, request_id, finding_id, &services.pool)
-                .await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_review_finding(
+                writer,
+                version,
+                request_id,
+                finding_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ListReviewFindings { run_id } => {
-            handle_list_review_findings(writer, version, request_id, run_id, &services.pool).await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_list_review_findings(
+                writer,
+                version,
+                request_id,
+                run_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::StopTurn {
             command_id,
@@ -1986,6 +2127,52 @@ where
             )
             .await
         }
+        ClientRequest::SpawnSession { .. } => {
+            reject_uncomposed_spawn(writer, version, request_id).await
+        }
+        ClientRequest::AwaitSession {
+            session_id,
+            turn_id,
+            tool_request_id,
+            child_session_id,
+            mode,
+        } => {
+            handle_await_session(
+                reader,
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                tool_request_id,
+                child_session_id,
+                mode,
+                services,
+                shutdown,
+            )
+            .await
+        }
+        ClientRequest::SendSessionMessage {
+            session_id,
+            turn_id,
+            tool_request_id,
+            peer_session_id,
+            content,
+        } => {
+            handle_send_session_message(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                tool_request_id,
+                peer_session_id,
+                content,
+                &services.pool,
+                &services.eligibility_nudge,
+            )
+            .await
+        }
         ClientRequest::DecideToolRequest {
             command_id,
             session_id,
@@ -2006,6 +2193,665 @@ where
             .await
         }
     }
+}
+
+async fn reject_uncomposed_spawn<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::without_detail(ErrorCode::InvalidRequest),
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed await request keeps every durable correlation explicit"
+)]
+async fn handle_await_session<Reader, Writer>(
+    reader: &mut Reader,
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    child_session_id: CanonicalUuid,
+    mode: WireDelegationWaitMode,
+    services: &ConnectionServices,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ProcessConnectionError>
+where
+    Reader: AsyncBufRead + Unpin,
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let turn = TurnId::from_uuid(turn_id.into_uuid());
+    let request = ToolRequestId::from_uuid(tool_request_id.into_uuid());
+    let child = SessionId::from_uuid(child_session_id.into_uuid());
+    let mode = match mode {
+        WireDelegationWaitMode::Foreground => DomainDelegationWaitMode::Foreground,
+        WireDelegationWaitMode::Background => DomainDelegationWaitMode::Background,
+    };
+    let mut subscription = services.fanouts.durable.subscribe();
+    let port = PostgresSessionDelegationPort::new(services.pool.clone());
+    let Some(outcome) = run_until_shutdown(
+        &mut shutdown,
+        port.await_process_session(session, turn, request, child, mode),
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    match outcome {
+        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::BackgroundRegistered(
+            receipt,
+        ))) => {
+            nudge_delegation_issuer(&services.eligibility_nudge, session);
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionAwaitRegistered {
+                    tool_request_id: wire_uuid(receipt.tool_request().into_uuid()),
+                    child_session_id: wire_uuid(receipt.child().into_uuid()),
+                    mode: WireDelegationWaitMode::Background,
+                },
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::Delivered(result))) => {
+            write_message(writer, version, request_id, wire_child_result(&result)?).await
+        }
+        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::ForegroundPending(wait))) => {
+            wait_for_foreground_child_result(
+                reader,
+                writer,
+                version,
+                request_id,
+                &port,
+                wait,
+                turn,
+                &mut subscription,
+                shutdown,
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::InvalidRequest) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::Rejected(rejection)) => {
+            nudge_after_process_await_rejection(&services.eligibility_nudge, session, rejection);
+            write_error(
+                writer,
+                version,
+                request_id,
+                process_delegation_rejection_for_recipient(
+                    rejection,
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    child_session_id,
+                    session_id,
+                ),
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::Applied(
+            AwaitSessionPortOutcome::Rejected | AwaitSessionPortOutcome::DurablyRejected,
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SessionDelegationContract,
+                ),
+            )
+            .await
+        }
+        Err(error) => {
+            write_delegation_port_error(writer, version, request_id, session_id, error).await
+        }
+    }
+}
+
+fn nudge_after_process_await_rejection(
+    eligibility_nudge: &impl EligibilityNudge,
+    issuer: SessionId,
+    rejection: ProcessDelegationRequestRejection,
+) {
+    let attempt_ended = match rejection {
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::RelationshipNotFound
+            | DelegationOperationRejection::DeliverySequenceExhausted
+            | DelegationOperationRejection::Transition { .. },
+        ) => true,
+        ProcessDelegationRequestRejection::SessionNotFound
+        | ProcessDelegationRequestRejection::ToolRequestNotFound
+        | ProcessDelegationRequestRejection::ToolRequestNotInSession
+        | ProcessDelegationRequestRejection::RequestNotInTurn
+        | ProcessDelegationRequestRejection::AwaitConflict
+        | ProcessDelegationRequestRejection::MessageConflict
+        | ProcessDelegationRequestRejection::MessageIdentityCollision { .. }
+        | ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::StaleDispatch { .. }
+            | DelegationOperationRejection::MessageIdentityCollision,
+        ) => false,
+    };
+    if attempt_ended {
+        nudge_delegation_issuer(eligibility_nudge, issuer);
+    }
+}
+
+fn nudge_after_process_message_rejection(
+    eligibility_nudge: &impl EligibilityNudge,
+    issuer: SessionId,
+    rejection: ProcessDelegationRequestRejection,
+) {
+    let attempt_ended = match rejection {
+        ProcessDelegationRequestRejection::MessageIdentityCollision { .. }
+        | ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::RelationshipNotFound
+            | DelegationOperationRejection::MessageIdentityCollision
+            | DelegationOperationRejection::DeliverySequenceExhausted
+            | DelegationOperationRejection::Transition { .. },
+        ) => true,
+        ProcessDelegationRequestRejection::SessionNotFound
+        | ProcessDelegationRequestRejection::ToolRequestNotFound
+        | ProcessDelegationRequestRejection::ToolRequestNotInSession
+        | ProcessDelegationRequestRejection::RequestNotInTurn
+        | ProcessDelegationRequestRejection::AwaitConflict
+        | ProcessDelegationRequestRejection::MessageConflict
+        | ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::StaleDispatch { .. },
+        ) => false,
+    };
+    if attempt_ended {
+        nudge_delegation_issuer(eligibility_nudge, issuer);
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "foreground delivery keeps socket cancellation and durable correlation explicit"
+)]
+async fn wait_for_foreground_child_result<Reader, Writer>(
+    reader: &mut Reader,
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    port: &PostgresSessionDelegationPort,
+    wait: DelegationWait,
+    turn: TurnId,
+    subscription: &mut broadcast::Receiver<ProcessUpdate>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ProcessConnectionError>
+where
+    Reader: AsyncBufRead + Unpin,
+    Writer: AsyncWrite + Unpin,
+{
+    loop {
+        let Some(delivery) =
+            run_until_shutdown(&mut shutdown, port.load_foreground_delivery(wait)).await
+        else {
+            return Ok(());
+        };
+        match preserve_committed_foreground_wait(delivery) {
+            CommittedForegroundDelivery::Delivered(result) => {
+                return write_message(writer, version, request_id, wire_child_result(&result)?)
+                    .await;
+            }
+            CommittedForegroundDelivery::Pending => {}
+            CommittedForegroundDelivery::Retry(error) => {
+                tracing::error!(
+                    diagnostic = "delegation_foreground_delivery_reread_failed",
+                    cause_code = error.operator_failure_cause_code(),
+                    session_id = %wait.parent().as_uuid(),
+                    turn_id = %turn.as_uuid(),
+                    "foreground process delivery reread failed after wait commit"
+                );
+                tokio::select! {
+                    () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                    peer = foreground_peer_activity(reader) => return peer,
+                    () = sleep(DELEGATION_DELIVERY_RETRY_INTERVAL) => continue,
+                }
+            }
+        }
+        loop {
+            let update = tokio::select! {
+                () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                peer = foreground_peer_activity(reader) => return peer,
+                update = subscription.recv() => update,
+            };
+            match update {
+                Ok(update) if update_signals_child_result(&update, wait) => break,
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => break,
+                Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CommittedForegroundDelivery<T, E> {
+    Delivered(T),
+    Pending,
+    Retry(E),
+}
+
+fn preserve_committed_foreground_wait<T, E>(
+    delivery: Result<Option<T>, E>,
+) -> CommittedForegroundDelivery<T, E> {
+    match delivery {
+        Ok(Some(delivered)) => CommittedForegroundDelivery::Delivered(delivered),
+        Ok(None) => CommittedForegroundDelivery::Pending,
+        Err(error) => CommittedForegroundDelivery::Retry(error),
+    }
+}
+
+async fn foreground_peer_activity<Reader>(reader: &mut Reader) -> Result<(), ProcessConnectionError>
+where
+    Reader: AsyncBufRead + Unpin,
+{
+    reader
+        .fill_buf()
+        .await
+        .map_err(ProcessConnectionError::PeerIo)?;
+    Err(ProcessConnectionError::PeerIo(io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "foreground delegation peer ended or sent another request",
+    )))
+}
+
+fn update_signals_child_result(update: &ProcessUpdate, wait: DelegationWait) -> bool {
+    match update {
+        ProcessUpdate::Durable { session, event, .. } => match event {
+            ProcessUpdateEvent::DelegationUpdate(delegation) => match delegation {
+                DispatchedDelegationUpdate::ChildResult {
+                    spawning_request,
+                    child,
+                    ..
+                } => {
+                    *session == wait.parent()
+                        && *spawning_request == wait.spawning_request()
+                        && *child == wait.child()
+                }
+                DispatchedDelegationUpdate::ChildSpawned { .. }
+                | DispatchedDelegationUpdate::ChildWaiting { .. }
+                | DispatchedDelegationUpdate::ChildLifecycleDisposition { .. }
+                | DispatchedDelegationUpdate::SessionMessage { .. } => false,
+            },
+            ProcessUpdateEvent::SessionCreated
+            | ProcessUpdateEvent::SessionModelSettingsChanged(_)
+            | ProcessUpdateEvent::TurnModelSettingsResolved(_)
+            | ProcessUpdateEvent::InputAccepted { .. }
+            | ProcessUpdateEvent::GoalTurnRetired { .. }
+            | ProcessUpdateEvent::TurnActivated { .. }
+            | ProcessUpdateEvent::ModelCallTransition { .. }
+            | ProcessUpdateEvent::ToolBatchTransition { .. }
+            | ProcessUpdateEvent::ToolApprovalDecided { .. }
+            | ProcessUpdateEvent::ContextCompacted { .. }
+            | ProcessUpdateEvent::TurnCompleted { .. }
+            | ProcessUpdateEvent::TurnFailed { .. }
+            | ProcessUpdateEvent::TurnRefused { .. }
+            | ProcessUpdateEvent::TurnCancelled { .. }
+            | ProcessUpdateEvent::TurnReconciliationRequired { .. } => false,
+        },
+        ProcessUpdate::ProviderTextDelta(_) => false,
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed message request keeps every durable correlation explicit"
+)]
+async fn handle_send_session_message<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    peer_session_id: CanonicalUuid,
+    content: String,
+    pool: &PgPool,
+    eligibility_nudge: &InProcessEligibilityNudge,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let port = PostgresSessionDelegationPort::new(pool.clone());
+    let result = port
+        .send_process_message(
+            SessionId::from_uuid(session_id.into_uuid()),
+            TurnId::from_uuid(turn_id.into_uuid()),
+            ToolRequestId::from_uuid(tool_request_id.into_uuid()),
+            SessionId::from_uuid(peer_session_id.into_uuid()),
+            content,
+        )
+        .await;
+    match result {
+        Ok(ProcessDelegationOutcome::Applied(receipt)) => {
+            nudge_delegation_issuer(
+                eligibility_nudge,
+                SessionId::from_uuid(session_id.into_uuid()),
+            );
+            let direction = match receipt.direction() {
+                DomainDelegationMessageDirection::ParentToChild => {
+                    signalbox_process_protocol::DelegationMessageDirection::ParentToChild
+                }
+                DomainDelegationMessageDirection::ChildToParent => {
+                    signalbox_process_protocol::DelegationMessageDirection::ChildToParent
+                }
+            };
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionMessageSent {
+                    tool_request_id: wire_uuid(receipt.tool_request().into_uuid()),
+                    message_id: wire_uuid(receipt.message().into_uuid()),
+                    direction,
+                    ordinal: CanonicalU64::new(receipt.ordinal().get()),
+                    delivery_sequence: CanonicalU64::new(receipt.delivery_sequence().get()),
+                },
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::InvalidRequest) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::Rejected(rejection)) => {
+            nudge_after_process_message_rejection(
+                eligibility_nudge,
+                SessionId::from_uuid(session_id.into_uuid()),
+                rejection,
+            );
+            write_error(
+                writer,
+                version,
+                request_id,
+                process_delegation_rejection(
+                    rejection,
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    peer_session_id,
+                ),
+            )
+            .await
+        }
+        Err(error) => {
+            write_delegation_port_error(writer, version, request_id, session_id, error).await
+        }
+    }
+}
+
+fn process_delegation_rejection(
+    rejection: ProcessDelegationRequestRejection,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    peer_session_id: CanonicalUuid,
+) -> ProtocolError {
+    process_delegation_rejection_for_recipient(
+        rejection,
+        session_id,
+        turn_id,
+        tool_request_id,
+        peer_session_id,
+        peer_session_id,
+    )
+}
+
+fn process_delegation_rejection_for_recipient(
+    rejection: ProcessDelegationRequestRejection,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    peer_session_id: CanonicalUuid,
+    delivery_recipient_id: CanonicalUuid,
+) -> ProtocolError {
+    let detail = match rejection {
+        ProcessDelegationRequestRejection::SessionNotFound => {
+            RejectionDetail::SessionNotFound { session_id }
+        }
+        ProcessDelegationRequestRejection::ToolRequestNotFound => {
+            RejectionDetail::ToolRequestNotFound { tool_request_id }
+        }
+        ProcessDelegationRequestRejection::ToolRequestNotInSession => {
+            RejectionDetail::ToolRequestNotInSession {
+                session_id,
+                tool_request_id,
+            }
+        }
+        ProcessDelegationRequestRejection::RequestNotInTurn => {
+            RejectionDetail::DelegationRequestNotInTurn {
+                session_id,
+                turn_id,
+                tool_request_id,
+            }
+        }
+        ProcessDelegationRequestRejection::AwaitConflict => {
+            RejectionDetail::DelegationAwaitConflict { tool_request_id }
+        }
+        ProcessDelegationRequestRejection::MessageConflict
+        | ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::Transition {
+                failure: signalbox_domain::DelegationTransitionFailure::ConflictingMessageReplay,
+                ..
+            },
+        ) => RejectionDetail::DelegationMessageConflict { tool_request_id },
+        ProcessDelegationRequestRejection::MessageIdentityCollision { message } => {
+            RejectionDetail::DelegationMessageIdentityCollision {
+                message_id: wire_uuid(message.into_uuid()),
+            }
+        }
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::RelationshipNotFound,
+        ) => RejectionDetail::DelegationRelationNotFound {
+            session_id,
+            peer_session_id,
+        },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::StaleDispatch { state },
+        ) => RejectionDetail::DelegationToolRequestNotExecutable {
+            tool_request_id,
+            state: match state {
+                DelegationRequestExecutionState::AwaitingApproval => {
+                    WireDelegationToolRequestState::AwaitingApproval
+                }
+                DelegationRequestExecutionState::Denied => WireDelegationToolRequestState::Denied,
+                DelegationRequestExecutionState::Approved => {
+                    WireDelegationToolRequestState::Approved
+                }
+                DelegationRequestExecutionState::Prepared => {
+                    WireDelegationToolRequestState::Prepared
+                }
+                DelegationRequestExecutionState::Closed => WireDelegationToolRequestState::Closed,
+                DelegationRequestExecutionState::AttemptEnded => {
+                    WireDelegationToolRequestState::AttemptEnded
+                }
+            },
+        },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::Transition {
+                spawning_request,
+                failure: signalbox_domain::DelegationTransitionFailure::EventOrdinalExhausted,
+            },
+        ) => RejectionDetail::DelegationEventOrdinalExhausted {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            last: CanonicalU64::new(u64::MAX),
+        },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::DeliverySequenceExhausted,
+        ) => RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id: delivery_recipient_id,
+            last: CanonicalU64::new(u64::MAX),
+        },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::MessageIdentityCollision
+            | DelegationOperationRejection::Transition { .. },
+        ) => {
+            return internal_protocol_error(
+                Some(session_id.into_uuid()),
+                InternalDiagnostic::SessionDelegationContract,
+            );
+        }
+    };
+    ProtocolError::rejected(detail)
+}
+
+fn wire_child_result(
+    result: &DeliveredChildResult,
+) -> Result<ServerMessage, ProcessConnectionError> {
+    let wait = result.wait();
+    let outcome = match result.kind() {
+        DomainDelegationOutcomeKind::ResultReturned => WireDelegationOutcome::Returned,
+        DomainDelegationOutcomeKind::ChildFailed => WireDelegationOutcome::Failed,
+        DomainDelegationOutcomeKind::ChildStopped => WireDelegationOutcome::Stopped,
+        DomainDelegationOutcomeKind::ChildCancelled => WireDelegationOutcome::Cancelled,
+        DomainDelegationOutcomeKind::AlreadyTerminal
+        | DomainDelegationOutcomeKind::ContinueRunning => {
+            return Err(ProcessConnectionError::EncodeInvariant);
+        }
+    };
+    let reason = match result.reason() {
+        DomainDelegationOutcomeReason::ChildCompleted => WireDelegationReason::ChildCompleted,
+        DomainDelegationOutcomeReason::ChildExecutionFailed => {
+            WireDelegationReason::ChildExecutionFailed
+        }
+        DomainDelegationOutcomeReason::ChildResultUnavailable => {
+            WireDelegationReason::ChildResultUnavailable
+        }
+        DomainDelegationOutcomeReason::ChildCancelled => WireDelegationReason::ChildCancelled,
+        DomainDelegationOutcomeReason::ParentStopped { .. } => WireDelegationReason::ParentStopped,
+        DomainDelegationOutcomeReason::ParentCancelled { .. } => {
+            WireDelegationReason::ParentCancelled
+        }
+    };
+    Ok(ServerMessage::ChildResult {
+        await_request_id: wire_uuid(wait.awaiting_request().into_uuid()),
+        spawning_request_id: wire_uuid(wait.spawning_request().into_uuid()),
+        child_session_id: wire_uuid(wait.child().into_uuid()),
+        outcome,
+        content: result.content().map(|content| content.as_str().to_owned()),
+        reason,
+        provenance: wire_domain_delegation_provenance(result.provenance())?,
+    })
+}
+
+fn wire_domain_delegation_provenance(
+    provenance: DomainDelegationProvenance,
+) -> Result<WireDelegationProvenance, ProcessConnectionError> {
+    let authority = match provenance.projection() {
+        signalbox_domain::DelegationProvenanceProjection::ChildTurn { terminal } => {
+            return Ok(WireDelegationProvenance::ChildTurn {
+                child_session_id: wire_uuid(terminal.session().into_uuid()),
+                child_turn_id: wire_uuid(terminal.turn().into_uuid()),
+            });
+        }
+        signalbox_domain::DelegationProvenanceProjection::ParentCommand { authority } => authority,
+        signalbox_domain::DelegationProvenanceProjection::ToolRequest { .. } => {
+            return Err(ProcessConnectionError::EncodeInvariant);
+        }
+    };
+    let descendant_scope = match authority.scope() {
+        DescendantTerminationScope::ParentAlone => WireDescendantTerminationScope::ParentAlone,
+        DescendantTerminationScope::ParentAndDescendants => {
+            WireDescendantTerminationScope::ParentAndDescendants
+        }
+    };
+    match authority.source() {
+        ParentTerminationCommandSource::Turn { turn } => {
+            Ok(WireDelegationProvenance::ParentTurnCommand {
+                parent_session_id: wire_uuid(authority.parent().into_uuid()),
+                parent_turn_id: wire_uuid(turn.into_uuid()),
+                command_id: wire_uuid(authority.command().into_uuid()),
+                descendant_scope,
+            })
+        }
+        ParentTerminationCommandSource::Goal { generation } => {
+            Ok(WireDelegationProvenance::ParentGoalCommand {
+                parent_session_id: wire_uuid(authority.parent().into_uuid()),
+                goal_generation: CanonicalU64::new(generation.get()),
+                command_id: wire_uuid(authority.command().into_uuid()),
+                descendant_scope,
+            })
+        }
+    }
+}
+
+async fn write_delegation_port_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    error: PostgresSessionDelegationPortError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::Database(
+                _,
+            ),
+        ) => unavailable_protocol_error(InternalDiagnostic::SessionDelegationDatabase),
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::CommitAmbiguous(
+                _,
+            ),
+        ) => ProtocolError::mutation_commit_ambiguous(),
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::ToolLoop(
+                error,
+            ),
+        ) => {
+            return write_tool_loop_error(writer, version, request_id, session_id, error).await;
+        }
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::Corruption(
+                _,
+            ),
+        ) => internal_protocol_error(
+            Some(session_id.into_uuid()),
+            InternalDiagnostic::SessionDelegationCorruption,
+        ),
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::InvalidTransition(
+                _,
+            ),
+        )
+        | PostgresSessionDelegationPortError::Contract => internal_protocol_error(
+            Some(session_id.into_uuid()),
+            InternalDiagnostic::SessionDelegationContract,
+        ),
+    };
+    write_error(writer, version, request_id, protocol_error).await
 }
 
 async fn handle_review_orchestration_mutation<Writer>(
@@ -3360,15 +4206,17 @@ async fn handle_read_review_target<Writer>(
     request_id: RequestId,
     target_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let store = ReviewWorkflowStore::new(pool.clone());
-    match store
+    let loaded = store
         .load_target(ReviewTargetId::from_uuid(target_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    match loaded {
         Ok(Some(target)) => {
             write_message(
                 writer,
@@ -3391,15 +4239,17 @@ async fn handle_read_review_run<Writer>(
     request_id: RequestId,
     run_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let store = ReviewWorkflowStore::new(pool.clone());
-    let (run, pass) = match store
+    let loaded = store
         .load_run_with_pass(ReviewRunId::from_uuid(run_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    let (run, pass) = match loaded {
         Ok(Some(aggregate)) => aggregate,
         Ok(None) => return write_review_not_found(writer, version, request_id).await,
         Err(error) => return write_review_store_error(writer, version, request_id, error).await,
@@ -3423,15 +4273,17 @@ async fn handle_read_review_finding<Writer>(
     request_id: RequestId,
     finding_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let store = ReviewWorkflowStore::new(pool.clone());
-    match store
+    let loaded = store
         .load_finding(ReviewFindingId::from_uuid(finding_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    match loaded {
         Ok(Some(finding)) => {
             write_message(
                 writer,
@@ -3448,25 +4300,39 @@ where
     }
 }
 
+/// Loads one run's complete finding page, or `None` when the run is absent.
+///
+/// The existence check and the graph walk are separate database phases, so they
+/// belong to the same reader admission: splitting them would let a listing hold
+/// pool capacity it never reserved.
+async fn load_review_findings_page(
+    store: &ReviewWorkflowStore,
+    run_id: ReviewRunId,
+) -> Result<Option<Vec<ReviewFinding>>, ReviewWorkflowStoreError> {
+    if store.load_run(run_id).await?.is_none() {
+        return Ok(None);
+    }
+    store.list_findings(run_id).await.map(Some)
+}
+
 async fn handle_list_review_findings<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
     run_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let run_id = ReviewRunId::from_uuid(run_id.into_uuid());
     let store = ReviewWorkflowStore::new(pool.clone());
-    match store.load_run(run_id).await {
-        Ok(Some(_)) => {}
+    let loaded = load_review_findings_page(&store, run_id).await;
+    drop(snapshot_permit);
+    let findings = match loaded {
+        Ok(Some(findings)) => findings,
         Ok(None) => return write_review_not_found(writer, version, request_id).await,
-        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
-    }
-    let findings = match store.list_findings(run_id).await {
-        Ok(findings) => findings,
         Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
     write_message(
@@ -7758,15 +8624,17 @@ async fn handle_read_session_metadata<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let service = LoadSessionMetadataService::new(SessionMetadataRepository::new(pool.clone()));
-    match service
+    let loaded = service
         .execute(SessionId::from_uuid(session_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    match loaded {
         Ok(Some(snapshot)) => {
             let (metadata, last_writer) =
                 wire_metadata_snapshot(&snapshot).ok_or(ProcessConnectionError::EncodeInvariant)?;
@@ -11029,10 +11897,7 @@ fn wire_system_prompt(
 fn wire_list_metadata(
     item: &SessionMetadataListItem,
 ) -> Option<(Option<String>, Vec<String>, Option<MetadataLastWriter>)> {
-    let last_writer = match item.last_writer() {
-        Some(writer) => Some(wire_metadata_last_writer(writer)?),
-        None => None,
-    };
+    let last_writer = item.last_writer().map(wire_metadata_last_writer);
     Some((
         item.title().map(str::to_owned),
         item.tags().map(str::to_owned).collect(),
@@ -11054,22 +11919,25 @@ fn wire_metadata_snapshot(
         content.archived(),
     )
     .ok()?;
-    let last_writer = match snapshot.last_writer() {
-        Some(writer) => Some(wire_metadata_last_writer(writer)?),
-        None => None,
-    };
+    let last_writer = snapshot.last_writer().map(wire_metadata_last_writer);
     Some((metadata, last_writer))
 }
 
-fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> Option<MetadataLastWriter> {
+fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
     let actor = match writer.actor() {
         Actor::User => MetadataActor::User {},
-        Actor::Recovery | Actor::Model { .. } | Actor::Tool { .. } => return None,
+        Actor::Model { turn } => MetadataActor::Model {
+            turn_id: wire_uuid(turn.into_uuid()),
+        },
+        Actor::Recovery => MetadataActor::Recovery {},
+        Actor::Tool { request } => MetadataActor::Tool {
+            tool_request_id: wire_uuid(request.into_uuid()),
+        },
     };
-    Some(MetadataLastWriter::new(
+    MetadataLastWriter::new(
         CanonicalU64::new(writer.updated_at().as_unix_micros()),
         actor,
-    ))
+    )
 }
 
 const fn wire_imported_source_speaker(
@@ -11340,6 +12208,9 @@ enum InternalDiagnostic {
     SessionDefaultsCommitAmbiguous,
     SessionDefaultsCommandKindMismatch,
     SessionDefaultsCorruption,
+    SessionDelegationDatabase,
+    SessionDelegationCorruption,
+    SessionDelegationContract,
     SystemPromptMemberMissing,
     SubmitInputCommandKindMismatch,
     SubmitInputIdentityCollision,
@@ -11362,7 +12233,8 @@ impl InternalDiagnostic {
             | Self::ImportedConversationDatabase
             | Self::SessionCreationDatabase
             | Self::SessionMetadataDatabase
-            | Self::SessionDefaultsDatabase => OperatorFailureClass::Infrastructure {
+            | Self::SessionDefaultsDatabase
+            | Self::SessionDelegationDatabase => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
             Self::ImportedSessionCommitAmbiguous
@@ -11383,6 +12255,7 @@ impl InternalDiagnostic {
             | Self::SessionCreationCommandKindMismatch
             | Self::SessionMetadataCommandKindMismatch
             | Self::SessionDefaultsCommandKindMismatch
+            | Self::SessionDelegationContract
             | Self::ContextCompactionUnconfiguredTarget
             | Self::SystemPromptMemberMissing
             | Self::SubmitInputCommandKindMismatch
@@ -11412,6 +12285,7 @@ impl InternalDiagnostic {
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
             | Self::SessionDefaultsCorruption
+            | Self::SessionDelegationCorruption
             | Self::SubmitInputCorruption
             | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
@@ -11470,6 +12344,9 @@ impl InternalDiagnostic {
             Self::SessionDefaultsCommitAmbiguous => "session_defaults_commit_ambiguous",
             Self::SessionDefaultsCommandKindMismatch => "session_defaults_command_kind_mismatch",
             Self::SessionDefaultsCorruption => "session_defaults_corruption",
+            Self::SessionDelegationDatabase => "session_delegation_database",
+            Self::SessionDelegationCorruption => "session_delegation_corruption",
+            Self::SessionDelegationContract => "session_delegation_contract",
             Self::SystemPromptMemberMissing => "system_prompt_member_missing",
             Self::SubmitInputCommandKindMismatch => "submit_input_command_kind_mismatch",
             Self::SubmitInputIdentityCollision => "submit_input_identity_collision",
@@ -12958,10 +13835,11 @@ impl Error for ProcessRuntimeError {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         collections::{BTreeSet, VecDeque},
         error::Error,
         io::{self, Write},
-        sync::{Arc, Mutex, mpsc},
+        sync::{Arc, Mutex, OnceLock, mpsc},
         thread,
     };
 
@@ -12972,27 +13850,29 @@ mod tests {
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        FastModeOverlay, FastModeSupport, FrozenAliasDefinition, FrozenModelSelection, Goal,
-        GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
-        ImportedConversationId, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
-        ModelCapabilities, ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
-        ModelSettingsPrecedence, ReasoningLevel, ReviewPass, ReviewPassAcceptedInputEvidence,
-        ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
-        ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId,
-        ReviewRunRef, ReviewRunState, ReviewTargetId, ReviewWorkflowKind,
-        SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
-        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, ToolRequestId,
-        TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
+        AcceptedInputId, Actor, ContextFrontierId, DelegationMessageId, DirectModelSelection,
+        DurableCommandId, FastModeOverlay, FastModeSupport, FrozenAliasDefinition,
+        FrozenModelSelection, Goal, GoalStatement, GoalUserProvenance, ImportedConversation,
+        ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelAlias,
+        ModelCallId, ModelCapabilities, ModelChangeAdjustment, ModelSelectionRequest,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ReasoningLevel, ReviewPass,
+        ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+        ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
+        ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
+        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
+        SessionId, SessionInputPosition, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
+        SessionModelSettingsChanged, SettingOverlay, SubmitInputRejectedResult,
+        ToolApprovalDecision, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
-        ErrorCode, ErrorDetail, FrameEncodeError, GoalLifecycleState, ImportedContentKind,
-        ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ProtocolVersion, RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame,
-        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry,
-        TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
+        FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
+        RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+        TurnState, decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -13003,34 +13883,36 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ContextCompactionRangeLoadError, ConversationImportState, ConversionFailureDisposition,
-        GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
+        CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
+        ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
         MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS,
         MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, PendingConversationImport,
         ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
-        REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
-        SnapshotSpoolError, SubmitInputModelExecutionDiagnostic, acquire_import_permit,
-        acquire_import_waiter_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_review_orchestration_snapshot_permit,
-        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
-        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
+        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
+        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
+        canonical_review_request_digest, claude_conversion_failure_disposition,
+        codex_conversion_failure_disposition, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
         handle_append_conversation_import, handle_begin_conversation_import,
         handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, nudge_delegation_wake, observe_outbox_metrics_once,
-        operational_import_error, read_frame_line,
+        internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
+        nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
+        observe_outbox_metrics_once, operational_import_error, preserve_committed_foreground_wait,
+        process_delegation_rejection, process_delegation_rejection_for_recipient, read_frame_line,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_snapshot_spool_error,
-        write_transcript_entry,
+        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -13088,6 +13970,10 @@ mod tests {
         process_read::{
             ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
             ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
+        },
+        session_delegation::{
+            DelegationOperationRejection, DelegationRequestExecutionState,
+            ProcessDelegationRequestRejection,
         },
     };
 
@@ -13163,27 +14049,18 @@ mod tests {
     }
     struct PendingResponseWriter;
 
-    #[derive(Clone, Default)]
-    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedTelemetry {
-        fn text(&self) -> String {
-            String::from_utf8(
-                self.0
-                    .lock()
-                    .expect("captured telemetry lock is available")
-                    .clone(),
-            )
-            .expect("captured telemetry is UTF-8")
-        }
+    thread_local! {
+        /// Telemetry captured on this thread alone.
+        static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
+
+    /// Appends every formatted event to the emitting thread's own buffer.
+    #[derive(Clone, Copy, Default)]
+    struct CapturedTelemetry;
 
     impl Write for CapturedTelemetry {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("captured telemetry lock is available")
-                .extend_from_slice(buffer);
+            CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().extend_from_slice(buffer));
             Ok(buffer.len())
         }
 
@@ -13196,19 +14073,40 @@ mod tests {
         type Writer = Self;
 
         fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
+            *self
         }
     }
 
+    /// Records the telemetry `record` emits on this thread.
+    ///
+    /// The subscriber is installed once for the whole test process rather than
+    /// scoped to this thread. `tracing` caches each callsite's interest
+    /// process-wide, but `set_default` binds a subscriber to one thread, so a
+    /// sibling test that reaches a callsite first on another thread registers
+    /// it against no subscriber at all -- recording it as uninteresting for
+    /// every thread, including the one that installed a capture. The event then
+    /// is not merely written late; it is never emitted, and the assertion reads
+    /// an empty buffer.
+    ///
+    /// Writes are routed per thread so concurrent tests never read each other's
+    /// events, which keeps assertions on both presence and absence honest.
     fn capture_telemetry(record: impl FnOnce()) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, record);
-        output.text()
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(CapturedTelemetry)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global telemetry subscriber is installed");
+        });
+        CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().clear());
+        record();
+        CAPTURED_TELEMETRY
+            .with(|captured| String::from_utf8(captured.borrow().clone()))
+            .expect("captured telemetry is UTF-8")
     }
 
     fn capture_internal_diagnostic(session_id: Uuid, diagnostic: InternalDiagnostic) -> String {
@@ -13581,6 +14479,52 @@ mod tests {
         Ok(())
     }
 
+    /// The post-lock statement time every metadata projection fixture carries.
+    /// No projection depends on the value, only on its passing through.
+    const METADATA_WRITE_UNIX_MICROS: u64 = 17;
+
+    /// Projects one domain agency and pins both members against the fixture it
+    /// came from. A failure names the agency at the call site.
+    #[track_caller]
+    fn assert_metadata_last_writer_projects(actor: Actor, expected_actor: MetadataActor) {
+        let writer = SessionMetadataLastWriter::new(
+            SessionMetadataUpdatedAt::from_unix_micros(METADATA_WRITE_UNIX_MICROS),
+            actor,
+        );
+        let projected = wire_metadata_last_writer(writer);
+        assert_eq!(projected.actor(), expected_actor);
+        assert_eq!(
+            projected.updated_at_unix_micros().value(),
+            writer.updated_at().as_unix_micros()
+        );
+    }
+
+    /// INV-033: the metadata last-writer projection is total over the domain
+    /// agencies durable metadata records, and each carried reference lands in
+    /// its own member. A projection gap here is not a degraded field: both
+    /// callers propagate it as an encode invariant, which is fatal to the
+    /// daemon and re-fires on every read of the durable row.
+    #[test]
+    fn inv033_metadata_last_writer_projects_every_domain_agency() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(2));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(3));
+
+        assert_metadata_last_writer_projects(Actor::User, MetadataActor::User {});
+        assert_metadata_last_writer_projects(
+            Actor::Model { turn },
+            MetadataActor::Model {
+                turn_id: wire_uuid(turn.into_uuid()),
+            },
+        );
+        assert_metadata_last_writer_projects(Actor::Recovery, MetadataActor::Recovery {});
+        assert_metadata_last_writer_projects(
+            Actor::Tool { request },
+            MetadataActor::Tool {
+                tool_request_id: wire_uuid(request.into_uuid()),
+            },
+        );
+    }
+
     fn compaction_session() -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
@@ -13654,6 +14598,37 @@ mod tests {
             decode_server_line(&encoded)?.message(),
             ServerMessage::Error {
                 code: ErrorCode::Unavailable,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_commit_ambiguity_uses_the_mutation_recovery_code()
+    -> Result<(), Box<dyn Error>> {
+        let (mut writer, mut reader) = duplex(1_024);
+
+        write_delegation_port_error(
+            &mut writer,
+            ProtocolVersion::One,
+            RequestId::try_new(13)?,
+            CanonicalUuid::from_uuid(Uuid::from_u128(14)),
+            crate::session_delegation::PostgresSessionDelegationPortError::Repository(
+                signalbox_persistence::session_delegation::SessionDelegationRepositoryError::CommitAmbiguous(
+                    sqlx::Error::PoolClosed,
+                ),
+            ),
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+
+        assert!(matches!(
+            decode_server_line(&encoded)?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::CommitAmbiguous,
                 ..
             }
         ));
@@ -13849,25 +14824,31 @@ mod tests {
         Ok(())
     }
 
+    /// The orchestration snapshot holds one pooled connection, like every
+    /// other review read: its whole reconstruction runs inside a single
+    /// `REPEATABLE READ` transaction. A three-connection pool therefore starts,
+    /// where the two-connection form of this read needed four.
     #[tokio::test]
-    async fn review_orchestration_snapshot_reserves_its_two_pool_connections()
-    -> Result<(), Box<dyn Error>> {
-        let reserved = usize::try_from(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS)?;
-        let capacity = reserved + 1;
+    async fn review_orchestration_snapshot_holds_one_pool_connection() -> Result<(), Box<dyn Error>>
+    {
+        let capacity = 2;
         let budget = Arc::new(Semaphore::new(capacity));
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
 
-        let permit = acquire_review_orchestration_snapshot_permit(
+        let permit = admit_snapshot_reader(
+            &read_review_orchestration_request(),
             Arc::clone(&budget),
             &mut shutdown_receiver,
         )
         .await?
-        .ok_or_else(|| io::Error::other("the running fixture must acquire a permit"))?;
+        .ok_or_else(|| io::Error::other("the running fixture must be admitted"))?
+        .ok_or_else(|| io::Error::other("the snapshot read must hold a reader permit"))?;
 
-        assert_eq!(budget.available_permits(), capacity - reserved);
+        assert_eq!(budget.available_permits(), capacity - 1);
         drop(permit);
         assert_eq!(budget.available_permits(), capacity);
-        assert!(snapshot_reader_capacity(3).is_none());
+        assert_eq!(snapshot_reader_capacity(3), Some(1));
+        assert!(snapshot_reader_capacity(2).is_none());
         Ok(())
     }
 
@@ -13908,6 +14889,203 @@ mod tests {
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+
+    /// The wire vocabulary as text. The review read verbs are enumerated from
+    /// the protocol itself so a later one cannot be admitted by a list here
+    /// staying silent about it.
+    const WIRE_VOCABULARY: &str = include_str!("../../../crates/process-protocol/src/lib.rs");
+
+    fn client_request_variant_names(source: &str) -> BTreeSet<String> {
+        let declaration = "pub enum ClientRequest {";
+        let start = source
+            .find(declaration)
+            .expect("the wire vocabulary declares the client request enum");
+        let body = &source[start + declaration.len()..];
+        let end = body
+            .find("\n}\n")
+            .expect("the client request enum body is closed");
+        body[..end]
+            .lines()
+            .filter_map(|line| {
+                let variant = line.strip_prefix("    ")?;
+                if !variant.starts_with(|character: char| character.is_ascii_uppercase()) {
+                    return None;
+                }
+                Some(
+                    variant
+                        .split(|character: char| !character.is_ascii_alphanumeric())
+                        .next()?
+                        .to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// The review verbs that read the database, taken from the wire vocabulary.
+    fn review_read_verbs_in_vocabulary() -> BTreeSet<String> {
+        client_request_variant_names(WIRE_VOCABULARY)
+            .into_iter()
+            .filter(|name| {
+                name.contains("Review") && (name.starts_with("Read") || name.starts_with("List"))
+            })
+            .collect()
+    }
+
+    /// The scraper carries logic no assertion can inspect, so it is pinned on
+    /// its own: one name per declaration, single-line and braced forms alike,
+    /// with doc comments and field lines excluded.
+    #[test]
+    fn client_request_variant_names_reads_one_name_per_declaration() {
+        let source = concat!(
+            "pub enum ClientRequest {\n",
+            "    /// Read one target.\n",
+            "    ReadReviewTarget { target_id: CanonicalUuid },\n",
+            "    ListReviewFindings {\n",
+            "        run_id: CanonicalUuid,\n",
+            "    },\n",
+            "    ListTemplates {},\n",
+            "}\n",
+        );
+
+        assert_eq!(
+            client_request_variant_names(source),
+            BTreeSet::from([
+                String::from("ListReviewFindings"),
+                String::from("ListTemplates"),
+                String::from("ReadReviewTarget"),
+            ])
+        );
+    }
+
+    /// One fixture identity. No admission reads an identity's value; the verb
+    /// carrying one is the whole input.
+    fn fixture_identity(seed: u128) -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(seed))
+    }
+
+    fn read_review_target_request() -> ClientRequest {
+        ClientRequest::ReadReviewTarget {
+            target_id: fixture_identity(1),
+        }
+    }
+
+    fn read_review_run_request() -> ClientRequest {
+        ClientRequest::ReadReviewRun {
+            run_id: fixture_identity(2),
+        }
+    }
+
+    fn read_review_finding_request() -> ClientRequest {
+        ClientRequest::ReadReviewFinding {
+            finding_id: fixture_identity(3),
+        }
+    }
+
+    fn list_review_findings_request() -> ClientRequest {
+        ClientRequest::ListReviewFindings {
+            run_id: fixture_identity(4),
+        }
+    }
+
+    fn read_review_orchestration_request() -> ClientRequest {
+        ClientRequest::ReadReviewOrchestration {
+            attempt_id: fixture_identity(5),
+        }
+    }
+
+    /// Every review verb that reads the database reserves snapshot capacity.
+    /// The reservation exists so `RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS`
+    /// connections stay available to the outbox dispatcher and mutations; a
+    /// read verb dispatched without it spends that reserve silently.
+    #[test]
+    fn every_review_read_verb_reserves_snapshot_capacity() {
+        assert_eq!(
+            review_read_verbs_in_vocabulary(),
+            BTreeSet::from([
+                String::from("ListReviewFindings"),
+                String::from("ReadReviewFinding"),
+                String::from("ReadReviewOrchestration"),
+                String::from("ReadReviewRun"),
+                String::from("ReadReviewTarget"),
+            ]),
+            "a review read verb in the wire vocabulary has no admission of its own"
+        );
+
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_target_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_run_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_finding_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&list_review_findings_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_orchestration_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+    }
+
+    /// A metadata point read opens a transaction, sets `REPEATABLE READ ONLY`,
+    /// selects, and commits, so it holds a pooled connection across statements
+    /// and belongs to the same admission. A defaults read is one statement and
+    /// does not.
+    #[test]
+    fn point_reads_are_admitted_by_how_long_they_hold_a_connection() {
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&ClientRequest::ReadSessionMetadata {
+                session_id: fixture_identity(6),
+            }),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&ClientRequest::ReadSessionDefaults {
+                session_id: fixture_identity(7),
+                defaults_version: None,
+            }),
+            SnapshotReaderAdmission::NotRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn review_read_admission_draws_on_the_shared_reader_budget() -> Result<(), Box<dyn Error>>
+    {
+        let capacity = 3;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+
+        let permit = admit_snapshot_reader(
+            &read_review_target_request(),
+            Arc::clone(&budget),
+            &mut shutdown_receiver,
+        )
+        .await?
+        .ok_or_else(|| io::Error::other("the running fixture must be admitted"))?
+        .ok_or_else(|| io::Error::other("a review read must hold a reader permit"))?;
+        assert_eq!(budget.available_permits(), capacity - 1);
+        drop(permit);
+
+        assert!(
+            admit_snapshot_reader(
+                &ClientRequest::ListModelAliases {},
+                Arc::clone(&budget),
+                &mut shutdown_receiver,
+            )
+            .await?
+            .ok_or_else(|| io::Error::other("the running fixture must be admitted"))?
+            .is_none(),
+            "a request that reads no snapshot holds no reader permit"
+        );
+        assert_eq!(budget.available_permits(), capacity);
         Ok(())
     }
 
@@ -15534,6 +16712,13 @@ mod tests {
     }
 
     #[test]
+    fn committed_process_foreground_wait_retries_follow_up_read_failure() {
+        let disposition = preserve_committed_foreground_wait::<u8, _>(Err("database"));
+
+        assert_eq!(disposition, CommittedForegroundDelivery::Retry("database"));
+    }
+
+    #[test]
     fn delegation_updates_project_but_internal_wakes_do_not_follow() {
         let spawning_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(8));
         let child = SessionId::from_uuid(Uuid::from_u128(9));
@@ -15591,6 +16776,357 @@ mod tests {
                 .expect("recorded nudge lock remains available")
                 .as_slice(),
             &[recipient]
+        );
+    }
+
+    #[test]
+    fn completed_process_delegation_nudges_exact_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(12));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_delegation_issuer(&nudge, issuer);
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[issuer]
+        );
+    }
+
+    #[test]
+    fn definitive_process_message_rejection_nudges_exact_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(17));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_after_process_message_rejection(
+            &nudge,
+            issuer,
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::RelationshipNotFound,
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[issuer]
+        );
+    }
+
+    #[test]
+    fn definitive_process_await_rejection_nudges_exact_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(19));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_after_process_await_rejection(
+            &nudge,
+            issuer,
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::DeliverySequenceExhausted,
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[issuer]
+        );
+    }
+
+    #[test]
+    fn stale_process_await_rejection_does_not_nudge_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(20));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_after_process_await_rejection(
+            &nudge,
+            issuer,
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::AttemptEnded,
+                },
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[]
+        );
+    }
+
+    #[test]
+    fn stale_process_message_rejection_does_not_nudge_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(18));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_after_process_message_rejection(
+            &nudge,
+            issuer,
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::AttemptEnded,
+                },
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[]
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_delegation_peer_disconnect_abandons_socket_wait() {
+        let (peer, daemon) = duplex(64);
+        let mut reader = BufReader::new(daemon);
+        drop(peer);
+
+        let error = foreground_peer_activity(&mut reader)
+            .await
+            .expect_err("a disconnected foreground peer ends its socket wait");
+        let source = error
+            .source()
+            .expect("peer failure retains its I/O source")
+            .downcast_ref::<io::Error>()
+            .expect("peer failure source is I/O");
+
+        assert_eq!(source.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn delegated_process_rejections_use_typed_wire_details() {
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(13));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(14));
+        let request_id = CanonicalUuid::from_uuid(Uuid::from_u128(15));
+        let peer_id = CanonicalUuid::from_uuid(Uuid::from_u128(16));
+        let relationship = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::RelationshipNotFound,
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let session_not_found = process_delegation_rejection(
+            ProcessDelegationRequestRejection::SessionNotFound,
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let await_conflict = process_delegation_rejection(
+            ProcessDelegationRequestRejection::AwaitConflict,
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let message_conflict = process_delegation_rejection(
+            ProcessDelegationRequestRejection::MessageConflict,
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let awaiting_approval = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::AwaitingApproval,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let denied = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Denied,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let approved = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Approved,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let prepared = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Prepared,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let closed = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Closed,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let attempt_ended = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::AttemptEnded,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+
+        assert_eq!(
+            session_not_found.detail,
+            ErrorDetail::rejected(RejectionDetail::SessionNotFound { session_id })
+        );
+        assert_eq!(
+            relationship.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationRelationNotFound {
+                session_id,
+                peer_session_id: peer_id,
+            })
+        );
+        assert_eq!(
+            await_conflict.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationAwaitConflict {
+                tool_request_id: request_id,
+            })
+        );
+        assert_eq!(
+            message_conflict.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationMessageConflict {
+                tool_request_id: request_id,
+            })
+        );
+        assert_eq!(
+            awaiting_approval.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::AwaitingApproval,
+            })
+        );
+        assert_eq!(
+            denied.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Denied,
+            })
+        );
+        assert_eq!(
+            approved.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Approved,
+            })
+        );
+        assert_eq!(
+            prepared.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Prepared,
+            })
+        );
+        assert_eq!(
+            closed.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Closed,
+            })
+        );
+        assert_eq!(
+            attempt_ended.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::AttemptEnded,
+            })
+        );
+    }
+
+    #[test]
+    fn delivery_sequence_exhaustion_names_the_operation_recipient() {
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(13));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(14));
+        let request_id = CanonicalUuid::from_uuid(Uuid::from_u128(15));
+        let peer_id = CanonicalUuid::from_uuid(Uuid::from_u128(16));
+        let recipient_id = CanonicalUuid::from_uuid(Uuid::from_u128(17));
+        let error = process_delegation_rejection_for_recipient(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::DeliverySequenceExhausted,
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+            recipient_id,
+        );
+
+        assert_eq!(
+            error.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationDeliverySequenceExhausted {
+                recipient_session_id: recipient_id,
+                last: CanonicalU64::new(u64::MAX),
+            })
+        );
+    }
+
+    #[test]
+    fn message_identity_collision_preserves_the_minted_identity() {
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(13));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(14));
+        let request_id = CanonicalUuid::from_uuid(Uuid::from_u128(15));
+        let peer_id = CanonicalUuid::from_uuid(Uuid::from_u128(16));
+        let message = DelegationMessageId::from_uuid(Uuid::from_u128(17));
+        let error = process_delegation_rejection(
+            ProcessDelegationRequestRejection::MessageIdentityCollision { message },
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+
+        assert_eq!(
+            error.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationMessageIdentityCollision {
+                message_id: wire_uuid(message.into_uuid()),
+            })
         );
     }
 

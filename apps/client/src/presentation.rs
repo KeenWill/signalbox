@@ -8,12 +8,13 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_process_protocol::{
-    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationOutcome, DelegationPolicy,
-    DelegationProvenance, DelegationReason, DelegationWaitMode, DescendantTerminationScope,
-    FailedModelCallCause, FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason,
-    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-    ImportedSpeaker, ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor,
-    MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
+    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationMessageDirection,
+    DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
+    DelegationWaitMode, DescendantTerminationScope, FailedModelCallCause,
+    FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
+    GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
+    ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
+    ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
@@ -30,6 +31,37 @@ use crate::{
         TranscriptTurn,
     },
 };
+
+pub(crate) struct ChildResultPresentation<'a> {
+    pub(crate) await_request_id: CanonicalUuid,
+    pub(crate) spawning_request_id: CanonicalUuid,
+    pub(crate) child_session_id: CanonicalUuid,
+    pub(crate) outcome: DelegationOutcome,
+    pub(crate) content: Option<&'a String>,
+    pub(crate) reason: DelegationReason,
+    pub(crate) provenance: DelegationProvenance,
+}
+
+pub(crate) struct SessionSpawnedPresentation {
+    pub(crate) tool_request_id: CanonicalUuid,
+    pub(crate) child_session_id: CanonicalUuid,
+    pub(crate) relationship: DelegationPolicy,
+}
+
+pub(crate) struct SessionAwaitRegisteredPresentation {
+    pub(crate) tool_request_id: CanonicalUuid,
+    pub(crate) child_session_id: CanonicalUuid,
+    pub(crate) mode: DelegationWaitMode,
+}
+
+pub(crate) struct SessionMessageSentPresentation {
+    pub(crate) tool_request_id: CanonicalUuid,
+    pub(crate) peer_session_id: CanonicalUuid,
+    pub(crate) message_id: CanonicalUuid,
+    pub(crate) direction: DelegationMessageDirection,
+    pub(crate) ordinal: u64,
+    pub(crate) delivery_sequence: u64,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PresentTokenTotal {
@@ -641,6 +673,94 @@ impl<'a> Output<'a> {
 
     pub(crate) fn session_created(&mut self, session_id: CanonicalUuid) -> io::Result<()> {
         writeln!(self.stdout, "{session_id}")
+    }
+
+    pub(crate) fn session_spawned(
+        &mut self,
+        receipt: SessionSpawnedPresentation,
+    ) -> io::Result<()> {
+        let SessionSpawnedPresentation {
+            tool_request_id,
+            child_session_id,
+            relationship,
+        } = receipt;
+        match relationship {
+            DelegationPolicy::Background {} => writeln!(
+                self.stdout,
+                "spawn_request={tool_request_id} child_session={child_session_id} relationship=background"
+            ),
+            DelegationPolicy::Bound {
+                on_parent_stopped,
+                on_parent_cancelled,
+            } => writeln!(
+                self.stdout,
+                "spawn_request={tool_request_id} child_session={child_session_id} \
+                 relationship=bound on_parent_stopped={} on_parent_cancelled={}",
+                bound_child_action(on_parent_stopped),
+                bound_child_action(on_parent_cancelled)
+            ),
+        }
+    }
+
+    pub(crate) fn session_await_registered(
+        &mut self,
+        receipt: SessionAwaitRegisteredPresentation,
+    ) -> io::Result<()> {
+        let SessionAwaitRegisteredPresentation {
+            tool_request_id,
+            child_session_id,
+            mode,
+        } = receipt;
+        writeln!(
+            self.stdout,
+            "await_request={tool_request_id} child_session={child_session_id} mode={}",
+            delegation_wait_mode(mode)
+        )
+    }
+
+    pub(crate) fn child_result(&mut self, result: ChildResultPresentation<'_>) -> io::Result<()> {
+        let ChildResultPresentation {
+            await_request_id,
+            spawning_request_id,
+            child_session_id,
+            outcome,
+            content,
+            reason,
+            provenance,
+        } = result;
+        let content = content.map_or_else(
+            || String::from("null"),
+            |content| self.render_field(content, TextField::TrailingOnLine),
+        );
+        writeln!(
+            self.stdout,
+            "await_request={await_request_id} spawning_request={spawning_request_id} \
+             child_session={child_session_id} delivery=foreground outcome={} reason={} \
+             provenance={} content={content}",
+            delegation_outcome(outcome),
+            delegation_reason(reason),
+            delegation_provenance(&provenance)
+        )
+    }
+
+    pub(crate) fn session_message_sent(
+        &mut self,
+        receipt: SessionMessageSentPresentation,
+    ) -> io::Result<()> {
+        let SessionMessageSentPresentation {
+            tool_request_id,
+            peer_session_id,
+            message_id,
+            direction,
+            ordinal,
+            delivery_sequence,
+        } = receipt;
+        writeln!(
+            self.stdout,
+            "message_request={tool_request_id} peer_session={peer_session_id} \
+             message={message_id} direction={} ordinal={ordinal} delivery_sequence={delivery_sequence}",
+            delegation_message_direction(direction)
+        )
     }
 
     pub(crate) fn goal_transition_applied(
@@ -2623,6 +2743,13 @@ const fn delegation_wait_mode(mode: DelegationWaitMode) -> &'static str {
     }
 }
 
+const fn delegation_message_direction(direction: DelegationMessageDirection) -> &'static str {
+    match direction {
+        DelegationMessageDirection::ParentToChild => "parent_to_child",
+        DelegationMessageDirection::ChildToParent => "child_to_parent",
+    }
+}
+
 fn delegation_provenance(provenance: &DelegationProvenance) -> String {
     match provenance {
         DelegationProvenance::ChildTurn {
@@ -2786,6 +2913,9 @@ const fn last_writer_actor_label(last_writer: Option<MetadataLastWriter>) -> &'s
     match last_writer {
         Some(last_writer) => match last_writer.actor() {
             MetadataActor::User {} => "user",
+            MetadataActor::Model { .. } => "model",
+            MetadataActor::Recovery {} => "recovery",
+            MetadataActor::Tool { .. } => "tool",
         },
         None => "none",
     }
@@ -2845,7 +2975,7 @@ mod tests {
 
     use super::{
         ConversationRow, CostAggregateKey, DiskCostTotals, ImportedEntryRow, Output,
-        SessionMetadataRow, SnapshotSelection, TextField, control_safe,
+        SessionMetadataRow, SnapshotSelection, TextField, control_safe, last_writer_actor_label,
     };
     use crate::{
         error::ClientError,
@@ -3141,6 +3271,37 @@ mod tests {
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
+    }
+
+    /// One written last-writer stamp carrying the actor under test; the
+    /// timestamp is fixture plumbing the label never reads.
+    fn written_by(actor: MetadataActor) -> Option<MetadataLastWriter> {
+        Some(MetadataLastWriter::new(CanonicalU64::new(1), actor))
+    }
+
+    #[test]
+    fn search_names_every_last_writer_actor_the_wire_can_carry() {
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::User {})),
+            "user"
+        );
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::Model {
+                turn_id: wire_uuid(2)
+            })),
+            "model"
+        );
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::Recovery {})),
+            "recovery"
+        );
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::Tool {
+                tool_request_id: wire_uuid(3)
+            })),
+            "tool"
+        );
+        assert_eq!(last_writer_actor_label(None), "none");
     }
 
     #[test]

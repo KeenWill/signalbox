@@ -4,6 +4,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
     DISABLED_CODEX_CLI_CAPABILITY_FEATURES,
 };
+use signalbox_test_bin::test_bin_path;
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
@@ -235,6 +237,84 @@ fn collect_loss_cause(cause: &LossCause, material: &mut Vec<String>) {
     }
 }
 
+/// Which of a correlation's parallel delta streams a fragment extends. Part of
+/// the reassembly key: two facts may share a correlation and an index yet
+/// belong to streams no consumer ever concatenates together.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum EmittedStream {
+    Text,
+    Thinking,
+    ToolArguments,
+}
+
+/// Reassembles each delta stream the adapter emitted, in emission order,
+/// grouped by the stream a fragment extends — correlation, kind, and index.
+///
+/// [`boundary_material`] joins the facts it visits with newlines, which is what
+/// a *field*-level claim needs but not what a stream-level one does: the
+/// redactor may emit a safe prefix and its continuation as two fragments of one
+/// delta stream, and a credential spanning that split is recoverable by any
+/// consumer that concatenates the stream while appearing in no single fragment
+/// and in no newline-joined dump. A claim about what the caller can read is
+/// therefore checked against the reconstruction the caller assembles.
+///
+/// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be added
+/// without deciding whether it joins a stream. Facts that carry one complete
+/// value rather than a fragment (a decoded tool proposal, the thread id) are
+/// not fragments of anything and stay covered by [`boundary_material`].
+fn emitted_streams(observations: &[Observation<String>]) -> Vec<String> {
+    let mut streams: BTreeMap<(&str, EmittedStream, u32), String> = BTreeMap::new();
+    for observation in observations {
+        let correlation = observation.correlation.as_str();
+        let (kind, index, fragment) = match &observation.fact {
+            ObservationFact::TextDelta { index, text } => (EmittedStream::Text, *index, text),
+            ObservationFact::ThinkingDelta { index, text } => {
+                (EmittedStream::Thinking, *index, text)
+            }
+            ObservationFact::ToolArgumentsDelta { index, fragment } => {
+                (EmittedStream::ToolArguments, *index, fragment)
+            }
+            ObservationFact::SendCommenced
+            | ObservationFact::ExchangeEstablished(_)
+            | ObservationFact::ProviderModelReported(_)
+            | ObservationFact::ToolCallProposed(_)
+            | ObservationFact::UsageReported(_)
+            | ObservationFact::FinishReported(_) => continue,
+        };
+        streams
+            .entry((correlation, kind, index))
+            .or_default()
+            .push_str(fragment);
+    }
+    streams.into_values().collect()
+}
+
+/// Asserts `secret` is unrecoverable from everything that crossed the adapter
+/// boundary: every field [`boundary_material`] visits, and every delta stream
+/// reassembled as the caller would read it. `label` names the fixture, so a
+/// leak in one case of a multi-scenario test is reported as itself.
+///
+/// Both checks, because they fail differently. Every fixture this helper guards
+/// is suppressed whole today and emits one fragment, so the field-level dump
+/// alone would catch each of them; the reassembly is what keeps that from being
+/// the assertion's ceiling. A regression that released the safe prefix and held
+/// only the tail would put the credential in no single fragment and in no
+/// newline-joined dump, and the case guarding the leak would go on passing.
+#[track_caller]
+fn assert_no_emitted_stream_carries(label: &str, result: &ExecutionResult, secret: &str) {
+    let material = boundary_material(result);
+    assert!(
+        !material.contains(secret),
+        "{label}: the credential must not cross the boundary, found it in: {material}"
+    );
+    for stream in emitted_streams(&result.observations) {
+        assert!(
+            !stream.contains(secret),
+            "{label}: the credential must not be recoverable from a reassembled stream: {stream}"
+        );
+    }
+}
+
 #[test]
 fn boundary_material_reads_terminal_and_observation_text() {
     let result = ExecutionResult {
@@ -262,6 +342,56 @@ fn boundary_material_reads_terminal_and_observation_text() {
 
     assert!(material.contains(BOUNDARY_FIXTURE_TERMINAL_TEXT));
     assert!(material.contains(BOUNDARY_FIXTURE_OBSERVATION_TEXT));
+}
+
+fn text_delta_fixture(correlation: &str, index: u32, text: &str) -> Observation<String> {
+    Observation {
+        correlation: correlation.to_string(),
+        fact: ObservationFact::TextDelta {
+            index,
+            text: text.to_string(),
+        },
+    }
+}
+
+/// The reassembly every stream-level absence check depends on: a value the
+/// redactor emitted as two fragments of one stream is one reconstruction, so a
+/// credential spanning the split cannot hide in the gap between them.
+#[test]
+fn emitted_streams_rejoin_the_fragments_of_one_stream() {
+    let observations = vec![
+        text_delta_fixture("reassembly-fixture", 0, "synthetic-reassembly-"),
+        text_delta_fixture("reassembly-fixture", 0, "secret"),
+    ];
+
+    assert_eq!(
+        emitted_streams(&observations),
+        vec!["synthetic-reassembly-secret".to_string()]
+    );
+}
+
+/// Grouping is per stream: fragments that spell a value only across streams no
+/// consumer concatenates — a different part index, a different correlation —
+/// are separate reconstructions, so the check does not report a leak the caller
+/// cannot read.
+#[test]
+fn emitted_streams_keep_separate_streams_apart() {
+    let observations = vec![
+        text_delta_fixture("reassembly-fixture", 0, "synthetic-reassembly-"),
+        text_delta_fixture("reassembly-fixture", 1, "secret"),
+        text_delta_fixture("other-correlation", 0, "secret"),
+    ];
+
+    // Three reconstructions, none of them the joined value: the fragments stay
+    // in the streams that carried them, keyed correlation-first.
+    assert_eq!(
+        emitted_streams(&observations),
+        vec![
+            "secret".to_string(),
+            "synthetic-reassembly-".to_string(),
+            "secret".to_string(),
+        ]
+    );
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
@@ -870,6 +1000,172 @@ async fn inv_035_message_id_prefixing_final_text_is_redacted() {
     // value continues to appear only in its marker-less `key=…` form.
     assert!(!diagnostic.contains("api_"));
     assert!(!diagnostic.contains("api_key="));
+    assert_eq!(result.spawns, 1);
+}
+
+/// Runs one dropped-identity fixture and asserts the credential is
+/// unrecoverable from everything the adapter emitted for it.
+///
+/// Absorbs only the spawn plumbing every case repeats; the two
+/// behaviour-relevant values — which fixture, which delivery mode — stay at the
+/// call site. `#[track_caller]` cannot name a call site through an async fn, so
+/// the case identity travels in the failure label instead.
+async fn assert_identity_marker_suppresses_the_continuation(
+    scenario: &str,
+    delivery: DeliveryMode,
+) {
+    let result = execute_scenario(
+        scenario,
+        delivery,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_no_emitted_stream_carries(
+        &format!("{scenario} {delivery:?}"),
+        &result,
+        fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a bare lifecycle event is dropped whole after its identity is only
+/// validated as nonempty, so an `id` ending in a credential-marker prefix
+/// (`api_`) is dropped provider text that seeds the lookbehind — the value
+/// opening the text that follows (`key=<secret>`) is suppressed instead of
+/// crossing the boundary in retained evidence.
+#[tokio::test]
+async fn inv_035_lifecycle_item_id_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_id_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_id_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// INV-035: the same boundary one field over. A lifecycle event's item `type`
+/// is matched against nothing the adapter chose, so a `type` ending in the
+/// marker prefix seeds the lookbehind exactly as the id does.
+#[tokio::test]
+async fn inv_035_lifecycle_item_type_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_type_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_type_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// INV-035: an unsupported item's `type` selected the catch-all arm rather than
+/// one of the adapter's literals, so it is provider-chosen text the adapter
+/// drops, and a marker prefix ending it governs the text that follows.
+#[tokio::test]
+async fn inv_035_unsupported_item_type_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "unsupported_item_type_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "unsupported_item_type_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// INV-035: a modeled reasoning item interprets its `type` (the adapter's own
+/// literal) and its text, but never retains the id. The dropped id carries the
+/// marker prefix that the item's own `key=` and the final-text value complete.
+#[tokio::test]
+async fn inv_035_reasoning_item_id_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "reasoning_item_id_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "reasoning_item_id_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// INV-035: the same shape on the dropped error item, whose message is
+/// interpreted while its id is not.
+#[tokio::test]
+async fn inv_035_error_item_id_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "error_item_id_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "error_item_id_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// The control on the cases above, in buffered delivery: routine item identity
+/// is not a credential. An ordinary id and a real Codex item type (`todo_list`,
+/// whose trailing bytes the lookbehind does hold conservatively — they could
+/// still grow into a credential name) fold like every other dropped field, and
+/// the answer still reaches the caller byte-verbatim. Folding the identity
+/// widens what can arm the scrubber; it does not make routine metadata suppress
+/// the response.
+#[tokio::test]
+async fn buffered_benign_item_identity_leaves_the_answer_verbatim() {
+    let result = execute_scenario(
+        "benign_item_identity_before_answer",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let completed = completed(&result.evidence);
+
+    assert_eq!(
+        completed.content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert!(!boundary_material(&result).contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// The same control in streamed delivery, which carries the further claim
+/// buffered delivery has no stream to make: the answer is verbatim in the
+/// delta stream too, read as the caller reads it — reassembled, since a
+/// conservatively held trailing byte may arrive as its own fragment.
+#[tokio::test]
+async fn streamed_benign_item_identity_leaves_the_answer_verbatim() {
+    let result = execute_scenario(
+        "benign_item_identity_before_answer",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let completed = completed(&result.evidence);
+
+    assert_eq!(
+        completed.content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert!(!boundary_material(&result).contains("[redacted]"));
+    assert_eq!(
+        emitted_streams(&result.observations),
+        vec![fixtures::BUFFERED_ANSWER.to_string()]
+    );
     assert_eq!(result.spawns, 1);
 }
 
@@ -3549,7 +3845,7 @@ async fn prepare(
 }
 
 fn fake_cli() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-fake-codex-cli"))
+    test_bin_path!("signalbox-fake-codex-cli")
 }
 
 /// Scripts the reproduced launder-by-cancellation sequence: refuse the
@@ -3613,10 +3909,29 @@ fn stdout_closing_cli(directory: &Path) -> std::path::PathBuf {
 }
 
 /// Writes an executable shell-script fake CLI and returns its path.
+///
+/// Every scripted CLI consumes the request upload before its own body runs.
+/// The adapter writes the rendered request to the child's stdin and only then
+/// begins reading stdout, so a script that exits without reading stdin races
+/// that write. The leader is the sole holder of the pipe's read end — POSIX
+/// hands an asynchronous list `/dev/null` for stdin, so a backgrounded
+/// descendant never inherits it — and once the leader exits, the adapter's
+/// write fails with `EPIPE`. The adapter records that as an incomplete request
+/// upload, which demotes an otherwise complete exchange to boundary loss and
+/// displaces the message of a bare nonzero exit. Draining first makes every
+/// scripted exit lose that race by construction, so these fixtures assert on
+/// the behaviour they name rather than on process scheduling.
+///
+/// Fixtures that must leave the upload incomplete — `stderr_holding_incomplete_upload_cli`
+/// closes stdin outright — write their own executable instead of using this helper.
 #[cfg(unix)]
 fn script_cli(directory: &Path, name: &str, script: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
+    let body = script
+        .strip_prefix("#!/bin/sh\n")
+        .expect("a scripted fake CLI opens with the POSIX shell shebang");
+    let script = format!("#!/bin/sh\ncat >/dev/null\n{body}");
     let executable = directory.join(name);
     std::fs::write(&executable, script).expect("the scripted fake CLI is written");
     let mut permissions = std::fs::metadata(&executable)

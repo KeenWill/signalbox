@@ -15,15 +15,15 @@ use crate::{
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
-    CorrelatedToolAttemptObservation, CurrentToolAttemptState, DangerousToolAutoApproval,
-    DecideToolRequest, EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities,
-    InitialToolApproval, IssuedExecutorFence, ModelCallId, NormalizedToolArguments,
-    PreparedDecideToolRequest, SemanticTranscriptEntryId, SessionId, ToolApprovalPosture,
-    ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
-    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass,
-    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName,
-    ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultContent, ToolResultText,
-    ToolResultTextFailure, TurnAttemptId, TurnId,
+    ChildWait, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
+    DangerousToolAutoApproval, DecideToolRequest, DelegationWait, EndedToolAttempt,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence,
+    ModelCallId, NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId,
+    SessionId, ToolApprovalPosture, ToolArgumentsKind, ToolAttemptCrashOutcome,
+    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation, ToolBatch,
+    ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
+    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -386,6 +386,13 @@ impl ToolExecutionInvocation {
             evidence,
         }
     }
+
+    /// Seals a claim that the executor transaction already ended this attempt.
+    pub fn durable_completion(self) -> CorrelatedDurableToolCompletion {
+        CorrelatedDurableToolCompletion {
+            correlation: self.authority.correlation(),
+        }
+    }
 }
 
 /// Non-durable evidence returned by a tool executor.
@@ -409,6 +416,69 @@ pub struct CorrelatedToolExecutorEvidence {
     evidence: ToolExecutorEvidence,
 }
 
+/// Exact dispatch fence for a terminal transition already committed by an executor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CorrelatedDurableToolCompletion {
+    correlation: ToolAttemptDispatchCorrelation,
+}
+
+impl CorrelatedDurableToolCompletion {
+    /// Returns the complete issued dispatch correlation.
+    pub const fn correlation(self) -> ToolAttemptDispatchCorrelation {
+        self.correlation
+    }
+}
+
+/// Executor evidence that one exact foreground await committed its durable
+/// child-wait transition instead of returning a terminal tool result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CorrelatedDurableChildWait {
+    correlation: ToolAttemptDispatchCorrelation,
+    wait: DelegationWait,
+    child_wait: ChildWait,
+}
+
+impl CorrelatedDurableChildWait {
+    /// Correlates a foreground wait with its physical dispatch fence.
+    pub fn try_new(
+        correlation: ToolAttemptDispatchCorrelation,
+        wait: DelegationWait,
+    ) -> Option<Self> {
+        let child_wait = wait.foreground_subject()?;
+        (wait.parent() == correlation.session() && wait.awaiting_request() == correlation.request())
+            .then_some(Self {
+                correlation,
+                wait,
+                child_wait,
+            })
+    }
+
+    /// Returns the complete issued dispatch correlation.
+    pub const fn correlation(self) -> ToolAttemptDispatchCorrelation {
+        self.correlation
+    }
+
+    /// Returns the exact registered foreground wait.
+    pub const fn wait(self) -> DelegationWait {
+        self.wait
+    }
+
+    /// Returns the exact child-wait subject retained by the parent turn.
+    pub const fn child_wait(self) -> ChildWait {
+        self.child_wait
+    }
+}
+
+/// Nonblocking executor outcome: ordinary evidence or an already-durable transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolExecutorDisposition {
+    /// Ordinary executor evidence still requiring durable observation commit.
+    Completed(CorrelatedToolExecutorEvidence),
+    /// Terminal evidence the executor already committed with its exact effect.
+    DurableCompletion(CorrelatedDurableToolCompletion),
+    /// The executor's transaction already parked this exact foreground wait.
+    DurableChildWait(CorrelatedDurableChildWait),
+}
 impl CorrelatedToolExecutorEvidence {
     /// Returns the executor-supplied correlation.
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
@@ -431,6 +501,22 @@ pub trait ToolExecutor {
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> impl Future<Output = Result<CorrelatedToolExecutorEvidence, Self::Error>> + Send;
+
+    /// Executes with scheduling-aware support for tools whose transaction can
+    /// durably yield the current turn. Ordinary executors use terminal evidence.
+    fn execute_with_scheduling(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> impl Future<Output = Result<ToolExecutorDisposition, Self::Error>> + Send
+    where
+        Self: Send,
+    {
+        async move {
+            self.execute(invocation)
+                .await
+                .map(ToolExecutorDisposition::Completed)
+        }
+    }
 }
 
 /// Supplies UUIDv7 candidates for approval progression.
@@ -557,6 +643,14 @@ enum RetainedToolExecutionStateKind {
         observation: CorrelatedToolAttemptObservation,
         dispatch_permit: InProcessToolDispatchPermit,
     },
+    DurableCompletion {
+        completion: CorrelatedDurableToolCompletion,
+        dispatch_permit: InProcessToolDispatchPermit,
+    },
+    DurableChildWait {
+        wait: CorrelatedDurableChildWait,
+        dispatch_permit: InProcessToolDispatchPermit,
+    },
     CrashClassification {
         session: SessionId,
         turn: TurnId,
@@ -582,6 +676,10 @@ impl fmt::Debug for RetainedToolExecutionState {
                         "authorization_non_consumption"
                     }
                     RetainedToolExecutionStateKind::Observation { .. } => "observation",
+                    RetainedToolExecutionStateKind::DurableCompletion { .. } => {
+                        "durable_completion"
+                    }
+                    RetainedToolExecutionStateKind::DurableChildWait { .. } => "durable_child_wait",
                     RetainedToolExecutionStateKind::CrashClassification { .. } => {
                         "crash_classification"
                     }
@@ -603,6 +701,8 @@ pub enum ToolExecutionServiceOutcome {
     AwaitingRecovery(ToolAttemptId),
     /// A delivered foreground child result reopened serialized execution.
     ChildWaitResumed(TurnAttemptId),
+    /// A foreground await atomically parked the current turn on its child.
+    ChildWaitParked(ChildWait),
     /// A fresh attempt checkpoint committed; execution waits for another pass.
     AttemptCheckpointed(ToolAttemptId),
     /// Pure preflight closed one attempt with typed error evidence.
@@ -656,6 +756,14 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ObservationCommit(TransactionError),
     /// Retained executor evidence could not be reconciled with durable state.
     ObservationReconciliation(TransactionError),
+    /// An executor-reported durable completion could not be reread from storage.
+    DurableCompletionReconciliation(TransactionError),
+    /// An executor-reported durable completion was absent or cross-wired.
+    DurableCompletionMismatch,
+    /// A reported durable child wait could not be reread from storage.
+    ChildWaitReconciliation(TransactionError),
+    /// A reported durable child wait was absent or cross-wired.
+    ChildWaitMismatch,
     /// Crash classification failed.
     CrashClassification(TransactionError),
     /// Atomic continuation preparation failed.
@@ -715,6 +823,22 @@ where
             Self::ObservationReconciliation(error) => {
                 write!(formatter, "tool observation reconciliation failed: {error}")
             }
+            Self::DurableCompletionReconciliation(error) => write!(
+                formatter,
+                "durable tool completion reconciliation failed: {error}"
+            ),
+            Self::DurableCompletionMismatch => {
+                formatter.write_str("executor durable completion did not match storage")
+            }
+            Self::ChildWaitReconciliation(error) => {
+                write!(
+                    formatter,
+                    "durable child wait reconciliation failed: {error}"
+                )
+            }
+            Self::ChildWaitMismatch => {
+                formatter.write_str("executor durable child wait did not match storage")
+            }
             Self::CrashClassification(error) => {
                 write!(formatter, "tool crash classification failed: {error}")
             }
@@ -732,6 +856,32 @@ where
     TransactionError: Error + 'static,
     ExecutorError: Error + 'static,
 {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Load(error)
+            | Self::Prepare(error)
+            | Self::Authorize(error)
+            | Self::AuthorizationReconciliation(error)
+            | Self::PreflightCommit(error)
+            | Self::ExecutorCorrelationMismatchCrashClassification(error)
+            | Self::ObservationCommit(error)
+            | Self::ObservationReconciliation(error)
+            | Self::DurableCompletionReconciliation(error)
+            | Self::ChildWaitReconciliation(error)
+            | Self::CrashClassification(error)
+            | Self::Continuation(error) => Some(error),
+            Self::AuthorizationReread { reread_error, .. } => Some(reread_error),
+            Self::Executor(error) => Some(error),
+            Self::ExecutorCrashClassification {
+                classification_error,
+                ..
+            } => Some(classification_error),
+            Self::ExecutorCorrelationMismatch
+            | Self::DurableCompletionMismatch
+            | Self::ChildWaitMismatch
+            | Self::CatalogDrift => None,
+        }
+    }
 }
 
 impl<TransactionError, ExecutorError> ClassifyOperatorFailure
@@ -749,6 +899,8 @@ where
             | Self::PreflightCommit(error)
             | Self::ObservationCommit(error)
             | Self::ObservationReconciliation(error)
+            | Self::DurableCompletionReconciliation(error)
+            | Self::ChildWaitReconciliation(error)
             | Self::CrashClassification(error)
             | Self::ExecutorCorrelationMismatchCrashClassification(error)
             | Self::Continuation(error) => error.operator_failure_class(),
@@ -758,9 +910,10 @@ where
                 classification_error,
                 ..
             } => classification_error.operator_failure_class(),
-            Self::ExecutorCorrelationMismatch | Self::CatalogDrift => {
-                OperatorFailureClass::CallerOrHubBug
-            }
+            Self::ExecutorCorrelationMismatch
+            | Self::DurableCompletionMismatch
+            | Self::ChildWaitMismatch
+            | Self::CatalogDrift => OperatorFailureClass::CallerOrHubBug,
         }
     }
 
@@ -780,6 +933,10 @@ where
             }
             Self::ObservationCommit(_) => "tool_observation_commit",
             Self::ObservationReconciliation(_) => "tool_observation_reconciliation",
+            Self::DurableCompletionReconciliation(_) => "tool_durable_completion_reconciliation",
+            Self::DurableCompletionMismatch => "tool_durable_completion_mismatch",
+            Self::ChildWaitReconciliation(_) => "tool_child_wait_reconciliation",
+            Self::ChildWaitMismatch => "tool_child_wait_mismatch",
             Self::CrashClassification(_) => "tool_crash_classification",
             Self::Continuation(_) => "tool_continuation",
             Self::CatalogDrift => "tool_catalog_drift",
@@ -869,7 +1026,7 @@ where
     Ids: ToolExecutionIdGenerator + Send,
     Transaction: ToolExecutionTransaction,
     Catalog: ToolCatalog,
-    Executor: ToolExecutor,
+    Executor: ToolExecutor + Send,
 {
     /// Runs at most one attempt preparation, executor effect, crash
     /// classification, or continuation checkpoint for an authoritative hint.
@@ -956,6 +1113,22 @@ where
                             ));
                         }
                     }
+                }
+                RetainedToolExecutionStateKind::DurableCompletion {
+                    completion,
+                    dispatch_permit,
+                } => {
+                    return self
+                        .reconcile_durable_completion(completion, dispatch_permit)
+                        .await;
+                }
+                RetainedToolExecutionStateKind::DurableChildWait {
+                    wait,
+                    dispatch_permit,
+                } => {
+                    return self
+                        .reconcile_durable_child_wait(wait, dispatch_permit)
+                        .await;
                 }
                 RetainedToolExecutionStateKind::CrashClassification {
                     session,
@@ -1269,8 +1442,8 @@ where
         let invocation = ToolExecutionInvocation::try_new(request, definition, authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
         report_tool_dispatch(&dispatched_tool, &expected_correlation);
-        let evidence = match self.executor.execute(invocation).await {
-            Ok(evidence) => evidence,
+        let disposition = match self.executor.execute_with_scheduling(invocation).await {
+            Ok(disposition) => disposition,
             Err(error) => {
                 return self
                     .classify_untrusted_executor_failure(
@@ -1279,6 +1452,39 @@ where
                         dispatch_permit,
                         UntrustedExecutorFailure::Executor(error),
                     )
+                    .await;
+            }
+        };
+        let evidence = match disposition {
+            ToolExecutorDisposition::Completed(evidence) => evidence,
+            ToolExecutorDisposition::DurableCompletion(completion) => {
+                if completion.correlation() != expected_correlation {
+                    return self
+                        .classify_untrusted_executor_failure(
+                            expected_correlation,
+                            result_entry_count,
+                            dispatch_permit,
+                            UntrustedExecutorFailure::CorrelationMismatch,
+                        )
+                        .await;
+                }
+                return self
+                    .reconcile_durable_completion(completion, dispatch_permit)
+                    .await;
+            }
+            ToolExecutorDisposition::DurableChildWait(wait) => {
+                if wait.correlation() != expected_correlation {
+                    return self
+                        .classify_untrusted_executor_failure(
+                            expected_correlation,
+                            result_entry_count,
+                            dispatch_permit,
+                            UntrustedExecutorFailure::CorrelationMismatch,
+                        )
+                        .await;
+                }
+                return self
+                    .reconcile_durable_child_wait(wait, dispatch_permit)
                     .await;
             }
         };
@@ -1296,6 +1502,63 @@ where
         report_tool_attempt(&dispatched_tool, &observation);
         self.commit_executor_observation(observation, dispatch_permit)
             .await
+    }
+
+    async fn reconcile_durable_completion(
+        &mut self,
+        completion: CorrelatedDurableToolCompletion,
+        dispatch_permit: InProcessToolDispatchPermit,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    > {
+        let attempt = completion.correlation().attempt();
+        match self
+            .transaction
+            .reread_durable_completion(completion.correlation())
+            .await
+        {
+            Ok(true) => Ok(ToolExecutionServiceOutcome::ObservationAlreadyCommitted(
+                attempt,
+            )),
+            Ok(false) => Err(ToolExecutionServiceError::DurableCompletionMismatch),
+            Err(error) => {
+                self.retained_state = Some(RetainedToolExecutionState {
+                    state: RetainedToolExecutionStateKind::DurableCompletion {
+                        completion,
+                        dispatch_permit,
+                    },
+                });
+                Err(ToolExecutionServiceError::DurableCompletionReconciliation(
+                    error,
+                ))
+            }
+        }
+    }
+
+    async fn reconcile_durable_child_wait(
+        &mut self,
+        wait: CorrelatedDurableChildWait,
+        dispatch_permit: InProcessToolDispatchPermit,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    > {
+        match self.transaction.reread_durable_child_wait(wait).await {
+            Ok(true) => Ok(ToolExecutionServiceOutcome::ChildWaitParked(
+                wait.child_wait(),
+            )),
+            Ok(false) => Err(ToolExecutionServiceError::ChildWaitMismatch),
+            Err(error) => {
+                self.retained_state = Some(RetainedToolExecutionState {
+                    state: RetainedToolExecutionStateKind::DurableChildWait {
+                        wait,
+                        dispatch_permit,
+                    },
+                });
+                Err(ToolExecutionServiceError::ChildWaitReconciliation(error))
+            }
+        }
     }
 
     async fn classify_untrusted_executor_failure(
@@ -1595,17 +1858,34 @@ fn report_tool_attempt(name: &ToolName, observation: &CorrelatedToolAttemptObser
 }
 
 /// Selects initial approval for one proposal from frozen posture and catalog.
+///
+/// An explicitly configured `Delegated` posture satisfies an `AlwaysConfirm`
+/// declaration; a configured `Auto` posture never does. `AlwaysConfirm` exists
+/// so that a session blanket cannot silently approve the tool — see
+/// [`InitialToolApproval::AlwaysConfirm`], "leave an `AlwaysConfirm` request
+/// undecided despite blanket posture". A delegate judge is not a blanket but a
+/// distinct decider that can still deny the request or escalate it to the user,
+/// so admitting it serves that purpose rather than evading it. Admitting `Auto`
+/// would instead erase the decision altogether, which is the loophole this
+/// distinction keeps closed. An unconfigured `AlwaysConfirm` declaration still
+/// parks for a human under either blanket posture.
 pub(crate) fn initial_tool_approval(
     posture: DangerousToolAutoApproval,
     definition: Option<&ToolDefinition>,
 ) -> InitialToolApproval {
+    let configured = definition.and_then(ToolDefinition::approval_posture);
     if definition.is_some_and(|definition| {
         definition.permission_default() == ToolPermissionDefault::AlwaysConfirm
     }) {
-        return InitialToolApproval::AlwaysConfirm;
+        return match configured {
+            Some(ToolApprovalPosture::Delegated) => InitialToolApproval::Delegated,
+            Some(ToolApprovalPosture::Auto | ToolApprovalPosture::Human) | None => {
+                InitialToolApproval::AlwaysConfirm
+            }
+        };
     }
-    if let Some(posture) = definition.and_then(ToolDefinition::approval_posture) {
-        return match posture {
+    if let Some(configured) = configured {
+        return match configured {
             ToolApprovalPosture::Auto => InitialToolApproval::PolicyAuto,
             ToolApprovalPosture::Delegated => InitialToolApproval::Delegated,
             ToolApprovalPosture::Human => InitialToolApproval::Human,
@@ -1629,6 +1909,7 @@ pub(crate) fn initial_tool_approval(
 mod tests {
     use std::{
         collections::VecDeque,
+        num::NonZeroU64,
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
@@ -1637,10 +1918,13 @@ mod tests {
 
     use super::*;
     use signalbox_domain::{
-        ResolvedContextFrontierReconstitutionInput, ToolApprovalResolutionReconstitutionInput,
-        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDecisionSource,
-        ToolDispatchGeneration, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest, DelegationEvent,
+        DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode,
+        ResolvedContextFrontierReconstitutionInput, SessionDelegationReconstitutionInput,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
+        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
+        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration,
+        ToolRequestOrdinal, ToolRequestReconstitutionInput,
     };
     use uuid::Uuid;
 
@@ -1746,6 +2030,87 @@ mod tests {
         )
     }
 
+    fn foreground_wait_for(request: &ToolRequest) -> DelegationWait {
+        let spawning = ToolRequestReconstitutionInput::new(
+            ToolRequestId::from_uuid(Uuid::from_u128(90)),
+            request.session(),
+            request.turn(),
+            request.producing_call(),
+            ToolRequestOrdinal::from_u32(1),
+            tool_name("spawn_session"),
+            NormalizedToolArguments::try_from_provider_text(String::from(
+                r#"{"relationship":{"kind":"background"},"task":"inspect"}"#,
+            ))
+            .expect("spawn arguments are canonical"),
+        )
+        .into_request();
+        let spawning = DelegatedSpawnRequest::parse(
+            spawning,
+            String::from("inspect"),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("spawn request is canonical");
+        let child = SessionId::from_uuid(Uuid::from_u128(91));
+        let relation = SessionDelegationReconstitutionInput::new(
+            spawning.clone(),
+            child,
+            TurnId::from_uuid(Uuid::from_u128(92)),
+            vec![DelegationEvent::Spawned {
+                ordinal: DelegationEventOrdinal::new(NonZeroU64::MIN),
+                provenance: DelegationProvenance::from_spawn(&spawning),
+            }],
+        )
+        .reconstitute()
+        .expect("spawn event reconstitutes the relation");
+        let awaiting = ToolRequestReconstitutionInput::new(
+            request.id(),
+            request.session(),
+            request.turn(),
+            request.producing_call(),
+            ToolRequestOrdinal::from_u32(0),
+            tool_name("await_session"),
+            NormalizedToolArguments::try_from_provider_text(format!(
+                r#"{{"child_session_id":"{}","mode":"foreground"}}"#,
+                child.as_uuid()
+            ))
+            .expect("await arguments are canonical"),
+        )
+        .into_request();
+        let awaiting =
+            DelegationAwaitRequest::parse(awaiting, child, DelegationWaitMode::Foreground)
+                .expect("await request is canonical");
+        DelegationWait::reconstitute(&relation, &awaiting)
+            .expect("await request names the relation")
+    }
+
+    #[track_caller]
+    fn assert_child_wait_reconciliation_error(
+        error: ToolExecutionServiceError<FakeError, FakeError>,
+    ) {
+        assert!(matches!(
+            error,
+            ToolExecutionServiceError::ChildWaitReconciliation(FakeError::Ordinary)
+        ));
+    }
+
+    #[track_caller]
+    fn assert_durable_completion_mismatch(error: ToolExecutionServiceError<FakeError, FakeError>) {
+        assert!(matches!(
+            error,
+            ToolExecutionServiceError::DurableCompletionMismatch
+        ));
+    }
+
+    #[track_caller]
+    fn assert_durable_completion_reconciliation_error(
+        error: ToolExecutionServiceError<FakeError, FakeError>,
+    ) {
+        assert!(matches!(
+            error,
+            ToolExecutionServiceError::DurableCompletionReconciliation(FakeError::Ordinary)
+        ));
+    }
+
     #[track_caller]
     fn current_attempt_fixture(batch: &ToolBatch) -> signalbox_domain::CurrentToolAttempt {
         match batch.attempt(batch.requests()[0].id()) {
@@ -1767,6 +2132,31 @@ mod tests {
                 Self::CommitAmbiguous => "fake commit-ambiguous tool-loop failure",
             })
         }
+    }
+
+    #[test]
+    fn durable_completion_reconciliation_exposes_transaction_source() {
+        let error =
+            ToolExecutionServiceError::<FakeError, FakeError>::DurableCompletionReconciliation(
+                FakeError::Ordinary,
+            );
+
+        assert_eq!(
+            error.source().map(ToString::to_string),
+            Some(String::from("fake tool-loop failure"))
+        );
+    }
+
+    #[test]
+    fn child_wait_reconciliation_exposes_transaction_source() {
+        let error = ToolExecutionServiceError::<FakeError, FakeError>::ChildWaitReconciliation(
+            FakeError::Ordinary,
+        );
+
+        assert_eq!(
+            error.source().map(ToString::to_string),
+            Some(String::from("fake tool-loop failure"))
+        );
     }
 
     impl Error for FakeError {}
@@ -1910,6 +2300,32 @@ mod tests {
             })
         }
 
+        async fn reread_durable_completion(
+            &mut self,
+            _correlation: ToolAttemptDispatchCorrelation,
+        ) -> Result<bool, Self::Error> {
+            if self.commit_failures > 0 {
+                self.commit_failures -= 1;
+                return Err(FakeError::Ordinary);
+            }
+            Ok(self.committed)
+        }
+
+        async fn reread_durable_child_wait(
+            &mut self,
+            _wait: CorrelatedDurableChildWait,
+        ) -> Result<bool, Self::Error> {
+            self.events
+                .lock()
+                .expect("event lock")
+                .push("reread_child_wait");
+            if self.commit_failures > 0 {
+                self.commit_failures -= 1;
+                return Err(FakeError::Ordinary);
+            }
+            Ok(true)
+        }
+
         async fn classify_crash_loss<NextTurn>(
             &mut self,
             _session: SessionId,
@@ -2018,6 +2434,58 @@ mod tests {
 
     struct FailingExecutor {
         events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    struct DurableWaitExecutor {
+        wait: DelegationWait,
+    }
+
+    struct DurableCompletionExecutor {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ToolExecutor for DurableCompletionExecutor {
+        type Error = FakeError;
+
+        async fn execute(
+            &mut self,
+            _invocation: ToolExecutionInvocation,
+        ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+            panic!("scheduling-aware execution handles durable completion")
+        }
+
+        async fn execute_with_scheduling(
+            &mut self,
+            invocation: ToolExecutionInvocation,
+        ) -> Result<ToolExecutorDisposition, Self::Error> {
+            self.events
+                .lock()
+                .expect("event lock")
+                .push("execute_durable_completion");
+            Ok(ToolExecutorDisposition::DurableCompletion(
+                invocation.durable_completion(),
+            ))
+        }
+    }
+
+    impl ToolExecutor for DurableWaitExecutor {
+        type Error = FakeError;
+
+        async fn execute(
+            &mut self,
+            _invocation: ToolExecutionInvocation,
+        ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+            panic!("scheduling-aware execution handles durable child waits")
+        }
+
+        async fn execute_with_scheduling(
+            &mut self,
+            invocation: ToolExecutionInvocation,
+        ) -> Result<ToolExecutorDisposition, Self::Error> {
+            let wait = CorrelatedDurableChildWait::try_new(invocation.correlation(), self.wait)
+                .expect("fixture wait matches the invocation");
+            Ok(ToolExecutorDisposition::DurableChildWait(wait))
+        }
     }
 
     impl ToolExecutor for FailingExecutor {
@@ -2169,16 +2637,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
-        let explicit = definition(
-            "explicit",
+    fn always_confirm_definition(name: &str) -> ToolDefinition {
+        definition(
+            name,
             ToolPermissionDefault::AlwaysConfirm,
             ToolEffectClass::ExternalEffect,
-        );
-        let configured_delegate = explicit
-            .clone()
-            .with_approval_posture(ToolApprovalPosture::Delegated);
+        )
+    }
+
+    /// With no posture configured, an `AlwaysConfirm` declaration parks for a
+    /// human under either blanket posture. This is the default `unsandboxed_exec`
+    /// behavior, which the configured-posture admission below must not change.
+    #[test]
+    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
+        let explicit = always_confirm_definition("explicit");
 
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
@@ -2188,11 +2660,61 @@ mod tests {
             initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
             InitialToolApproval::AlwaysConfirm
         );
+    }
+
+    /// An explicitly configured `Delegated` posture satisfies `AlwaysConfirm`.
+    /// The declaration exists so that a session blanket cannot silently approve
+    /// the tool; a delegate judge is not a blanket but a distinct decider that
+    /// can still deny the request or escalate it to the user, so routing to it
+    /// serves that purpose rather than evading it.
+    #[test]
+    fn configured_delegated_posture_satisfies_always_confirm() {
+        let delegated = always_confirm_definition("explicit")
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
         assert_eq!(
-            initial_tool_approval(
-                DangerousToolAutoApproval::ApproveAll,
-                Some(&configured_delegate)
-            ),
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+    }
+
+    /// A configured `Auto` posture must never satisfy `AlwaysConfirm`. Unlike a
+    /// delegate judge it erases the decision entirely, which is exactly the
+    /// silent automatic approval the declaration refuses; admitting it would be
+    /// the loophole that admitting `Delegated` is not.
+    #[test]
+    fn configured_auto_posture_never_satisfies_always_confirm() {
+        let automatic =
+            always_confirm_definition("explicit").with_approval_posture(ToolApprovalPosture::Auto);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&automatic)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&automatic)),
+            InitialToolApproval::AlwaysConfirm
+        );
+    }
+
+    /// A configured `Human` posture keeps the stricter `AlwaysConfirm` outcome
+    /// rather than the plain human park, since both await the same user and the
+    /// declaration is the more specific fact.
+    #[test]
+    fn configured_human_posture_leaves_always_confirm_parked() {
+        let human =
+            always_confirm_definition("explicit").with_approval_posture(ToolApprovalPosture::Human);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&human)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&human)),
             InitialToolApproval::AlwaysConfirm
         );
     }
@@ -2287,6 +2809,120 @@ mod tests {
         assert_eq!(*events.lock().expect("event lock"), ["preflight"]);
     }
 
+    /// What one execution against a possibly drifted catalog produced.
+    struct ExecutionUnderCatalog {
+        result:
+            Result<ToolExecutionServiceOutcome, ToolExecutionServiceError<FakeError, FakeError>>,
+        executor_calls: usize,
+        transaction_events: Vec<&'static str>,
+    }
+
+    /// The two effect classes one drift execution puts in disagreement.
+    ///
+    /// A struct rather than two positional arguments: both fields are
+    /// `ToolEffectClass`, the two tests below deliberately pass them in
+    /// opposite orders, and a transposition would compile while silently
+    /// reversing which side is the drifted one — leaving the assertion
+    /// describing a case it no longer covers.
+    struct CatalogDrift {
+        /// What the durable authorization froze when the attempt was prepared.
+        prepared_effect: ToolEffectClass,
+        /// What the live, rebuilt catalog declares for the same tool.
+        catalog_effect: ToolEffectClass,
+    }
+
+    /// Prepares one attempt whose durable authorization froze
+    /// `drift.prepared_effect`, then executes it against a live catalog
+    /// declaring the same tool `drift.catalog_effect` — the daemon-restart
+    /// shape in which a rebuilt catalog can disagree with a parked approval.
+    async fn execute_under_catalog_effect_class(drift: CatalogDrift) -> ExecutionUnderCatalog {
+        let CatalogDrift {
+            prepared_effect,
+            catalog_effect,
+        } = drift;
+        let (batch, _) = prepared_batch("{}", prepared_effect);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition("known", ToolPermissionDefault::Auto, catalog_effect),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let (_, _, _, executor, _, _) = service.into_parts();
+        let transaction_events = events.lock().expect("event lock").clone();
+        ExecutionUnderCatalog {
+            result,
+            executor_calls: executor.calls,
+            transaction_events,
+        }
+    }
+
+    /// The effect class frozen at preparation is what the approval gate
+    /// authorized, so a catalog that now declares another class stops the call
+    /// before authorization rather than running it under a class no approval
+    /// ever covered.
+    #[tokio::test]
+    async fn drifted_catalog_effect_class_never_reaches_authorization_or_the_executor() {
+        let drifted = execute_under_catalog_effect_class(CatalogDrift {
+            prepared_effect: ToolEffectClass::EffectFree,
+            catalog_effect: ToolEffectClass::ExternalEffect,
+        })
+        .await;
+
+        assert!(matches!(
+            drifted.result,
+            Err(ToolExecutionServiceError::CatalogDrift)
+        ));
+        assert_eq!(drifted.executor_calls, 0);
+        assert!(
+            drifted.transaction_events.is_empty(),
+            "drift stops before authorization, preflight commit, and observation commit"
+        );
+    }
+
+    /// Catalog drift is an operator-visible caller-or-hub bug carrying its own
+    /// stable cause token, so a wedged turn is attributable without formatting
+    /// adapter detail.
+    #[tokio::test]
+    async fn drifted_catalog_effect_class_reports_its_declared_operator_failure() {
+        let drifted = execute_under_catalog_effect_class(CatalogDrift {
+            prepared_effect: ToolEffectClass::ExternalEffect,
+            catalog_effect: ToolEffectClass::EffectFree,
+        })
+        .await;
+        let error = drifted
+            .result
+            .expect_err("a prepared call cannot execute under a drifted effect class");
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(error.operator_failure_cause_code(), "tool_catalog_drift");
+    }
+
     /// INV-011 / INV-021 / INV-024: durable authorization precedes the
     /// executor, and only its exact correlation can commit returned evidence.
     #[tokio::test]
@@ -2346,6 +2982,285 @@ mod tests {
         assert_eq!(
             *events.lock().expect("event lock"),
             ["authorize", "execute", "commit"]
+        );
+    }
+
+    /// S17 / INV-005 / INV-011: a scheduling-aware executor's durable
+    /// foreground wait is reread before the service accepts the parked turn.
+    #[tokio::test]
+    async fn s17_inv005_inv011_durable_child_wait_is_authenticated_without_second_observation() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = current_attempt_fixture(&batch);
+        let wait = foreground_wait_for(&batch.requests()[0]);
+        let expected = wait
+            .foreground_subject()
+            .expect("fixture wait is foreground");
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            DurableWaitExecutor { wait },
+            InProcessToolDispatchGate::default(),
+        );
+
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("durable wait evidence is authenticated");
+
+        assert_eq!(
+            outcome,
+            ToolExecutionServiceOutcome::ChildWaitParked(expected)
+        );
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "reread_child_wait"]
+        );
+    }
+
+    /// S17 / INV-011 / INV-024: terminal evidence committed atomically with a
+    /// tool effect is authenticated and never sent through a second commit.
+    #[tokio::test]
+    async fn s17_inv011_inv024_durable_completion_is_authenticated_without_second_commit() {
+        let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = current_attempt_fixture(&batch);
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: true,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            DurableCompletionExecutor {
+                events: Arc::clone(&events),
+            },
+            InProcessToolDispatchGate::default(),
+        );
+
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("durable completion evidence is authenticated");
+
+        assert_eq!(
+            outcome,
+            ToolExecutionServiceOutcome::ObservationAlreadyCommitted(attempt)
+        );
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute_durable_completion"]
+        );
+    }
+
+    /// INV-011 / INV-024: a durable-completion claim cannot authorize an
+    /// attempt that storage still reports as pending.
+    #[tokio::test]
+    async fn inv011_inv024_durable_completion_fails_closed_when_not_committed() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = current_attempt_fixture(&batch);
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            DurableCompletionExecutor {
+                events: Arc::clone(&events),
+            },
+            InProcessToolDispatchGate::default(),
+        );
+
+        let error = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect_err("pending storage cannot authenticate durable completion");
+
+        assert_durable_completion_mismatch(error);
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute_durable_completion"]
+        );
+    }
+
+    /// INV-011 / INV-024 / INV-037: a failed durable-completion reread retains
+    /// the exact evidence and dispatch permit, then retries only authentication.
+    #[tokio::test]
+    async fn inv011_inv024_inv037_durable_completion_retries_only_authentication() {
+        let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = current_attempt_fixture(&batch);
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 1,
+            committed: true,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let gate = InProcessToolDispatchGate::default();
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            DurableCompletionExecutor {
+                events: Arc::clone(&events),
+            },
+            gate.clone(),
+        );
+
+        let first = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect_err("first durable-completion reread fails transiently");
+        let gate_blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            gate.acquire(batch.turn()),
+        )
+        .await;
+        let retried = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("retained durable completion authenticates on retry");
+
+        assert_durable_completion_reconciliation_error(first);
+        assert!(service.retained_state().is_none());
+        assert!(gate_blocked.is_err());
+        assert_eq!(
+            retried,
+            ToolExecutionServiceOutcome::ObservationAlreadyCommitted(attempt)
+        );
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute_durable_completion"]
+        );
+    }
+
+    /// S17 / INV-011 / INV-024: a transient durable-wait reread failure keeps
+    /// the exact evidence and dispatch permit for same-incarnation retry.
+    #[tokio::test]
+    async fn s17_inv011_inv024_durable_child_wait_retries_only_its_authentication() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = current_attempt_fixture(&batch);
+        let wait = foreground_wait_for(&batch.requests()[0]);
+        let expected = wait
+            .foreground_subject()
+            .expect("fixture wait is foreground");
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 1,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            DurableWaitExecutor { wait },
+            InProcessToolDispatchGate::default(),
+        );
+
+        let first = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect_err("first wait authentication fails transiently");
+        let retried = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("retained wait authentication retries");
+
+        assert_child_wait_reconciliation_error(first);
+        assert_eq!(
+            retried,
+            ToolExecutionServiceOutcome::ChildWaitParked(expected)
+        );
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "reread_child_wait", "reread_child_wait"]
         );
     }
 

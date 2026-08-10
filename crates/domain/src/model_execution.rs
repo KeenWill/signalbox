@@ -2362,6 +2362,21 @@ impl FailedModelCallTurnIdentities {
         self.pending_steering_reclassifications = identities;
         self
     }
+
+    /// Returns the failure-marker identity this bundle mints.
+    ///
+    /// Exposed alongside [`Self::terminal_frontier`] because the two are
+    /// minted into one collision domain: a retry after an identity collision
+    /// has to refresh *both*, and a caller that can only compare whole
+    /// bundles cannot tell a full refresh from one that reused half.
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntryId {
+        self.failure_entry
+    }
+
+    /// Returns the terminal-frontier identity this bundle mints.
+    pub const fn terminal_frontier(&self) -> ContextFrontierId {
+        self.terminal_frontier
+    }
 }
 
 /// Fresh identities for an interrupt-cancelled turn.
@@ -4613,6 +4628,44 @@ mod tests {
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::PolicyAuto,
+        ));
+    }
+
+    /// A configured `Delegated` posture now also satisfies an `AlwaysConfirm`
+    /// declaration, so `Delegated` reaches this admission check with the blanket
+    /// disabled and must be admitted there.
+    #[test]
+    fn delegated_approval_is_admitted_when_blanket_posture_is_disabled() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Delegated,
+        ));
+    }
+
+    /// The same configured `Delegated` posture reaches this check under the
+    /// dangerous blanket, which the `AlwaysConfirm` declaration refuses to honor
+    /// on its own.
+    #[test]
+    fn delegated_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Delegated,
+        ));
+    }
+
+    #[test]
+    fn human_approval_is_admitted_when_blanket_posture_is_disabled() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Human,
+        ));
+    }
+
+    #[test]
+    fn human_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Human,
         ));
     }
 

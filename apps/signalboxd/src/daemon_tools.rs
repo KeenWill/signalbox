@@ -3,9 +3,10 @@
 use std::{collections::BTreeMap, error::Error, fmt, path::Path, sync::Arc};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
-    ToolExecutionInvocation, ToolExecutor,
+    ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedDurableChildWait,
+    CorrelatedToolExecutorEvidence, OperatorFailureClass, ToolCatalog,
+    ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorDisposition,
 };
 use signalbox_domain::{NormalizedToolArguments, ToolApprovalPosture, ToolName};
 use signalbox_model_runtime::CredentialAccess;
@@ -33,6 +34,10 @@ use signalbox_tools_github::{
     GitHubTransport,
 };
 use signalbox_tools_plan::{PLAN_TOOL_NAMES, PlanExecutor, PlanTools, SessionPlanPort};
+use signalbox_tools_sessions::{
+    SESSION_DELEGATION_TOOL_NAMES, SessionDelegationExecutionDisposition,
+    SessionDelegationExecutor, SessionDelegationTools,
+};
 use signalbox_tools_web::{
     ReqwestWebFetchTransport, ReqwestWebSearchTransport, WEB_FETCH_NAME, WEB_SEARCH_NAME,
     WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool, WebFetchTransport,
@@ -53,6 +58,7 @@ use tokio::sync::Mutex;
 use crate::{
     FileCredentialAccess, PostgresConversationIntrospection,
     goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor, GoalDeclarationTool},
+    session_delegation::DaemonSessionDelegationPort,
 };
 
 /// Daemon-local filesystem adapter that shares one pinned root across both
@@ -158,6 +164,7 @@ struct ComposedToolFamilies<
     cargo_diagnostics: Option<CargoDiagnosticsTool<ExecRunner>>,
     conversations: Option<ConversationTools<ConversationPort>>,
     plan: PlanTools<PlanPort>,
+    delegation: SessionDelegationTools<DaemonSessionDelegationPort>,
     goal: Option<GoalDeclarationTool>,
 }
 
@@ -275,6 +282,9 @@ impl<Clock>
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
+        let delegation =
+            SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(pool.clone()))
+                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
@@ -293,6 +303,7 @@ impl<Clock>
                 cargo_diagnostics: Some(cargo_diagnostics),
                 conversations: Some(conversations),
                 plan,
+                delegation,
                 goal: Some(goal),
             },
         )
@@ -324,6 +335,9 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        let delegation =
+            SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(pool.clone()))
+                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
@@ -342,6 +356,7 @@ impl<Clock>
                 cargo_diagnostics: None,
                 conversations: None,
                 plan,
+                delegation,
                 goal: Some(goal),
             },
         )
@@ -432,6 +447,9 @@ where
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let plan = PlanTools::try_new(plan_port).map_err(|_| DaemonToolsConstructionError::Plan)?;
+        let delegation =
+            SessionDelegationTools::try_new(DaemonSessionDelegationPort::unavailable())
+                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -448,6 +466,7 @@ where
                 cargo_diagnostics: Some(cargo_diagnostics),
                 conversations: Some(conversations),
                 plan,
+                delegation,
                 goal: None,
             },
         )
@@ -482,6 +501,7 @@ where
             cargo_diagnostics,
             conversations,
             plan,
+            delegation,
             goal,
         } = families;
         let (current_time_catalog, current_time) = CurrentTimeTool::try_new(clock)
@@ -503,6 +523,7 @@ where
         let cargo_diagnostics = cargo_diagnostics.map(CargoDiagnosticsTool::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
         let (plan_catalog, plan) = plan.into_parts();
+        let (delegation_catalog, delegation) = delegation.into_parts();
         let goal = goal.map(GoalDeclarationTool::into_parts);
         let mut catalogs = vec![
             current_time_catalog,
@@ -512,6 +533,7 @@ where
             status_catalog,
             code_host_catalog,
             plan_catalog,
+            delegation_catalog,
         ];
         catalogs.extend(github.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(workspace_read.as_ref().map(|(catalog, _)| catalog.clone()));
@@ -555,6 +577,7 @@ where
                 cargo_diagnostics: cargo_diagnostics.map(|(_, executor)| executor),
                 conversations: conversations.map(|(_, executor)| executor),
                 plan,
+                delegation,
                 goal: goal.map(|(_, executor)| executor),
             },
         })
@@ -615,6 +638,8 @@ pub enum DaemonToolsConstructionError {
     Conversations,
     /// The plan declarations or session plan port were invalid.
     Plan,
+    /// The session-delegation declarations were invalid.
+    SessionDelegation,
     /// The goal declaration or its static validation details were invalid.
     GoalDeclaration,
     /// Two declarations unexpectedly shared one name.
@@ -637,6 +662,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::Exec => "exec tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
+            Self::SessionDelegation => "session-delegation tool suite construction failed",
             Self::GoalDeclaration => "goal_declare tool construction failed",
             Self::Duplicate => "daemon tool catalog contains a duplicate name",
         })
@@ -744,6 +770,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
         || name == GOAL_DECLARE_NAME
         || CODE_HOST_TOOL_NAMES.contains(&name)
         || PLAN_TOOL_NAMES.contains(&name)
+        || SESSION_DELEGATION_TOOL_NAMES.contains(&name)
         || mapped_family_contains
 }
 
@@ -873,6 +900,7 @@ pub struct DaemonToolExecutor<
     cargo_diagnostics: Option<CargoDiagnosticsExecutor<ExecRunner>>,
     conversations: Option<ConversationExecutor<ConversationPort>>,
     plan: PlanExecutor<PlanPort>,
+    delegation: SessionDelegationExecutor<DaemonSessionDelegationPort>,
     goal: Option<GoalDeclarationExecutor>,
 }
 
@@ -1042,6 +1070,19 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if SESSION_DELEGATION_TOOL_NAMES.contains(&name) => match self
+                .delegation
+                .execute_nonblocking(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error))?
+            {
+                SessionDelegationExecutionDisposition::Completed(evidence) => Ok(evidence),
+                SessionDelegationExecutionDisposition::DurableCompletion(_)
+                | SessionDelegationExecutionDisposition::ForegroundDelivered(_)
+                | SessionDelegationExecutionDisposition::ForegroundPending(_) => {
+                    Err(DaemonToolExecutorError::unknown_tool())
+                }
+            },
             GOAL_DECLARE_NAME => self
                 .goal
                 .as_mut()
@@ -1056,6 +1097,43 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             _ => Err(DaemonToolExecutorError::unknown_tool()),
         }
+    }
+
+    async fn execute_with_scheduling(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<ToolExecutorDisposition, Self::Error> {
+        if SESSION_DELEGATION_TOOL_NAMES.contains(&invocation.request().name().as_str()) {
+            return match self
+                .delegation
+                .execute_nonblocking(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error))?
+            {
+                SessionDelegationExecutionDisposition::Completed(evidence) => {
+                    Ok(ToolExecutorDisposition::Completed(evidence))
+                }
+                SessionDelegationExecutionDisposition::DurableCompletion(evidence) => {
+                    Ok(ToolExecutorDisposition::DurableCompletion(evidence))
+                }
+                SessionDelegationExecutionDisposition::ForegroundDelivered(delivered) => {
+                    CorrelatedDurableChildWait::try_new(
+                        delivered.correlation(),
+                        delivered.result().wait(),
+                    )
+                    .map(ToolExecutorDisposition::DurableChildWait)
+                    .ok_or_else(DaemonToolExecutorError::unknown_tool)
+                }
+                SessionDelegationExecutionDisposition::ForegroundPending(pending) => {
+                    CorrelatedDurableChildWait::try_new(pending.correlation(), pending.wait())
+                        .map(ToolExecutorDisposition::DurableChildWait)
+                        .ok_or_else(DaemonToolExecutorError::unknown_tool)
+                }
+            };
+        }
+        self.execute(invocation)
+            .await
+            .map(ToolExecutorDisposition::Completed)
     }
 }
 
@@ -1488,6 +1566,10 @@ mod tests {
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
                 plan: PlanTools::try_new(OfflineConversationPort)
                     .expect("offline plan tools compile"),
+                delegation: SessionDelegationTools::try_new(
+                    DaemonSessionDelegationPort::unavailable(),
+                )
+                .expect("offline session-delegation tools compile"),
                 goal: None,
             },
         )
@@ -1500,6 +1582,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                signalbox_tools_sessions::AWAIT_SESSION_NAME,
                 CHANGE_REQUEST_CHANGED_FILES_NAME,
                 CHANGE_REQUEST_CHECKS_STATUS_NAME,
                 CHANGE_REQUEST_CI_JOB_LOG_NAME,
@@ -1520,20 +1603,18 @@ mod tests {
                 REPOSITORY_LIST_DIRECTORY_NAME,
                 REPOSITORY_READ_FILE_NAME,
                 REVIEW_GATE_CHECK_NAME,
+                signalbox_tools_sessions::SEND_SESSION_MESSAGE_NAME,
                 SESSION_STATUS_UPDATE_NAME,
+                signalbox_tools_sessions::SPAWN_SESSION_NAME,
                 WEB_FETCH_NAME,
                 WEB_SEARCH_NAME,
             ]
         );
     }
 
-    /// The merged process-lifetime catalog exposes every daemon declaration in
-    /// deterministic name order.
-    #[test]
-    fn daemon_catalog_contains_every_injected_tool_family() {
-        let workspace = tempfile::tempdir().expect("workspace root exists");
-        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
-        let (catalog, _executor) = DaemonTools::try_new(
+    /// Composes every injected family against offline boundaries.
+    fn fully_composed_catalog(workspace: &Path) -> DaemonToolCatalog {
+        DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
             MappedDaemonCredentialInputs {
@@ -1547,7 +1628,7 @@ mod tests {
             OfflineGitHubTransport,
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,
-            workspace.path(),
+            workspace,
             git_identity(),
             TokioProcessRunner::try_new(
                 std::env::current_exe().expect("test executable path is available"),
@@ -1558,7 +1639,17 @@ mod tests {
             WebFetchEgressPolicy::deny_all(),
         )
         .expect("static daemon tools compile")
-        .into_parts();
+        .into_parts()
+        .0
+    }
+
+    /// The merged process-lifetime catalog exposes every daemon declaration in
+    /// deterministic name order.
+    #[test]
+    fn daemon_catalog_contains_every_injected_tool_family() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
 
         let definitions = catalog.definitions();
         let names = definition_names(&definitions);
@@ -1567,6 +1658,7 @@ mod tests {
             names,
             [
                 APPLY_PATCH_NAME,
+                signalbox_tools_sessions::AWAIT_SESSION_NAME,
                 CARGO_DIAGNOSTICS_NAME,
                 CHANGE_REQUEST_CHANGED_FILES_NAME,
                 CHANGE_REQUEST_CHECKS_STATUS_NAME,
@@ -1609,12 +1701,287 @@ mod tests {
                 REVIEW_GATE_CHECK_NAME,
                 SANDBOXED_EXEC_NAME,
                 SEARCH_FILES_NAME,
+                signalbox_tools_sessions::SEND_SESSION_MESSAGE_NAME,
                 SESSION_STATUS_UPDATE_NAME,
+                signalbox_tools_sessions::SPAWN_SESSION_NAME,
                 UNSANDBOXED_EXEC_NAME,
                 WEB_FETCH_NAME,
                 WEB_SEARCH_NAME,
                 WRITE_FILE_NAME,
             ]
+        );
+    }
+
+    /// Root-level JSON Schema keywords an advertised argument schema may
+    /// carry: object declaration, its members, and annotations.
+    ///
+    /// An allowlist rather than a list of known-bad combinators. A root
+    /// applicator leaves the argument shape to its branches, so a validator
+    /// requiring an object-typed root cannot accept it even beside a sibling
+    /// `"type"` — but `oneOf`, `anyOf`, `allOf`, `not`, and `$ref` are not the
+    /// closed set of those. JSON Schema also applies at the root through
+    /// `if`/`then`/`else`, `dependentSchemas`, and `unevaluatedProperties`,
+    /// and later drafts may add more. A blocklist naming today's rejects
+    /// therefore admits tomorrow's in silence, which is the exact failure this
+    /// gate exists to prevent: a root shape nobody enumerated reached a
+    /// provider once already and returned 400 for every exchange offering the
+    /// catalog.
+    ///
+    /// So the gate fails closed. A declaration needing a keyword absent here
+    /// fails this test and joins the list deliberately, with the wire question
+    /// answered once rather than assumed.
+    const PERMITTED_ROOT_KEYWORDS: [&str; 7] = [
+        "$defs",
+        "additionalProperties",
+        "description",
+        "properties",
+        "required",
+        "title",
+        "type",
+    ];
+
+    /// Fails one advertised schema that a function-tool wire would reject.
+    ///
+    /// OpenAI Chat Completions documents `tools[].function.parameters` as
+    /// "The parameters the functions accepts, described as a JSON Schema
+    /// object" (platform.openai.com/docs/api-reference/chat/create), and its
+    /// Structured Outputs guide states the matching root rule directly: a
+    /// schema root must be an `object` and must not be a root `anyOf`
+    /// (platform.openai.com/docs/guides/structured-outputs). Its supported
+    /// composition keyword is `anyOf` alone; `oneOf`, `allOf`, and `not`
+    /// appear nowhere in that subset.
+    ///
+    /// This assertion pins the strictest reading of those two rules — a
+    /// declared `"type": "object"` root carrying nothing outside
+    /// [`PERMITTED_ROOT_KEYWORDS`]. The rejection this test exists to prevent
+    /// was a root `oneOf`, and the root is what both rules constrain directly.
+    ///
+    /// It claims nothing past the root. Strict Structured Outputs demands more
+    /// of a schema than this gate reads — every property named in `required`,
+    /// `additionalProperties: false` throughout — and this catalog does not
+    /// meet that: `current_time` advertises an optional `timezone`, declared
+    /// but unrequired. Enabling a strict function contract would need the
+    /// schema transformation the OpenAI adapter already notes, which this gate
+    /// neither performs nor approximates. Passing here is evidence about the
+    /// root and nothing else.
+    ///
+    /// Accepted cost: a schema may not express a root-level union, and must
+    /// instead discriminate through one tag property, as
+    /// `signalbox_tool_contract::rendered_contract_schema` now renders
+    /// internally tagged argument enums.
+    ///
+    /// Nested combinators are untouched: only the root is constrained, so a
+    /// property may still carry `oneOf`, `anyOf`, or a `$ref` into `$defs`.
+    ///
+    /// The stake is the blast radius, not one tool. Every request carries the
+    /// whole catalog, so one rejected schema returns 400 for every exchange
+    /// that offers it — not merely for calls to the offending tool.
+    #[track_caller]
+    fn assert_object_rooted(name: &str, schema: &str) {
+        let decoded: serde_json::Value = serde_json::from_str(schema)
+            .unwrap_or_else(|error| panic!("{name} schema is JSON: {error}"));
+        let root = decoded
+            .as_object()
+            .unwrap_or_else(|| panic!("{name} schema root is a JSON object"));
+        assert_eq!(
+            root.get("type").and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{name} schema root must declare \"type\": \"object\""
+        );
+        let unsupported = unsupported_root_keywords(root);
+        assert!(
+            unsupported.is_empty(),
+            "{name} schema root must carry no keyword outside the advertised \
+             object contract, found {unsupported:?}"
+        );
+    }
+
+    /// Names the keywords a schema root declares outside the object contract.
+    ///
+    /// Split from the assertion so the allowlist can be exercised directly:
+    /// what the gate rejects is the claim under review, and reading it back
+    /// through a caught panic would prove less about which keywords it names.
+    fn unsupported_root_keywords(root: &serde_json::Map<String, serde_json::Value>) -> Vec<&str> {
+        root.keys()
+            .map(String::as_str)
+            .filter(|keyword| !PERMITTED_ROOT_KEYWORDS.contains(keyword))
+            .collect()
+    }
+
+    /// Fails the first advertised declaration whose schema root a function-tool
+    /// wire would reject, naming it.
+    ///
+    /// The iteration lives here rather than in the test body. The sweep has to
+    /// cover the whole composed catalog — that is what makes a tool family
+    /// added later join without anyone remembering — while a test body stays
+    /// straight-line, so the loop sits behind a `#[track_caller]` helper that
+    /// names the failing declaration at the call site.
+    #[track_caller]
+    fn assert_every_definition_is_object_rooted(definitions: &[ToolDefinition]) {
+        for definition in definitions {
+            assert_object_rooted(
+                definition.name().as_str(),
+                definition.input_schema().as_str(),
+            );
+        }
+    }
+
+    /// INV-055: every schema the daemon advertises satisfies the function-tool
+    /// wire's root constraint, so no single declaration can fail whole
+    /// exchanges.
+    ///
+    /// The sweep runs over the fully composed catalog rather than a listed
+    /// subset: a tool family added later joins it without being remembered.
+    #[test]
+    fn every_advertised_tool_schema_is_object_rooted() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
+
+        let definitions = catalog.definitions();
+
+        assert!(!definitions.is_empty(), "the composed catalog is not empty");
+        assert_every_definition_is_object_rooted(&definitions);
+        // `goal_declare` compiles only against a live pool, so the composed
+        // catalog cannot carry it and its static declaration joins directly.
+        assert_object_rooted(GOAL_DECLARE_NAME, crate::goal_mode::GOAL_DECLARE_SCHEMA);
+    }
+
+    /// The root gate names a conditional applicator, not merely the five
+    /// combinators the observed rejection happened to involve.
+    ///
+    /// `if`/`then`/`else` applies at the root exactly as `oneOf` does: it
+    /// makes the admitted argument shape depend on a branch, which is what a
+    /// function-tool root may not do. A gate written as a blocklist from one
+    /// observed 400 would pass this schema through to the provider and
+    /// recreate the whole-catalog rejection, so the allowlist is what is
+    /// pinned here.
+    #[test]
+    fn the_root_gate_names_a_conditional_applicator_as_unsupported() {
+        let declared = serde_json::json!({
+            "if": {"required": ["base"]},
+            "properties": {},
+            "then": {"required": ["head"]},
+            "type": "object"
+        });
+
+        assert_eq!(
+            unsupported_root_keywords(declared.as_object().expect("the fixture root is an object")),
+            vec!["if", "then"]
+        );
+    }
+
+    /// `git_diff` is the declaration whose root `oneOf` failed every Git
+    /// exchange through the OpenAI adapter. Its rendered shape is pinned so
+    /// the tagged-enum root cannot come back unnoticed.
+    #[test]
+    fn git_diff_advertises_one_object_with_a_discriminating_scope() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
+        let name = ToolName::try_new(String::from(signalbox_tools_git::GIT_DIFF_NAME))
+            .expect("git_diff is a valid tool name");
+
+        let schema: serde_json::Value = serde_json::from_str(
+            catalog
+                .definition(&name)
+                .expect("git_diff is composed")
+                .input_schema()
+                .as_str(),
+        )
+        .expect("git_diff schema is JSON");
+
+        assert_eq!(
+            schema,
+            serde_json::json!({
+                "additionalProperties": false,
+                "properties": {
+                    "base": {
+                        "description": "Older `HEAD`, full `refs/...` name, or full object ID.",
+                        "maxLength": 1030,
+                        "minLength": 1,
+                        "type": "string"
+                    },
+                    "head": {
+                        "description": "Newer `HEAD`, full `refs/...` name, or full object ID.",
+                        "maxLength": 1030,
+                        "minLength": 1,
+                        "type": "string"
+                    },
+                    "scope": {
+                        "description": "`worktree`: Includes both staged and unstaged worktree changes against HEAD. Takes no other property. `revisions`: Compares trees named by exact revision identifiers. Requires `base`, `head`.",
+                        "enum": ["worktree", "revisions"],
+                        "type": "string"
+                    }
+                },
+                "required": ["scope"],
+                "type": "object"
+            })
+        );
+    }
+
+    /// Composition preserves each execution declaration's permission default:
+    /// the sandboxed command takes `Confirm`, because it accepts an arbitrary
+    /// program — a compiled default an explicit posture or a session blanket
+    /// can still lower, so this pins the declaration and not the resolved
+    /// approval; the diagnostics
+    /// reader stays automatic, since its arguments select no program and it
+    /// issues only the fixed Cargo passes it builds itself — which do still run
+    /// the workspace's own build scripts, macros, and test binaries; and the
+    /// unsandboxed command keeps
+    /// `AlwaysConfirm` — human-only regardless of the dangerous session blanket.
+    /// Only an ignored live smoke observed this before, so a silent downgrade in
+    /// the mapped composition could reach main unnoticed.
+    #[test]
+    fn composed_execution_tools_keep_their_declared_permission_defaults() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let (catalog, _executor) = DaemonTools::try_new(
+            || SystemTime::UNIX_EPOCH,
+            OfflineTransport,
+            MappedDaemonCredentialInputs {
+                web_search: OfflineCredentials,
+                code_host: OfflineCredentials,
+                github: OfflineCredentials,
+            },
+            OfflineSearchTransport,
+            OfflineWriter,
+            OfflineCodeHostTransport,
+            OfflineGitHubTransport,
+            GitHubEgressPolicy::github_api_only(),
+            LocalWorkspaceFileSystem,
+            workspace.path(),
+            git_identity(),
+            TokioProcessRunner::try_new(
+                std::env::current_exe().expect("test executable path is available"),
+            )
+            .expect("test executable can stand in for the unused supervisor"),
+            OfflineConversationPort,
+            OfflineConversationPort,
+            WebFetchEgressPolicy::deny_all(),
+        )
+        .expect("static daemon tools compile")
+        .into_parts();
+
+        let permission_default = |name: &str| {
+            let name = ToolName::try_new(String::from(name)).expect("fixture name is valid");
+            catalog
+                .definition(&name)
+                .expect("the execution tool remains composed")
+                .permission_default()
+        };
+
+        assert_eq!(
+            permission_default(SANDBOXED_EXEC_NAME),
+            signalbox_domain::ToolPermissionDefault::Confirm
+        );
+        assert_eq!(
+            permission_default(CARGO_DIAGNOSTICS_NAME),
+            signalbox_domain::ToolPermissionDefault::Auto
+        );
+        assert_eq!(
+            permission_default(UNSANDBOXED_EXEC_NAME),
+            signalbox_domain::ToolPermissionDefault::AlwaysConfirm
         );
     }
 }

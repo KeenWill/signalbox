@@ -19,6 +19,7 @@ members = [
     "crates/persistence",
     "crates/process-protocol",
     "crates/runner-wire",
+    "crates/test-bin",
     "crates/tool-contract",
     "crates/tool-schema-derive",
     "crates/tools-basic",
@@ -28,6 +29,7 @@ members = [
     "crates/tools-github",
     "crates/tools-git",
     "crates/tools-plan",
+    "crates/tools-sessions",
     "crates/tools-web",
     "crates/tools-workspace",
 ]

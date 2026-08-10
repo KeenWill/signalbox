@@ -66,8 +66,14 @@ credential_profile = "anthropic-primary"
 # is involved. `mcp_bridge_executable` names the `signalbox-claude-mcp-bridge`
 # program this workspace builds: the adapter spawns it as Claude Code's only
 # tool server, and the deployment names it explicitly rather than having the
-# daemon guess a path from its own image. Claude Code exposes no service tier,
-# so a Claude model declares reasoning levels and fast mode only. Uncomment the
+# daemon guess a path from its own image. That name takes either form. A bare
+# program name, as below, is resolved once at startup against the daemon's own
+# PATH: the form for a deployment that installs the bridge alongside the daemon,
+# which is what `devenv up` does for the dev instance. Any other value is a
+# path, is used verbatim, and consults no PATH: the form for a bridge the
+# daemon's PATH does not reach. Either way it must end at an absolute path
+# naming an existing regular file. Claude Code exposes no service tier, so a
+# Claude model declares reasoning levels and fast mode only. Uncomment the
 # Claude Code catalog rows below with it.
 
 # [[credential_profiles]]
@@ -81,7 +87,7 @@ credential_profile = "anthropic-primary"
 #
 # [claude_cli]
 # executable = "/absolute/path/to/claude"
-# mcp_bridge_executable = "/absolute/path/to/signalbox-claude-mcp-bridge"
+# mcp_bridge_executable = "signalbox-claude-mcp-bridge"
 # working_directory = "/absolute/path/to/workspace"
 
 # To serve an OpenAI model family, add this profile and mapping and set
@@ -202,6 +208,24 @@ author_email = "signalbox@example.invalid"
 
 # Exact-name overrides are optional. Any composed tool omitted here retains its
 # existing permission default and session-blanket behavior.
+#
+# The execution tools are omitted deliberately and keep their compiled defaults:
+# unsandboxed_exec is AlwaysConfirm, sandboxed_exec is Confirm, and
+# cargo_diagnostics is Auto because its arguments select no program. Note that
+# the fixed Cargo passes still compile and run the workspace's own build
+# scripts, macros, and test binaries, so an automatic diagnostics call executes
+# workspace-supplied code inside the sandbox; set cargo_diagnostics = "human"
+# below for a deployment that will not accept that unattended.
+#
+# A session template that enables dangerous_tool_auto_approval turns the
+# sandboxed_exec confirmation into a session blanket; add
+# sandboxed_exec = "human" below to keep it parked for a person regardless.
+#
+# unsandboxed_exec accepts all three posture values, but only
+# unsandboxed_exec = "delegated" changes where its requests go: to the approval
+# judge, which can still deny them or escalate to a person. Mapping it "auto" or
+# "human" leaves it parked for a person, as does omitting it, and no session
+# blanket ever lowers it.
 [tool_approval_postures]
 web_fetch = "human"
 web_search = "human"

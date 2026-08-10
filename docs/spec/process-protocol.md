@@ -6,6 +6,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The typed usage provenance, derived-cost row shape, and labeled client
 aggregation are verified against PR #389 (`agent/cost-accounting`).
 
+The delegation mutation request and receipt frame vocabulary is verified through
+this PR (`agent/delegation-process-wire-v2`).
+
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
@@ -18,6 +21,10 @@ verified through this PR (`agent/model-settings-persistence`).
 
 The tool-approval decision event surface is verified against this implementing
 change.
+
+The session-delegation terminal and client surface was re-verified through PR
+#459 (`agent/delegation-client-verbs-v2`), and its daemon await/message
+execution through PR #462 (`agent/delegation-runtime-daemon-v2`).
 
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
@@ -32,6 +39,14 @@ between a local client process and `signalboxd`; domain values, PostgreSQL
 records, and wire messages remain distinct representations. The path-scoped
 session-placement wire and terminal-client surface were verified through PR #400
 (`agent/scoped-visibility-wiring`).
+
+The session-metadata last-writer actor inventory, its native and terminal-client
+projections, and the totality of the daemon projection that produces it are
+verified against this PR (`fix/review-read-snapshot-permit`).
+
+The coherent review-orchestration snapshot's single-transaction construction,
+the pool capacity it draws, and the writer independence that follows from both
+are verified against this PR (`agent/review-snapshot-mvcc`).
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -406,14 +421,16 @@ Judgment-effect states require strictly fewer applied effects than plan members,
 while repair and later states require equality. Counts belonging to a later
 barrier must remain zero until that barrier can exist. Any state, status, or
 count combination violating those relations is an impossible server projection
-and is malformed. Snapshot construction consumes two units from the shared
+and is malformed. The whole projection is reconstructed inside one read-only
+repeatable-read transaction, so every reported fact comes from a single database
+snapshot and no two of them can disagree. That read is pure and acquires no lock
+any writer waits on: submitting input, starting or advancing a turn, recording
+an approval, and every review mutation proceed unimpeded while a snapshot is
+under construction. Snapshot construction consumes one unit from the shared
 pool-capacity budget, leaving two connections reserved for non-snapshot work; a
-pool with fewer than four configured connections cannot start the process
-listener. The database-global snapshot admission loser rolls back its
-transaction before an exponential retry wait that begins at 10 ms and is capped
-at 100 ms. Admission is bounded to five seconds, after which the read reports
-unavailable; daemon shutdown cancels the admission wait and releases its
-capacity.
+pool with fewer than three configured connections cannot start the process
+listener. Daemon shutdown cancels the capacity wait and releases its
+reservation.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the
@@ -1070,10 +1087,14 @@ and the value-bearing forms retain the unsupported value.
 unwritten snapshot has the empty non-archived metadata object and a null
 `last_writer`; an applied replacement always has a non-null last writer. A
 last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
-microseconds since the Unix epoch) and the closed actor object `user`. No
-non-user metadata writer is constructible through this boundary; additional
-actor variants require the later slice that introduces their constructing
-authority. Actor is provenance, not wire authentication or authorization.
+microseconds since the Unix epoch) and one closed actor object: `user`,
+`model { turn_id }`, `recovery`, or `tool { tool_request_id }`. That inventory
+is exactly the durable actor inventory, because the projection is total over
+what storage admits: `replace_session_metadata` on this boundary always writes
+the user actor, but the tool-facing replacement constructor writes a tool actor
+for the session-status tool, and a writer with no wire form would fail an
+otherwise valid read as an encode invariant rather than degrade a field. Actor
+is provenance, not wire authentication or authorization.
 
 `session_defaults_replaced` is the successful defaults write receipt. It echoes
 the complete installed defaults and names the exact successor epoch. An equal
@@ -1171,9 +1192,11 @@ request admits `session_not_found`, `tool_request_not_found`, and
 the named request belongs to another turn, and
 `delegation_tool_request_not_executable { tool_request_id, state }` when a first
 execution names a request whose state is `awaiting_approval`, `denied`,
-`closed`, or `attempt_ended`. Durable equal replay is checked first against the
-exact stored operation and returns its original receipt without requiring a
-still-live execution attempt. `spawn_session` additionally admits
+`approved`, `prepared`, `closed`, or `attempt_ended`. `approved` means the
+proposal-ordered request has approval but no physical attempt yet. Durable equal
+replay is checked first against the exact stored operation and returns its
+original receipt without requiring a still-live execution attempt.
+`spawn_session` additionally admits
 `delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
 `delegated_child_identity_collision { child_session_id }` when the generated
 child identity is already occupied. It has no fixed active-child-count
@@ -1181,13 +1204,17 @@ rejection: admission checks the complete locked parent relationship inventory
 only for request and child uniqueness. `await_session` additionally admits
 `delegation_relation_not_found { session_id, peer_session_id }` and
 `delegation_await_conflict { tool_request_id }`; `send_session_message` admits
-that same relation detail and `delegation_message_conflict { tool_request_id }`.
-An exhausted relation event ordinal admits
-`delegation_event_ordinal_exhausted { spawning_request_id, last }`. These
-delegation details are closed; request-purpose, carried-argument, and bounded
-content failures occur while constructing the application input and therefore
-map to `invalid_request`, not `rejected`. A
-`create_session_from_imported_frontier` rejection admits
+that same relation detail, `delegation_message_conflict { tool_request_id }`,
+and `delegation_message_identity_collision { message_id }` when a concurrent
+operation already claimed the daemon-minted message identity. An exhausted
+relation event ordinal admits
+`delegation_event_ordinal_exhausted { spawning_request_id, last }`. Exhausting
+the independent recipient-wide delivery counter admits
+`delegation_delivery_sequence_exhausted { recipient_session_id, last }`. Either
+`last` is the maximum unsigned 64-bit value. These delegation details are
+closed; request-purpose, carried-argument, and bounded content failures occur
+while constructing the application input and therefore map to `invalid_request`,
+not `rejected`. A `create_session_from_imported_frontier` rejection admits
 `imported_conversation_not_found { imported_conversation_id }` and
 `imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
 The first names an imported conversation, never a session, as the absent target;
@@ -1394,9 +1421,20 @@ runtime evidence because a valid snapshot has already begun. A follow request
 closes the spool immediately after transmitting the snapshot, before waiting for
 live events.
 
-Session-list, transcript-read, and follow-snapshot construction share bounded
-admission that reserves application-pool capacity for non-snapshot work. The
-exact reservation is owned by this contract.
+Every read that holds a pooled connection across more than one statement shares
+one bounded admission that reserves application-pool capacity for non-snapshot
+work. That is session-list, session-metadata-list, session-metadata-read,
+transcript-read, follow-snapshot, goal-read, imported-conversation-read, and
+conversation-list construction; the review target, run, finding, and
+finding-list reads, each of which spans a repeatable-read transaction; and the
+coherent review-orchestration snapshot, which spans one such transaction too and
+draws the same single unit. The session-metadata read is admitted on the same
+ground as the rest and not for its result size: it opens a transaction, fixes a
+repeatable-read snapshot, selects, and commits. The session-defaults read is the
+single-statement case; it returns its connection immediately and takes no
+admission. The exact reservation is owned by this contract, and every request
+states its admission class before dispatch, so no read verb reaches the pool by
+omission.
 
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
@@ -1597,17 +1635,15 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-The session-follow event shapes and internal-wake exclusion in this section are
-implemented. The mutation request and receipt shapes are committed unimplemented
-functionality: no current `ClientRequest`, daemon handler, or client verb
-provides them. Their fixed compatibility constraint is that the future process
-surface admits only exact already-issued model work for terminal operation and
-recovery; it must not let a client fabricate model provenance. The model-facing
-tool names and arguments are owned by
-[tool-loop](tool-loop.md#session-delegation-tool-family). Future
-`spawn_session`, `await_session`, and `send_session_message` requests therefore
-each carry the invoking session, turn, and `tool_request_id`, which must
-reconstitute one matching logical request before any mutation occurs.
+The session-follow event shapes, internal-wake exclusion, closed mutation
+request and receipt frame vocabulary, terminal-client verbs, and daemon
+`await_session`/`send_session_message` execution in this section are
+implemented. The composed process surface admits only exact already-issued model
+work for terminal operation and recovery; it never lets a client fabricate model
+provenance. The model-facing tool names and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). Each request carries
+the invoking session, turn, and `tool_request_id`, which must reconstitute one
+matching logical request before any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable
@@ -1617,21 +1653,31 @@ boundary; a process client cannot promote a merely issued request. An exact
 durable replay is the sole exception: it returns the immutable stored receipt
 before consulting current attempt state and cannot create another effect.
 
-`spawn_session` additionally carries bounded `task` and the closed relationship
-object, and returns
-`session_spawned { tool_request_id, child_session_id, relationship }`.
 `await_session` carries the related child and wait mode, and returns either
 `session_await_registered { tool_request_id, child_session_id, mode }` for
-background or the already-delivered child outcome for foreground.
+background or the delivered child outcome for foreground. A foreground request
+subscribes before registering its durable wait, queries durable delivery before
+blocking, and queries again after a matching wake or subscriber lag; completion
+therefore cannot be lost between registration and subscription. Disconnect or
+daemon shutdown abandons only the socket wait, never the durable child wait.
 `send_session_message` carries the related peer and bounded content, and returns
 `session_message_sent { tool_request_id, message_id, direction, ordinal, delivery_sequence }`.
 For a sent-message receipt or update, `direction` is the closed string
 `parent_to_child` or `child_to_parent`. For a result that predates the wait,
 background records delivery and returns `session_await_registered`, while
 foreground returns the child outcome. Equal replay returns that same
-mode-specific receipt or outcome. Task and message strings must fit both the
+mode-specific receipt or outcome. Message strings must fit both the
 delegation-content ceiling and their complete normalized JSON argument envelope;
 the 1 MiB ceiling is exact only for standalone returned-result content.
+
+**Committed unimplemented functionality.** `spawn_session` carries bounded
+`task` and the closed relationship object and is reserved to return
+`session_spawned { tool_request_id, child_session_id, relationship }`, but no
+present process execution surface creates the child. Until the placement-owned
+creation transaction implements the decided parent-directory default, the daemon
+rejects this request without mutation. That future transaction must preserve the
+exact-request and authority rules above. Its task string must fit both the
+delegation-content ceiling and its complete normalized JSON argument envelope.
 
 Session-follow updates add these closed event shapes:
 
@@ -2008,23 +2054,24 @@ below. The client accepts a global `--socket <path>` override or reads
   and
 - `chat <session-uuid>`.
 
-**Committed unimplemented functionality.** No present client provides the
-delegation commands below. Their shapes constrain the client surface implemented
-later in this stack:
+The terminal client provides these delegation commands for exact already-issued
+tool requests:
 
 - `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep_running|stop|cancel> --on-parent-cancelled <keep_running|stop|cancel>)`;
 - `session await <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> <child-session-uuid> --mode <foreground|background>`;
   and
 - `session message <sender-session-uuid> <sender-turn-uuid> <tool-request-uuid> <peer-session-uuid> (--content <text> | --content-file <path>)`.
 
-When implemented, delegation mutations print the exact spawning or awaiting
-request, child or peer session, closed mode/policy, and recorded message/result
-identity. Follow and chat render child results as delivered content labeled with
-the child session; they never inline the child transcript. Lifecycle lines
-always show outcome, typed reason, and provenance, including `continue_running`.
-Background result wakes are labeled separately from foreground tool-result
-continuation so a user can see whether an old turn resumed or a new parent turn
-became eligible.
+Delegation mutations print the exact spawning or awaiting request, child or peer
+session, closed mode or policy, and recorded message or result identity. Follow
+and chat render child results as delivered content labeled with the child
+session; they never inline the child transcript. Lifecycle lines always show
+outcome, typed reason, and provenance, including `continue_running`. Background
+result wakes are labeled separately from foreground tool-result continuation so
+a user can see whether an old turn resumed or a new parent turn became eligible.
+Before presenting success, the terminal client requires every child or peer to
+be distinct from the invoking session in spawn, both await-result modes, and
+message receipts.
 
 `chat` is the plain line-oriented interactive surface for one live session. It
 opens one long-lived `follow_session` connection before accepting input and
@@ -2097,20 +2144,21 @@ usage errors before socket I/O, so every metadata-filter bound this page states
 reaches the user as a named diagnostic rather than a generic local encode
 failure. Each result is one line carrying the summary's session identity,
 archive state, defaults version, model selection, dangerous-tool posture,
-last-writer actor and timestamp, sorted comma-joined tags, and title. An
-unwritten metadata snapshot prints `last_writer=none`,
-`updated_at_unix_micros=none`, and empty tag and title values, which a present
-tag or title never is. A tag may itself contain the space that ends its field,
-the comma that separates it from a sibling, or the backslash that introduces an
-escape, so all three are escaped inside a tag exactly as a control code point
-is; every backslash in the tag field therefore opens an escape the client wrote,
-and the field decodes back to the exact tag set. The title is the line's last
-field, keeps its spaces, and is rendered to be read rather than decoded. When
-the page end names a continuation cursor, the client prints
-`next_after_session_id=<uuid>` to standard error after the results; a page is
-therefore never silently truncated, and that value is the next invocation's
-`--after`. The client also validates that a page never exceeds its requested
-limit.
+last-writer actor and timestamp, sorted comma-joined tags, and title. The actor
+prints as its wire kind — `user`, `model`, `recovery`, or `tool` — without the
+reference the kind carries, which the line has no field for. An unwritten
+metadata snapshot prints `last_writer=none`, `updated_at_unix_micros=none`, and
+empty tag and title values, which a present tag or title never is. A tag may
+itself contain the space that ends its field, the comma that separates it from a
+sibling, or the backslash that introduces an escape, so all three are escaped
+inside a tag exactly as a control code point is; every backslash in the tag
+field therefore opens an escape the client wrote, and the field decodes back to
+the exact tag set. The title is the line's last field, keeps its spaces, and is
+rendered to be read rather than decoded. When the page end names a continuation
+cursor, the client prints `next_after_session_id=<uuid>` to standard error after
+the results; a page is therefore never silently truncated, and that value is the
+next invocation's `--after`. The client also validates that a page never exceeds
+its requested limit.
 
 `conversations` is the separate verb for `list_conversations` and follows the
 same one-request, one-page discipline as `search`. `--title` is the exact

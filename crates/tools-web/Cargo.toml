@@ -41,6 +41,9 @@ unicode-normalization = "0.1.25"
 url = { version = "2.5.8", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+# The shared executor-driving harness lives in the application crate so
+# sibling provider crates do not each grow a copy; it is test-only.
+signalbox-application = { path = "../application", features = ["test-support"] }
 expect-test = "1.5.1"
 proptest = "1.11.0"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt"] }

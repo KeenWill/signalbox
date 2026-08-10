@@ -48,7 +48,7 @@ use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
 };
-use signalbox_tools_exec::UNSANDBOXED_EXEC_NAME;
+use signalbox_tools_exec::{SANDBOXED_EXEC_NAME, UNSANDBOXED_EXEC_NAME};
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
 use signalbox_tools_web::{BRAVE_SEARCH_CREDENTIAL_REFERENCE, WEB_FETCH_NAME, WEB_SEARCH_NAME};
 use signalboxd::{
@@ -105,6 +105,7 @@ const WEB_URL: &str = "https://example.com/";
 const UNUSED_WEB_SEARCH_CREDENTIAL_FILE: &str = "unused-brave-key";
 const DENIED_WEB_SEARCH_QUERY: &str = "synthetic denied search";
 const DENIED_UNSANDBOXED_PROGRAM: &str = "/bin/false";
+const DENIED_SANDBOXED_PROGRAM: &str = "false";
 const DENIED_WRITE_PATH: &str = "denied.txt";
 const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
@@ -627,11 +628,49 @@ fn completion_script(text: &str) -> Script {
     }))
 }
 
+/// Names every composed declaration whose permission default parks for a user.
+///
+/// Both confirming defaults belong here. `AlwaysConfirm` is the stricter of the
+/// two — human-only even under the dangerous session blanket — so an exact
+/// `Confirm` comparison omits precisely the declarations that most need the
+/// gate, and the denied-gate fixture would then be expected to skip them.
+/// Whether a permission default puts a tool behind a confirm gate.
+///
+/// Exhaustive rather than `matches!`: a new `ToolPermissionDefault` must fail
+/// to compile here instead of being silently classified as ungated, which is
+/// the coverage hole this smoke exists to close.
+///
+/// Split out from `confirm_tool_names` so ordinary test runs exercise it. That
+/// function is reachable only from the ignored, token-gated smoke below, so
+/// mapping `AlwaysConfirm` to `false` would otherwise leave the whole suite
+/// green while the smoke's expected gated set quietly lost a tool.
+fn is_confirm_gated(permission_default: ToolPermissionDefault) -> bool {
+    match permission_default {
+        ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => true,
+        ToolPermissionDefault::Auto => false,
+    }
+}
+
+#[test]
+fn a_confirm_default_is_confirm_gated() {
+    assert!(is_confirm_gated(ToolPermissionDefault::Confirm));
+}
+
+#[test]
+fn an_always_confirm_default_is_confirm_gated() {
+    assert!(is_confirm_gated(ToolPermissionDefault::AlwaysConfirm));
+}
+
+#[test]
+fn an_auto_default_is_not_confirm_gated() {
+    assert!(!is_confirm_gated(ToolPermissionDefault::Auto));
+}
+
 fn confirm_tool_names(catalog: &impl ToolCatalog) -> Vec<String> {
     catalog
         .definitions()
         .iter()
-        .filter(|definition| definition.permission_default() == ToolPermissionDefault::Confirm)
+        .filter(|definition| is_confirm_gated(definition.permission_default()))
         .map(|definition| definition.name().as_str().to_owned())
         .collect()
 }
@@ -693,6 +732,10 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
                 "max_entries": 10,
                 "max_bytes": 4096,
             }),
+        ),
+        call(
+            SANDBOXED_EXEC_NAME,
+            json!({"program": DENIED_SANDBOXED_PROGRAM}),
         ),
         call(
             SESSION_STATUS_UPDATE_NAME,

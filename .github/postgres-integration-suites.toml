@@ -1,0 +1,80 @@
+# The PostgreSQL integration suites, and how CI runs them.
+#
+# This file is the single authority for what the `postgres-integration` check
+# executes. Two consumers read it and neither restates its contents:
+#
+#   * `.github/workflows/rust.yml` builds one nextest archive per suite from
+#     `package`/`features`, and derives its run matrix from `shards`/`skip`,
+#     through `scripts/postgres_integration_suites.py`.
+#   * `scripts/check_docs_consistency.py` reads the same rows to decide which
+#     `#[ignore]`d tests authoritative CI actually executes, which is what
+#     `docs/invariants.md` indexes.
+#
+# The checker used to recover this by regex-parsing the workflow's `cargo test`
+# shell commands. That coupling broke the moment the workflow moved to nextest:
+# the parser silently recognized zero ignored-test runs, which would have
+# dropped every PostgreSQL invariant from the index while claiming CI still
+# enforced them. A manifest both sides read cannot drift that way, and
+# `check_docs_consistency.py` gates the agreement mechanically.
+#
+# Changing a suite's shard count is a one-line edit here: the run matrix is
+# generated, so nothing in the workflow needs to move.
+#
+# `.github/workflows/coverage.yml` measures the same package set, with the two
+# persistence target partitions folded into one command, and is deliberately
+# NOT derived from this file. That job is report-only, every suite in it is
+# `continue-on-error`, and it skips one further test that only its own
+# instrumented supervisor perturbs — so it is not a statement about what CI
+# enforces, and `docs/invariants.md` must not be derived from it.
+#
+# Fields:
+#   name     — suite identifier; names the archive artifact and the check.
+#   package  — the Cargo package archived and run (`-p`).
+#   features — features enabled for the archive build (`--features`); the
+#              suite's ignored tests are compiled out without them.
+#   shards   — how many partitions the suite's tests are split across
+#              (`--partition count:i/N`). 1 runs the suite whole.
+#   skip     — test-name substrings excluded from the run. Rendered into a
+#              nextest filterset as `not test(<substring>)`, which matches a
+#              substring of the test path exactly as libtest's `--skip` did.
+#   include_binaries — optional exact Cargo test-target names selected by the
+#              run. Multiple names are joined as one positive binary filter.
+#   exclude_binaries — optional exact Cargo test-target names excluded from the
+#              run. This partitions two suites that archive the same package.
+
+[[suite]]
+name = "persistence"
+package = "signalbox-persistence"
+features = ["postgres-integration"]
+# The long pole by an order of magnitude: 659 of the 909 ignored tests these
+# suites hold, and 22m22s as one job against 6-7m per shard at three ways.
+# Counts are a snapshot, taken with `cargo test --tests -- --ignored --list`;
+# they justify the shard count and nothing depends on them staying exact.
+shards = 3
+skip = []
+exclude_binaries = ["runner_protocol_postgres"]
+
+[[suite]]
+name = "runner"
+package = "signalbox-persistence"
+features = ["postgres-integration"]
+# The 84 runner-protocol tests have their own single-purpose CI partition.
+shards = 1
+skip = []
+include_binaries = ["runner_protocol_postgres"]
+
+[[suite]]
+name = "signalboxd"
+package = "signalboxd"
+features = []
+shards = 1
+skip = []
+
+[[suite]]
+name = "terminal-client"
+package = "signalbox-client"
+features = []
+shards = 1
+# A live-credential smoke, owner- and CI-excluded, that the previous `cargo
+# test` invocation excluded with `--skip`.
+skip = ["terminal_client_completes_the_real_anthropic_path"]

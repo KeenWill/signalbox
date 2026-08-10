@@ -5,10 +5,16 @@ implementing stack through this PR (`agent/model-settings-execution`).
 
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
-(`agent/approval-judge-daemon`).
+(`agent/approval-judge-daemon`). The posture values `unsandboxed_exec` accepts,
+and which of them changes its resolved approval, are re-verified against this PR
+(`agent/approval-posture-alwaysconfirm`).
 
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
+
+The execution family's permission defaults and the confinement its bubblewrap
+profile does and does not provide are verified against this PR
+(`agent/exec-sandbox-net-fence`).
 
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
@@ -18,6 +24,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 
 The credential billing-kind registry and versioned per-model rate catalog are
 verified against PR #389 (`agent/cost-accounting`).
+
+The `PATH` spelling of `mcp_bridge_executable` and its resolution precedence are
+verified against this PR (`agent/mcp-bridge-wiring`).
 
 The rule binding one provider-model spelling to one adapter is verified against
 this PR (`agent/adapter-model-catalogs`).
@@ -561,7 +570,7 @@ unknown posture values, and startup rejects a structurally valid name that is
 absent from the selected composition. That name check runs in the pre-database
 configuration pass. An absent table or omitted tool name preserves that
 declaration's legacy permission-default and session-blanket behavior exactly.
-Subject to the `AlwaysConfirm` human-only rule owned by
+Subject to the `AlwaysConfirm` rule owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources),
 an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
@@ -584,12 +593,79 @@ publication, and every workspace mutation default to `Confirm`. Reading the
 invoking session's transcript defaults to `Auto`, while listing conversations
 and reading another native or imported conversation default to `Confirm`.
 `web_search` and `web_fetch` also default to `Confirm`; the checked-in example
-maps both exact names to `human`. The runtime meaning and precedence of those
-declaration defaults, the explicit posture, the session blanket, and the durable
-approval wait are owned by
+maps both exact names to `human`. The three execution tools complete the
+enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`. Every posture value
+remains configurable for it, but which of them changes its resolved approval is
+owned by
+[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
+`sandboxed_exec` defaults to `Confirm`, because it accepts an arbitrary program
+and argument vector. That is a compiled default and not a floor: an explicit
+`auto` posture resolves it to policy-automatic, and with no posture mapped a
+session blanket approves it without a per-call decision. Only the `human`
+posture parks it for a person whatever the blanket says. `cargo_diagnostics`
+defaults to `Auto`: its arguments carry no program, so a turn selects neither
+the binary nor its argument vector, and the tool issues only the fixed Cargo
+check, clippy, and test passes it builds itself. Those passes still compile and
+run the workspace's own build scripts, procedural macros, and test binaries, so
+an automatic diagnostics call executes whatever code the workspace already
+contains, under the profile described below. The runtime meaning and precedence
+of those declaration defaults, the explicit posture, the session blanket, and
+the durable approval wait are owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
+
+`sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
+profile. Its name claims more than it delivers, so this page recites the launch
+and then lists separately what the profile does not provide. The recitation
+draws no consequence, because every consequence stated here so far has proved
+narrower than it sounded.
+
+The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
+`--unshare-user`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`, and
+`--unshare-net`. It mounts a fresh `/proc`, a fresh `/dev`, and a `tmpfs` at
+`/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
+`/nix/store`, `/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and
+`/etc/ssl`, each where it is present. It does not bind `/etc/resolv.conf`. It
+binds the configured workspace root read-write at `/workspace`, read-only binds
+the pinned execution supervisor — a host path that need not lie under that root
+— at `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
+requested directory beneath it. The child environment is cleared and then set to
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
+through the supervisor.
+
+The profile does not provide the following, and no other daemon-local control
+supplies them:
+
+- Two transports outside the network namespace's reach stay available. An
+  `AF_UNIX` *pathname* socket inside the workspace root is connectable, because
+  it is reached through the filesystem, and one fronting a proxy carries egress
+  with it; `AF_VSOCK` to a host CID remains available wherever the platform
+  provides it. Abstract `AF_UNIX` sockets are not in this class — that namespace
+  is scoped by the network namespace, so unsharing it does isolate them.
+- A credential inside the workspace root is readable. Credential settings are
+  admitted on presence alone and are never checked against that root, so one
+  configured inside it is bound along with the workspace, as is any secret the
+  repository itself carries.
+- The fresh `/proc` and `/dev` are not a private surface. They carry kernel- and
+  host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot identifier
+  among it — that no bind governs, so the readable surface is wider than the
+  bound paths alone.
+- `HOME` is the workspace root, so home-relative configuration discovery —
+  `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
+  inside the writable workspace rather than at a host location.
+- Everything under the workspace root is writable, including the repository's
+  `.git`.
+- `cargo_diagnostics` compiles and runs the workspace's own build scripts,
+  procedural macros, and test binaries under this profile, so an automatic call
+  executes whatever code the workspace already contains.
+- No resource limit, uid or gid drop, seccomp policy, or landlock policy
+  applies, so the profile does not contain a deliberately hostile program.
+
+This is not the runner's `WorkspaceRestricted` profile described by
+[sandbox profiles and approval](runner-protocol.md#sandbox-profiles-and-approval),
+which additionally drops capabilities and brokers egress through a hostname
+allowlist, and which no present runner surface provides.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
@@ -654,17 +730,32 @@ Claude Code mappings follow that same CLI shape. They may select any declared
 profile under the same one-ambient-login rule — every `claude_cli` family in one
 daemon configuration must select the same profile — and the checked-in example
 names `claude-subscription-primary`. A Claude mapping requires `[claude_cli]`
-with three deployment-named absolute paths: `executable` and
-`mcp_bridge_executable` must each name an existing regular file, and
+with three deployment-named paths: `executable` and `mcp_bridge_executable` must
+each resolve to an absolute path naming an existing regular file, and
 `working_directory` must name an existing directory. The bridge is the separate
 `signalbox-claude-mcp-bridge` program the adapter spawns as Claude Code's only
 tool server; the deployment names it exactly the way it names the CLI, so the
-daemon derives no executable path from its own image. Construction validates
-that shape and platform support without invoking Claude Code or inspecting login
-state, and Claude Code owns its external login exactly as its adapter contract
-specifies. Because Claude Code exposes no service tier, any `service_tiers`
-entry on a Claude model is a typed startup failure, while its reasoning set and
-either fast-mode form are admitted.
+daemon derives no executable path from its own image. Because that program is
+one this workspace builds and installs rather than one the operator already
+placed, `mcp_bridge_executable` alone admits a second spelling: a bare program
+name — a value equal to its own final path component — is resolved once at
+startup against the daemon's own `PATH`, entry by entry in configured order, to
+the first entry holding a regular file of that name the daemon's own effective
+credentials may execute, which a file only another user may run does not
+satisfy. Only absolute search entries participate; a relative entry, including
+the empty entry POSIX reads as the working directory, is skipped, because the
+resolved path is written into the MCP server configuration Claude Code spawns
+from a working directory of its own. A name `PATH` does not resolve is a typed
+startup failure distinct from a malformed path. Any other value is a path,
+consults no `PATH`, and faces the absolute-existing-file rule unchanged, so a
+configured path never silently resolves to a different program. Both spellings
+yield the same absolute path downstream: what the adapter receives, and writes
+into that MCP server configuration, is always the resolved absolute path.
+Construction validates that shape and platform support without invoking Claude
+Code or inspecting login state, and Claude Code owns its external login exactly
+as its adapter contract specifies. Because Claude Code exposes no service tier,
+any `service_tiers` entry on a Claude model is a typed startup failure, while
+its reasoning set and either fast-mode form are admitted.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
@@ -1008,6 +1099,28 @@ advancing the head by exactly one; it must never rewrite history or
 automatically apply a configuration edit. The current append-only record shape
 is compatible with that operation.
 
+**Committed unimplemented functionality — several credential profiles for one
+family.** Present configuration admits exactly one profile per model family: the
+adapter-mapping rules above fix the Anthropic and OpenAI profile names and force
+one shared profile for each of Codex CLI and Claude CLI, while file-based supply
+binds each direct-HTTP reference to one deployment path. No present surface lets
+one family draw on several interchangeable profiles. A later surface that does
+remains constrained by this page's credential-history rules; the qualifying and
+selection policy constraints are recorded under
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+Each model call keeps its own durable `credential_reference` pinned at the
+`Prepared` insert, so the profile that authenticated a call remains that call's
+record whatever chose it. Billing kind stays a property of the profile, so a
+historical read still resolves its dollar meaning from the reference that call
+pinned. A selection scope, if a session records one, is appended alongside the
+family-to-reference snapshot rather than replacing it, leaving the present
+complete snapshot valid as the single-member case. Members of one
+interchangeable group share an adapter, because the four composed runtimes
+differ in authentication shape as described above. The
+[credential operations policy](#credential-operations-policy) applies per
+profile: several profiles are several sources of truth, never one secret under
+several names.
+
 ## Runner credential lifecycle
 
 Runner credential profiles are non-secret checked names granted by the daemon
@@ -1212,3 +1325,10 @@ are outside this cluster-delivery policy:
   phase.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns the unresolved in-memory credential-hygiene question.
+- One profile per model family is the present arity, so a deployment holding
+  several accounts for one provider cannot configure them. What a later plural
+  surface must stay compatible with is stated under
+  [credential lifecycle](#credential-lifecycle); which failure classes would let
+  one profile succeed another, and whether any adapter can report remaining
+  capacity, are routed through
+  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).

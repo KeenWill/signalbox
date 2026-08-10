@@ -48,6 +48,13 @@ let
   # on whatever the developer keeps in their real home directory.
   daemonHome = "${stateRoot}/home";
 
+  # Everything the dev instance publishes on the daemon's own PATH, and
+  # nothing else. It holds one symlink, to the built MCP bridge, so a
+  # developer who uncomments the example's `[claude_cli]` block can name that
+  # program instead of deriving a path into `target/` by hand. Pointing PATH
+  # at the build directory itself would publish every workspace binary.
+  daemonBinDirectory = "${stateRoot}/bin";
+
   daemonConfigFile = "${stateRoot}/signalboxd.toml";
   daemonRuntimeConfigFile = "${daemonSocketDirectory}/signalboxd.toml";
   daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
@@ -454,10 +461,10 @@ in
           python3 -c "import json, sys; print(json.load(sys.stdin)['target_directory'])"
       )"
 
-      # Resolve both separately packaged executables through Cargo's artifact
+      # Resolve each separately packaged executable through Cargo's artifact
       # stream. The shared resolver also refuses a configured foreign target
-      # rather than letting either later exec fail or select a stale host
-      # artifact from an assumed target/debug layout.
+      # rather than letting a later exec fail or select a stale host artifact
+      # from an assumed target/debug layout.
       daemon_executable="$(
         "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
           "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
@@ -468,6 +475,18 @@ in
           "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
           signalbox-tools-exec signalbox-exec-supervisor
       )"
+      bridge_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalbox-model-runtime-claude-cli signalbox-claude-mcp-bridge
+      )"
+
+      # Republished on every start so the link follows a rebuild that lands
+      # the artifact somewhere else, and so a stale link from an earlier
+      # layout never survives.
+      mkdir -p ${shellArg daemonBinDirectory}
+      ln -sfn "$bridge_executable" \
+        ${shellArg "${daemonBinDirectory}/signalbox-claude-mcp-bridge"}
 
       # Recreated here rather than in the provisioning task because the
       # runtime directory does not survive between runs. Mode 0700 is exact:
@@ -502,6 +521,7 @@ in
 
       exec env ${scrub} \
         HOME=${shellArg daemonHome} \
+        PATH=${shellArg daemonBinDirectory}:"$PATH" \
         DATABASE_URL=${shellArg databaseUrl} \
         SIGNALBOX_CONFIG_FILE=${shellArg daemonRuntimeConfigFile} \
         SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \

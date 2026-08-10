@@ -13,10 +13,10 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ClassifyOperatorFailure, DecideToolRequestTransaction, ModelCallCredentialReference,
-    OperatorFailureClass, PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
-    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
-    ToolExecutionTransaction,
+    ClassifyOperatorFailure, CorrelatedDurableChildWait, DecideToolRequestTransaction,
+    ModelCallCredentialReference, OperatorFailureClass, PrepareToolContinuationOutcome,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 use signalbox_domain::{
     ActiveTurnPhase, CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
@@ -29,12 +29,13 @@ use signalbox_domain::{
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
     ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
-    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
-    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
-    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
+    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
+    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
+    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
+    ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -50,7 +51,10 @@ use crate::{
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
-    model_execution::{insert_prepared_call, insert_snapshot},
+    model_execution::{
+        insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
+        lock_delegated_turn_terminal_frontier,
+    },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
 
@@ -741,6 +745,91 @@ impl PostgresToolLoopRepository {
         Ok(status)
     }
 
+    /// Authenticates an executor-reported foreground wait against the complete
+    /// durable batch and exact ended dispatch fence.
+    pub async fn reread_durable_child_wait(
+        &self,
+        evidence: CorrelatedDurableChildWait,
+    ) -> Result<bool, ToolLoopRepositoryError> {
+        let correlation = evidence.correlation();
+        let wait = evidence.wait();
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, correlation.session()).await?;
+        let Some(batch) = load_active_batch_from_connection(
+            &mut transaction,
+            correlation.session(),
+            correlation.turn(),
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let phase_matches = batch.phase()
+            == signalbox_domain::ToolBatchPhase::AwaitingChild {
+                request: wait.awaiting_request(),
+                spawning_request: wait.spawning_request(),
+                child: wait.child(),
+            };
+        let attempt_matches = match batch.attempt(correlation.request()) {
+            Some(ReconstitutedToolAttempt::Ended(ended)) => {
+                ended.attempt() == correlation.attempt()
+                    && ended.session() == correlation.session()
+                    && ended.turn() == correlation.turn()
+                    && ended.issuing_attempt() == correlation.issuing_attempt()
+                    && ended.request() == correlation.request()
+                    && ended.generation() == correlation.generation()
+                    && ended.effect_class() == ToolEffectClass::EffectFree
+                    && ended.end()
+                        == &(ToolAttemptEnd::AwaitingChild {
+                            spawning_request: wait.spawning_request(),
+                            child: wait.child(),
+                        })
+            }
+            None | Some(ReconstitutedToolAttempt::Current(_)) => false,
+        };
+        transaction.rollback().await?;
+        Ok(phase_matches && attempt_matches)
+    }
+
+    /// Authenticates an executor-reported terminal transition against the
+    /// complete durable batch and exact ended dispatch fence.
+    pub async fn reread_durable_completion(
+        &self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<bool, ToolLoopRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, correlation.session()).await?;
+        let Some(batch) = load_active_batch_from_connection(
+            &mut transaction,
+            correlation.session(),
+            correlation.turn(),
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let attempt_matches = match batch.attempt(correlation.request()) {
+            Some(ReconstitutedToolAttempt::Ended(ended)) => {
+                let terminal_matches = match ended.end() {
+                    ToolAttemptEnd::Completed { .. } | ToolAttemptEnd::KnownFailed { .. } => true,
+                    ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => false,
+                };
+                ended.attempt() == correlation.attempt()
+                    && ended.session() == correlation.session()
+                    && ended.turn() == correlation.turn()
+                    && ended.issuing_attempt() == correlation.issuing_attempt()
+                    && ended.request() == correlation.request()
+                    && ended.generation() == correlation.generation()
+                    && terminal_matches
+            }
+            Some(ReconstitutedToolAttempt::Current(_)) | None => false,
+        };
+        transaction.rollback().await?;
+        Ok(attempt_matches)
+    }
+
     /// Atomically records a lookup/schema error before any executor effect.
     pub async fn commit_preflight_error(
         &self,
@@ -784,7 +873,9 @@ impl PostgresToolLoopRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_tool_session(&mut transaction, session).await?;
+            lock_delegated_turn_terminal_frontier(&mut transaction, session, turn)
+                .await
+                .map_err(map_model_call_error)?;
             load_active_batch_from_connection(&mut transaction, session, turn)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
@@ -961,6 +1052,9 @@ impl PostgresToolLoopRepository {
         )?;
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session)
+                .await
+                .map_err(map_model_call_error)?;
             lock_tool_session(&mut transaction, session).await?;
             let Some(batch) =
                 load_active_batch_from_connection(&mut transaction, session, turn).await?
@@ -1164,6 +1258,20 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         observation: &CorrelatedToolAttemptObservation,
     ) -> Result<RetainedToolAttemptObservationStatus, Self::Error> {
         PostgresToolLoopRepository::reread_observation(self, observation).await
+    }
+
+    async fn reread_durable_completion(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<bool, Self::Error> {
+        PostgresToolLoopRepository::reread_durable_completion(self, correlation).await
+    }
+
+    async fn reread_durable_child_wait(
+        &mut self,
+        wait: CorrelatedDurableChildWait,
+    ) -> Result<bool, Self::Error> {
+        PostgresToolLoopRepository::reread_durable_child_wait(self, wait).await
     }
 
     async fn classify_crash_loss<NextTurn>(
@@ -3192,7 +3300,7 @@ async fn inspect_registry(
         })
 }
 
-async fn lock_tool_session(
+pub(crate) async fn lock_tool_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), ToolLoopRepositoryError> {

@@ -244,6 +244,14 @@ persistence integration suite must include its feature:
 without `--features postgres-integration` it runs zero tests and exits
 successfully.
 
+CI runs these ignored suites from
+[`.github/postgres-integration-suites.toml`](.github/postgres-integration-suites.toml),
+which names each suite's package, features, shard count, and exclusions. Both
+`.github/workflows/rust.yml` and `scripts/check_docs_consistency.py` read that
+manifest instead of restating it, and the docs-consistency check fails when the
+manifest, the workflow, and the command documented above disagree. Change a
+suite there, not in the workflow.
+
 Size validation to the change. A documentation-only change runs the
 documentation bar below; a change to code, tests, dependency manifests,
 generated contracts, or any other semantic surface runs the complete bar. CI is
@@ -258,6 +266,9 @@ python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py
 python3 scripts/test_check_migration_versions.py
+python3 scripts/check_panic_gate.py
+python3 scripts/test_check_panic_gate.py
+python3 scripts/test_postgres_integration_suites.py
 mdformat --check *.md docs/
 git diff --check
 ```

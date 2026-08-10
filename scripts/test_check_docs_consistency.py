@@ -26,6 +26,66 @@ from generate_invariants import (
     orphan_invariant_references as find_orphan_invariant_references,
     render as render_generated_invariant_index,
 )
+from postgres_integration_suites import ManifestError
+
+
+def write_suite_manifest(root: Path, *suites: str) -> None:
+    """Write a PostgreSQL suite manifest holding exactly the given entries.
+
+    Each argument is one rendered `[[suite]]` body. The manifest is what the
+    checker reads to decide which `#[ignore]`d tests authoritative CI runs, so
+    a fixture that wants ignored enforcement declares it here.
+    """
+    manifest = root / ".github/postgres-integration-suites.toml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("\n".join(f"[[suite]]\n{suite}" for suite in suites))
+
+
+def write_manifest_workflow(root: Path, *names: str) -> None:
+    """Write a Rust workflow that agrees with a manifest declaring `names`."""
+    workflow = root / ".github/workflows/rust.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    uploads = "".join(
+        f"      - uses: actions/upload-artifact@v7\n"
+        f"        with:\n"
+        f"          name: postgres-integration-archive-{name}\n"
+        f"          path: ${{{{ runner.temp }}}}/{name}.tar.zst\n"
+        for name in names
+    )
+    aggregate = (
+        "  postgres-integration:\n"
+        "    if: ${{ always() }}\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - env:\n"
+        "          BUILD_RESULT: ${{ needs.postgres-integration-build.result }}\n"
+        "          RUN_RESULT: ${{ needs.postgres-integration-run.result }}\n"
+        "        run: |\n"
+        '          test "$BUILD_RESULT" = success\n'
+        '          test "$RUN_RESULT" = success\n'
+    )
+    workflow.write_text(
+        "jobs:\n"
+        "  postgres-integration-run:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - env:\n"
+        "          SUITE: ${{ matrix.suite }}\n"
+        "          PARTITION: ${{ matrix.partition }}\n"
+        "          PARTITIONS: ${{ matrix.partitions }}\n"
+        "          FILTER: ${{ matrix.filter }}\n"
+        '        run: cargo nextest run --archive-file "$RUNNER_TEMP/$SUITE.z"'
+        ' --partition "count:$PARTITION/$PARTITIONS"'
+        ' --run-ignored only -E "$FILTER"\n'
+        "  postgres-integration-build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: python3 scripts/postgres_integration_suites.py --matrix\n"
+        "      - run: python3 scripts/postgres_integration_suites.py"
+        " --archive-plan\n"
+        f"{uploads}{aggregate}",
+        encoding="utf-8",
+    )
 
 
 def failure_categories(failures: list[Violation]) -> list[str]:
@@ -458,19 +518,9 @@ class DocsConsistencyTests(unittest.TestCase):
             "fn inv_001_ignored_test() {}\n",
             encoding="utf-8",
         )
-        workflow = self.root / ".github/workflows/rust.yml"
-        workflow.parent.mkdir(parents=True)
-        workflow.write_text(
-            "jobs:\n"
-            "  integration:\n"
-            "    strategy:\n"
-            "      matrix:\n"
-            "        include:\n"
-            "          - suite: fixture\n"
-            "            command: >-\n"
-            "              cargo test --no-fail-fast -p fixture\n"
-            "              --tests -- --ignored\n",
-            encoding="utf-8",
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\npackage = "fixture"\nshards = 1\n',
         )
 
         self.assertIn(
@@ -478,7 +528,7 @@ class DocsConsistencyTests(unittest.TestCase):
             render_invariant_index(self.root),
         )
 
-    def test_ci_ignored_test_filters_select_only_matching_enforcement(self) -> None:
+    def test_unmanifested_package_registers_no_ignored_enforcement(self) -> None:
         (self.root / "Cargo.toml").write_text(
             '[package]\nname = "fixture"\nversion = "0.0.0"\n',
             encoding="utf-8",
@@ -489,31 +539,149 @@ class DocsConsistencyTests(unittest.TestCase):
         selected.write_text(
             "#[test]\n"
             "#[ignore]\n"
-            "fn inv_001_selected_by_ci_filter() {}\n"
+            "fn inv_001_in_a_manifested_package() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "other"\npackage = "not-this-workspace-package"\nshards = 1\n',
+        )
+
+        self.assertNotIn("| INV-001", render_invariant_index(self.root))
+
+    def test_manifested_package_registers_ignored_enforcement(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        selected = self.root / "tests/selected.rs"
+        selected.parent.mkdir()
+        selected.write_text(
             "#[test]\n"
             "#[ignore]\n"
-            "fn inv_002_not_selected_by_ci_filter() {}\n",
+            "fn inv_001_in_a_manifested_package() {}\n",
             encoding="utf-8",
         )
-        workflow = self.root / ".github/workflows/rust.yml"
-        workflow.parent.mkdir(parents=True)
-        workflow.write_text(
-            "jobs:\n"
-            "  integration:\n"
-            "    strategy:\n"
-            "      matrix:\n"
-            "        include:\n"
-            "          - suite: fixture\n"
-            "            command: >-\n"
-            "              cargo test -p fixture --test selected\n"
-            "              inv_001 -- --ignored\n",
-            encoding="utf-8",
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\npackage = "fixture"\nshards = 1\n',
         )
 
-        rendered = render_invariant_index(self.root)
+        self.assertIn("| INV-001", render_invariant_index(self.root))
 
-        self.assertIn("| INV-001", rendered)
-        self.assertNotIn("| INV-002", rendered)
+    def test_binary_include_uses_the_declared_cargo_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[[test]]\n"
+            'name = "selected_target"\n'
+            'path = "tests/physical_file.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/physical_file.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_declared_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'include_binaries = ["selected_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_exclude_uses_the_declared_cargo_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[[test]]\n"
+            'name = "excluded_target"\n'
+            'path = "tests/physical_file.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/physical_file.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_declared_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'exclude_binaries = ["excluded_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertNotIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_the_conventional_directory_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/nested_target/main.rs"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_directory_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'include_binaries = ["nested_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_an_overridden_library_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture-package"\nversion = "0.0.0"\n\n'
+            '[lib]\nname = "selected_library"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text(
+            "#[test]\n#[ignore]\nfn inv_001_library_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture-package"\n'
+            'include_binaries = ["selected_library"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_the_implicit_name_for_a_relocated_library(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture-package"\nversion = "0.0.0"\n\n'
+            '[lib]\npath = "src/custom_library.rs"\n',
+            encoding="utf-8",
+        )
+        target = self.root / "src/custom_library.rs"
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_implicit_library_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture-package"\n'
+            'include_binaries = ["fixture_package"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
 
     def test_ci_ignored_test_skips_exclude_only_named_enforcement(self) -> None:
         selected_invariant = "INV-001"
@@ -541,19 +709,12 @@ class DocsConsistencyTests(unittest.TestCase):
             f"fn {also_skipped_test}_also_skipped_by_ci() {{}}\n",
             encoding="utf-8",
         )
-        workflow = self.root / ".github/workflows/rust.yml"
-        workflow.parent.mkdir(parents=True)
-        workflow.write_text(
-            "jobs:\n"
-            "  integration:\n"
-            "    strategy:\n"
-            "      matrix:\n"
-            "        include:\n"
-            "          - suite: fixture\n"
-            "            command: >-\n"
-            "              cargo test --no-fail-fast -p fixture --test selected\n"
-            f"              -- --ignored --skip {skipped_test} --skip={also_skipped_test}\n",
-            encoding="utf-8",
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            "shards = 1\n"
+            f'skip = ["{skipped_test}", "{also_skipped_test}"]\n',
         )
 
         rendered = render_invariant_index(self.root)
@@ -561,6 +722,267 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertIn(f"| {selected_invariant}", rendered)
         self.assertNotIn(f"| {skipped_invariant}", rendered)
         self.assertNotIn(f"| {also_skipped_invariant}", rendered)
+
+    def declare_gated_target(self, *features: str) -> None:
+        """Declare a package whose ignored test target requires `gated`."""
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[features]\ndefault = []\ngated = []\n\n"
+            "[[test]]\n"
+            'name = "gated"\n'
+            'path = "tests/gated.rs"\n'
+            'required-features = ["gated"]\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/gated.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_only_with_the_feature() {}\n",
+            encoding="utf-8",
+        )
+        rendered = ", ".join(f'"{feature}"' for feature in features)
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            f"features = [{rendered}]\n"
+            "shards = 1\n",
+        )
+
+    def test_target_missing_its_required_features_is_not_enforcement(self) -> None:
+        # Cargo skips such a target and reports success, so crediting it would
+        # claim CI enforces an invariant nothing runs.
+        self.declare_gated_target()
+
+        self.assertNotIn("| INV-001", render_invariant_index(self.root))
+
+    def test_target_with_its_required_features_is_enforcement(self) -> None:
+        self.declare_gated_target("gated")
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def declare_fixture_package(self) -> None:
+        """Give the fixture root one workspace package the manifest can name."""
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+
+    def test_agreeing_manifest_and_workflow_pass(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 2\n'
+        )
+        write_manifest_workflow(self.root, "fixture")
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_suite_without_a_workflow_artifact_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+        write_manifest_workflow(self.root)
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn("postgres-integration-archive-fixture", failures[0].message)
+
+    def test_workflow_artifact_without_a_suite_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+        write_manifest_workflow(self.root, "fixture", "phantom")
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn("phantom", failures[0].message)
+
+    def test_workflow_that_stops_reading_the_manifest_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.parent.mkdir(parents=True, exist_ok=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  postgres-integration-run:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - env:\n"
+            "          SUITE: ${{ matrix.suite }}\n"
+            "          PARTITION: ${{ matrix.partition }}\n"
+            "          PARTITIONS: ${{ matrix.partitions }}\n"
+            "          FILTER: ${{ matrix.filter }}\n"
+            '        run: cargo nextest run --archive-file "$RUNNER_TEMP/$SUITE.z"'
+            ' --partition "count:$PARTITION/$PARTITIONS"'
+            ' --run-ignored only -E "$FILTER"\n'
+            "  postgres-integration-build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/upload-artifact@v7\n"
+            "        with:\n"
+            "          name: postgres-integration-archive-fixture\n"
+            "          path: ${{ runner.temp }}/fixture.tar.zst\n"
+            "  postgres-integration:\n"
+            "    if: ${{ always() }}\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - env:\n"
+            "          BUILD_RESULT: "
+            "${{ needs.postgres-integration-build.result }}\n"
+            "          RUN_RESULT: "
+            "${{ needs.postgres-integration-run.result }}\n"
+            "        run: |\n"
+            '          test "$BUILD_RESULT" = success\n'
+            '          test "$RUN_RESULT" = success\n',
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        # One per required invocation: the build's archive plan and the run
+        # job's shard matrix are separate readings of the manifest.
+        self.assertEqual(
+            failure_categories(failures), ["suite-manifest", "suite-manifest"]
+        )
+        self.assertTrue(
+            all(
+                "scripts/postgres_integration_suites.py" in failure.message
+                for failure in failures
+            )
+        )
+
+    def test_workflow_running_ignored_tests_outside_the_manifest_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+        write_manifest_workflow(self.root, "fixture")
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.write_text(
+            workflow.read_text(encoding="utf-8")
+            + "      - run: cargo test -p other --tests -- --ignored\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn("outside", failures[0].message)
+
+    def test_workflow_leaving_ubuntu_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+        write_manifest_workflow(self.root, "fixture")
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.write_text(
+            workflow.read_text(encoding="utf-8").replace(
+                "ubuntu-latest", "macos-latest"
+            ),
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn("macos-latest", failures[0].message)
+
+    def test_suite_naming_an_absent_package_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "absent"\nshards = 1\n'
+        )
+        write_manifest_workflow(self.root, "fixture")
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn("absent", failures[0].message)
+
+    def test_malformed_manifest_is_a_hard_input_error(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 0\n'
+        )
+        write_manifest_workflow(self.root, "fixture")
+
+        with self.assertRaises(ManifestError) as raised:
+            run_checks(self.root)
+
+        self.assertIn("shards", str(raised.exception))
+
+    def test_documentation_naming_other_features_for_a_suite_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'features = ["postgres-integration"]\n'
+            "shards = 1\n",
+        )
+        write_manifest_workflow(self.root, "fixture")
+        agents = self.root / "AGENTS.md"
+        agents.write_text(
+            agents.read_text(encoding="utf-8")
+            + "\nRun `cargo test -p fixture --features stale --tests -- --ignored`.\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn("stale", failures[0].message)
+
+    def test_documentation_matching_the_manifest_passes(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'features = ["postgres-integration"]\n'
+            "shards = 1\n",
+        )
+        write_manifest_workflow(self.root, "fixture")
+        agents = self.root / "AGENTS.md"
+        agents.write_text(
+            agents.read_text(encoding="utf-8")
+            + "\nRun `cargo test -p fixture --features postgres-integration"
+            " --tests -- --ignored`.\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_workflow_without_a_manifest_fails(self) -> None:
+        self.declare_fixture_package()
+        write_manifest_workflow(self.root, "fixture")
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn(
+            ".github/postgres-integration-suites.toml", failures[0].message
+        )
+
+    def test_manifest_without_a_workflow_fails(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["suite-manifest"])
+        self.assertIn(".github/workflows/rust.yml", failures[0].message)
 
     def test_windows_only_test_does_not_register_invariant_enforcement(self) -> None:
         disabled = self.root / "src/windows.rs"

@@ -16,11 +16,14 @@ mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod session_delegation;
 mod session_metadata;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
 mod tool_dispatch_gate;
+#[cfg(feature = "test-support")]
+mod tool_execution_test_support;
 mod tool_loop;
 mod tool_loop_ports;
 mod update_session_placement;
@@ -108,6 +111,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
 };
+pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
     ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
     ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
@@ -128,12 +132,19 @@ pub use submit_input::{
     SubmitInputService, SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
 };
 pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
+#[cfg(feature = "test-support")]
+pub use tool_execution_test_support::{
+    FixtureToolExecutionTransaction, FixtureTransactionFailures, PreparedAttemptApproval,
+    PreparedAttemptIdentities, PreparedAttemptProposal, RecordedEvidence, RecordingToolExecutor,
+    prepared_single_attempt_batch,
+};
 pub use tool_loop::{
-    CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence, DecideToolRequestService,
-    DuplicateToolDefinition, NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator,
-    ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
-    ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
-    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorEvidence,
+    CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CorrelatedDurableToolCompletion,
+    CorrelatedToolExecutorEvidence, DecideToolRequestService, DuplicateToolDefinition,
+    NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator, ToolArgumentValidator,
+    ToolCatalog, ToolCatalogValidationFailure, ToolDefinition, ToolExecutionIdGenerator,
+    ToolExecutionInvocation, ToolExecutionService, ToolExecutionServiceError,
+    ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition, ToolExecutorEvidence,
     ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
