@@ -3738,7 +3738,7 @@ async fn decode_placement(
         })
         .transpose()?;
     let state = if state_kind == "unpinned" {
-        if lost_runner.is_some() || loss_source.is_some() {
+        if placement_row_has_invalid_unpinned_facts(row)? {
             return Err(RunnerProtocolCorruption::InvalidEncoding.into());
         }
         SessionRunnerPlacementState::Unpinned
@@ -3921,6 +3921,16 @@ fn placement_row_has_invalid_pre_pin_loss_facts(
         || placement_row_has_pinned_facts(row)?)
 }
 
+fn placement_row_has_invalid_unpinned_facts(row: &PgRow) -> Result<bool, RunnerProtocolStoreError> {
+    Ok(row
+        .decode_column::<Option<Uuid>>("lost_runner_id")?
+        .is_some()
+        || row
+            .decode_column::<Option<String>>("loss_source_kind")?
+            .is_some()
+        || placement_row_has_pinned_facts(row)?)
+}
+
 async fn decode_placement_request(
     connection: &mut PgConnection,
     row: &PgRow,
@@ -3962,6 +3972,13 @@ async fn load_placement_reconstitution_history(
     let [origin] = origins.as_slice() else {
         return Err(RunnerProtocolCorruption::MissingCanonicalPlacement.into());
     };
+    let origin_state: String = origin.decode_column("state_kind")?;
+    if origin_state != "unpinned" {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    if placement_row_has_invalid_unpinned_facts(origin)? {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
     let origin_ordinal = decode_u64(origin.decode_column("event_ordinal")?)?;
     let predecessor_ordinal = origin_ordinal
         .checked_sub(1)
