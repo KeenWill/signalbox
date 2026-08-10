@@ -4,6 +4,18 @@ import XCTest
 
 @testable import SignalboxNative
 
+/// The four canvases every scenario is promised on.
+///
+/// Named once because all fourteen dispositions declare it and a repeated
+/// literal set would be fourteen places to disagree. A scenario that ever needs
+/// a different set spells that set instead, and the difference is then visible
+/// against this name.
+extension Set where Element == SnapshotCanvas {
+    static let everyScreenCanvas: Set<SnapshotCanvas> = [
+        .iPhonePortrait, .iPhoneLandscape, .iPadPortrait, .iPadLandscape,
+    ]
+}
+
 /// Goldens for the screens `RootView` reaches, in every state
 /// `ScreenshotScenario` selects, on every canvas.
 ///
@@ -50,6 +62,15 @@ import XCTest
 /// decides which `__Snapshots__` directory its references land in.
 @MainActor
 final class LiveScreenSnapshotTests: XCTestCase {
+    /// What this test rendered, recorded by `assertScenarioSnapshot` as it went.
+    ///
+    /// XCTest builds a fresh instance per test method, so this is per-test
+    /// without any resetting: `tearDown` reads exactly what the method that
+    /// just ran produced. It is the evidence the two structural checks are
+    /// made of — a claim can no longer be satisfied by a method that exists and
+    /// happens to have PNGs, because the rendering itself is what reports.
+    private var scenarioRenderings: [(scenario: ScreenshotScenario, canvas: SnapshotCanvas)] = []
+
     /// What this suite does with one `ScreenshotScenario`.
     ///
     /// A disposition per case rather than a count of them. A count is satisfied
@@ -72,12 +93,15 @@ final class LiveScreenSnapshotTests: XCTestCase {
         /// snapshot existing anywhere, and the documentation above claimed
         /// otherwise. Discharging the decision now means writing a test.
         ///
-        /// What it still does not prove is that the named test renders *this*
-        /// scenario; nothing here reads the argument the test passes to
-        /// `rootView(for:)`. It proves the test exists and answers for nothing
-        /// else, which is what makes the next case's cheapest path an actual
-        /// rendering.
-        case rendered(by: String)
+        /// The association is now checked at the point of rendering, which is
+        /// what the name alone could not do. `assertScenarioSnapshot` compares
+        /// the running test's `#function` against the name here before it
+        /// renders anything, and `tearDown` requires a test named here to have
+        /// rendered this scenario on exactly `canvases`. A claim pointing at a
+        /// test that renders something else — a legacy screen, a section gate —
+        /// fails when that test runs, rather than passing because the method
+        /// exists and has PNGs.
+        case rendered(by: String, on: Set<SnapshotCanvas>)
         /// Deliberately not rendered, for the reason given.
         case refused(reason: String)
 
@@ -94,33 +118,33 @@ final class LiveScreenSnapshotTests: XCTestCase {
         static func of(_ scenario: ScreenshotScenario) -> ScenarioDisposition {
             switch scenario {
             case .setup:
-                return .rendered(by: "testTransportGateWithoutAConfiguredSocket")
+                return .rendered(by: "testTransportGateWithoutAConfiguredSocket", on: .everyScreenCanvas)
             case .sessions:
-                return .rendered(by: "testSessionList")
+                return .rendered(by: "testSessionList", on: .everyScreenCanvas)
             case .newSession:
-                return .rendered(by: "testSessionListPresentingTheCreationSheet")
+                return .rendered(by: "testSessionListPresentingTheCreationSheet", on: .everyScreenCanvas)
             case .activeChat:
-                return .rendered(by: "testSessionTranscriptForACompletedTurn")
+                return .rendered(by: "testSessionTranscriptForACompletedTurn", on: .everyScreenCanvas)
             case .markdownBasics:
-                return .rendered(by: "testSessionTranscriptRenderingMarkdownHeadingsAndLists")
+                return .rendered(by: "testSessionTranscriptRenderingMarkdownHeadingsAndLists", on: .everyScreenCanvas)
             case .markdownTable:
-                return .rendered(by: "testSessionTranscriptRenderingAMarkdownTable")
+                return .rendered(by: "testSessionTranscriptRenderingAMarkdownTable", on: .everyScreenCanvas)
             case .markdownCode:
-                return .rendered(by: "testSessionTranscriptRenderingMarkdownCodeAndQuotes")
+                return .rendered(by: "testSessionTranscriptRenderingMarkdownCodeAndQuotes", on: .everyScreenCanvas)
             case .markdownMessage:
-                return .rendered(by: "testSessionTranscriptRenderingAMarkdownIncidentReport")
+                return .rendered(by: "testSessionTranscriptRenderingAMarkdownIncidentReport", on: .everyScreenCanvas)
             case .pendingApproval:
-                return .rendered(by: "testSessionTranscriptWithAToolRequestAwaitingApproval")
+                return .rendered(by: "testSessionTranscriptWithAToolRequestAwaitingApproval", on: .everyScreenCanvas)
             case .completedTool:
-                return .rendered(by: "testSessionTranscriptWithACompletedTool")
+                return .rendered(by: "testSessionTranscriptWithACompletedTool", on: .everyScreenCanvas)
             case .failedTool:
-                return .rendered(by: "testSessionTranscriptWithAFailedTool")
+                return .rendered(by: "testSessionTranscriptWithAFailedTool", on: .everyScreenCanvas)
             case .runners:
-                return .rendered(by: "testRunnersCapabilityGate")
+                return .rendered(by: "testRunnersCapabilityGate", on: .everyScreenCanvas)
             case .monitor:
-                return .rendered(by: "testMonitorCapabilityGate")
+                return .rendered(by: "testMonitorCapabilityGate", on: .everyScreenCanvas)
             case .settings:
-                return .rendered(by: "testSettingsScreen")
+                return .rendered(by: "testSettingsScreen", on: .everyScreenCanvas)
             case .artifactPreview:
                 return .refused(
                     reason: """
@@ -135,31 +159,63 @@ final class LiveScreenSnapshotTests: XCTestCase {
             }
         }
 
-        /// Whether this disposition carries a written reason.
-        ///
-        /// A rendered case does not and needs none; a refusal that does not is
-        /// the gap `testTheArtifactPreviewRefusalStatesAReason` reports. The
-        /// `switch` is here rather than in that test body because
-        /// `docs/agents/testing-style.md` rule 2 governs test bodies, and a
-        /// straight-line assertion still needs the branch to happen somewhere.
-        var statesARefusalReason: Bool {
-            switch self {
-            case .rendered:
-                return false
-            case .refused(let reason):
-                return !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            }
-        }
-
         /// The test this disposition names, or `nil` for a refusal.
         var renderingTestName: String? {
             switch self {
-            case .rendered(let name):
+            case .rendered(let name, _):
                 return name
             case .refused:
                 return nil
             }
         }
+
+        /// The canvases this disposition promises, or `nil` for a refusal.
+        var declaredCanvases: Set<SnapshotCanvas>? {
+            switch self {
+            case .rendered(_, let canvases):
+                return canvases
+            case .refused:
+                return nil
+            }
+        }
+
+        /// The reason a refusal states, or `nil` for a rendering.
+        ///
+        /// Optional rather than a `Bool`, so "renders" and "refuses blankly"
+        /// stay distinguishable: the predecessor collapsed both into `false`
+        /// and so could not be used to find the blank refusals among every
+        /// disposition.
+        var refusalReason: String? {
+            switch self {
+            case .rendered:
+                return nil
+            case .refused(let reason):
+                return reason
+            }
+        }
+    }
+
+    /// Every scenario beside its disposition.
+    static var everyDisposition: [(scenario: ScreenshotScenario, disposition: ScenarioDisposition)] {
+        ScreenshotScenario.allCases.map { ($0, ScenarioDisposition.of($0)) }
+    }
+
+    /// The scenarios whose refusal states no reason.
+    ///
+    /// Takes its input so the known-answer test can hand it a blank refusal:
+    /// run only over the suite's own dispositions it would answer `[]`, which
+    /// is the answer the coverage test wants, and an implementation that always
+    /// answered `[]` would be indistinguishable from a working one.
+    static func scenariosRefusedWithoutAReason(
+        in dispositions: [(scenario: ScreenshotScenario, disposition: ScenarioDisposition)]
+    ) -> [String] {
+        dispositions
+            .compactMap { pair -> String? in
+                guard let reason = pair.disposition.refusalReason else { return nil }
+                let stated = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                return stated.isEmpty ? String(describing: pair.scenario) : nil
+            }
+            .sorted()
     }
 
     /// The names the rendered dispositions carry, refusals dropped.
@@ -215,12 +271,17 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// test in this file missing. A name here reads `-[Class testFoo]`, so the
     /// last space-separated component with its bracket removed is the method.
     private static var definedTestNames: Set<String> {
-        Set(
-            defaultTestSuite.tests.map { test in
-                String(test.name.split(separator: " ").last ?? "")
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-            }
-        )
+        Set(defaultTestSuite.tests.map { methodName(ofTestCaseName: $0.name) })
+    }
+
+    /// The method out of an `XCTest.name`, which reads `-[Class testFoo]`.
+    ///
+    /// Shared by `definedTestNames` and `tearDown` so the two cannot disagree
+    /// about what a test is called, and parameterized so
+    /// `testTheTestCaseNameParserReadsTheMethod` can hand it a known input.
+    static func methodName(ofTestCaseName name: String) -> String {
+        String(name.split(separator: " ").last ?? "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
     }
 
     /// The names no test on this class defines.
@@ -231,11 +292,18 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// prefix is required because a directory holds other files —
     /// `MANIFEST.sha256` next door is one — and a name that cannot be a test
     /// method should not become an entry in an inventory of them.
-    static func testName(fromGoldenNamed fileName: String) -> String? {
+    static func goldenIdentity(ofFileNamed fileName: String) -> (test: String, canvas: String)? {
         guard fileName.hasSuffix(".png") else { return nil }
-        guard let first = fileName.split(separator: ".").first else { return nil }
-        let name = String(first)
-        return name.hasPrefix("test") ? name : nil
+        let components = fileName.split(separator: ".")
+        guard components.count >= 3 else { return nil }
+        let name = String(components[0])
+        guard name.hasPrefix("test") else { return nil }
+        return (name, String(components[1]))
+    }
+
+    /// The test a golden belongs to, discarding its canvas.
+    static func testName(fromGoldenNamed fileName: String) -> String? {
+        goldenIdentity(ofFileNamed: fileName)?.test
     }
 
     /// The tests that have at least one committed golden.
@@ -246,18 +314,68 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// references from — `#filePath` locates it exactly as
     /// `assertSnapshot` does — so a name is in here when, and only when, a
     /// rendering for it is committed.
-    private static var snapshotProducingTestNames: Set<String> {
+    private static var committedGoldenNames: [String] {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("__Snapshots__")
         let manager = FileManager.default
         let suiteDirectories =
             (try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
-        return Set(
-            suiteDirectories
-                .flatMap { (try? manager.contentsOfDirectory(atPath: $0.path)) ?? [] }
-                .compactMap(testName(fromGoldenNamed:))
-        )
+        return suiteDirectories
+            .flatMap { (try? manager.contentsOfDirectory(atPath: $0.path)) ?? [] }
+    }
+
+    /// The canvases each test has a committed golden for.
+    ///
+    /// The canvas is kept rather than discarded, which the predecessor did not
+    /// do: it reduced every file to a test name, so a test that stopped
+    /// rendering one canvas still appeared in the inventory — its stale PNG was
+    /// on disk and the name had not changed. Keeping the suffix is what lets
+    /// `testEveryRenderedScenarioHasAGoldenForEveryDeclaredCanvas` compare what
+    /// is committed against what the disposition promises.
+    static func canvasesByTest(inGoldensNamed fileNames: [String]) -> [String: Set<String>] {
+        var canvases: [String: Set<String>] = [:]
+        for fileName in fileNames {
+            guard let identity = goldenIdentity(ofFileNamed: fileName) else { continue }
+            canvases[identity.test, default: []].insert(identity.canvas)
+        }
+        return canvases
+    }
+
+    static var committedCanvasesByTest: [String: Set<String>] {
+        canvasesByTest(inGoldensNamed: committedGoldenNames)
+    }
+
+    /// The canvases each claimed test promises, by test name.
+    static var declaredCanvasesByTest: [String: Set<String>] {
+        var declared: [String: Set<String>] = [:]
+        for pair in everyDisposition {
+            guard let test = pair.disposition.renderingTestName,
+                let canvases = pair.disposition.declaredCanvases
+            else { continue }
+            declared[test] = Set(canvases.map(\.rawValue))
+        }
+        return declared
+    }
+
+    /// The claimed tests whose committed goldens differ from what they promise.
+    ///
+    /// Both directions matter. Fewer goldens than declared is a canvas that was
+    /// never recorded; more is a golden left behind by a canvas the body
+    /// stopped rendering, which is the case the review raised — the file stays
+    /// on disk and nothing else notices.
+    static func testsWhoseGoldensDoNotMatchTheirDeclaration(
+        declared: [String: Set<String>],
+        committed: [String: Set<String>]
+    ) -> [String] {
+        declared
+            .filter { test, canvases in (committed[test] ?? []) != canvases }
+            .map(\.key)
+            .sorted()
+    }
+
+    private static var snapshotProducingTestNames: Set<String> {
+        Set(committedCanvasesByTest.keys)
     }
 
     /// The claimed names that no committed rendering answers for.
@@ -308,27 +426,36 @@ final class LiveScreenSnapshotTests: XCTestCase {
         static let statedReason = "a stated reason"
     }
 
-    /// The refusal-reason check rejects an empty reason.
+    /// The blank-refusal detector reports a refusal with no reason.
     ///
-    /// Found by mutation rather than by review: neutering
-    /// `statesARefusalReason` to `return true` left
-    /// `testTheArtifactPreviewRefusalStatesAReason` green, because that test
-    /// asserts the property is true of the one refusal the suite has, and a
-    /// property hardcoded to true is true of it. The assertion was reading the
-    /// answer it wanted from an implementation that could no longer be wrong.
-    ///
-    /// This is the known-answer half, and the empty and whitespace cases are
-    /// the whole point of it — they are the inputs a working implementation
-    /// answers `false` for and a broken one cannot.
-    func testTheRefusalReasonCheckRejectsAnEmptyReason() {
-        XCTAssertTrue(
-            ScenarioDisposition.refused(reason: ArbitraryClaim.statedReason).statesARefusalReason
+    /// Known-answer half. The predecessor asserted a property of the one
+    /// refusal the suite happens to have, which a version hardcoded to `true`
+    /// satisfied — mutation found that, and the same shape would return here if
+    /// this only ever saw dispositions that are already fine. The empty and
+    /// whitespace reasons are the whole point: they are what a working
+    /// implementation reports and a broken one cannot.
+    func testTheBlankRefusalDetectorReportsABlankReason() {
+        XCTAssertEqual(
+            Self.scenariosRefusedWithoutAReason(in: [(.setup, .refused(reason: ""))]),
+            ["setup"]
         )
-        XCTAssertFalse(ScenarioDisposition.refused(reason: "").statesARefusalReason)
-        XCTAssertFalse(ScenarioDisposition.refused(reason: "   \n\t ").statesARefusalReason)
-        XCTAssertFalse(
-            ScenarioDisposition.rendered(by: ArbitraryClaim.first).statesARefusalReason
+        XCTAssertEqual(
+            Self.scenariosRefusedWithoutAReason(in: [(.setup, .refused(reason: "   \n\t "))]),
+            ["setup"]
         )
+        XCTAssertEqual(
+            Self.scenariosRefusedWithoutAReason(
+                in: [(.setup, .refused(reason: ArbitraryClaim.statedReason))]
+            ),
+            []
+        )
+        XCTAssertEqual(
+            Self.scenariosRefusedWithoutAReason(
+                in: [(.setup, .rendered(by: ArbitraryClaim.first, on: .everyScreenCanvas))]
+            ),
+            []
+        )
+        XCTAssertEqual(Self.scenariosRefusedWithoutAReason(in: []), [])
     }
 
     /// The extractor keeps rendered names and drops refusals.
@@ -342,14 +469,14 @@ final class LiveScreenSnapshotTests: XCTestCase {
     func testTheNameExtractorKeepsRenderedNamesAndDropsRefusals() {
         XCTAssertEqual(
             Self.renderingTestNames(of: [
-                .rendered(by: ArbitraryClaim.first),
+                .rendered(by: ArbitraryClaim.first, on: .everyScreenCanvas),
                 .refused(reason: ArbitraryClaim.statedReason),
-                .rendered(by: ArbitraryClaim.second),
+                .rendered(by: ArbitraryClaim.second, on: .everyScreenCanvas),
             ]),
             [ArbitraryClaim.first, ArbitraryClaim.second]
         )
         XCTAssertEqual(
-            Self.renderingTestNames(of: [.rendered(by: ArbitraryClaim.first)]),
+            Self.renderingTestNames(of: [.rendered(by: ArbitraryClaim.first, on: .everyScreenCanvas)]),
             [ArbitraryClaim.first]
         )
         XCTAssertEqual(
@@ -444,17 +571,134 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// Known-answer half of the inventory: the directory scan below is what
     /// makes the claim structural, and this is the part of it that can be
     /// wrong quietly.
-    func testTheGoldenNameParserReadsTheTestName() {
+    func testTheGoldenNameParserReadsTheTestAndCanvas() {
         XCTAssertEqual(
-            Self.testName(fromGoldenNamed: "testSessionList.iphone-portrait.png"),
+            Self.goldenIdentity(ofFileNamed: "testSessionList.iphone-portrait.png")?.test,
             "testSessionList"
         )
         XCTAssertEqual(
-            Self.testName(fromGoldenNamed: "testSessionCreationSheetContent.sheet.png"),
-            "testSessionCreationSheetContent"
+            Self.goldenIdentity(ofFileNamed: "testSessionList.iphone-portrait.png")?.canvas,
+            "iphone-portrait"
         )
-        XCTAssertNil(Self.testName(fromGoldenNamed: "MANIFEST.sha256"))
-        XCTAssertNil(Self.testName(fromGoldenNamed: "notATestMethod.iphone-portrait.png"))
+        XCTAssertEqual(
+            Self.goldenIdentity(ofFileNamed: "testSessionCreationSheetContent.sheet.png")?.canvas,
+            "sheet"
+        )
+        XCTAssertNil(Self.goldenIdentity(ofFileNamed: "MANIFEST.sha256"))
+        XCTAssertNil(Self.goldenIdentity(ofFileNamed: "notATestMethod.iphone-portrait.png"))
+    }
+
+    /// The canvas index groups a test's goldens together.
+    func testTheCanvasIndexGroupsGoldensByTest() {
+        XCTAssertEqual(
+            Self.canvasesByTest(inGoldensNamed: [
+                "testOne.iphone-portrait.png", "testOne.ipad-portrait.png",
+                "testTwo.sheet.png", "MANIFEST.sha256",
+            ]),
+            [
+                "testOne": ["iphone-portrait", "ipad-portrait"],
+                "testTwo": ["sheet"],
+            ]
+        )
+        XCTAssertEqual(Self.canvasesByTest(inGoldensNamed: []), [:])
+    }
+
+    /// The declaration comparison reports a canvas that is missing or left over.
+    func testTheCanvasComparisonReportsADifference() {
+        XCTAssertEqual(
+            Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
+                declared: ["testOne": ["iphone-portrait", "ipad-portrait"]],
+                committed: ["testOne": ["iphone-portrait"]]
+            ),
+            ["testOne"]
+        )
+        XCTAssertEqual(
+            Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
+                declared: ["testOne": ["iphone-portrait"]],
+                committed: ["testOne": ["iphone-portrait", "ipad-portrait"]]
+            ),
+            ["testOne"]
+        )
+        XCTAssertEqual(
+            Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
+                declared: ["testOne": ["iphone-portrait"]],
+                committed: ["testOne": ["iphone-portrait"]]
+            ),
+            []
+        )
+        XCTAssertEqual(
+            Self.testsWhoseGoldensDoNotMatchTheirDeclaration(declared: [:], committed: [:]),
+            []
+        )
+    }
+
+    /// The test-case name parser reads the method out of `-[Class testFoo]`.
+    func testTheTestCaseNameParserReadsTheMethod() {
+        XCTAssertEqual(
+            Self.methodName(ofTestCaseName: "-[LiveScreenSnapshotTests testSessionList]"),
+            "testSessionList"
+        )
+        XCTAssertEqual(Self.methodName(ofTestCaseName: "testSessionList"), "testSessionList")
+    }
+
+    /// The function-name parser drops the parentheses `#function` carries.
+    func testTheFunctionNameParserDropsTheParentheses() {
+        XCTAssertEqual(Self.methodName(ofFunction: "testSessionList()"), "testSessionList")
+        XCTAssertEqual(Self.methodName(ofFunction: "testSessionList"), "testSessionList")
+    }
+
+    /// The renderer check accepts the claimed test and rejects any other.
+    func testTheRendererCheckAcceptsOnlyTheClaimedTest() {
+        XCTAssertTrue(Self.test("testSessionList", isTheClaimedRendererOf: .sessions))
+        XCTAssertFalse(Self.test("testLegacySessionList", isTheClaimedRendererOf: .sessions))
+        XCTAssertFalse(Self.test("testSettingsScreen", isTheClaimedRendererOf: .sessions))
+        XCTAssertFalse(Self.test("testSessionList", isTheClaimedRendererOf: .artifactPreview))
+    }
+
+    /// The claim lookup finds the scenario that names a test, and only then.
+    ///
+    /// `tearDown` returns early when this answers `nil`, so a version that
+    /// always did would disable the whole converse check silently — which is
+    /// what the mutation sweep found before this test existed.
+    func testTheClaimLookupFindsTheScenarioThatNamesATest() {
+        XCTAssertEqual(Self.scenarioClaimedBy("testSessionList"), .sessions)
+        XCTAssertEqual(Self.scenarioClaimedBy("testSettingsScreen"), .settings)
+        XCTAssertNil(Self.scenarioClaimedBy("testTheDuplicateDetectorReportsADuplicate"))
+        XCTAssertNil(Self.scenarioClaimedBy("testLegacySessionList"))
+    }
+
+    /// The declaration index covers the claimed tests and nothing else.
+    ///
+    /// An empty index would make the canvas comparison compare nothing and
+    /// report nothing, which is the answer that check wants.
+    func testTheDeclarationIndexCoversEveryClaimedTest() {
+        XCTAssertEqual(
+            Self.declaredCanvasesByTest["testSessionList"],
+            ["iphone-portrait", "iphone-landscape", "ipad-portrait", "ipad-landscape"]
+        )
+        XCTAssertNil(Self.declaredCanvasesByTest["testTheDuplicateDetectorReportsADuplicate"])
+        XCTAssertNil(Self.declaredCanvasesByTest["testTemplatesCapabilityGate"])
+    }
+
+    /// Every claimed test has a golden for every canvas it promises.
+    ///
+    /// The inventory check says a claimed test records something; this says it
+    /// records exactly what its disposition promises. Without it a canvas
+    /// dropped from a body leaves its golden on disk and every other guard
+    /// stays green.
+    func testEveryRenderedScenarioHasAGoldenForEveryDeclaredCanvas() {
+        XCTAssertEqual(
+            Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
+                declared: Self.declaredCanvasesByTest,
+                committed: Self.committedCanvasesByTest
+            ),
+            [],
+            """
+            A claimed test's committed goldens do not match the canvases its \
+            disposition promises. A canvas removed from the body leaves its \
+            golden behind; a canvas added needs one recorded.
+            """
+        )
     }
 
     /// The inventory holds the tests that record goldens, and only those.
@@ -514,35 +758,36 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// rest.
     ///
     /// One named test rather than a scan over `allCases`:
-    /// `docs/agents/testing-style.md` rule 2 unrolls a loop over same-behaviour
-    /// cases into straight-line calls, and a failure here names the scenario
-    /// that caused it instead of reporting from one anonymous site inside a
-    /// `for` body. `.artifactPreview` is the only case `ScenarioDisposition`
-    /// refuses, so it is the only test; a second refusal gets a second test,
-    /// and the switch is what puts that decision in front of whoever adds one.
-    func testTheArtifactPreviewRefusalStatesAReason() {
-        XCTAssertTrue(
-            ScenarioDisposition.of(.artifactPreview).statesARefusalReason,
+    /// No scenario is refused without a reason — every one of them, not one.
+    ///
+    /// The predecessor inspected `.artifactPreview` alone, so a scenario added
+    /// later could return `.refused(reason: "")`, compile, be ignored by the
+    /// rendered-name checks, and leave this green. The refusal is derived from
+    /// every disposition now, so the one-line way out is closed.
+    func testNoScenarioIsRefusedWithoutAReason() {
+        XCTAssertEqual(
+            Self.scenariosRefusedWithoutAReason(in: Self.everyDisposition),
+            [],
             """
-            .artifactPreview is refused without a reason. A scenario this suite \
-            does not render carries the argument for why no golden is the right \
+            A scenario is refused without a reason. A scenario this suite does \
+            not render carries the argument for why no golden is the right \
             outcome; write it, or render the scenario.
             """
         )
     }
 
     func testTransportGateWithoutAConfiguredSocket() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .setup), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .setup), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .setup), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .setup), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.setup, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.setup, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.setup, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.setup, canvas: .iPadLandscape)
     }
 
     func testSessionList() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .sessions), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .sessions), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .sessions), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .sessions), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.sessions, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.sessions, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.sessions, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.sessions, canvas: .iPadLandscape)
     }
 
     /// The list with the creation sheet over it, which is what the scenario
@@ -593,10 +838,10 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// would put the clipping threshold 100 points low and make a canvas that
     /// still clips look like one that fits.
     func testSessionListPresentingTheCreationSheet() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.newSession, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.newSession, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.newSession, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.newSession, canvas: .iPadLandscape)
     }
 
     /// Named for the state it renders, not the fixture it uses. `.activeChat`
@@ -606,10 +851,10 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// different usage card, and nothing here covers it — a test named for an
     /// active turn would have claimed otherwise while pinning this.
     func testSessionTranscriptForACompletedTurn() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .activeChat), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .activeChat), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .activeChat), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .activeChat), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.activeChat, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.activeChat, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.activeChat, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.activeChat, canvas: .iPadLandscape)
     }
 
     /// The four markdown scenarios are four different transcripts, not four
@@ -619,52 +864,52 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// a long mixed document. A change to any one renderer shows up in one of
     /// these and not the others, which is why they are four tests.
     func testSessionTranscriptRenderingMarkdownHeadingsAndLists() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownBasics), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownBasics), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownBasics), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownBasics), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.markdownBasics, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.markdownBasics, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.markdownBasics, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.markdownBasics, canvas: .iPadLandscape)
     }
 
     func testSessionTranscriptRenderingAMarkdownTable() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownTable), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownTable), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownTable), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownTable), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.markdownTable, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.markdownTable, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.markdownTable, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.markdownTable, canvas: .iPadLandscape)
     }
 
     func testSessionTranscriptRenderingMarkdownCodeAndQuotes() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownCode), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownCode), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownCode), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownCode), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.markdownCode, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.markdownCode, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.markdownCode, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.markdownCode, canvas: .iPadLandscape)
     }
 
     func testSessionTranscriptRenderingAMarkdownIncidentReport() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownMessage), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownMessage), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownMessage), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .markdownMessage), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.markdownMessage, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.markdownMessage, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.markdownMessage, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.markdownMessage, canvas: .iPadLandscape)
     }
 
     func testSessionTranscriptWithAToolRequestAwaitingApproval() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .pendingApproval), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .pendingApproval), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .pendingApproval), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .pendingApproval), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.pendingApproval, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.pendingApproval, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.pendingApproval, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.pendingApproval, canvas: .iPadLandscape)
     }
 
     func testSessionTranscriptWithACompletedTool() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .completedTool), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .completedTool), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .completedTool), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .completedTool), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.completedTool, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.completedTool, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.completedTool, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.completedTool, canvas: .iPadLandscape)
     }
 
     func testSessionTranscriptWithAFailedTool() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .failedTool), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .failedTool), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .failedTool), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .failedTool), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.failedTool, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.failedTool, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.failedTool, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.failedTool, canvas: .iPadLandscape)
     }
 
     // `.artifactPreview` has no test here, and the absence is the finding
@@ -698,24 +943,24 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// who reaches one of these sections is told what the process protocol does
     /// not expose, and nothing else on the screen distinguishes it.
     func testMonitorCapabilityGate() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .monitor), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .monitor), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .monitor), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .monitor), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.monitor, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.monitor, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.monitor, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.monitor, canvas: .iPadLandscape)
     }
 
     func testRunnersCapabilityGate() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .runners), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .runners), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .runners), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .runners), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.runners, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.runners, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.runners, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.runners, canvas: .iPadLandscape)
     }
 
     func testSettingsScreen() async {
-        await assertLiveScreenSnapshot(of: rootView(for: .settings), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .settings), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: rootView(for: .settings), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: rootView(for: .settings), canvas: .iPadLandscape)
+        await assertScenarioSnapshot(.settings, canvas: .iPhonePortrait)
+        await assertScenarioSnapshot(.settings, canvas: .iPhoneLandscape)
+        await assertScenarioSnapshot(.settings, canvas: .iPadPortrait)
+        await assertScenarioSnapshot(.settings, canvas: .iPadLandscape)
     }
 
     /// Selected rather than named, and the one test in the file that skips the
@@ -750,6 +995,117 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// crops.
     func testSessionCreationSheetContent() async {
         await assertLiveScreenSnapshot(of: processCreationSheet(), canvas: .sheet)
+    }
+
+    /// Renders a scenario and records that this test is what rendered it.
+    ///
+    /// The binding the disposition's name could not provide. `#function` is the
+    /// method actually running, so comparing it against the claimed name here
+    /// fails a scenario pointed at a test that renders something else — the
+    /// case the review raised, where a claim on `testLegacySessionList` passed
+    /// every guard because that method exists and has committed PNGs.
+    ///
+    /// Only scenario renderings go through here. `testTemplatesCapabilityGate`
+    /// and `testSessionCreationSheetContent` call `assertLiveScreenSnapshot`
+    /// directly and deliberately: neither is a scenario's own rendering — one
+    /// shows a section the scenario does not select, the other a sheet's
+    /// content standing alone — and routing them through this would claim they
+    /// were.
+    private func assertScenarioSnapshot(
+        _ scenario: ScreenshotScenario,
+        canvas: SnapshotCanvas,
+        testName: String = #function,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let runningTest = Self.methodName(ofFunction: testName)
+        XCTAssertTrue(
+            Self.test(runningTest, isTheClaimedRendererOf: scenario),
+            """
+            \(scenario) is rendered by \(runningTest), but its disposition \
+            names a different test. A scenario and the test that renders it \
+            have to agree; fix whichever is wrong.
+            """,
+            file: file,
+            line: line
+        )
+        scenarioRenderings.append((scenario, canvas))
+        // Forwarded rather than defaulted: `assertLiveScreenSnapshot` derives a
+        // golden's name from `#function`, so leaving it to default here would
+        // name every reference after this wrapper instead of after the test.
+        await assertLiveScreenSnapshot(
+            of: rootView(for: scenario),
+            canvas: canvas,
+            file: file,
+            testName: testName,
+            line: line
+        )
+    }
+
+    /// `#function` without its parentheses.
+    ///
+    /// `#function` in a method reads `testSessionList()`; the disposition names
+    /// the method. Parameterized so
+    /// `testTheFunctionNameParserDropsTheParentheses` can hand it a known input,
+    /// because a version returning the empty string would make every comparison
+    /// above fail loudly rather than silently — but one returning its argument
+    /// unchanged would make them all fail too, and neither is what this should
+    /// do.
+    static func methodName(ofFunction function: String) -> String {
+        guard let parenthesis = function.firstIndex(of: "(") else { return function }
+        return String(function[function.startIndex..<parenthesis])
+    }
+
+    /// Requires the test that just ran to have rendered what it claims.
+    ///
+    /// The other half of the binding, and the half that catches a claim never
+    /// exercised at all. `assertScenarioSnapshot` establishes that a rendered
+    /// scenario is claimed by the test rendering it; this establishes the
+    /// converse — a test named by a disposition rendered that scenario, on
+    /// exactly the canvases the disposition promises. A scenario pointed at a
+    /// legacy test or a section gate fails here when that test runs, because it
+    /// rendered no scenario at all.
+    ///
+    /// Per test rather than per suite, which is what makes it safe: it needs no
+    /// ordering between tests and no assumption that every test ran, so a
+    /// `-only-testing` run checks exactly the tests it selected.
+    override func tearDown() {
+        verifyThisTestRenderedWhatItClaims()
+        super.tearDown()
+    }
+
+    private func verifyThisTestRenderedWhatItClaims() {
+        let runningTest = Self.methodName(ofTestCaseName: name)
+        guard let claimed = Self.scenarioClaimedBy(runningTest) else { return }
+        let disposition = ScenarioDisposition.of(claimed)
+        XCTAssertEqual(
+            Set(scenarioRenderings.filter { $0.scenario == claimed }.map(\.canvas)),
+            disposition.declaredCanvases ?? [],
+            """
+            \(runningTest) is named by \(claimed) but did not render it on the \
+            canvases that scenario promises. A canvas dropped from the body \
+            leaves its committed golden on disk, so nothing else notices.
+            """
+        )
+    }
+
+    /// Whether this test is the one the scenario's disposition names.
+    ///
+    /// Extracted from `assertScenarioSnapshot` so it has a known-answer test:
+    /// inside the assertion it was only ever evaluated on agreeing pairs, so a
+    /// version returning `true` was indistinguishable from a working one — the
+    /// vacuity this file has now hit three times.
+    static func test(_ testName: String, isTheClaimedRendererOf scenario: ScreenshotScenario)
+        -> Bool
+    {
+        ScenarioDisposition.of(scenario).renderingTestName == testName
+    }
+
+    /// The scenario whose disposition names this test, if any.
+    static func scenarioClaimedBy(_ testName: String) -> ScreenshotScenario? {
+        ScreenshotScenario.allCases.first { scenario in
+            ScenarioDisposition.of(scenario).renderingTestName == testName
+        }
     }
 
     /// `RootView` on the section the scenario itself selects.
