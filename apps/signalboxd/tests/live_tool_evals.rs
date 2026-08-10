@@ -6730,35 +6730,54 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     let predicate_tail = &scope[outcome + 1..];
                     predicate_tail
                         .iter()
-                        .position(|word| word == "other")
-                        .is_some_and(|other| {
-                            predicate_tail[..other].iter().all(|word| {
-                                matches!(
-                                    word.as_str(),
-                                    "also"
-                                        | "and"
-                                        | "any"
-                                        | "change"
-                                        | "changed"
-                                        | "create"
-                                        | "created"
-                                        | "modify"
-                                        | "modified"
-                                        | "on"
-                                        | "or"
-                                        | "the"
-                                        | "write"
-                                        | "written"
-                                        | "wrote"
-                                )
-                            })
+                        .position(|word| is_collateral_file_qualifier(word))
+                        .is_some_and(|qualifier| {
+                            predicate_tail[qualifier + 1..]
+                                .iter()
+                                .any(|word| matches!(word.as_str(), "file" | "files"))
+                                && predicate_tail[..qualifier].iter().all(|word| {
+                                    matches!(
+                                        word.as_str(),
+                                        "also"
+                                            | "and"
+                                            | "any"
+                                            | "change"
+                                            | "changed"
+                                            | "create"
+                                            | "created"
+                                            | "modify"
+                                            | "modified"
+                                            | "on"
+                                            | "or"
+                                            | "the"
+                                            | "write"
+                                            | "written"
+                                            | "wrote"
+                                    )
+                                })
                         })
                 });
+                let read_only_file_denial = !file_creation_required
+                    && outcome.is_some_and(|outcome| {
+                        let predicate_tail = &scope[outcome + 1..];
+                        matches!(
+                            scope[outcome].as_str(),
+                            "change" | "changed" | "modify" | "modified"
+                        ) && predicate_tail
+                            .iter()
+                            .position(|word| matches!(word.as_str(), "file" | "files"))
+                            .is_some_and(|file| {
+                                predicate_tail[..file]
+                                    .iter()
+                                    .all(|word| matches!(word.as_str(), "any" | "the"))
+                            })
+                    });
                 matches!(word.as_str(), "never" | "no" | "not" | "without")
                     && outcome.is_some()
                     && !affirmative_not_only
                     && !no_is_collateral
                     && !collateral_only
+                    && !read_only_file_denial
             })
         });
     explicit_failure
