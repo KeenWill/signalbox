@@ -1551,6 +1551,13 @@ mod tests {
         permissions.set_mode(0o700);
         fs::set_permissions(&executable, permissions)
             .expect("catalog capture executable is private and executable");
+        fs::write(
+            workspace.path().join(CLAUDE_EXPECTED_BRIDGE_PATH_FILENAME),
+            bridge
+                .to_str()
+                .expect("catalog capture bridge path is valid UTF-8"),
+        )
+        .expect("expected catalog bridge path is written");
         let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
         let mut config =
             ClaudeCliConfig::new(&executable, bridge, workspace.path(), credential.clone());
@@ -1985,6 +1992,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     const CLAUDE_CAPTURED_READY_EXERCISE_FILENAME: &str = "captured-mcp-ready-exercised";
     #[cfg(target_os = "linux")]
+    const CLAUDE_EXPECTED_BRIDGE_PATH_FILENAME: &str = "expected-claude-mcp-bridge-path";
+    #[cfg(target_os = "linux")]
     const SYNTHETIC_CAPTURED_CATALOG_PATH: &str = "catalog with a \"quote\".json";
     #[cfg(target_os = "linux")]
     const SYNTHETIC_MCP_BRIDGE_PATH: &str = "synthetic-claude-mcp-bridge";
@@ -2022,6 +2031,12 @@ with open(sys.argv[3], encoding="utf-8") as source:
     settings = json.load(source)
 hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
 assert hook["type"] == "command"
+expected_bridge = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+assert server["command"] == expected_bridge
+quote = chr(39)
+shell_quote = lambda value: quote + value.replace(quote, quote + chr(92) + quote + quote) + quote
+expected_hook = f"{shell_quote(expected_bridge)} --wait-ready {shell_quote(arguments[2])}"
+assert hook["command"] == expected_hook
 shutil.copyfile(arguments[1], sys.argv[2])
 pathlib.Path(sys.argv[4]).write_text(arguments[1], encoding="utf-8")
 bridge = subprocess.Popen(
@@ -2064,7 +2079,8 @@ finally:
     if bridge.poll() is None:
         bridge.terminate()' \
   "$mcp_config" "$capture_dir/captured-mcp-catalog.json" "$settings" \
-  "$capture_dir/captured-mcp-catalog-path" "$capture_dir/captured-mcp-ready-exercised"
+  "$capture_dir/captured-mcp-catalog-path" "$capture_dir/captured-mcp-ready-exercised" \
+  "$capture_dir/expected-claude-mcp-bridge-path"
 "#;
 
     #[cfg(target_os = "linux")]
