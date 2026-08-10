@@ -3,7 +3,9 @@
 The runner connection authority head and durable loss epoch were verified
 against the parent slice (`agent/runner-loss-epoch`). Placement-relative
 lease-offer fencing was verified against this PR
-(`agent/runner-loss-propagation`).
+(`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
+and ordered page read were verified against this PR
+(`agent/runner-loss-session-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -333,6 +335,17 @@ Representation rules, all enforced in the schema:
   connections until a checked replacement installs a fresh baseline. This is the
   implemented not-yet-projected placement fence; bounded session propagation
   remains the committed unimplemented transaction described below.
+- Migration `202608080105` gives every new durable connection-loss epoch a
+  pending propagation cursor in the same transaction and backfills older loss
+  epochs as completed because migration `202608080104` already absorbed them
+  into the compatibility baseline. A repeatable-read page authenticates the
+  exact loss source and returns at most 64 current pinned or exact-identity
+  unpinned placements whose baselines precede that loss, ordered strictly after
+  the durable session-identity cursor. Cursor advancement is monotonic, cannot
+  pass an affected current placement, and cannot complete while one remains. The
+  cursor and ordered page are implemented; the per-session transaction that
+  changes placement, lease, turn, release, and runner-event state remains the
+  committed unimplemented propagation step below.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,

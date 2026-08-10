@@ -96,6 +96,7 @@ const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
 const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608080103;
+const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608080104;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -1077,6 +1078,174 @@ async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Er
 
 async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
     insert_session_for(pool, uuid(SESSION)).await
+}
+
+async fn insert_terminal_connection_loss_before_cursor_migration(
+    pool: &PgPool,
+    enrollment: RunnerEnrollmentId,
+    connection: RunnerConnectionEpoch,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, $2, 2, 'lost', 'transport_closed')",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(connection.get()))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_loss_epoch
+            (enrollment_id, loss_epoch, connection_epoch,
+             connection_event_ordinal)
+         VALUES ($1, 1, $2, 2)",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(connection.get()))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_connection_loss (enrollment_id, loss_epoch)
+         VALUES ($1, 1)",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_connection_authority_head
+            SET connection_event_ordinal = 2, latest_loss_epoch = 1
+          WHERE enrollment_id = $1 AND connection_epoch = $2",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(connection.get()))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+fn propagation_session(ordinal: u128) -> SessionId {
+    SessionId::from_uuid(Uuid::from_u128(
+        0xa200_0000_0000_0000_0000_0000_0000_0000 + ordinal,
+    ))
+}
+
+async fn insert_bounded_propagation_session_fixture(
+    pool: &PgPool,
+    runner: RunnerId,
+) -> Result<Vec<SessionId>, sqlx::Error> {
+    let sessions: Vec<_> = (1..=65).map(propagation_session).collect();
+    let session_uuids: Vec<_> = sessions.iter().copied().map(SessionId::into_uuid).collect();
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE session DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         SELECT session_id, 'owner_initiated', 'none'
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE session ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_scheduler (session_id)
+         SELECT session_id FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count)
+         SELECT session_id, 1, 1, 'created', 'identity', $2,
+                'runner_default', 'none', 'workspace_restricted', 0,
+                'unpinned', 0
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .bind(runner.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement
+            (session_id, event_ordinal)
+         SELECT session_id, 1
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(sessions)
+}
+
+async fn project_bounded_propagation_sessions(
+    pool: &PgPool,
+    sessions: &[SessionId],
+) -> Result<(), sqlx::Error> {
+    let session_uuids: Vec<_> = sessions.iter().copied().map(SessionId::into_uuid).collect();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, selector_capability_class,
+             directory_selection_kind, requested_working_directory,
+             requested_credential_profile_name, workspace_requirement_kind,
+             requested_repository_key, requested_sandbox_profile,
+             permission_override_count, state_kind, lost_runner_id,
+             loss_source_kind, pinned_runner_id,
+             pinned_working_directory, pinned_credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             pinned_tool_count, workspace_repository_key,
+             workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
+             workspace_clone_url_digest, workspace_credential_profile_name,
+             workspace_sandbox_profile, workspace_relative_path,
+             workspace_recovery_kind, workspace_branch_name, workspace_revision,
+             credential_grant_runner_id,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision)
+         SELECT placement.session_id, placement.event_ordinal + 1,
+                placement.placement_revision, 'runner_lost_before_pin',
+                placement.selector_kind, placement.selector_runner_id,
+                placement.selector_capability_class,
+                placement.directory_selection_kind,
+                placement.requested_working_directory,
+                placement.requested_credential_profile_name,
+                placement.workspace_requirement_kind,
+                placement.requested_repository_key,
+                placement.requested_sandbox_profile,
+                placement.permission_override_count,
+                'runner_lost_before_pin', placement.selector_runner_id,
+                NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                NULL
+           FROM runner_session_placement_record AS placement
+           JOIN runner_current_session_placement AS current_placement
+             ON current_placement.session_id = placement.session_id
+            AND current_placement.event_ordinal = placement.event_ordinal
+          WHERE placement.session_id = ANY($1::uuid[])",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = ANY($1::uuid[])",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 async fn dispatch_next_outbox_event(
@@ -3112,13 +3281,12 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_backfills_pinned_state
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
-    store
-        .transition_connection(
-            expected_enrollment.enrollment(),
-            connection.epoch(),
-            RunnerConnectionTransition::TransportClosed,
-        )
-        .await?;
+    insert_terminal_connection_loss_before_cursor_migration(
+        &pool,
+        expected_enrollment.enrollment(),
+        connection.epoch(),
+    )
+    .await?;
     let loss = store
         .load_current_connection_loss(expected_enrollment.enrollment())
         .await?
@@ -3143,6 +3311,218 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_backfills_pinned_state
     assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
     assert_eq!(baseline.1, Decimal::from(loss.loss_epoch().get()));
     assert_eq!(loaded, pin.lease);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: losses predating bounded propagation migrate to an exact completed
+/// cursor because their placements received the compatibility loss baseline.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_migration_backfills_completed_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    insert_terminal_connection_loss_before_cursor_migration(
+        &pool,
+        expected_enrollment.enrollment(),
+        connection.epoch(),
+    )
+    .await?;
+    migrate(&pool).await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the migrated terminal connection retains its loss");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.loss(), loss);
+    assert_eq!(page.propagated_through(), None);
+    assert!(page.sessions().is_empty());
+    assert!(page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a new loss owns a pending cursor whose ordered read page is capped
+/// at 64 sessions and resumes strictly after its durable session identity.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    let first_page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(first_page.loss(), loss);
+    assert_eq!(first_page.propagated_through(), None);
+    assert_eq!(first_page.sessions(), &expected_sessions[..64]);
+    assert!(!first_page.is_complete());
+
+    let skipped = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[63].into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a durable cursor cannot skip an affected session");
+    project_bounded_propagation_sessions(&pool, &expected_sessions[..64]).await?;
+    sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[63].into_uuid())
+    .execute(&pool)
+    .await?;
+    let second_page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_check_violation(skipped);
+    assert_eq!(second_page.loss(), loss);
+    assert_eq!(
+        second_page.propagated_through(),
+        Some(expected_sessions[63])
+    );
+    assert_eq!(second_page.sessions(), &expected_sessions[64..]);
+    assert!(!second_page.is_complete());
+
+    let rewound = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[62].into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a durable cursor cannot rewind its session identity");
+    let premature_completion = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET state_kind = 'completed'
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .execute(&pool)
+    .await
+    .expect_err("a durable cursor cannot complete before its final session");
+    project_bounded_propagation_sessions(&pool, &expected_sessions[64..]).await?;
+    sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET state_kind = 'completed'
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .execute(&pool)
+    .await?;
+    let completed = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_check_violation(rewound);
+    assert_check_violation(premature_completion);
+    assert_eq!(completed.loss(), loss);
+    assert_eq!(completed.propagated_through(), Some(expected_sessions[63]));
+    assert!(completed.sessions().is_empty());
+    assert!(completed.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a runner-loss propagation cursor is durable evidence and cannot be
+/// deleted independently of its exact loss epoch.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_propagation_cursor_rejects_delete() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its durable cursor");
+    let deleted = sqlx::query(
+        "DELETE FROM runner_connection_loss_propagation
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .execute(&pool)
+    .await
+    .expect_err("a durable runner-loss cursor cannot be deleted");
+
+    assert_check_violation(deleted);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: bulk truncation cannot bypass runner-loss cursor durability.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_propagation_cursor_rejects_truncate() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let truncated = sqlx::query("TRUNCATE runner_connection_loss_propagation")
+        .execute(&pool)
+        .await
+        .expect_err("durable runner-loss cursors cannot be truncated");
+
+    assert_check_violation(truncated);
     drop(pool);
     Ok(())
 }
