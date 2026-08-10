@@ -3756,6 +3756,45 @@ async fn s32_inv044_checked_runner_replacement_requires_a_live_successor_connect
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_checked_runner_replacement_rejects_a_successor_without_a_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    append_runner_lost_projection(&pool, lost.session()).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let successor_registration = store.register(&successor, advertisement()).await?;
+    let replacement_request = lost.request().clone();
+    let replacement = lost
+        .replace_lost_runner(
+            replacement_request,
+            successor_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/replacement".to_owned())
+                .expect("the replacement directory is valid"),
+            None,
+            pin.grant,
+        )
+        .expect("the caller-held registration can prepare a replacement");
+    let rejected = store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &successor_registration,
+            replacement.grant.as_ref(),
+        )
+        .await
+        .expect_err("a successor without a connection cannot install replacement authority");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-044: the relational replacement shape preserves the checked future
 /// same-runner recovery reserved exclusively for registration-triggered loss.
 #[tokio::test]
@@ -4394,6 +4433,50 @@ async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Resul
     assert_eq!(loaded.placement(), &lost);
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_load_rejects_pinned_facts_on_loss_before_pin() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET pinned_runner_id = lost_runner_id
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("loss before pin cannot discard contradictory pinned authority");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
     drop(pool);
     Ok(())
 }
