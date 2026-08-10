@@ -1788,6 +1788,7 @@ mod tests {
     const SYNTHETIC_CARGO_COLOR_OPTION_VALUE: &str = "always";
     const SYNTHETIC_CARGO_CHANGE_DIRECTORY_OPTION_VALUE: &str = "synthetic-workspace";
     const SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE: &str = "unstable-options";
+    const SYNTHETIC_POST_SUBCOMMAND_UNSTABLE_OPTION_VALUE: &str = "profile-rustflags";
     const CARGO_RELEASE_OPTION: &str = "--release";
     const CARGO_RELEASE_SHORT_OPTION: &str = "-r";
     const CARGO_IGNORE_RUST_VERSION_OPTION: &str = "--ignore-rust-version";
@@ -1952,16 +1953,26 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
                 index += 1;
                 continue;
             }
+            if argument == OsStr::new(CARGO_UNSTABLE_OPTION) {
+                unstable_flags.push(arguments.get(index + 1)?.to_os_string());
+                index += 2;
+                continue;
+            }
+            if let Some(unstable_flag) = argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix(CARGO_UNSTABLE_OPTION))
+                .filter(|unstable_flag| !unstable_flag.is_empty())
+            {
+                unstable_flags.push(OsString::from(unstable_flag));
+                index += 1;
+                continue;
+            }
             if !found_test_subcommand {
                 if matches!(
                     argument.to_str(),
                     Some(CARGO_TEST_SUBCOMMAND | CARGO_TEST_SUBCOMMAND_ALIAS)
                 ) {
                     found_test_subcommand = true;
-                } else if argument == OsStr::new(CARGO_UNSTABLE_OPTION) {
-                    unstable_flags.push(arguments.get(index + 1)?.to_os_string());
-                    index += 2;
-                    continue;
                 } else if cargo_global_option_takes_value(argument) {
                     arguments.get(index + 1)?;
                     index += 2;
@@ -2749,11 +2760,14 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
 
     #[test]
     fn bridge_build_preserves_parent_cargo_unstable_flags() {
+        let attached_unstable_option =
+            format!("{CARGO_UNSTABLE_OPTION}{SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE}");
         let arguments = [
             OsStr::new(CARGO_PROGRAM_STEM),
-            OsStr::new(CARGO_UNSTABLE_OPTION),
-            OsStr::new(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE),
+            OsStr::new(&attached_unstable_option),
             OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(CARGO_UNSTABLE_OPTION),
+            OsStr::new(SYNTHETIC_POST_SUBCOMMAND_UNSTABLE_OPTION_VALUE),
         ];
         let invocation = cargo_test_invocation_from_arguments(&arguments, Path::new("."))
             .expect("the synthetic Cargo test invocation is admitted");
@@ -2762,13 +2776,18 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
 
         assert_eq!(
             invocation.unstable_flags,
-            vec![OsString::from(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE)]
+            vec![
+                OsString::from(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE),
+                OsString::from(SYNTHETIC_POST_SUBCOMMAND_UNSTABLE_OPTION_VALUE),
+            ]
         );
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             vec![
                 OsStr::new(CARGO_UNSTABLE_OPTION),
                 OsStr::new(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE),
+                OsStr::new(CARGO_UNSTABLE_OPTION),
+                OsStr::new(SYNTHETIC_POST_SUBCOMMAND_UNSTABLE_OPTION_VALUE),
             ]
         );
     }
