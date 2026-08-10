@@ -35,9 +35,10 @@ use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    SessionCredentialPin, SessionModelCredential, create_session::CreateSessionRepository,
-    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
-    start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
+    ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
+    create_session::CreateSessionRepository, local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository, start_eligible_turn::StartEligibleTurnRepository,
+    submit_input::SubmitInputRepository,
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
@@ -394,64 +395,73 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         provider,
     } = arguments;
     let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
-    let (selection, targets, credential_reference, credential_pin, provider) = match provider {
-        DebugProvider::Scripted { reply } => {
-            let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
-            let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+    let (selection, targets, credential_reference, credential_pin, credential_families, provider) =
+        match provider {
+            DebugProvider::Scripted { reply } => {
+                let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
+                let targets =
+                    ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+                        selection,
+                        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                            Uuid::now_v7(),
+                        )),
+                    )])
+                    .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
+                (
+                    selection,
+                    targets,
+                    ModelCallCredentialReference::new("scripted-test"),
+                    SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                        "scripted-debug",
+                        "scripted-test",
+                    )])
+                    .map_err(|_| DebugDriverError::Configuration)?,
+                    // The scripted provider routes no real family, so it carries an
+                    // empty catalog rather than borrowing the Anthropic one.
+                    ModelCredentialFamilyCatalog::try_new([])
+                        .map_err(|_| DebugDriverError::Configuration)?,
+                    DebugProviderRuntime::Scripted(
+                        AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
+                    ),
+                )
+            }
+            DebugProvider::Anthropic {
                 selection,
-                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7())),
-            )])
-            .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
-            (
-                selection,
-                targets,
-                ModelCallCredentialReference::new("scripted-test"),
-                SessionCredentialPin::try_new(vec![SessionModelCredential::new(
-                    "scripted-debug",
-                    "scripted-test",
-                )])
-                .map_err(|_| DebugDriverError::Configuration)?,
-                DebugProviderRuntime::Scripted(
-                    AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
-                ),
-            )
-        }
-        DebugProvider::Anthropic {
-            selection,
-            model_configuration_file,
-        } => {
-            let configuration = HubModelConfiguration::read(&model_configuration_file)
-                .map_err(|_| DebugDriverError::Configuration)?;
-            require_anthropic_selection(&configuration, selection)?;
-            let credential_profile = configuration
-                .resolve_direct_model(selection)
-                .ok_or(DebugDriverError::Configuration)?
-                .credential_profile()
-                .to_owned();
-            let credential_access = FileCredentialAccess::from_files(
-                configuration
-                    .file_credential_profiles(ModelAdapter::Anthropic)
-                    .map(|(reference, path)| {
-                        (CredentialReference::new(reference), path.to_path_buf())
-                    }),
-            );
-            let credential_reference = ModelCallCredentialReference::new(credential_profile);
-            let mut adapter_configuration = AnthropicConfig::new();
-            adapter_configuration.model_capabilities =
-                configuration.runtime_model_capability_catalog();
-            let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
-                .map_err(|_| DebugDriverError::Configuration)?;
-            let provider =
-                RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
-            (
-                selection,
-                configuration.target_catalog(),
-                credential_reference,
-                configuration.session_credential_pin(),
-                DebugProviderRuntime::Anthropic(provider),
-            )
-        }
-    };
+                model_configuration_file,
+            } => {
+                let configuration = HubModelConfiguration::read(&model_configuration_file)
+                    .map_err(|_| DebugDriverError::Configuration)?;
+                require_anthropic_selection(&configuration, selection)?;
+                let credential_profile = configuration
+                    .resolve_direct_model(selection)
+                    .ok_or(DebugDriverError::Configuration)?
+                    .credential_profile()
+                    .to_owned();
+                let credential_access = FileCredentialAccess::from_files(
+                    configuration
+                        .file_credential_profiles(ModelAdapter::Anthropic)
+                        .map(|(reference, path)| {
+                            (CredentialReference::new(reference), path.to_path_buf())
+                        }),
+                );
+                let credential_reference = ModelCallCredentialReference::new(credential_profile);
+                let mut adapter_configuration = AnthropicConfig::new();
+                adapter_configuration.model_capabilities =
+                    configuration.runtime_model_capability_catalog();
+                let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
+                    .map_err(|_| DebugDriverError::Configuration)?;
+                let provider =
+                    RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
+                (
+                    selection,
+                    configuration.target_catalog(),
+                    credential_reference,
+                    configuration.session_credential_pin(),
+                    configuration.credential_family_catalog(),
+                    DebugProviderRuntime::Anthropic(provider),
+                )
+            }
+        };
     let connection_options =
         local_test_connection_options(&database_url).map_err(|_| DebugDriverError::Database)?;
     let pool = PgPoolOptions::new()
@@ -513,7 +523,13 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
     let turn = origin.turn();
     let work_source = DebugSessionWorkSource::new(session);
 
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference);
+    // The diagnostic composes the same session-credential catalog production
+    // does. Without it a model whose enabled fast mode routes to an alternate
+    // serving target resolves the base family's profile while the runtime
+    // switches families, so the call would authenticate — and bill — against
+    // an account the route did not select.
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
+        .with_session_credentials(credential_families);
     let activation = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),

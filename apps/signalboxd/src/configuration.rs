@@ -3470,6 +3470,13 @@ mod tests {
 
     /// The exact pool block [`CONFIGURATION`] declares, so a test that cares
     /// about pool shape states its own replacement in full.
+    /// The exact pool name [`ANTHROPIC_POOL`] declares.
+    ///
+    /// Bound once so a rename of the fixture cannot leave an assertion
+    /// comparing against a stale literal (testing-style rule 6); the helper
+    /// below asserts the fixture still spells it.
+    const ANTHROPIC_POOL_NAME: &str = "anthropic-main";
+
     const ANTHROPIC_POOL: &str = r#"[[credential_pools]]
 name = "anthropic-main"
 tie_break = "first_listed"
@@ -3604,6 +3611,10 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert!(
             CONFIGURATION.contains(ANTHROPIC_POOL),
             "fixture declares the pool block tests replace"
+        );
+        assert!(
+            ANTHROPIC_POOL.contains(ANTHROPIC_POOL_NAME),
+            "the bound pool name is the one the fixture block declares"
         );
         CONFIGURATION.replace(ANTHROPIC_POOL, pool)
     }
@@ -5127,7 +5138,7 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&undeclared_profile).err(),
             Some(HubModelConfigurationError::UnknownPoolMemberProfile {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
                 credential_profile: Arc::from(undeclared_profile_name),
             })
         );
@@ -5338,7 +5349,7 @@ members = []"#,
         assert_eq!(
             HubModelConfiguration::parse(&empty_pool).err(),
             Some(HubModelConfigurationError::EmptyCredentialPool {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5359,7 +5370,7 @@ members = [
         assert_eq!(
             HubModelConfiguration::parse(&repeated_member).err(),
             Some(HubModelConfigurationError::DuplicatePoolMember {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
                 credential_profile: Arc::from("anthropic-primary"),
             })
         );
@@ -5384,7 +5395,7 @@ members = [{ profile = "anthropic-overflow", priority = 1 }]"#,
         assert_eq!(
             HubModelConfiguration::parse(&repeated_pool).err(),
             Some(HubModelConfigurationError::DuplicateCredentialPool {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5402,7 +5413,7 @@ members = [{ profile = "anthropic-primary", priority = 0 }]"#,
         assert_eq!(
             HubModelConfiguration::parse(&zero_priority).err(),
             Some(HubModelConfigurationError::InvalidMemberPriority {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5420,7 +5431,7 @@ members = [{ profile = "anthropic-primary", priority = 4294967296 }]"#,
         assert_eq!(
             HubModelConfiguration::parse(&overflowing_priority).err(),
             Some(HubModelConfigurationError::InvalidMemberPriority {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5441,7 +5452,7 @@ members = [
         assert_eq!(
             HubModelConfiguration::parse(&mixed_adapters).err(),
             Some(HubModelConfigurationError::ConflictingPoolAdapters {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5456,7 +5467,7 @@ members = [
         assert_eq!(
             HubModelConfiguration::parse(&disagreeing_mapping).err(),
             Some(HubModelConfigurationError::ConflictingPoolAdapters {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5596,7 +5607,7 @@ members = [{ profile = "anthropic-primary", priority = 1 }]"#,
         assert_eq!(
             HubModelConfiguration::parse(&reserved).err(),
             Some(HubModelConfigurationError::UnobservedCapacityPolicy {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5633,7 +5644,7 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
         assert_eq!(
             HubModelConfiguration::parse(&reserved).err(),
             Some(HubModelConfigurationError::UnobservedCapacityPolicy {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5674,7 +5685,7 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
         assert_eq!(
             HubModelConfiguration::parse(&substituting).err(),
             Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
@@ -5692,7 +5703,7 @@ members = [{ profile = "anthropic-primary", priority = 1 }]"#,
         assert_eq!(
             HubModelConfiguration::parse(&least_used).err(),
             Some(HubModelConfigurationError::UnobservedCapacityPolicy {
-                credential_pool: Arc::from("anthropic-main"),
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
             })
         );
     }
