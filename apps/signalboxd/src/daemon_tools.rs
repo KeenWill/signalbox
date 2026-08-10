@@ -2019,7 +2019,7 @@ test -n "$mcp_config"
 test -n "$settings"
 capture_dir=${0%/*}
 cp "$mcp_config" "$capture_dir/captured-mcp-config.json"
-python3 -c 'import json, pathlib, shutil, subprocess, sys
+python3 -c 'import json, pathlib, shlex, shutil, subprocess, sys
 with open(sys.argv[1], encoding="utf-8") as source:
     servers = json.load(source)["mcpServers"]
 assert len(servers) == 1
@@ -2033,10 +2033,9 @@ hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
 assert hook["type"] == "command"
 expected_bridge = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 assert server["command"] == expected_bridge
-quote = chr(39)
-shell_quote = lambda value: quote + value.replace(quote, quote + chr(92) + quote + quote) + quote
-expected_hook = f"{shell_quote(expected_bridge)} --wait-ready {shell_quote(arguments[2])}"
-assert hook["command"] == expected_hook
+hook_arguments = shlex.split(hook["command"])
+expected_hook_arguments = [expected_bridge, "--wait-ready", arguments[2]]
+assert hook_arguments == expected_hook_arguments or hook_arguments == ["exec", *expected_hook_arguments]
 shutil.copyfile(arguments[1], sys.argv[2])
 pathlib.Path(sys.argv[4]).write_text(arguments[1], encoding="utf-8")
 bridge = subprocess.Popen(
