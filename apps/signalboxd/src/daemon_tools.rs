@@ -1716,6 +1716,7 @@ mod tests {
     struct CargoTestInvocation {
         profile: OsString,
         config_overrides: Vec<OsString>,
+        unstable_flags: Vec<OsString>,
         ignore_rust_version: bool,
         invocation_directory: PathBuf,
     }
@@ -1926,6 +1927,7 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         }
         let mut profile = None;
         let mut config_overrides = Vec::new();
+        let mut unstable_flags = Vec::new();
         let mut ignore_rust_version = false;
         let mut found_test_subcommand = false;
         let mut index = 1;
@@ -1956,6 +1958,10 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
                     Some(CARGO_TEST_SUBCOMMAND | CARGO_TEST_SUBCOMMAND_ALIAS)
                 ) {
                     found_test_subcommand = true;
+                } else if argument == OsStr::new(CARGO_UNSTABLE_OPTION) {
+                    unstable_flags.push(arguments.get(index + 1)?.to_os_string());
+                    index += 2;
+                    continue;
                 } else if cargo_global_option_takes_value(argument) {
                     arguments.get(index + 1)?;
                     index += 2;
@@ -1995,6 +2001,7 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         found_test_subcommand.then(|| CargoTestInvocation {
             profile: profile.unwrap_or_else(|| OsString::from(CARGO_TEST_PROFILE)),
             config_overrides,
+            unstable_flags,
             ignore_rust_version,
             invocation_directory: invocation_directory.to_path_buf(),
         })
@@ -2003,8 +2010,14 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
     fn cargo_global_option_takes_value(argument: &OsStr) -> bool {
         matches!(
             argument.to_str(),
-            Some(CARGO_COLOR_OPTION | CARGO_CHANGE_DIRECTORY_OPTION | CARGO_UNSTABLE_OPTION)
+            Some(CARGO_COLOR_OPTION | CARGO_CHANGE_DIRECTORY_OPTION)
         )
+    }
+
+    fn apply_cargo_unstable_flags(command: &mut Command, flags: &[OsString]) {
+        for flag in flags {
+            command.arg(CARGO_UNSTABLE_OPTION).arg(flag);
+        }
     }
 
     fn normalized_cargo_config_override(
@@ -2730,6 +2743,32 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             vec![
                 OsStr::new(CARGO_MANIFEST_PATH_OPTION),
                 expected_manifest.as_os_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn bridge_build_preserves_parent_cargo_unstable_flags() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_UNSTABLE_OPTION),
+            OsStr::new(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+        ];
+        let invocation = cargo_test_invocation_from_arguments(&arguments, Path::new("."))
+            .expect("the synthetic Cargo test invocation is admitted");
+        let mut command = Command::new(CARGO_PROGRAM_STEM);
+        apply_cargo_unstable_flags(&mut command, &invocation.unstable_flags);
+
+        assert_eq!(
+            invocation.unstable_flags,
+            vec![OsString::from(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE)]
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new(CARGO_UNSTABLE_OPTION),
+                OsStr::new(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE),
             ]
         );
     }
@@ -3824,6 +3863,7 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         require_direct_bridge_execution(&selection);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let mut build_command = Command::new(cargo);
+        apply_cargo_unstable_flags(&mut build_command, &invocation.unstable_flags);
         build_command
             .args([
                 "build",
