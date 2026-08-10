@@ -523,6 +523,7 @@ const SYNTHETIC_COLLATERAL_COULD_NOT_REPORT: &str =
     "Created exec-result.txt; I could not make changes outside the workspace.";
 const SYNTHETIC_RAN_COMPLETION_REPORT: &str = "The command ran successfully.";
 const SYNTHETIC_HEDGED_RUN_REPORT: &str = "The command might have run.";
+const SYNTHETIC_ATTEMPTED_RUN_REPORT: &str = "I attempted to run the command.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -7828,6 +7829,7 @@ fn report_words_deny_success(
     });
     let deferred_completion = report_has_deferred_outcome(report);
     let hedged_completion = report_hedges_outcome(report);
+    let attempted_completion = report_only_attempts_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
     let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
         clause.iter().enumerate().any(|(index, word)| {
@@ -7957,6 +7959,7 @@ fn report_words_deny_success(
         || negative_nothing_claim
         || deferred_completion
         || hedged_completion
+        || attempted_completion
         || affirmative_pending
         || scoped_negation
 }
@@ -8022,6 +8025,34 @@ fn report_hedges_outcome(report: &str) -> bool {
                 && scope.iter().any(|word| is_negative_outcome(word))
                 && !collateral_file_assurance
                 && !scope_is_confinement_assurance(scope)
+        })
+    })
+}
+
+fn report_only_attempts_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..];
+            let scope = &scope[..scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "and" | "but" | "then"))
+                .unwrap_or(scope.len())];
+            let infinitive_outcome = scope
+                .windows(2)
+                .any(|claim| claim[0] == "to" && is_negative_outcome(&claim[1]));
+            let gerund_outcome = scope.first().is_some_and(|word| is_negative_outcome(word));
+            matches!(
+                word.as_str(),
+                "attempt"
+                    | "attempted"
+                    | "attempting"
+                    | "prepare"
+                    | "prepared"
+                    | "preparing"
+                    | "tried"
+                    | "try"
+                    | "trying"
+            ) && (infinitive_outcome || gerund_outcome)
         })
     })
 }
@@ -9576,6 +9607,18 @@ fn forced_sandboxed_exec_report_accepts_a_successful_run() {
 fn forced_sandboxed_exec_report_rejects_a_hedged_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_HEDGED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_attempted_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ATTEMPTED_RUN_REPORT, false);
 
     assert!(!forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
