@@ -2064,6 +2064,7 @@ impl FamilySuite {
             &self.workspace_seed_modified_times,
             &self.workspace_seed_entry_identities,
             &self.workspace_seed_extended_attributes,
+            &self.workspace_seed_inode_flags,
             self.executor
                 .filesystem_execution_window(SANDBOXED_EXEC_NAME),
         )
@@ -2076,6 +2077,7 @@ fn exec_natural_entries_match(
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
     seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_inode_flags: &BTreeMap<PathBuf, u32>,
     execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     match fs::read(root.join(EXEC_RESULT_PATH)) {
@@ -2125,6 +2127,12 @@ fn exec_natural_entries_match(
             root,
             seed_extended_attributes,
             Path::new(EXEC_RESULT_PATH),
+        )?
+        && workspace_inode_flags_match_for_mutation_with_reference(
+            root,
+            seed_inode_flags,
+            Path::new(EXEC_RESULT_PATH),
+            Path::new("Cargo.toml"),
         )?)
 }
 
@@ -3487,10 +3495,25 @@ fn workspace_inode_flags_match_for_mutation(
     expected: &BTreeMap<PathBuf, u32>,
     target: &Path,
 ) -> EvalResult<bool> {
+    workspace_inode_flags_match_for_mutation_with_reference(
+        root,
+        expected,
+        target,
+        Path::new(WORKSPACE_SEED_PATH),
+    )
+}
+
+fn workspace_inode_flags_match_for_mutation_with_reference(
+    root: &Path,
+    expected: &BTreeMap<PathBuf, u32>,
+    target: &Path,
+    creation_reference: &Path,
+) -> EvalResult<bool> {
     Ok(inode_flag_snapshots_match_for_mutation(
         workspace_inode_flags(root)?,
         expected,
         target,
+        creation_reference,
     ))
 }
 
@@ -3498,13 +3521,14 @@ fn inode_flag_snapshots_match_for_mutation(
     actual: BTreeMap<PathBuf, u32>,
     expected: &BTreeMap<PathBuf, u32>,
     target: &Path,
+    creation_reference: &Path,
 ) -> bool {
     if expected.is_empty() {
         return actual.is_empty();
     }
     let mut expected = expected.clone();
     if !expected.contains_key(target) {
-        let Some(default_flags) = expected.get(Path::new(WORKSPACE_SEED_PATH)).copied() else {
+        let Some(default_flags) = expected.get(creation_reference).copied() else {
             return false;
         };
         expected.insert(target.to_path_buf(), default_flags);
@@ -18147,6 +18171,7 @@ type PreparedExecNaturalWorkspace = (
     BTreeMap<PathBuf, SystemTime>,
     BTreeMap<PathBuf, FilesystemIdentity>,
     BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    BTreeMap<PathBuf, u32>,
     FilesystemExecutionTimeWindow,
 );
 
@@ -18168,6 +18193,7 @@ fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace>
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let seed_inode_flags = workspace_inode_flags(workspace.path())?;
     let result = workspace.path().join(EXEC_RESULT_PATH);
     let started = current_filesystem_recorded_time()?;
     fs::write(&result, EXEC_RESULT)?;
@@ -18183,6 +18209,7 @@ fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace>
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         FilesystemExecutionTimeWindow { started, finished },
     ))
 }
@@ -18205,8 +18232,15 @@ fn create_cargo_target_directory(root: &Path) -> EvalResult<FilesystemExecutionT
 #[cfg(unix)]
 #[test]
 fn exec_natural_created_file_gate_rejects_changed_ownership() -> EvalResult {
-    let (workspace, _entries, _times, expected_identities, _attributes, _execution_window) =
-        prepared_exec_natural_workspace()?;
+    let (
+        workspace,
+        _entries,
+        _times,
+        expected_identities,
+        _attributes,
+        _inode_flags,
+        _execution_window,
+    ) = prepared_exec_natural_workspace()?;
     let target = Path::new(EXEC_RESULT_PATH);
     let mut actual_identities = workspace_entry_identities(workspace.path())?;
     let changed_group_id = actual_identities[target].group_id.wrapping_add(1);
@@ -18226,8 +18260,15 @@ fn exec_natural_created_file_gate_rejects_changed_ownership() -> EvalResult {
 #[cfg(unix)]
 #[test]
 fn exec_natural_created_file_gate_rejects_a_different_device() -> EvalResult {
-    let (workspace, _entries, _times, expected_identities, _attributes, _execution_window) =
-        prepared_exec_natural_workspace()?;
+    let (
+        workspace,
+        _entries,
+        _times,
+        expected_identities,
+        _attributes,
+        _inode_flags,
+        _execution_window,
+    ) = prepared_exec_natural_workspace()?;
     let target = Path::new(EXEC_RESULT_PATH);
     let mut actual_identities = workspace_entry_identities(workspace.path())?;
     actual_identities
@@ -18246,7 +18287,7 @@ fn exec_natural_created_file_gate_rejects_a_different_device() -> EvalResult {
 #[cfg(unix)]
 #[test]
 fn exec_natural_created_file_gate_rejects_collateral_write_permissions() -> EvalResult {
-    let (workspace, entries, times, identities, attributes, execution_window) =
+    let (workspace, entries, times, identities, attributes, inode_flags, execution_window) =
         prepared_exec_natural_workspace()?;
     fs::set_permissions(
         workspace.path().join(EXEC_RESULT_PATH),
@@ -18259,6 +18300,7 @@ fn exec_natural_created_file_gate_rejects_collateral_write_permissions() -> Eval
         &times,
         &identities,
         &attributes,
+        &inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18693,6 +18735,7 @@ fn exec_natural_state_accepts_only_the_requested_output_addition() -> EvalResult
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
 
@@ -18702,6 +18745,63 @@ fn exec_natural_state_accepts_only_the_requested_output_addition() -> EvalResult
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_natural_state_rejects_output_inode_flag_drift() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let output = fs::File::open(workspace.path().join(EXEC_RESULT_PATH))?;
+    let flags = rustix::fs::ioctl_getflags(&output)?;
+    rustix::fs::ioctl_setflags(&output, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_natural_state_rejects_seed_inode_flag_drift() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let seed = fs::File::open(workspace.path().join("Cargo.toml"))?;
+    let flags = rustix::fs::ioctl_getflags(&seed)?;
+    rustix::fs::ioctl_setflags(&seed, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18715,6 +18815,7 @@ fn exec_natural_state_rejects_out_of_window_output_times() -> EvalResult {
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
     fs::File::open(workspace.path().join(EXEC_RESULT_PATH))?
@@ -18726,6 +18827,7 @@ fn exec_natural_state_rejects_out_of_window_output_times() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18739,6 +18841,7 @@ fn exec_natural_state_rejects_out_of_window_parent_times() -> EvalResult {
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
     fs::File::open(workspace.path())?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
@@ -18749,6 +18852,7 @@ fn exec_natural_state_rejects_out_of_window_parent_times() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18762,6 +18866,7 @@ fn exec_natural_state_rejects_a_mutated_seed_file() -> EvalResult {
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
     fs::write(
@@ -18775,6 +18880,7 @@ fn exec_natural_state_rejects_a_mutated_seed_file() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18788,6 +18894,7 @@ fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
     fs::write(
@@ -18801,6 +18908,7 @@ fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18815,6 +18923,7 @@ fn exec_natural_state_rejects_root_extended_attribute_drift() -> EvalResult {
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
     let root = Path::new("");
@@ -18835,6 +18944,7 @@ fn exec_natural_state_rejects_root_extended_attribute_drift() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18849,6 +18959,7 @@ fn exec_natural_state_rejects_byte_identical_seed_replacement() -> EvalResult {
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
     replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
@@ -18859,6 +18970,7 @@ fn exec_natural_state_rejects_byte_identical_seed_replacement() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18872,6 +18984,7 @@ fn exec_result_inspection_propagates_failures() -> EvalResult {
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     ) = prepared_exec_natural_workspace()?;
     fs::remove_file(workspace.path().join(EXEC_RESULT_PATH))?;
@@ -18884,6 +18997,7 @@ fn exec_result_inspection_propagates_failures() -> EvalResult {
             &seed_modified_times,
             &seed_entry_identities,
             &seed_extended_attributes,
+            &seed_inode_flags,
             Some(execution_window),
         )
         .is_err()
