@@ -4942,6 +4942,45 @@ async fn s32_inv044_checked_runner_replacement_requires_a_live_successor_connect
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_checked_runner_replacement_rejects_a_successor_without_a_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    append_runner_lost_projection(&pool, lost.session()).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let successor_registration = store.register(&successor, advertisement()).await?;
+    let replacement_request = lost.request().clone();
+    let replacement = lost
+        .replace_lost_runner(
+            replacement_request,
+            successor_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/replacement".to_owned())
+                .expect("the replacement directory is valid"),
+            None,
+            pin.grant,
+        )
+        .expect("the caller-held registration can prepare a replacement");
+    let rejected = store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &successor_registration,
+            replacement.grant.as_ref(),
+        )
+        .await
+        .expect_err("a successor without a connection cannot install replacement authority");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-044: the relational replacement shape preserves the checked future
 /// same-runner recovery reserved exclusively for registration-triggered loss.
 #[tokio::test]
@@ -5550,6 +5589,50 @@ async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Resul
     assert_eq!(loaded.placement(), &lost);
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_load_rejects_pinned_facts_on_loss_before_pin() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET pinned_runner_id = lost_runner_id
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("loss before pin cannot discard contradictory pinned authority");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
     drop(pool);
     Ok(())
 }
@@ -7763,6 +7846,180 @@ async fn s32_inv009_inv044_runner_recovery_rechecks_changed_tool_attempt()
     .execute(&pool)
     .await
     .expect_err("tool-attempt changes must preserve the exact runner recovery wait");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a continuation written after the wait must not leave its
+/// predecessor masquerading as the yielded chain-tip recovery boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rechecks_turn_attempt_continuations()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let rejected = sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'ended', 'without_stop', 'known_failure')",
+    )
+    .bind(uuid(0xa16e))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn_attempt.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a later continuation must invalidate the stale yielded boundary");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a lease-head rewrite after wait admission must recheck
+/// the exact loss event that authorized runner recovery.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rechecks_changed_lease_head()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let correlation = pin.lease.correlation();
+    sqlx::query(
+        "ALTER TABLE runner_current_lease_event
+         DISABLE TRIGGER runner_current_lease_event_advances",
+    )
+    .execute(&pool)
+    .await?;
+    let rejected = sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 1
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&pool)
+    .await
+    .expect_err("a lease-head rewrite must preserve runner-recovery loss authority");
+    sqlx::query(
+        "ALTER TABLE runner_current_lease_event
+         ENABLE TRIGGER runner_current_lease_event_advances",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: mutating the lease event under an unchanged head must
+/// also recheck the execution-loss classification retained by the wait.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rechecks_changed_lease_event()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let correlation = pin.lease.correlation();
+    sqlx::query(
+        "ALTER TABLE runner_lease_event
+         DISABLE TRIGGER runner_lease_event_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let rejected = sqlx::query(
+        "UPDATE runner_lease_event
+            SET state_kind = 'claimed'
+          WHERE lease_id = $1 AND generation = $2 AND event_ordinal = 2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&pool)
+    .await
+    .expect_err("lease-event mutation must preserve runner-recovery loss authority");
+    sqlx::query(
+        "ALTER TABLE runner_lease_event
+         ENABLE TRIGGER runner_lease_event_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
 
     assert_check_violation(rejected);
     drop(pool);

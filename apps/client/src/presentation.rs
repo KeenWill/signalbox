@@ -1650,9 +1650,9 @@ impl<'a> Output<'a> {
                 state,
             } => {
                 let working_directory_present = working_directory.is_some();
-                let working_directory = working_directory.as_deref().map_or_else(
+                let working_directory = working_directory.as_ref().map_or_else(
                     || String::from("none"),
-                    |directory| self.render_field(directory, TextField::DelimitedOnLine),
+                    |directory| self.render_field(directory.as_str(), TextField::DelimitedOnLine),
                 );
                 writeln!(
                     self.stdout,
@@ -3030,9 +3030,9 @@ mod tests {
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
         ReviewTargetSnapshot, ReviewTargetSubject, RunnerPlacementRevision, RunnerSandboxProfile,
-        RunnerStateTransitionState, ServerMessage, SessionEvent, ToolApprovalEventDecider,
-        ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-        UsageProvenance,
+        RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage, SessionEvent,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
+        TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -4442,7 +4442,10 @@ mod tests {
             placement_revision: RunnerPlacementRevision::try_new(3)
                 .expect("the fixture placement revision is positive"),
             sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
-            working_directory: Some(String::from("workspace root\nproject")),
+            working_directory: Some(
+                RunnerWorkingDirectory::try_new(String::from("workspace root\nproject"))
+                    .expect("the fixture working directory is valid"),
+            ),
             state: RunnerStateTransitionState::WorkingDirectoryChanged,
         });
 
@@ -4467,7 +4470,10 @@ mod tests {
             placement_revision: RunnerPlacementRevision::try_new(3)
                 .expect("the fixture placement revision is positive"),
             sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
-            working_directory: Some(String::from("none")),
+            working_directory: Some(
+                RunnerWorkingDirectory::try_new(String::from("none"))
+                    .expect("the fixture working directory is valid"),
+            ),
             state: RunnerStateTransitionState::Pinned,
         });
 
