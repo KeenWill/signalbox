@@ -1323,7 +1323,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
-      .inputAccepted, .modelCallTransition, .turnActivated:
+      .inputAccepted, .modelCallTransition, .turnActivated, .runnerStateTransition:
       return false
     }
   }
@@ -2040,7 +2040,7 @@ extension SignalboxProcessSessionEvent {
       .inputAccepted, .turnActivated, .modelCallTransition,
       .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
-      .turnToolReconciliationRequired:
+      .turnToolReconciliationRequired, .runnerStateTransition:
       return nil
     }
   }
@@ -2063,6 +2063,8 @@ extension SignalboxProcessSessionEvent {
     case .toolApprovalDecided(_, _, let decision, _, let rationale):
       return decision.retainedUTF8Bytes
         .saturatedAdding(UInt(rationale?.utf8.count ?? 0))
+    case .runnerStateTransition(_, _, _, let workingDirectory, _):
+      return UInt(workingDirectory?.rawValue.utf8.count ?? 0)
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
