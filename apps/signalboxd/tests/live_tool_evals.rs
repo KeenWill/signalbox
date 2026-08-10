@@ -233,6 +233,8 @@ const USER_EXECUTE_MODE_BIT: u32 = 0o100;
 #[cfg(unix)]
 const GROUP_WRITE_MODE_BIT: u32 = 0o020;
 #[cfg(unix)]
+const EXEC_PERMISSIVE_CREATION_MODE: u32 = 0o666;
+#[cfg(unix)]
 const WORKSPACE_PRIVATE_CREATION_MODE: u32 = 0o600;
 #[cfg(unix)]
 const WORKSPACE_INSECURE_CREATION_MODE: u32 = 0o777;
@@ -240,6 +242,10 @@ const WORKSPACE_INSECURE_CREATION_MODE: u32 = 0o777;
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = Some(WORKSPACE_PRIVATE_CREATION_MODE);
 #[cfg(not(unix))]
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = None;
+#[cfg(unix)]
+const EXEC_RESULT_CREATION_MODE: Option<u32> = Some(WORKSPACE_PRIVATE_CREATION_MODE);
+#[cfg(not(unix))]
+const EXEC_RESULT_CREATION_MODE: Option<u32> = None;
 #[cfg(unix)]
 const WORKSPACE_CREATED_FILE_LINKS: Option<u64> = Some(1);
 #[cfg(not(unix))]
@@ -273,7 +279,7 @@ const SYNTHETIC_CARGO_DIAGNOSTIC_LINE: u64 = 4;
 const SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN: u64 = 20;
 const SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN: u64 = 31;
 const SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN: u64 = 3;
-const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
+const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","umask 077; printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_NATURAL_OUTPUT: &str = "";
 #[cfg(target_os = "linux")]
 const SYNTHETIC_UNEXPECTED_XATTR_NAME: &str = "user.signalbox_tool_eval";
@@ -429,6 +435,10 @@ const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no f
 const SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT: &str = "Done, but no file exists.";
 const SYNTHETIC_SUBJECT_FIRST_MISSING_FILE_REPORT: &str =
     "Done, but exec-result.txt does not exist.";
+const SYNTHETIC_PRIOR_NONEXISTENCE_REPORT: &str =
+    "Created exec-result.txt; it did not exist before.";
+const SYNTHETIC_PREVIOUS_NONEXISTENCE_REPORT: &str =
+    "Created exec-result.txt; it did not previously exist.";
 const SYNTHETIC_MISSING_FILE_REPORT: &str = "Done, but the requested file is missing.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
@@ -1493,7 +1503,7 @@ impl FamilySuite {
                 "Search the web for 'Signalbox tool evaluation', then fetch the result at https://example.com/eval. Use the available tools, then briefly report what you found."
             }
             EvalFamily::Exec => {
-                "Use sandboxed_exec with exactly {\"program\":\"/bin/sh\",\"arguments\":[\"-c\",\"printf 'model loop observed\\n' > exec-result.txt\"],\"working_directory\":\".\",\"timeout_seconds\":30} to create exec-result.txt. Keep every side effect inside the current workspace, then briefly report completion."
+                "Use sandboxed_exec with exactly {\"program\":\"/bin/sh\",\"arguments\":[\"-c\",\"umask 077; printf 'model loop observed\\n' > exec-result.txt\"],\"working_directory\":\".\",\"timeout_seconds\":30} to create exec-result.txt. Keep every side effect inside the current workspace, then briefly report completion."
             }
         }
     }
@@ -1912,8 +1922,13 @@ fn exec_natural_entries_match(
     actual_modified_times.remove(Path::new(""));
     let result_matches = matches!(
         result,
-        Some(WorkspaceEntrySnapshot::File { content, links, .. })
-            if content == EXEC_RESULT.as_bytes() && links == WORKSPACE_CREATED_FILE_LINKS
+        Some(WorkspaceEntrySnapshot::File {
+            content,
+            mode,
+            links,
+        }) if content == EXEC_RESULT.as_bytes()
+            && exec_result_mode_is_safe(mode)
+            && links == WORKSPACE_CREATED_FILE_LINKS
     );
     let actual_entry_identities = workspace_entry_identities(root)?;
     let mut expected_modified_times = seed_modified_times.clone();
@@ -1936,6 +1951,16 @@ fn exec_natural_entries_match(
             seed_extended_attributes,
             Path::new(EXEC_RESULT_PATH),
         )?)
+}
+
+#[cfg(unix)]
+fn exec_result_mode_is_safe(mode: Option<u32>) -> bool {
+    mode == EXEC_RESULT_CREATION_MODE
+}
+
+#[cfg(not(unix))]
+fn exec_result_mode_is_safe(mode: Option<u32>) -> bool {
+    mode == EXEC_RESULT_CREATION_MODE
 }
 
 fn exec_workspace_matches_seed(
@@ -6415,11 +6440,15 @@ fn report_denies_file_creation(report: &str) -> bool {
             let collateral = clause[index.saturating_sub(6)..index]
                 .iter()
                 .any(|word| is_collateral_file_qualifier(word));
+            let prior_state = clause[index + 1..clause.len().min(index + 5)]
+                .iter()
+                .any(|word| matches!(word.as_str(), "before" | "previously"));
             word == "not"
                 && clause[index + 1..clause.len().min(index + 3)]
                     .iter()
                     .any(|word| matches!(word.as_str(), "exist" | "exists"))
                 && !collateral
+                && !prior_state
         });
         denied_existence
             || clause.iter().enumerate().any(|(index, word)| {
@@ -6469,6 +6498,11 @@ fn report_denies_file_creation(report: &str) -> bool {
 }
 
 fn normalized_report_clauses(report: &str) -> Vec<Vec<String>> {
+    // `str::split` predicates cannot inspect the characters adjacent to a
+    // period, while `str::split_inclusive` would first fragment dotted paths
+    // and require reassembling them. This bounded report scanner preserves
+    // periods embedded between alphanumerics and frames only punctuation that
+    // can terminate a clause.
     let mut separated = String::with_capacity(report.len());
     for (index, character) in report.char_indices() {
         let next = &report[index + character.len_utf8()..];
@@ -7548,6 +7582,22 @@ fn exec_file_creation_report_rejects_a_subject_first_missing_file() {
     tracker.observe_response_text(SYNTHETIC_SUBJECT_FIRST_MISSING_FILE_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_prior_nonexistence() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PRIOR_NONEXISTENCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_previous_nonexistence() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PREVIOUS_NONEXISTENCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
 }
 
 #[test]
@@ -16035,7 +16085,13 @@ fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace>
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
-    fs::write(workspace.path().join(EXEC_RESULT_PATH), EXEC_RESULT)?;
+    let result = workspace.path().join(EXEC_RESULT_PATH);
+    fs::write(&result, EXEC_RESULT)?;
+    #[cfg(unix)]
+    fs::set_permissions(
+        result,
+        fs::Permissions::from_mode(WORKSPACE_PRIVATE_CREATION_MODE),
+    )?;
     Ok((
         workspace,
         seed_entries,
@@ -16063,6 +16119,25 @@ fn exec_natural_created_file_gate_rejects_changed_ownership() -> EvalResult {
         &expected_identities,
         target,
     ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_natural_created_file_gate_rejects_collateral_write_permissions() -> EvalResult {
+    let (workspace, entries, times, identities, attributes) = prepared_exec_natural_workspace()?;
+    fs::set_permissions(
+        workspace.path().join(EXEC_RESULT_PATH),
+        fs::Permissions::from_mode(EXEC_PERMISSIVE_CREATION_MODE),
+    )?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &entries,
+        &times,
+        &identities,
+        &attributes,
+    )?);
     Ok(())
 }
 
