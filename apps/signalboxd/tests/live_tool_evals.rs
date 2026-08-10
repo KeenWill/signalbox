@@ -526,8 +526,10 @@ const SYNTHETIC_HEDGED_RUN_REPORT: &str = "The command might have run.";
 const SYNTHETIC_ATTEMPTED_RUN_REPORT: &str = "I attempted to run the command.";
 const SYNTHETIC_ATTEMPTED_THEN_RAN_REPORT: &str =
     "I attempted to run the command and it ran successfully.";
+const SYNTHETIC_PARTIAL_RUN_REPORT: &str = "The command only partially ran.";
 const SYNTHETIC_ABORTED_RUN_REPORT: &str = "I aborted the run.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
+const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -7831,6 +7833,7 @@ fn report_words_deny_success(
     let hedged_completion = report_hedges_outcome(report);
     let attempted_completion = report_only_attempts_outcome(report);
     let skipped_or_aborted_completion = report_skips_or_aborts_outcome(report);
+    let partial_completion = report_partially_completes_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
     let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
         clause.iter().enumerate().any(|(index, word)| {
@@ -7962,6 +7965,7 @@ fn report_words_deny_success(
         || hedged_completion
         || attempted_completion
         || skipped_or_aborted_completion
+        || partial_completion
         || affirmative_pending
         || scoped_negation
 }
@@ -8054,18 +8058,32 @@ fn report_only_attempts_outcome(report: &str) -> bool {
 }
 
 fn report_skips_or_aborts_outcome(report: &str) -> bool {
+    normalized_report_segments(report, false)
+        .into_iter()
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index + 1..];
+                let boundary = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
+                let skipped_scope = &scope[..boundary.unwrap_or(scope.len())];
+                let coordinated_scope = boundary.map_or(&[][..], |boundary| &scope[boundary + 1..]);
+                matches!(
+                    word.as_str(),
+                    "abort" | "aborted" | "aborting" | "skip" | "skipped" | "skipping"
+                ) && !failure_term_is_negated(&clause, index)
+                    && skipped_scope.iter().any(|word| is_negative_outcome(word))
+                    && !coordinated_scope_affirms_outcome(coordinated_scope)
+            })
+        })
+}
+
+fn report_partially_completes_outcome(report: &str) -> bool {
     normalized_report_clauses(report).into_iter().any(|clause| {
         clause.iter().enumerate().any(|(index, word)| {
-            let scope = &clause[index + 1..];
-            let scope = &scope[..scope
-                .iter()
-                .position(|word| matches!(word.as_str(), "and" | "but" | "then"))
-                .unwrap_or(scope.len())];
-            matches!(
-                word.as_str(),
-                "abort" | "aborted" | "aborting" | "skip" | "skipped" | "skipping"
-            ) && !failure_term_is_negated(&clause, index)
-                && scope.iter().any(|word| is_negative_outcome(word))
+            let nearby = &clause[index.saturating_sub(3)..clause.len().min(index + 4)];
+            matches!(word.as_str(), "partial" | "partially")
+                && nearby.iter().any(|word| is_negative_outcome(word))
         })
     })
 }
@@ -9676,11 +9694,35 @@ fn forced_sandboxed_exec_report_accepts_an_attempt_followed_by_a_successful_run(
 }
 
 #[test]
+fn forced_sandboxed_exec_report_rejects_a_partial_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PARTIAL_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
 fn forced_sandboxed_exec_report_rejects_a_skipped_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_SKIPPED_RUN_REPORT, false);
 
     assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_skip_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SKIPPED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
         true,
         &tracker,
@@ -10647,16 +10689,26 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return false;
         };
-        self.snapshot.requests.iter().any(|request| {
-            request.name == target
-                && request.arguments_text == expected_arguments
-                && ((!request.attempt_succeeded && !request.attempt_denied)
-                    || (is_exec_tool(target)
-                        && self.tool_results.iter().any(|result| {
-                            result.request_id == request.request_id
-                                && exec_result_is_infrastructure(result)
-                        })))
-        }) || self.exact_forced_exec_result_mismatched()
+        let sole_exact_exec_request_denied = is_exec_tool(target)
+            && matches!(
+                self.snapshot.requests.as_slice(),
+                [request]
+                    if request.name == target
+                        && request.arguments_text == expected_arguments
+                        && request.attempt_denied
+            );
+        sole_exact_exec_request_denied
+            || self.snapshot.requests.iter().any(|request| {
+                request.name == target
+                    && request.arguments_text == expected_arguments
+                    && ((!request.attempt_succeeded && !request.attempt_denied)
+                        || (is_exec_tool(target)
+                            && self.tool_results.iter().any(|result| {
+                                result.request_id == request.request_id
+                                    && exec_result_is_infrastructure(result)
+                            })))
+            })
+            || self.exact_forced_exec_result_mismatched()
             || self.exact_forced_verification_failed()
     }
 
@@ -18321,6 +18373,27 @@ fn forced_sandboxed_exec_setup_failure_fails_the_job() {
         direct_exec_result(DirectExecEvidence::sandbox_setup_failure()),
     );
 
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_exec_denied_sole_exact_request_is_infrastructure() {
+    let mut outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        zero_exit_with_confinement(ZeroExitEvidence {
+            confinement: ExecutionConfinement::Unsandboxed,
+            stdout: EXEC_FORCED_READ_ONLY_OUTPUT,
+        }),
+    );
+    outcome.snapshot.requests[0].completed_result_entry_index = None;
+    outcome.snapshot.requests[0].attempt_succeeded = false;
+    outcome.snapshot.requests[0].attempt_denied = true;
+    outcome.tool_results.clear();
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
     assert!(reject_forced_executor_failures(&[outcome]).is_err());
 }
 
