@@ -384,6 +384,8 @@ const SYNTHETIC_COLLATERAL_WITHOUT_MODIFYING_REPORT: &str =
     "Created exec-result.txt without modifying any other files.";
 const SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not make modifications to any files.";
+const SYNTHETIC_BARE_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
+    "Done, but I did not make any modifications.";
 const SYNTHETIC_INVERTED_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I made no modifications to any files.";
 const SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT: &str =
@@ -1868,6 +1870,7 @@ impl FamilySuite {
             &self.workspace_seed_entries,
             &self.workspace_seed_modified_times,
             &self.workspace_seed_entry_identities,
+            &self.workspace_seed_extended_attributes,
         )
     }
 }
@@ -1877,6 +1880,7 @@ fn exec_natural_entries_match(
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
 ) -> EvalResult<bool> {
     match fs::read(root.join(EXEC_RESULT_PATH)) {
         Ok(bytes) if bytes == EXEC_RESULT.as_bytes() => {}
@@ -1903,6 +1907,11 @@ fn exec_natural_entries_match(
             root,
             seed_entry_identities,
             &[Path::new(EXEC_RESULT_PATH)],
+        )?
+        && workspace_extended_attributes_match_for_mutation(
+            root,
+            seed_extended_attributes,
+            Path::new(EXEC_RESULT_PATH),
         )?)
 }
 
@@ -6210,19 +6219,23 @@ fn report_denies_file_changes(report: &str) -> bool {
         let modification = scope
             .iter()
             .position(|word| matches!(word.as_str(), "modification" | "modifications"));
-        let file = scope
-            .iter()
-            .position(|word| matches!(word.as_str(), "file" | "files"));
         word == "not"
             && action.is_some_and(|action| {
                 modification.is_some_and(|modification| {
-                    file.is_some_and(|file| {
-                        action < modification
-                            && modification < file
-                            && !scope[modification + 1..file]
-                                .iter()
-                                .any(|word| is_collateral_file_qualifier(word))
-                    })
+                    action < modification && {
+                        let collateral_before_modification = scope[action + 1..modification]
+                            .iter()
+                            .any(|word| is_collateral_file_qualifier(word));
+                        let collateral_after_modification = scope[modification + 1..]
+                            .iter()
+                            .position(|word| matches!(word.as_str(), "file" | "files"))
+                            .is_some_and(|file| {
+                                scope[modification + 1..modification + 1 + file]
+                                    .iter()
+                                    .any(|word| is_collateral_file_qualifier(word))
+                            });
+                        !collateral_before_modification && !collateral_after_modification
+                    }
                 })
             })
     });
@@ -7194,6 +7207,14 @@ fn exec_file_creation_report_accepts_a_preexisting_file_assurance() {
 fn exec_file_creation_report_rejects_a_nominalized_modification_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_bare_nominalized_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NOMINALIZED_MODIFICATION_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
@@ -15723,6 +15744,14 @@ type PreparedExecWorkspace = (
     BTreeMap<PathBuf, FilesystemIdentity>,
 );
 
+type PreparedExecNaturalWorkspace = (
+    TempDir,
+    BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    BTreeMap<PathBuf, SystemTime>,
+    BTreeMap<PathBuf, FilesystemIdentity>,
+    BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+);
+
 fn prepared_exec_seed_workspace() -> EvalResult<PreparedExecWorkspace> {
     let workspace = tempfile::tempdir()?;
     seed_exec_workspace(workspace.path())?;
@@ -15737,15 +15766,17 @@ fn prepared_exec_seed_workspace() -> EvalResult<PreparedExecWorkspace> {
     ))
 }
 
-fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecWorkspace> {
+fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace> {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     fs::write(workspace.path().join(EXEC_RESULT_PATH), EXEC_RESULT)?;
     Ok((
         workspace,
         seed_entries,
         seed_modified_times,
         seed_entry_identities,
+        seed_extended_attributes,
     ))
 }
 
@@ -15915,22 +15946,33 @@ fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalRes
 
 #[test]
 fn exec_natural_state_accepts_only_the_requested_output_addition() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
-        prepared_exec_natural_workspace()?;
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+    ) = prepared_exec_natural_workspace()?;
 
     assert!(exec_natural_entries_match(
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
 
 #[test]
 fn exec_natural_state_rejects_a_mutated_seed_file() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
-        prepared_exec_natural_workspace()?;
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+    ) = prepared_exec_natural_workspace()?;
     fs::write(
         workspace.path().join("Cargo.toml"),
         "[package]\nname = \"collateral-mutation\"\n",
@@ -15941,14 +15983,20 @@ fn exec_natural_state_rejects_a_mutated_seed_file() -> EvalResult {
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
 
 #[test]
 fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
-        prepared_exec_natural_workspace()?;
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+    ) = prepared_exec_natural_workspace()?;
     fs::write(
         workspace.path().join("collateral.txt"),
         "collateral fixture\n",
@@ -15959,6 +16007,39 @@ fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_natural_state_rejects_root_extended_attribute_drift() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+    ) = prepared_exec_natural_workspace()?;
+    let root = Path::new("");
+    rustix::fs::setxattr(
+        workspace.path(),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert_ne!(
+        workspace_extended_attributes(workspace.path())?[root],
+        seed_extended_attributes[root]
+    );
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
@@ -15966,8 +16047,13 @@ fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
 #[cfg(unix)]
 #[test]
 fn exec_natural_state_rejects_byte_identical_seed_replacement() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
-        prepared_exec_natural_workspace()?;
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+    ) = prepared_exec_natural_workspace()?;
     replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
 
     assert!(!exec_natural_entries_match(
@@ -15975,14 +16061,20 @@ fn exec_natural_state_rejects_byte_identical_seed_replacement() -> EvalResult {
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
 
 #[test]
 fn exec_result_inspection_propagates_failures() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
-        prepared_exec_natural_workspace()?;
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+    ) = prepared_exec_natural_workspace()?;
     fs::remove_file(workspace.path().join(EXEC_RESULT_PATH))?;
     fs::create_dir(workspace.path().join(EXEC_RESULT_PATH))?;
 
@@ -15992,6 +16084,7 @@ fn exec_result_inspection_propagates_failures() -> EvalResult {
             &seed_entries,
             &seed_modified_times,
             &seed_entry_identities,
+            &seed_extended_attributes,
         )
         .is_err()
     );
