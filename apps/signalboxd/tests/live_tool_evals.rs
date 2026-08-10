@@ -394,6 +394,9 @@ const SYNTHETIC_COLLATERAL_INVERTED_MODIFICATION_DENIAL_REPORT: &str =
     "Created exec-result.txt; I made no modifications to any other files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
 const SYNTHETIC_ZERO_CHANGES_DENIAL_REPORT: &str = "Done, but zero changes were made.";
+const SYNTHETIC_VERB_FIRST_CHANGE_DENIAL_REPORT: &str = "Done, but I did not make any changes.";
+const SYNTHETIC_COLLATERAL_VERB_FIRST_CHANGE_REPORT: &str =
+    "Created exec-result.txt; I did not make any other changes.";
 const SYNTHETIC_EXISTING_FILE_ASSURANCE_REPORT: &str =
     "Created exec-result.txt without modifying any existing files.";
 const SYNTHETIC_PREEXISTING_FILE_ASSURANCE_REPORT: &str =
@@ -5933,6 +5936,37 @@ fn report_denies_file_changes(report: &str) -> bool {
                 })
             })
     });
+    let verb_first_change_denial = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..clause.len().min(index + 11)];
+            let action = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "make" | "made"));
+            let change = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "change" | "changes"));
+            word == "not"
+                && action.is_some_and(|action| {
+                    change.is_some_and(|change| {
+                        action < change && {
+                            let after_change = &scope[change + 1..];
+                            let collateral_before_change = scope[action + 1..change]
+                                .iter()
+                                .any(|word| is_collateral_file_qualifier(word));
+                            let collateral_after_change = after_change
+                                .iter()
+                                .position(|word| matches!(word.as_str(), "file" | "files"))
+                                .is_some_and(|file| {
+                                    after_change[..file]
+                                        .iter()
+                                        .any(|word| is_collateral_file_qualifier(word))
+                                });
+                            !collateral_before_change && !collateral_after_change
+                        }
+                    })
+                })
+        })
+    });
     let nominalized_modification_denial = words.iter().enumerate().any(|(index, word)| {
         let scope = &words[index + 1..words.len().min(index + 8)];
         let action = scope
@@ -6026,6 +6060,7 @@ fn report_denies_file_changes(report: &str) -> bool {
         || no_modifications_made
         || no_existential_modifications
         || verb_first_modification_denial
+        || verb_first_change_denial
         || nominalized_modification_denial
         || inverted_modification_denial
         || without_modifying
@@ -6996,6 +7031,22 @@ fn exec_file_creation_report_rejects_a_zero_changes_denial() {
     tracker.observe_response_text(SYNTHETIC_ZERO_CHANGES_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_verb_first_change_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_VERB_FIRST_CHANGE_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_verb_first_change_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_VERB_FIRST_CHANGE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
 }
 
 #[test]

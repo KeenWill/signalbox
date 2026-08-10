@@ -16,7 +16,7 @@ if [ "$#" -eq 5 ] \
   && [ "$5" = "--message-format=json" ]; then
   mkdir -p target
   printf '%s\n' \
-    '{"reason":"compiler-message","message":{"level":"warning","message":"use of deprecated function: tool eval fixture diagnostic","spans":[{"file_name":"src/lib.rs","line_start":4,"line_end":4,"column_start":20,"column_end":31,"is_primary":true}]}}' \
+    '{"reason":"compiler-message","message":{"level":"warning","message":"use of deprecated function `old_fixture`: tool eval fixture diagnostic","spans":[{"file_name":"src/lib.rs","line_start":4,"line_end":4,"column_start":20,"column_end":31,"is_primary":true}]}}' \
     '{"reason":"build-finished","success":true}'
   exit 0
 fi
