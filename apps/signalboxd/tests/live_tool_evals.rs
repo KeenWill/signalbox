@@ -453,6 +453,8 @@ const SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT: &str =
     "Created exec-result.txt; no files were modified except exec-result.txt.";
 const SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT: &str =
     "Created exec-result.txt; no files besides exec-result.txt were modified.";
+const SYNTHETIC_REQUESTED_FILE_EXCEPTION_WITH_LATER_DENIAL_REPORT: &str =
+    "Done; no files except exec-result.txt were modified, but exec-result.txt was not created.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -7199,8 +7201,16 @@ fn report_words_deny_success(
                                     .all(|word| matches!(word.as_str(), "any" | "the"))
                             })
                     });
+                let predicate_scope = &clause[index..];
+                let predicate_scope = &predicate_scope[..predicate_scope
+                    .iter()
+                    .position(|word| {
+                        matches!(word.as_str(), "and" | "but" | "however" | "then" | "yet")
+                    })
+                    .unwrap_or(predicate_scope.len())];
                 let requested_path_excepted = outcome.is_some()
-                    && excepted_path.is_some_and(|path| words_except_named_path(&clause, path));
+                    && excepted_path
+                        .is_some_and(|path| words_except_named_path(predicate_scope, path));
                 matches!(word.as_str(), "never" | "no" | "not" | "without")
                     && outcome.is_some()
                     && !affirmative_not_only
@@ -7861,6 +7871,19 @@ fn exec_file_creation_report_accepts_the_requested_file_besides_scope() {
 
     assert!(
         tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_later_requested_path_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_REQUESTED_FILE_EXCEPTION_WITH_LATER_DENIAL_REPORT,
+        false,
+    );
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
     );
 }
 
