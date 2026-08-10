@@ -120,10 +120,13 @@ jobs:
           cargo llvm-cov --no-report --no-fail-fast
           -p signalbox-persistence --features postgres-integration --tests
           -- --ignored --test-threads=4
-      # `--skip` keeps the whole-daemon live smoke out of this run. It is
-      # already inert without GITHUB_TOKEN, which this job never sets, but a
-      # measurement job spends no real HTTP requests by construction rather
-      # than by an absent credential.
+      # `--skip` keeps the whole-daemon live smoke and subprocess-only bridge
+      # fixtures out of this run. The live smoke is already inert without
+      # GITHUB_TOKEN, which this job never sets, but a measurement job spends
+      # no real HTTP requests by construction rather than by an absent
+      # credential. The bridge fixtures are launched only by owning tests;
+      # selecting them directly adds sleeps, builds, and orphaned descendants
+      # that measure no production behavior.
       - name: Measure the signalboxd PostgreSQL suite
         id: signalboxd
         continue-on-error: true
@@ -132,6 +135,8 @@ jobs:
           -p signalboxd --tests
           -- --ignored --test-threads=4
           --skip live_daemon_executes_every_tool_family_and_denies_every_gate
+          --skip bridge_build_direct_invocation_fixture
+          --skip bridge_wait_
       - name: Measure the terminal-client PostgreSQL suite
         id: terminal_client
         continue-on-error: true
