@@ -20,7 +20,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     MIGRATOR,
     create_session::CreateSessionRepository,
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     session_metadata::{
         ReplaceSessionMetadataHandlingOutcome, SessionMetadataCorruption,
         SessionMetadataRepository, SessionMetadataRepositoryError,
@@ -57,6 +57,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -79,6 +80,7 @@ async fn postgres_before_metadata_issuer()
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;

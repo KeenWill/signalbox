@@ -16,8 +16,11 @@ from the watcher.
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
-persistence, differ, polling, and rule-dispatch behavior below is verified
-against this PR (`agent/repo-watch-dispatch`).
+persistence and rule-dispatch behavior below is verified against PR #446
+(`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
+against this PR (`agent/repo-watch-poll-performance`). The provider members the
+poller adopts as check-suite and check-run completion generations are verified
+against PR #541 (`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
 
@@ -82,10 +85,18 @@ empty on every daemon start, so the first poll and the first poll after restart
 perform one complete unconditional fetch. When a current poll replaces a
 resource at the cache's entry bound, admission evicts an untouched stale entry
 before enforcing that bound; replacement within the bound cannot wedge later
-polls. REST continuation follows GitHub's `Link` relation for the next page, not
-response cardinality: a full terminal page at the 100-page bound completes the
-projection, while a next relation beyond that bound fails the poll. Because a
-`304` can omit changed pagination metadata, a cached full terminal page
+polls. Admission is an accelerator and never a precondition for an observation:
+a resource that does not fit the entry or retention bound is shed, not committed
+to the cache, and the poll continues, so that resource is refetched
+unconditionally on the next poll. Retention is bounded separately from, and
+lower than, what one poll may transfer, because retention is per watched
+repository and multiplies by the configured repository count; shedding is what
+keeps the lower retention bound from capping the transfer bound, since every
+resource already fetched in the current poll is touched and therefore not
+evictable. REST continuation follows GitHub's `Link` relation for the next page,
+not response cardinality: a full terminal page at the 100-page bound completes
+the projection, while a next relation beyond that bound fails the poll. Because
+a `304` can omit changed pagination metadata, a cached full terminal page
 conservatively probes one bounded successor; the cap page is reread
 unconditionally so that probe never manufactures page 101. A failed, rejected,
 partial, or unparseable poll submits no persistence candidate. The next poll
@@ -133,17 +144,22 @@ event vocabulary below in deterministic order. The cursor retains provider
 identity and completion generation for completed check suites and check runs,
 plus provider identities for reviews, threads, and both the workflow definition
 and branch-workflow run attempt. The poller uses the provider's `updated_at`
-value as the completion generation for both completed check suites and check
-runs, so an edited completed run conclusion is observable even when its
-`completed_at` value is unchanged. A rerequested suite or run therefore emits
-its later completion even when its provider identity and conclusion are
-unchanged. Workflows that share a display name remain distinct, renaming a
-workflow cannot re-emit its already observed run attempt, and a new attempt
-under an unchanged run ID does emit. The display name remains the rule-visible
-event payload. A provider fact retained in the consecutive comparison baseline
-is not re-emitted. Rules receive only events: they cannot inspect normalized
-snapshots or rerun the differ. Why: transport independence requires both polling
-and a later authenticated webhook receiver to feed the same durable facts.
+value as a completed check suite's completion generation and the provider's
+`completed_at` value as a completed check run's: the provider defines
+`updated_at` on a check suite only, while a check run carries `started_at` and
+`completed_at`. A completed run whose payload carries no `completed_at` fails
+the poll as an invalid response. A rerequested suite therefore emits its later
+completion even when its provider identity and conclusion are unchanged, and a
+rerequested run emits when the provider gives it a new identity, a different
+completion time, or a different conclusion, so a conclusion edited under one
+completion time stays observable. Workflows that share a display name remain
+distinct, renaming a workflow cannot re-emit its already observed run attempt,
+and a new attempt under an unchanged run ID does emit. The display name remains
+the rule-visible event payload. A provider fact retained in the consecutive
+comparison baseline is not re-emitted. Rules receive only events: they cannot
+inspect normalized snapshots or rerun the differ. Why: transport independence
+requires both polling and a later authenticated webhook receiver to feed the
+same durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and

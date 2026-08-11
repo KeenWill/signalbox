@@ -10,13 +10,11 @@ use crate::message::AssistantPart;
 use crate::target::ProviderReportedModel;
 use crate::usage::TokenUsage;
 
-/// The terminal report for one executed operation: the caller's correlation
-/// identity plus the evidence.
+/// The terminal report for one executed operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalReport<C> {
     /// The caller-supplied identity from the operation, returned verbatim.
     pub correlation: C,
-    /// What provably happened.
     pub evidence: TerminalEvidence,
 }
 
@@ -28,14 +26,21 @@ pub struct TerminalReport<C> {
 /// owns classification. The intended mapping, per the full-request-send rule
 /// in docs/spec/model-call-execution.md:
 ///
-/// | Evidence | Intended disposition |
-/// |---|---|
-/// | [`Completed`](Self::Completed) | `Completed` |
-/// | [`Refused`](Self::Refused) | `Refused` |
-/// | [`ProviderError`](Self::ProviderError) | `KnownFailed` (a complete, correlated definitive provider error response; credential rejection stays distinguishable via [`ProviderErrorKind::CredentialRejected`]) |
-/// | [`CancellationConfirmed`](Self::CancellationConfirmed) | `Cancelled` — a complete, correlated response definitively confirming provider cancellation |
-/// | [`ProvenUnsent`](Self::ProvenUnsent) | `KnownFailed`, or `Cancelled` when the cause is [`UnsentCause::CancelledBeforeSend`] and the caller holds the applied-interrupt proof required by docs/spec/model-call-execution.md |
-/// | [`BoundaryLoss`](Self::BoundaryLoss) | `Ambiguous` — the request crossed or may have crossed the acceptance-capable boundary and no definitive response classifies it |
+/// - [`Completed`](Self::Completed): `Completed`.
+/// - [`Refused`](Self::Refused): `Refused`.
+/// - [`ProviderError`](Self::ProviderError): `KnownFailed`, for a complete,
+///   correlated definitive provider error response; credential rejection
+///   stays distinguishable via [`ProviderErrorKind::CredentialRejected`].
+/// - [`CancellationConfirmed`](Self::CancellationConfirmed): `Cancelled`, for
+///   a complete, correlated response definitively confirming provider
+///   cancellation.
+/// - [`ProvenUnsent`](Self::ProvenUnsent): `KnownFailed`, or `Cancelled` when
+///   the cause is [`UnsentCause::CancelledBeforeSend`] and the caller holds
+///   the applied-interrupt proof required by
+///   docs/spec/model-call-execution.md.
+/// - [`BoundaryLoss`](Self::BoundaryLoss): `Ambiguous` — the request crossed
+///   or may have crossed the acceptance-capable boundary and no definitive
+///   response classifies it.
 ///
 /// A provider-reported model identity is carried as a separate fact where
 /// observed; comparing it with the resolved target (the mismatch rule in
@@ -71,7 +76,6 @@ pub struct ExchangeFacts {
     /// The provider's request identifier (for the smoke-critical provider,
     /// the `request-id` response header), when observed.
     pub provider_request_id: Option<ProviderRequestId>,
-    /// The HTTP status of the response, when the exchange produced one.
     pub http_status: Option<u16>,
 }
 
@@ -81,12 +85,10 @@ pub struct ExchangeFacts {
 pub struct ProviderRequestId(String);
 
 impl ProviderRequestId {
-    /// Wraps a provider request identifier exactly as observed.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
-    /// The identifier as observed.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -98,12 +100,10 @@ impl ProviderRequestId {
 pub struct ProviderMessageId(String);
 
 impl ProviderMessageId {
-    /// Wraps a provider message identifier exactly as observed.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
-    /// The identifier as observed.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -203,40 +203,29 @@ impl From<CompletionFinish> for FinishReason {
 /// Evidence for a completed exchange with valid completion material.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionEvidence {
-    /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
-    /// The provider's identifier for the response message, when reported.
     pub message_id: Option<ProviderMessageId>,
-    /// The model identity the provider reported, when reported. Comparing it
-    /// with the resolved target is the caller's classification work.
     pub reported_model: Option<ProviderReportedModel>,
-    /// Why generation stopped; refusal is unrepresentable by construction.
     pub finish: CompletionFinish,
     /// The assistant response parts, in provider order.
     pub content: Vec<AssistantPart>,
-    /// Provider-reported usage.
     pub usage: TokenUsage,
 }
 
 /// Evidence for a complete exchange the provider reported as refused.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefusalEvidence {
-    /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
-    /// The provider's identifier for the response message, when reported.
     pub message_id: Option<ProviderMessageId>,
-    /// The model identity the provider reported, when reported.
     pub reported_model: Option<ProviderReportedModel>,
     /// Any response parts produced before the refusal, in provider order.
     pub content: Vec<AssistantPart>,
-    /// Provider-reported usage.
     pub usage: TokenUsage,
 }
 
 /// Evidence for a complete, correlated definitive provider error response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderErrorEvidence {
-    /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
     /// The model identity the provider reported before or with the error,
     /// when observed — retained here so the mismatch precedence in
@@ -292,12 +281,10 @@ pub enum ProviderErrorKind {
 /// The provider's native error material, retained verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NativeErrorFacts {
-    /// The provider's native error-type token, when the payload carried one.
     pub error_token: Option<String>,
     /// The provider's native error code, when the payload carried one
     /// distinct from the type token.
     pub error_code: Option<String>,
-    /// The provider's rendered error message, when the payload carried one.
     pub message: Option<String>,
 }
 
@@ -305,7 +292,6 @@ pub struct NativeErrorFacts {
 /// confirms provider-side cancellation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancellationConfirmedEvidence {
-    /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
     /// The model identity reported by the definitive cancellation response,
     /// when present; retained for the target-mismatch precedence of
@@ -319,7 +305,6 @@ pub struct CancellationConfirmedEvidence {
 /// the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenUnsentEvidence {
-    /// Why acceptance was provably impossible.
     pub cause: UnsentCause,
 }
 
@@ -351,7 +336,6 @@ pub enum UnsentCause {
 /// string inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryLossEvidence {
-    /// How the exchange was lost.
     pub cause: LossCause,
     /// Exchange facts observed before the loss, when any were.
     pub exchange: ExchangeFacts,
@@ -476,12 +460,10 @@ pub enum StreamInterruption {
 /// audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportFacts {
-    /// The transport's rendered description of what happened.
     pub detail: String,
 }
 
 impl TransportFacts {
-    /// Wraps rendered transport detail.
     pub fn new(detail: impl Into<String>) -> Self {
         Self {
             detail: detail.into(),

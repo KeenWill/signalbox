@@ -29,8 +29,8 @@ use signalbox_domain::{
     CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
     DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
     DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
-    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -52,9 +52,11 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
+        DelegationUpdateStorageKind, DelegationWakeStorageKind,
         ToolApprovalDecisionSourceStorageKind, accepted_input_id_from_uuid,
         dangerous_tool_auto_approval_to_str, defaults_version_to_numeric,
         delegation_outcome_kind_to_str, delegation_outcome_reason_to_str,
+        delegation_update_kind_to_str, delegation_wake_subject_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
         positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
@@ -324,6 +326,25 @@ impl PostgresModelCallRepository {
         &self.pool
     }
 
+    /// Resolves the credential currently pinned for one session and exact
+    /// provider target through the same family catalog used by model calls.
+    pub async fn resolve_session_credential_reference(
+        &self,
+        session: SessionId,
+        target: ResolvedProviderTarget,
+    ) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        resolve_session_credential(
+            &mut connection,
+            session,
+            target,
+            FastMode::Disabled,
+            &self.credential_reference,
+            self.credential_families.as_ref(),
+        )
+        .await
+    }
+
     /// Derives tool-loop storage from this repository's exact database and
     /// continuation configuration.
     pub fn tool_loop_repository(&self) -> crate::tool_loop::PostgresToolLoopRepository {
@@ -424,6 +445,7 @@ impl PostgresModelCallRepository {
             &mut transaction,
             session_id,
             request.call().target(),
+            request.model_settings().effective().fast_mode(),
             &self.credential_reference,
             self.credential_families.as_ref(),
         )
@@ -460,6 +482,12 @@ impl PostgresModelCallRepository {
                 "counted activation gained uncounted call input",
             ));
         }
+        let fast_mode = execution
+            .configuration()
+            .effective()
+            .model_settings()
+            .effective()
+            .fast_mode();
         let prepared = execution
             .prepare_initial_call_consuming_steering(call, Vec::new(), None)
             .map_err(|_| {
@@ -471,6 +499,7 @@ impl PostgresModelCallRepository {
             connection,
             session,
             prepared.call().target(),
+            fast_mode,
             &self.credential_reference,
             self.credential_families.as_ref(),
         )
@@ -584,6 +613,12 @@ impl PostgresModelCallRepository {
                 ));
             }
             let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+            let fast_mode = execution
+                .configuration()
+                .effective()
+                .model_settings()
+                .effective()
+                .fast_mode();
             let prepared = match execution.prepare_initial_call_consuming_steering(
                 call,
                 steering_entries,
@@ -644,6 +679,7 @@ impl PostgresModelCallRepository {
                 &mut transaction,
                 session,
                 prepared.call().target(),
+                fast_mode,
                 &self.credential_reference,
                 self.credential_families.as_ref(),
             )
@@ -1652,6 +1688,12 @@ where
         ));
     }
     let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+    let fast_mode = execution
+        .configuration()
+        .effective()
+        .model_settings()
+        .effective()
+        .fast_mode();
     let prepared = match execution.prepare_initial_call_consuming_steering(
         call,
         steering_entries,
@@ -1710,6 +1752,7 @@ where
         connection,
         session,
         prepared.call().target(),
+        fast_mode,
         credential_reference,
         credential_families,
     )
@@ -1728,6 +1771,7 @@ pub(crate) async fn resolve_session_credential(
     connection: &mut PgConnection,
     session: SessionId,
     target: ResolvedProviderTarget,
+    fast_mode: FastMode,
     fallback: &ModelCallCredentialReference,
     families: Option<&crate::ModelCredentialFamilyCatalog>,
 ) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
@@ -1735,7 +1779,7 @@ pub(crate) async fn resolve_session_credential(
         return Ok(fallback.clone());
     };
     let family = families
-        .family(target)
+        .family_for_call(target, fast_mode)
         .ok_or(ModelCallCorruption::Missing("model credential family"))?;
     match crate::session_credentials::load_current_session_credential(
         connection,
@@ -1745,7 +1789,9 @@ pub(crate) async fn resolve_session_credential(
     .await
     {
         Ok(reference) => Ok(reference),
-        Err(sqlx::Error::RowNotFound) => match families.migration_fallback_family(target) {
+        Err(sqlx::Error::RowNotFound) => match families
+            .migration_fallback_family_for_call(target, fast_mode)
+        {
             Some(fallback_family) => crate::session_credentials::load_migrated_session_credential(
                 connection,
                 session_id_to_uuid(session),
@@ -4859,25 +4905,36 @@ async fn persist_delegated_child_result(
             .ok_or(ModelCallCorruption::Inconsistent(
                 "delegated child result provenance",
             ))?;
-    let (outcome_kind, reason_kind) = match (outcome.kind(), outcome.reason()) {
-        (DelegationOutcomeKind::ResultReturned, DelegationOutcomeReason::ChildCompleted) => {
-            ("result_returned", "child_completed")
-        }
-        (DelegationOutcomeKind::ChildFailed, DelegationOutcomeReason::ChildExecutionFailed) => {
-            ("child_failed", "child_execution_failed")
-        }
-        (DelegationOutcomeKind::ChildFailed, DelegationOutcomeReason::ChildResultUnavailable) => {
-            ("child_failed", "child_result_unavailable")
-        }
-        (DelegationOutcomeKind::ChildCancelled, DelegationOutcomeReason::ChildCancelled) => {
-            ("child_cancelled", "child_cancelled")
-        }
+    // The match admits only the outcome/reason pairings a terminal child result
+    // may carry; the spellings themselves come from the canonical encoders, so
+    // this states the pairing rule without restating the durable vocabulary.
+    let (outcome_pairing, reason_pairing) = match (outcome.kind(), outcome.reason()) {
+        pairing @ (
+            DelegationOutcomeKind::ResultReturned,
+            DelegationOutcomeReason::ChildCompleted,
+        )
+        | pairing @ (
+            DelegationOutcomeKind::ChildFailed,
+            DelegationOutcomeReason::ChildExecutionFailed,
+        )
+        | pairing @ (
+            DelegationOutcomeKind::ChildFailed,
+            DelegationOutcomeReason::ChildResultUnavailable,
+        )
+        | pairing @ (
+            DelegationOutcomeKind::ChildCancelled,
+            DelegationOutcomeReason::ChildCancelled,
+        ) => pairing,
         _ => {
             return Err(
                 ModelCallCorruption::Inconsistent("terminal delegated child outcome").into(),
             );
         }
     };
+    let outcome_kind = delegation_outcome_kind_to_str(outcome_pairing);
+    let reason_kind = delegation_outcome_reason_to_str(reason_pairing).ok_or(
+        ModelCallCorruption::Inconsistent("terminal delegated child outcome"),
+    )?;
     let content = outcome.content().map(DelegationContent::as_str);
     let relation = load_delegation_terminal_relation(
         connection,
@@ -5007,7 +5064,7 @@ async fn persist_delegated_child_result(
              provenance_session_id, provenance_turn_id,
              result_spawning_request_id, content_text)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                'child_result', $2, $3, $4, $5,
+                $8::text, $2, $3, $4, $5,
                 'child_turn', $3, $6, $2, $7
            FROM header",
     )
@@ -5018,6 +5075,9 @@ async fn persist_delegated_child_result(
     .bind(reason_kind)
     .bind(turn_id_to_uuid(turn))
     .bind(content)
+    .bind(delegation_update_kind_to_str(
+        DelegationUpdateStorageKind::ChildResult,
+    ))
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -5032,11 +5092,14 @@ async fn persist_delegated_child_result(
              spawning_tool_request_id, subject_kind,
              result_spawning_request_id, awaiting_tool_request_id)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                $2, 'result', $2, NULL
+                $2, $3::text, $2, NULL
            FROM header",
     )
     .bind(parent)
     .bind(spawning_request)
+    .bind(delegation_wake_subject_to_str(
+        DelegationWakeStorageKind::Result,
+    ))
     .execute(&mut *connection)
     .await?;
     Ok(())

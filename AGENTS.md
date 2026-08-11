@@ -244,6 +244,37 @@ persistence integration suite must include its feature:
 without `--features postgres-integration` it runs zero tests and exits
 successfully.
 
+These suites start one PostgreSQL container per test through testcontainers,
+whose Rust client ships no Ryuk reaper: a container is removed by
+`ContainerAsync`'s `Drop` and by nothing else, and it is created with
+`AutoRemove: false`, so a test process that dies without unwinding strands every
+container it started along with that container's anonymous volume. Nothing
+in-process reclaims those — the client's optional `watchdog` feature is left off
+deliberately, because it `expect`s every stop and removal and so panics its
+background thread on the first error, which both abandons the containers it had
+not reached and skips re-raising the signal, leaving a process that no longer
+dies on SIGTERM. Reclaim what an interrupted run leaves behind with
+[`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh), which
+removes containers past an age bound — two hours by default, far above any
+suite's runtime — together with their volumes. It reports what it would remove
+and changes nothing until passed `--apply`. On a shared machine, run it on a
+timer: an interrupted run is the case nothing in-process converts, so a periodic
+sweep is what bounds the leak there rather than any code change.
+
+The sweep selects positively, on the label
+`signalbox_persistence::disposable_test_container_labels` attaches to every
+container this repository's suites start, and on nothing else — not the image,
+not the global testcontainers label, and not a list of names to spare. A
+container that carries no such label is another party's to remove, so a sweep on
+a shared daemon leaves it alone whatever it is running. Start a test container
+through that helper, or the sweep will not reclaim it.
+
+The mark is safe only because a marked container is short-lived, so anything
+that can be configured to hold one for longer — the load benchmark's
+`--duration-seconds`, say — refuses a setting that would outlive
+`signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS`, which is the
+same bound the sweep defaults to.
+
 CI runs these ignored suites from
 [`.github/postgres-integration-suites.toml`](.github/postgres-integration-suites.toml),
 which names each suite's package, features, shard count, and exclusions. Both
@@ -266,6 +297,8 @@ python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py
 python3 scripts/test_check_migration_versions.py
+python3 scripts/check_panic_gate.py
+python3 scripts/test_check_panic_gate.py
 python3 scripts/test_postgres_integration_suites.py
 mdformat --check *.md docs/
 git diff --check

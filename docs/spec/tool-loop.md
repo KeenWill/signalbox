@@ -11,6 +11,17 @@ version cross-link was re-verified through this PR
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
+The object root every advertised argument schema declares, and the fold that
+renders an internally tagged argument type into it, are verified through this PR
+(`agent/object-rooted-tool-schemas`).
+
+The `AlwaysConfirm` interaction with an explicitly configured approval posture —
+`Delegated` admitted, `Auto` refused — is verified through this PR
+(`agent/approval-posture-alwaysconfirm`).
+
+The per-session workspace root the workspace, local Git, and execution families
+bind is verified against this PR (`agent/per-session-workspaces`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -29,7 +40,7 @@ through PR #311 (`agent/session-templates-spec`), and the exact-origin
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. The
-non-overridable explicit-approval posture is verified through PR #366
+explicit-approval `AlwaysConfirm` declaration is verified through PR #366
 (`agent/exec-tools`). The daemon family inventory and the implemented Git and
 execution names were re-verified through this PR (`agent/daemon-wiring`) against
 implementation ref `c8f881f585b49fb11ae5718cd923029ed0218b5d`; its child stack
@@ -115,17 +126,27 @@ policy has no decider or rationale. Neither automated path can claim user agency
 (INV-020).
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
-or `Human`. The selected posture is frozen into every resulting request. An
-`AlwaysConfirm` permission remains human-only regardless of that mapping or the
-session blanket. For every other definition, an explicit posture is
-authoritative: `Auto` records `PolicyAuto`, `Delegated` parks for a judge, and
-`Human` parks for the user even when the session blanket would otherwise
-approve. When the mapping omits the posture, the existing precedence below is
-unchanged.
+or `Human`. The selected posture is frozen into every resulting request. For
+every definition, an explicit posture is authoritative: `Auto` records
+`PolicyAuto`, `Delegated` parks for a judge, and `Human` parks for the user even
+when the session blanket would otherwise approve. When the mapping omits the
+posture, the existing precedence below is unchanged.
 
-Daemon-local execution first leaves an `AlwaysConfirm` declaration undecided;
-the dangerous blanket cannot override that posture. All other declarations keep
-this precedence:
+An `AlwaysConfirm` permission narrows that rule for exactly one posture. The
+declaration exists so that no session blanket can silently approve the tool, so
+a configured `Auto` posture never satisfies it: automation there would erase the
+decision the declaration demands. A configured `Delegated` posture does satisfy
+it, because an approval judge is not a blanket but a distinct decider that can
+still deny the request or escalate it to the user; routing to that judge serves
+the declaration's purpose rather than evading it. A configured `Human` posture
+leaves the stricter `AlwaysConfirm` outcome unchanged, since both await the same
+user. With no posture configured, an `AlwaysConfirm` declaration parks for a
+human under either session-blanket posture.
+
+Daemon-local execution therefore leaves an `AlwaysConfirm` declaration undecided
+unless an explicit `Delegated` posture is configured for it; the dangerous
+blanket alone can never override that posture. All other declarations keep this
+precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
 2. the registry default (`Auto` or `Confirm`); then
@@ -280,9 +301,49 @@ family's code owns its exact argument schemas, permission defaults, effect
 classes, bounds, and execution results; this cross-crate contract owns only
 their composition into one daemon catalog and name-directed executor. Mapped
 families are absent when their complete deployment configuration is absent.
-Local Git and execution tools bind the same configured workspace root used by
-the workspace families. The exact required inputs and fail-closed startup
-validation are owned by
+
+The workspace read, workspace mutation, local Git, and execution families all
+bind one workspace root, and that root is per session. Each session's root is
+derived from the configured root by a fixed formula owned by
+[configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry);
+a session supplies no path and cannot select another session's root. The
+executors bound to one root are composed once per session and retained under a
+bound, so two sessions executing concurrently write two trees, hold two pinned
+root descriptors, and take two independent serialization domains for the
+mutation and Git families rather than one process-wide domain. One session takes
+exactly one such domain at a time: a retained set a request still holds is never
+released, so a second set is never composed beside one already mutating that
+session's tree. Sessions with no derived directory share the configured root's
+own composition, which is what every session bound before the derivation
+existed.
+
+The catalog stays one process-lifetime immutable compiled value across that
+change. Every declaration a workspace-root-bound family advertises — its name,
+description, schema, permission default, and effect class — is a property of the
+family's code rather than of the repository it binds. The one compiled value
+that is not is the local Git argument validator, which carries the pinned
+repository's object format. A session whose repository selects another format is
+therefore refused rather than validated against the configured root's width, and
+the refusal has two shapes because catalog preflight runs before any session
+executor is resolved. An argument carrying a full object identifier in the
+session's own format is refused at preflight as invalid arguments, since the one
+compiled validator admits only the format it was compiled with. Every other
+argument reaches composition, which rejects the disagreeing repository and
+closes the request as a known tool failure whose sanitized detail names the
+closed reason. Neither shape redirects the request to another session's root.
+
+Every advertised argument schema declares an object at its root and carries no
+root keyword outside that object declaration (INV-055). One request carries the
+whole catalog, so a provider that refuses a single schema refuses every exchange
+offering it: a root-level union is a family-wide outage, not a per-tool cost. An
+internally tagged argument type is therefore advertised as one object whose tag
+property holds the variant vocabulary and names what each variant requires,
+while its Rust type still decodes the tagged form unchanged; the advertised
+schema alone widens, and each family's own argument validation still refuses
+what the declaration excludes. The composed catalog is swept for this property
+offline.
+
+The exact required inputs and fail-closed startup validation are owned by
 [configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry).
 The mapping-free base composition remains available without local Git or
 execution tools.

@@ -34,8 +34,9 @@ use signalbox_model_runtime::{
     ToolCallId, ToolCallProposal, ToolName,
 };
 use signalbox_persistence::{
-    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
-    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+    disposable_test_container_labels, local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
@@ -48,7 +49,7 @@ use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
 };
-use signalbox_tools_exec::UNSANDBOXED_EXEC_NAME;
+use signalbox_tools_exec::{SANDBOXED_EXEC_NAME, UNSANDBOXED_EXEC_NAME};
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
 use signalbox_tools_web::{BRAVE_SEARCH_CREDENTIAL_REFERENCE, WEB_FETCH_NAME, WEB_SEARCH_NAME};
 use signalboxd::{
@@ -105,6 +106,7 @@ const WEB_URL: &str = "https://example.com/";
 const UNUSED_WEB_SEARCH_CREDENTIAL_FILE: &str = "unused-brave-key";
 const DENIED_WEB_SEARCH_QUERY: &str = "synthetic denied search";
 const DENIED_UNSANDBOXED_PROGRAM: &str = "/bin/false";
+const DENIED_SANDBOXED_PROGRAM: &str = "false";
 const DENIED_WRITE_PATH: &str = "denied.txt";
 const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
@@ -437,12 +439,21 @@ fn smoke_configuration(workspace: &Path) -> SmokeResult<HubModelConfiguration> {
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "codex-subscription-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "{}"
@@ -731,6 +742,10 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
                 "max_entries": 10,
                 "max_bytes": 4096,
             }),
+        ),
+        call(
+            SANDBOXED_EXEC_NAME,
+            json!({"program": DENIED_SANDBOXED_PROGRAM}),
         ),
         call(
             SESSION_STATUS_UPDATE_NAME,
@@ -1206,6 +1221,7 @@ async fn migrated_postgres() -> SmokeResult<(ContainerAsync<Postgres>, PgPool)> 
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;

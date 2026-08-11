@@ -47,11 +47,11 @@ use signalbox_model_runtime::{
     ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName, ToolResultRecord,
 };
 use signalbox_persistence::{
-    create_session::CreateSessionRepository, local_test_connection_options, migrate,
-    model_execution::PostgresModelCallRepository, process_read::ProcessReadRepository,
-    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
-    startup::PostgresStartupScanRepository, submit_input::SubmitInputRepository,
-    tool_loop::PostgresToolLoopRepository,
+    create_session::CreateSessionRepository, disposable_test_container_labels,
+    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
+    process_read::ProcessReadRepository, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
+    submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
@@ -140,12 +140,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -166,12 +176,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "fixture"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Preserve the fixture."
@@ -594,6 +614,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -2725,10 +2746,13 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
 
 /// S10: the composed sandboxed executor reaches the injected process boundary
 /// and returns its typed host-refusal evidence through the daemon tool loop.
+/// The session blanket is enabled because `sandboxed_exec` declares `Confirm`,
+/// so an unapproved proposal parks instead of dispatching and this test would
+/// observe the approval gate rather than the process boundary it is about.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll).await?;
     let workspace = tempdir()?;
     let (tool_catalog, tool_executor) = commissioned_daemon_tools(
         &fixture.pool,

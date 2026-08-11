@@ -22,18 +22,20 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
-    CommitModelCallObservationTransaction, CorrelatedDurableChildWait, CreateSessionError,
-    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
-    EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
-    ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
-    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus, ScriptedModelCallProvider,
-    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    CommitModelCallObservationTransaction, CompiledTool, CompiledToolCatalog,
+    CorrelatedDurableChildWait, CreateSessionError, CreateSessionOutcome, CreateSessionRequest,
+    CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome, EligibilitySweep,
+    InProcessAttemptDispatchGate, LoadSessionService, ModelCallAuthorizationReread,
+    ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelConversationMessage,
+    OperatorFailureClass, PromptMemberStatement, ReplaceSessionDefaultsOutcome,
+    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
+    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputRequestError, SubmitInputService, ToolAttemptAuthorizationStatus,
+    SubmitInputRequestError, SubmitInputService, ToolAttemptAuthorizationStatus, ToolCatalog,
+    ToolDefinition, ToolInputSchema,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
@@ -64,10 +66,10 @@ use signalbox_domain::{
     SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
     ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
     ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDispatchAuthority,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnId, UserContent,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
+    ToolName, ToolPermissionDefault, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
+    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
+    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -82,7 +84,7 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
         PostgresModelCallRepository, PrepareInitialModelCallOutcome,
@@ -4980,6 +4982,7 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -10148,6 +10151,351 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
         panic!("the interrupt successor activates behind the cancelled continuation call");
     };
     assert_eq!(activated.turn(), successor);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The synthetic external-effect tool the ambiguity fixture proposes.
+const AMBIGUITY_FIXTURE_TOOL: &str = "external-tool";
+
+/// Declares the ambiguity fixture's tool the way a composed hub would.
+///
+/// The recovery path exercised below exists only for an external effect: the
+/// application asks the catalog for the class, prepares an attempt of that
+/// class, and the domain rejects an ambiguous observation against an
+/// effect-free attempt outright. Naming the tool and separately handing
+/// `ToolEffectClass::ExternalEffect` to the repository would freeze the class
+/// on this test's own authority, leaving the fixture green for a pairing no
+/// catalog declares. Declaring it once here and reading the class back through
+/// the `ToolCatalog` port makes the declaration the single source of that
+/// fact, so a declaration changed to `EffectFree` fails the recovery
+/// assertions instead of quietly disagreeing with them.
+///
+/// The permission default has to agree with the fixture's durable approval
+/// history for the same reason. `checkpoint_confirmed_tool_round` records an
+/// `InitialToolApproval::Confirm` round closed by a user decision, and
+/// `initial_tool_approval` maps an `Auto` declaration to `PolicyAuto`, so
+/// declaring `Auto` here would describe a batch no application composes: the
+/// recovery test would stay green while the auto-approved path it appeared to
+/// cover was broken.
+fn ambiguity_fixture_catalog() -> CompiledToolCatalog {
+    let definition = ToolDefinition::new(
+        ToolName::try_new(String::from(AMBIGUITY_FIXTURE_TOOL))
+            .expect("the fixture tool name is admitted"),
+        String::from("Synthetic external-effect tool for ambiguity fixtures"),
+        ToolInputSchema::try_new(String::from(r#"{"type":"object"}"#))
+            .expect("the fixture input schema is admitted"),
+        ToolPermissionDefault::Confirm,
+        ToolEffectClass::ExternalEffect,
+    );
+    CompiledToolCatalog::try_new([CompiledTool::new(
+        definition,
+        |_: &NormalizedToolArguments| -> Result<(), ToolExecutionErrorDetail> { Ok(()) },
+    )])
+    .expect("the single-tool fixture catalog is admitted")
+}
+
+/// What one dispatched event announces about the turn under test.
+///
+/// A named projection rather than a wildcard filter: the assertions below
+/// claim an ambiguous external effect announces its proposal and its recovery
+/// and *nothing definitive*, and that claim is only as good as the set of
+/// kinds it considered. Adding a `DispatchedOutboxEventKind` variant makes the
+/// match non-exhaustive and stops this crate compiling until the new kind is
+/// classified, rather than letting a `_ => None` arm silently exclude a new
+/// definitive announcement from the claim. Deliberately dependency-free, per
+/// `docs/style.md`: the projection reads only the event and the two fixture
+/// identities it is asked about.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AmbiguityAnnouncement {
+    /// A tool-batch presentation boundary for the batch under test.
+    BatchTransition(DispatchedToolBatchState),
+    /// The turn under test was announced as definitively resolved.
+    DefinitiveTurnOutcome,
+    /// Nothing that bears on the ambiguity claim.
+    Unrelated,
+}
+
+fn announcement_for(
+    kind: &DispatchedOutboxEventKind,
+    fixture_turn: TurnId,
+    fixture_call: ModelCallId,
+) -> AmbiguityAnnouncement {
+    match kind {
+        DispatchedOutboxEventKind::ToolBatchTransition {
+            turn,
+            producing_call,
+            state,
+        } if *turn == fixture_turn && *producing_call == fixture_call => {
+            AmbiguityAnnouncement::BatchTransition(*state)
+        }
+        // A turn announced completed, failed, refused, or cancelled has been
+        // reported resolved one way or another; an effect that may or may not
+        // have happened admits none of those. `TurnReconciliationRequired` is
+        // the honest terminal announcement for ambiguity and is not definitive.
+        DispatchedOutboxEventKind::TurnCompleted { turn, .. }
+        | DispatchedOutboxEventKind::TurnFailed { turn, .. }
+        | DispatchedOutboxEventKind::TurnRefused { turn, .. }
+        | DispatchedOutboxEventKind::TurnCancelled { turn, .. }
+            if *turn == fixture_turn =>
+        {
+            AmbiguityAnnouncement::DefinitiveTurnOutcome
+        }
+        DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::TurnCompleted { .. }
+        | DispatchedOutboxEventKind::TurnFailed { .. }
+        | DispatchedOutboxEventKind::TurnRefused { .. }
+        | DispatchedOutboxEventKind::TurnCancelled { .. }
+        | DispatchedOutboxEventKind::SessionCreated
+        | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
+        | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
+        | DispatchedOutboxEventKind::InputAccepted { .. }
+        | DispatchedOutboxEventKind::GoalTurnRetired { .. }
+        | DispatchedOutboxEventKind::TurnActivated { .. }
+        | DispatchedOutboxEventKind::ModelCallTransition { .. }
+        | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
+        | DispatchedOutboxEventKind::ContextCompacted { .. }
+        | DispatchedOutboxEventKind::TurnReconciliationRequired { .. }
+        | DispatchedOutboxEventKind::DelegationUpdate(_)
+        | DispatchedOutboxEventKind::DelegationWake(_) => AmbiguityAnnouncement::Unrelated,
+    }
+}
+
+/// Role-aware identities for the classifier's straight-line cases.
+///
+/// The classifier reads only the turn and producing call it is asked about, so
+/// its fixture needs distinct identities rather than particular ones. Minting
+/// them by role keeps that fact visible and leaves no arbitrary hexadecimal in
+/// the test body.
+#[derive(Default)]
+struct ClassifierFixtureIds {
+    next: u128,
+}
+
+impl ClassifierFixtureIds {
+    fn next_value(&mut self) -> Uuid {
+        self.next += 1;
+        Uuid::from_u128(0x9100 + self.next)
+    }
+
+    fn next_turn(&mut self) -> TurnId {
+        TurnId::from_uuid(self.next_value())
+    }
+
+    fn next_call(&mut self) -> ModelCallId {
+        ModelCallId::from_uuid(self.next_value())
+    }
+
+    fn next_tool_attempt(&mut self) -> ToolAttemptId {
+        ToolAttemptId::from_uuid(self.next_value())
+    }
+
+    fn next_frontier(&mut self) -> ContextFrontierId {
+        ContextFrontierId::from_uuid(self.next_value())
+    }
+
+    fn next_entry(&mut self) -> SemanticTranscriptEntryId {
+        SemanticTranscriptEntryId::from_uuid(self.next_value())
+    }
+}
+
+/// The batch states announced for `turn`/`call`, in dispatch order.
+fn announced_batch_states(
+    dispatched: &[DispatchedOutboxEventKind],
+    turn: TurnId,
+    call: ModelCallId,
+) -> Vec<DispatchedToolBatchState> {
+    dispatched
+        .iter()
+        .filter_map(|kind| match announcement_for(kind, turn, call) {
+            AmbiguityAnnouncement::BatchTransition(state) => Some(state),
+            AmbiguityAnnouncement::DefinitiveTurnOutcome | AmbiguityAnnouncement::Unrelated => None,
+        })
+        .collect()
+}
+
+/// Whether anything announced `turn` as definitively resolved.
+fn announces_a_definitive_turn_outcome(
+    dispatched: &[DispatchedOutboxEventKind],
+    turn: TurnId,
+    call: ModelCallId,
+) -> bool {
+    dispatched.iter().any(|kind| {
+        announcement_for(kind, turn, call) == AmbiguityAnnouncement::DefinitiveTurnOutcome
+    })
+}
+
+/// The projection above decides both ambiguity verdicts, so its classification
+/// is pinned directly rather than trusted: a batch transition for the turn
+/// under test, a definitive outcome for it, one for an unrelated turn, and a
+/// kind that bears on neither.
+#[test]
+fn announcement_for_classifies_each_outcome() {
+    // Named by role. Only distinctness and which identity plays which part
+    // matter here — no assertion depends on a particular hexadecimal value,
+    // and spelling the numbers inline would present each as load-bearing.
+    let mut ids = ClassifierFixtureIds::default();
+    let turn = ids.next_turn();
+    let other_turn = ids.next_turn();
+    let call = ids.next_call();
+    let attempt = ids.next_tool_attempt();
+    let frontier = ids.next_frontier();
+    let entry = ids.next_entry();
+
+    assert_eq!(
+        announcement_for(
+            &DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call: call,
+                state: DispatchedToolBatchState::RecoveryRequired { attempt },
+            },
+            turn,
+            call,
+        ),
+        AmbiguityAnnouncement::BatchTransition(DispatchedToolBatchState::RecoveryRequired {
+            attempt
+        })
+    );
+    assert_eq!(
+        announcement_for(
+            &DispatchedOutboxEventKind::TurnFailed {
+                turn,
+                failure_entry: entry,
+                terminal_frontier: frontier,
+            },
+            turn,
+            call,
+        ),
+        AmbiguityAnnouncement::DefinitiveTurnOutcome
+    );
+    assert_eq!(
+        announcement_for(
+            &DispatchedOutboxEventKind::TurnFailed {
+                turn: other_turn,
+                failure_entry: entry,
+                terminal_frontier: frontier,
+            },
+            turn,
+            call,
+        ),
+        AmbiguityAnnouncement::Unrelated
+    );
+    assert_eq!(
+        announcement_for(&DispatchedOutboxEventKind::SessionCreated, turn, call),
+        AmbiguityAnnouncement::Unrelated
+    );
+}
+
+/// S06 / INV-025 / INV-026: an executor that cannot establish whether its
+/// external effect happened terminalizes the attempt ambiguous and parks the
+/// turn on a durable recovery wait naming that exact attempt, so the effect is
+/// never silently repeated and the batch is never reported definitively
+/// failed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wait()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8180;
+    // The proposal must name an external-effect tool. An effect-free request
+    // would never reach this path in production: the catalog fixes its effect
+    // class, the application prepares an attempt of that class, and the domain
+    // rejects an ambiguous observation against an effect-free attempt outright.
+    // The class therefore comes from the catalog declaration rather than from
+    // this test, so the fixture cannot claim a pairing no catalog prepares.
+    let catalog = ambiguity_fixture_catalog();
+    let declared_effect_class = catalog
+        .definition(
+            &ToolName::try_new(String::from(AMBIGUITY_FIXTURE_TOOL))
+                .expect("the fixture tool name is admitted"),
+        )
+        .expect("the fixture catalog declares the proposed tool")
+        .effect_class();
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, AMBIGUITY_FIXTURE_TOOL, "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            declared_effect_class,
+        )
+        .await?;
+    let authorized_attempt = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+
+    let ended = tool_repository
+        .commit_observation(
+            authorized_attempt
+                .executor_fence()
+                .bind(ToolAttemptObservation::Ambiguous),
+        )
+        .await?;
+    let parked_attempt: Uuid = sqlx::query_scalar(
+        "SELECT recovery_tool_attempt_id
+           FROM turn_lifecycle
+          WHERE turn_id = $1
+            AND session_id = $2
+            AND active_phase_kind = 'awaiting_tool_recovery'",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut dispatched = Vec::new();
+    drain_outbox(&pool, |event| dispatched.push(event.kind().clone())).await?;
+
+    assert_eq!(ended.attempt(), tool_attempt);
+    assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
+    assert_eq!(parked_attempt, tool_attempt.into_uuid());
+    // The claim is that ambiguous work is *never* announced definitively, so
+    // membership is not enough: an outbox that carried both this recovery and a
+    // `ResultsProjected` for the same batch would satisfy `contains` while
+    // reporting the effect resolved. Pin the whole ordered transition set for
+    // this exact turn and producing call — the fixture's proposal, then the
+    // recovery — so any additional terminal announcement breaks the shape.
+    let batch_transitions = announced_batch_states(&dispatched, fixture.turn, fixture.call);
+    let [
+        DispatchedToolBatchState::Proposed { .. },
+        DispatchedToolBatchState::RecoveryRequired {
+            attempt: recovering,
+        },
+    ] = batch_transitions.as_slice()
+    else {
+        panic!(
+            "an ambiguous external effect announces exactly its proposal and its recovery, \
+             got {batch_transitions:?}"
+        )
+    };
+    assert_eq!(
+        *recovering, tool_attempt,
+        "the recovery names the exact ambiguous attempt the gate waits on"
+    );
+    // The turn itself must not be reported resolved either: a definitive turn
+    // outcome is the other way this batch could be announced as settled, and
+    // the projection above forces every outbox kind to be classified as
+    // definitive or not rather than assumed harmless.
+    assert!(
+        !announces_a_definitive_turn_outcome(&dispatched, fixture.turn, fixture.call),
+        "an ambiguous external effect must not also report its turn definitively resolved, \
+         got {dispatched:?}"
+    );
 
     pool.close().await;
     drop(container);

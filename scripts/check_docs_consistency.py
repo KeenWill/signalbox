@@ -1955,7 +1955,21 @@ def extract_reference_links(
             index += 1
             continue
         if index and text[index - 1] == "!" and not is_escaped(text, index - 1):
-            index += 1
+            # Skip the image's complete span, reference part included.
+            # Advancing one character re-enters the image's own construct, and
+            # `![alt][owner]` then parses `[owner]` as a shortcut link — which
+            # counts the image as a citation and defeats the exclusion this
+            # branch exists to apply.
+            image_label_end = find_closing_bracket(text, index)
+            if image_label_end is None:
+                index += 1
+                continue
+            image_end = image_label_end + 1
+            if image_end < len(text) and text[image_end] == "[":
+                image_reference_end = find_closing_bracket(text, image_end)
+                if image_reference_end is not None:
+                    image_end = image_reference_end + 1
+            index = image_end
             continue
 
         label_end = find_closing_bracket(text, index)
@@ -2580,15 +2594,16 @@ def rust_module_graph(
 
 @dataclass(frozen=True)
 class IgnoredTestSelection:
-    """One suite's ignored-test selection: its package, minus its exclusions.
+    """One suite's ignored-test selection within one Cargo target.
 
-    A suite archives and runs every test target of its package, so membership
-    is positive by default and `skips` is the only narrowing. Each entry is a
-    test-name substring, matched the way both libtest's `--skip` and nextest's
-    `not test(...)` match one.
+    Binary includes and excludes partition same-package targets before each
+    skip entry narrows registered test names the way both libtest's `--skip`
+    and nextest's `not test(...)` do.
     """
 
     skips: tuple[str, ...]
+    includes: tuple[str, ...]
+    excludes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -2612,10 +2627,10 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
     test` to `cargo nextest`. `check_suite_manifest` gates the two sides
     against each other so the manifest cannot drift from what CI runs.
 
-    Each suite archives and runs the whole package's test targets, which is
-    what `--tests` selected before and what nextest's default target selection
-    does now, so the selection is the package's ignored tests minus the
-    manifest's skips.
+    Each suite archives its package and the run filter selects the manifest's
+    included targets, removes its excluded targets, then removes its skipped
+    test names. With no binary fields this is the whole package, matching the
+    prior `--tests` selection.
 
     A repository with no manifest runs no ignored tests in CI, which is the
     same answer the workflow-parsing predecessor gave for a repository with no
@@ -2628,7 +2643,11 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
         IgnoredTestRun(
             package=suite.package,
             features=suite.features,
-            selection=IgnoredTestSelection(skips=tuple(sorted(suite.skip))),
+            selection=IgnoredTestSelection(
+                skips=tuple(sorted(suite.skip)),
+                includes=tuple(sorted(suite.include_binaries)),
+                excludes=tuple(sorted(suite.exclude_binaries)),
+            ),
         )
         for suite in postgres_integration_suites.load_suites(root)
     ]
@@ -2748,6 +2767,48 @@ def cargo_test_roots(package: Path) -> list[Path]:
     return roots
 
 
+def cargo_test_target_names(package: Path) -> dict[Path, str]:
+    """Map each test root to the target name Cargo exposes to nextest."""
+    declared = declared_package(package)
+    package_table = declared.get("package")
+    package_name = (
+        package_table.get("name") if isinstance(package_table, dict) else None
+    )
+    names: dict[Path, str] = {}
+    for target in cargo_test_roots(package):
+        relative = target.relative_to(package)
+        if relative == Path("src/lib.rs") and isinstance(package_name, str):
+            names[target] = package_name.replace("-", "_")
+        elif relative == Path("src/main.rs") and isinstance(package_name, str):
+            names[target] = package_name
+        elif relative.parts[0] in ("src", "tests"):
+            names[target] = (
+                relative.parent.name if relative.name == "main.rs" else target.stem
+            )
+    library = declared.get("lib")
+    if isinstance(library, dict):
+        root = declared_target_root(package, library, "src")
+        if root is None and (package / "src/lib.rs").is_file():
+            root = package / "src/lib.rs"
+        name = library.get("name")
+        if not isinstance(name, str) and isinstance(package_name, str):
+            name = package_name.replace("-", "_")
+        if root is not None and isinstance(name, str):
+            names[root] = name
+    for table, directory in (("bin", "src/bin"), ("test", "tests")):
+        entries = declared.get(table)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            root = declared_target_root(package, entry, directory)
+            name = entry.get("name")
+            if root is not None and isinstance(name, str):
+                names[root] = name
+    return names
+
+
 def ignored_test_selections_by_target(
     root: Path,
 ) -> dict[Path, tuple[IgnoredTestSelection, ...]]:
@@ -2760,12 +2821,29 @@ def ignored_test_selections_by_target(
             continue
         enabled = enabled_package_features(package, run.features)
         required = target_required_features(package)
+        target_names = cargo_test_target_names(package)
         for target in cargo_test_roots(package):
             if not set(required.get(target, ())) <= enabled:
                 continue
+            target_name = target_names.get(target)
+            if target_name is None:
+                continue
+            if run.selection.includes and target_name not in run.selection.includes:
+                continue
+            if target_name in run.selection.excludes:
+                continue
             selected.setdefault(target, set()).add(run.selection)
     return {
-        target: tuple(sorted(selections, key=lambda selection: selection.skips))
+        target: tuple(
+            sorted(
+                selections,
+                key=lambda selection: (
+                    selection.includes,
+                    selection.excludes,
+                    selection.skips,
+                ),
+            )
+        )
         for target, selections in selected.items()
     }
 
@@ -2887,7 +2965,14 @@ def rust_sources(root: Path) -> list[RustSource]:
             for selection in ignored_by_target.get(target, ())
         }
         source.ignored_test_selections = tuple(
-            sorted(ignored_selections, key=lambda selection: selection.skips)
+            sorted(
+                ignored_selections,
+                key=lambda selection: (
+                    selection.includes,
+                    selection.excludes,
+                    selection.skips,
+                ),
+            )
         )
     return prepared
 
@@ -3781,6 +3866,114 @@ def check_suite_manifest(root: Path) -> list[Violation]:
     return failures
 
 
+def is_image_link(text: str, link: MarkdownLink) -> bool:
+    """Report whether a parsed destination came from image syntax.
+
+    `extract_inline_links` returns image destinations deliberately, because its
+    other caller checks that every destination resolves. An image renders a
+    fetch rather than a navigation, so it is not a citation. This is the test
+    that function already applies to keep images out of its own link pass.
+    """
+    return bool(
+        link.offset
+        and text[link.offset - 1] == "!"
+        and not is_escaped(text, link.offset - 1)
+    )
+
+
+def check_machine_owner_links(root: Path) -> list[Violation]:
+    """Each projection owner links the machine it projects.
+
+    The credential-availability machine is stated once and every other page
+    holds a derived view of one of its columns. The failure this guards is the
+    one that started that restructuring: a carve moved a paragraph to another
+    branch, the anchor citing it still resolved, and only the meaning left — so
+    no link checker saw anything.
+
+    Deliberately coarse. It asks whether a page links the owner at all, not
+    whether each paragraph does. A per-block rule has to read prose, and the
+    checker that read prose generated more review findings than the pages it
+    guarded; this costs one resolution per page and adds no Markdown surface
+    beyond the link extraction this module already performs.
+
+    Scope, decided by count rather than by argument: whether a citation's label
+    *renders* anything is out of scope. Four consecutive review waves produced
+    exactly four findings against this function, every one of them the same
+    family — a construct that resolves but renders no navigation (an unused
+    reference definition, an image destination, an empty label, a raw-HTML
+    label). Three were closed by testing the label; the fourth arrived
+    immediately after the third was restated positively so that "nothing is
+    left for the next shape to slip through." It bought one round, which is the
+    same yield the two deleted documentation lints returned before they were
+    removed. The complement is unbounded at the string level — an HTML comment,
+    a zero-width entity, a soft hyphen — and closing it soundly needs a
+    Markdown renderer this stdlib-only module does not have and should not
+    acquire for a guard this coarse. None of the four shapes occurs anywhere in
+    the tracked corpus.
+
+    So the guarded property is stated as what it always was: a derived view
+    that stops citing its owner. A page either carries a link construct
+    resolving to the owner or it does not. An invisible label is not that
+    failure, and a page that somehow contained one would be broken in a way
+    this check could not repair anyway. Images and bare reference definitions
+    stay excluded, because those are destination-side facts this module already
+    decides without reading a label.
+    """
+    owner = (root / "docs/spec/credential-availability.md").resolve()
+    if not owner.exists():
+        return []
+    projecting_pages = (
+        "docs/spec/turn-lifecycle-and-scheduling.md",
+        "docs/spec/persistence-protocol.md",
+        "docs/spec/sessions-and-transcript.md",
+        "docs/spec/process-protocol.md",
+        "docs/spec/runtime-substrate.md",
+        "docs/spec/model-call-execution.md",
+        "docs/spec/configuration-and-credentials.md",
+    )
+    violations: list[Violation] = []
+    for name in projecting_pages:
+        source = root / name
+        if not source.exists():
+            continue
+        parsed = mask_inline_code(
+            mask_block_content(source.read_text(encoding="utf-8"))
+        )
+        # A citation is a link construct whose destination resolves to the
+        # owner. Label rendering is deliberately NOT tested — see the scope
+        # note in this function's docstring.
+        citations = [
+            link
+            for link in extract_inline_links(parsed)
+            if not is_image_link(parsed, link)
+        ]
+        citations.extend(
+            extract_reference_links(parsed, reference_definitions(parsed))
+        )
+        linked = any(
+            (resolved := resolve_relative_target(root, source, link.destination))
+            is not None
+            and resolved[0] == owner
+            for link in citations
+        )
+        if not linked:
+            violations.append(
+                Violation(
+                    path=name,
+                    line=1,
+                    category="machine-owner-link",
+                    message=(
+                        "page projects a column of the credential-availability "
+                        "machine but carries no resolving link to "
+                        "docs/spec/credential-availability.md; a derived view "
+                        "that stops citing its owner is the carve seam no link "
+                        "checker can see"
+                    ),
+                )
+            )
+    return violations
+
+
 def run_checks(root: Path = ROOT) -> list[Violation]:
     root = root.resolve()
     heading_anchors.cache_clear()
@@ -3790,6 +3983,7 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
     )
     failures = invariant_failures
     failures.extend(check_relative_links(root, enforcement_links))
+    failures.extend(check_machine_owner_links(root))
     failures.extend(check_spec_verification_references(root))
     failures.extend(check_rust_test_generation(sources))
     failures.extend(check_suite_manifest(root))

@@ -6,8 +6,8 @@ use serde_json::Value;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
     CliSession, CliTerminalTextCapture, CompletionEvidence, CompletionFinish, DeliveryMode,
-    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
-    ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
+    DiscardedField, ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation,
+    ObservationFact, ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
     TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal,
     ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_json, redact_text,
@@ -43,7 +43,7 @@ pub(crate) struct EventDecoder<C> {
     exchange: ExchangeFacts,
     reported_model: Option<ProviderReportedModel>,
     native_session_id: Option<String>,
-    native_model: Option<String>,
+    native_assistant_model: Option<String>,
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
@@ -98,7 +98,7 @@ impl<C: Clone> EventDecoder<C> {
             exchange: ExchangeFacts::default(),
             reported_model: None,
             native_session_id: None,
-            native_model: None,
+            native_assistant_model: None,
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
@@ -190,10 +190,86 @@ impl<C: Clone> EventDecoder<C> {
         value: Value,
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
-        if value.get("subtype").and_then(Value::as_str) != Some("init") || self.initialized {
-            return Err(DecodeFailure::stream_protocol(
-                "unexpected or duplicate Claude system event",
-            ));
+        let subtype = value.get("subtype").and_then(Value::as_str);
+        if matches!(
+            subtype,
+            Some(
+                "status"
+                    | "hook_started"
+                    | "hook_progress"
+                    | "hook_response"
+                    | "api_retry"
+                    | "thinking_tokens"
+            )
+        ) {
+            let mut event = value;
+            if let Value::Object(members) = &mut event {
+                // Closed protocol metadata describes the envelope, not
+                // discarded provider content. In particular,
+                // `thinking_tokens` must not create a credential-shaped
+                // lookbehind merely because its name contains `token`, and
+                // repeated copies of the already-retained session identity
+                // must not accumulate as dropped content.
+                members.remove("type");
+                members.remove("subtype");
+                // That last exemption is a claim about the value, so it is
+                // checked rather than assumed. `session_id` is dropped only
+                // where it is provably the identity `system/init` retained; a
+                // differing value contradicts that correlation exactly as it
+                // does on a `result` event, and a value arriving before any
+                // init is not a repeated identity at all. Anything this
+                // predicate cannot vouch for stays provider-controlled content
+                // and seeds the dropped lookbehind (INV-035), because a
+                // credential prefix discarded here would let its continuation
+                // escape the shape redactor in a later field.
+                match (
+                    members.get("session_id").and_then(Value::as_str),
+                    self.native_session_id.as_deref(),
+                ) {
+                    (Some(session), Some(native)) if session == native => {
+                        members.remove("session_id");
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(DecodeFailure::stream_protocol(
+                            "Claude lifecycle session contradicts system init",
+                        ));
+                    }
+                    _ => {}
+                }
+                members.retain(|_, value| !value.is_null());
+                if members.is_empty() {
+                    return Ok(());
+                }
+            }
+            let mut context = String::new();
+            let members = event.as_object().ok_or_else(|| {
+                DecodeFailure::stream_protocol("Claude system event is not an object")
+            })?;
+            for (name, value) in members {
+                if !context.is_empty() {
+                    context.push('\n');
+                }
+                context.push_str(name);
+                context.push(':');
+                if let Some(value) = value.as_str() {
+                    context.push_str(value);
+                } else {
+                    let value = serde_json::to_string(value).map_err(|error| {
+                        DecodeFailure::stream_protocol(format!(
+                            "Claude lifecycle event could not be retained for redaction: {error}"
+                        ))
+                    })?;
+                    context.push_str(&value);
+                }
+            }
+            sink.extend_dropped_context(&context);
+            return Ok(());
+        }
+        if subtype != Some("init") || self.initialized {
+            let subtype = subtype.unwrap_or("<missing>");
+            return Err(DecodeFailure::stream_protocol(format!(
+                "unexpected or duplicate Claude system event subtype `{subtype}`"
+            )));
         }
         let event: SystemInit = decode(value)?;
         if event.session_id.is_empty() || event.model.is_empty() {
@@ -235,7 +311,6 @@ impl<C: Clone> EventDecoder<C> {
         let request_id = sink.redact_provider_id("", &event.session_id);
         let model = sink.redact_provider_id(&request_id, &event.model);
         self.native_session_id = Some(event.session_id);
-        self.native_model = Some(event.model);
         self.exchange.provider_request_id = Some(ProviderRequestId::new(request_id.clone()));
         self.reported_model = Some(ProviderReportedModel::new(model.clone()));
         self.initialized = true;
@@ -303,11 +378,37 @@ impl<C: Clone> EventDecoder<C> {
             self.message_id = Some(ProviderMessageId::new(sanitized));
             self.native_message_id = Some(event.message.id.clone());
         }
-        if self.native_model.as_deref() != Some(event.message.model.as_str()) {
+        if self
+            .native_assistant_model
+            .as_ref()
+            .is_some_and(|model| model != &event.message.model)
+        {
             return Err(DecodeFailure::stream_protocol(
-                "Claude assistant model contradicts system init",
+                "Claude assistant model contradicts prior assistant content",
             ));
         }
+        // The provider-resolved model is accepted and then discarded: it is
+        // retained only to detect a later contradiction and leaves the adapter
+        // in no record, so an ambient delivery has no exact value to redact
+        // downstream. A marker prefix ending it (`api_`) beside a text block
+        // opening `key=value` still reconstructs the credential, so register it
+        // as a lookbehind chain of its own — the emitted chain belongs to the
+        // message id above, and the dropped chain to provider content this
+        // field does not sit in.
+        //
+        // Every assistant envelope repeats and discards this same field, and
+        // each repetition sits beside that envelope's own content blocks, so
+        // registration happens on every event rather than only the first:
+        // content that spends the lookbehind in one event would otherwise leave
+        // the next event's text unguarded. The check above has already proven a
+        // repeat equal to the stored value.
+        let repetition = if self.native_assistant_model.is_none() {
+            self.native_assistant_model = Some(event.message.model.clone());
+            DiscardedField::New
+        } else {
+            DiscardedField::Repeated
+        };
+        sink.add_discarded_field_identifier(&event.message.model, repetition);
         if let Some(usage) = event.message.usage {
             self.usage.absorb(message_usage(usage));
         }
