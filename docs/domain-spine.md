@@ -764,10 +764,14 @@ impl CreateSession {
         placement: SessionPlacement,
     ) -> Self;
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
+    pub fn with_runner_placement(
+        self,
+        runner_placement: Option<SessionRunnerPlacementRequest>,
+    ) -> Self;
     pub fn prepare(self, session: SessionId)
         -> Result<PreparedCreateSession, CreateSessionPreparationError>;
     // accessors: command_id(), provenance(), initial_configuration_defaults(),
-    //   template_provenance(), placement()
+    //   template_provenance(), placement(), runner_placement()
 }
 // Eq/Hash exclude command_id; explicit mode compares defaults, template mode
 // compares the requested template name, and the two modes differ.
@@ -781,6 +785,10 @@ impl CreateSessionFromImportedFrontier {
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
+    pub fn with_runner_placement(
+        self,
+        runner_placement: Option<SessionRunnerPlacementRequest>,
+    ) -> Self;
     pub fn prepare<NextSemanticEntryId>(
         self,
         imported_conversation: &ImportedConversation,
@@ -794,7 +802,7 @@ impl CreateSessionFromImportedFrontier {
     where
         NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId;
     // accessors: command_id(), imported_conversation(), imported_frontier(),
-    //   relationship(), initial_configuration_defaults()
+    //   relationship(), initial_configuration_defaults(), runner_placement()
 }
 // Eq/Hash exclude command_id (comparison-payload rule,
 // spec/identity-and-commands.md)
@@ -811,7 +819,7 @@ pub struct InitialSession { /* private */ }
 // and ReconstitutedSessionCreationFromImportedFrontier
 impl InitialSession {
     // accessors: id(), provenance(), template_provenance(),
-    //   configuration_defaults(), placement()
+    //   configuration_defaults(), placement(), runner_placement()
 }
 
 pub struct Session { /* private */ }
@@ -954,10 +962,23 @@ impl CreateSessionReconstitutionInput {
         defaults: SessionConfigurationDefaults,
         placement: VersionedSessionPlacement,
     ) -> Self;
+    pub const fn new_with_runner_placement(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: VersionedSessionPlacement,
+        runner_placement: Option<SessionRunnerPlacement>,
+    ) -> Self;
     pub fn reconstitute(self)
         -> Result<ReconstitutedSessionCreation, CreateSessionReconstitutionError>;
     // accessors: command(), result_session(), session(), provenance(),
-    //   template_provenance(), defaults_session(), defaults_version(), defaults(), placement()
+    //   template_provenance(), defaults_session(), defaults_version(), defaults(), placement(),
+    //   runner_placement()
 }
 
 pub enum CreateSessionReconstitutionFailure {
@@ -965,6 +986,7 @@ pub enum CreateSessionReconstitutionFailure {
     ProvenanceMismatch,
     TemplateProvenanceMismatch,
     PlacementMismatch,
+    RunnerPlacementMismatch,
     DefaultsSessionMismatch,
     TranscriptAncestryUnavailable,
     DelegatedCreationRequiresSpawn,
@@ -1533,6 +1555,20 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
         semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     ) -> Self;
+    pub fn new_with_runner_placement(
+        command: CreateSessionFromImportedFrontier,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        imported_conversation: ImportedConversation,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+        runner_placement: Option<SessionRunnerPlacement>,
+    ) -> Self;
     pub fn reconstitute(
         self,
     ) -> Result<
@@ -1542,7 +1578,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
     // accessors: command(), result_session(), session(), provenance(),
     //   defaults_session(), defaults_version(), defaults(),
     //   imported_conversation(), seed_records(), seed_snapshots(),
-    //   semantic_entries()
+    //   semantic_entries(), runner_placement()
 }
 
 pub enum CreateSessionFromImportedFrontierReconstitutionFailure {
@@ -1551,6 +1587,7 @@ pub enum CreateSessionFromImportedFrontierReconstitutionFailure {
     DefaultsSessionMismatch,
     DefaultsVersionIsNotFirst,
     DefaultsMismatch,
+    RunnerPlacementMismatch,
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
@@ -5474,7 +5511,12 @@ impl CreateSessionRequest {
         resolved_configuration_defaults: SessionConfigurationDefaults,
     ) -> Result<Self, InvalidDurableCommandId>;
     pub fn with_placement(self, placement: SessionPlacement) -> Self;
-    // accessors: command_id(), initial_configuration_defaults(), template_provenance(), placement()
+    pub fn with_runner_placement(
+        self,
+        runner_placement: Option<SessionRunnerPlacementRequest>,
+    ) -> Self;
+    // accessors: command_id(), initial_configuration_defaults(), template_provenance(), placement(),
+    //   runner_placement()
 }
 
 pub trait SessionIdGenerator {
@@ -5569,8 +5611,12 @@ impl CreateSessionFromImportedFrontierRequest {
         relationship: ImportedSessionRelationship,
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn with_runner_placement(
+        self,
+        runner_placement: Option<SessionRunnerPlacementRequest>,
+    ) -> Self;
     // accessors: command_id(), imported_frontier(), relationship(),
-    //   initial_configuration_defaults()
+    //   initial_configuration_defaults(), runner_placement()
 }
 
 pub trait CreateSessionFromImportedFrontierIdGenerator {

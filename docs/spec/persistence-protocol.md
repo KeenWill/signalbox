@@ -13,7 +13,9 @@ startup resumption of every pending cursor were verified against this PR
 cursor, exact registration-loss cause, and per-session transaction were verified
 against this PR (`agent/runner-registration-reconciliation`). Pending-successor
 enrollment admission and exact receipt replay were verified against this PR
-(`agent/runner-pending-successor-promotion`).
+(`agent/runner-pending-successor-promotion`). Creation-command runner placement
+and revision-one readback were verified against this PR
+(`agent/runner-creation-placement-persistence`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR

@@ -11,7 +11,7 @@ use signalbox_domain::{
     CreateSession as DomainCreateSession, CreateSessionAppliedResult,
     CreateSessionPreparationFailure, DurableCommandId, PreparedCreateSession,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionPlacement, SessionTemplateProvenance, TranscriptAncestry,
+    SessionPlacement, SessionRunnerPlacementRequest, SessionTemplateProvenance, TranscriptAncestry,
 };
 
 /// Why a caller-supplied command identity cannot enter canonical construction.
@@ -50,6 +50,7 @@ pub struct CreateSessionRequest {
     initial_configuration_defaults: SessionConfigurationDefaults,
     template_provenance: Option<SessionTemplateProvenance>,
     placement: SessionPlacement,
+    runner_placement: Option<SessionRunnerPlacementRequest>,
 }
 
 impl CreateSessionRequest {
@@ -70,6 +71,7 @@ impl CreateSessionRequest {
             initial_configuration_defaults,
             template_provenance: None,
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
         })
     }
 
@@ -92,6 +94,7 @@ impl CreateSessionRequest {
             initial_configuration_defaults: resolved_configuration_defaults,
             template_provenance: Some(template_provenance),
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
         })
     }
 
@@ -119,6 +122,20 @@ impl CreateSessionRequest {
     /// Borrows the creation-time placement decision.
     pub const fn placement(&self) -> &SessionPlacement {
         &self.placement
+    }
+
+    /// Installs the complete optional runner-placement request.
+    pub fn with_runner_placement(
+        mut self,
+        runner_placement: Option<SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = runner_placement;
+        self
+    }
+
+    /// Borrows the runner-placement request, when present.
+    pub const fn runner_placement(&self) -> Option<&SessionRunnerPlacementRequest> {
+        self.runner_placement.as_ref()
     }
 }
 
@@ -255,6 +272,7 @@ where
             initial_configuration_defaults,
             template_provenance,
             placement,
+            runner_placement,
         } = request;
         let provenance = SessionCreationProvenance::new(
             SessionCreationCause::UserInitiated,
@@ -274,7 +292,8 @@ where
                 initial_configuration_defaults,
                 placement,
             ),
-        };
+        }
+        .with_runner_placement(runner_placement);
         let prepared = command
             .prepare(candidate_session)
             .map_err(|error| CreateSessionError::Preparation(error.failure()))?;

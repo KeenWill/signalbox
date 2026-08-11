@@ -12,7 +12,7 @@ use signalbox_domain::{
     CreateSessionFromImportedFrontier as DomainCreateSessionFromImportedFrontier,
     CreateSessionFromImportedFrontierAppliedResult, DurableCommandId, ImportedConversationId,
     ImportedSessionRelationship, ImportedTranscriptFrontier, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionId,
+    SessionConfigurationDefaults, SessionId, SessionRunnerPlacementRequest,
 };
 
 use crate::InvalidDurableCommandId;
@@ -28,6 +28,7 @@ pub struct CreateSessionFromImportedFrontierRequest {
     imported_frontier: ImportedTranscriptFrontier,
     relationship: ImportedSessionRelationship,
     initial_configuration_defaults: SessionConfigurationDefaults,
+    runner_placement: Option<SessionRunnerPlacementRequest>,
 }
 
 impl CreateSessionFromImportedFrontierRequest {
@@ -50,6 +51,7 @@ impl CreateSessionFromImportedFrontierRequest {
             imported_frontier,
             relationship,
             initial_configuration_defaults,
+            runner_placement: None,
         })
     }
 
@@ -71,6 +73,20 @@ impl CreateSessionFromImportedFrontierRequest {
     /// Borrows the complete initial model-selection defaults.
     pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults {
         &self.initial_configuration_defaults
+    }
+
+    /// Installs the complete optional runner-placement request.
+    pub fn with_runner_placement(
+        mut self,
+        runner_placement: Option<SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = runner_placement;
+        self
+    }
+
+    /// Borrows the runner-placement request, when present.
+    pub const fn runner_placement(&self) -> Option<&SessionRunnerPlacementRequest> {
+        self.runner_placement.as_ref()
     }
 }
 
@@ -197,7 +213,8 @@ where
             request.imported_frontier,
             request.relationship,
             request.initial_configuration_defaults,
-        );
+        )
+        .with_runner_placement(request.runner_placement);
         let session = self.ids.next_session_id();
         let seed_frontier = self.ids.next_context_frontier_id();
         let ids = &mut self.ids;

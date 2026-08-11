@@ -248,6 +248,7 @@ pub struct CreateSession {
     provenance: SessionCreationProvenance,
     creation_defaults: SessionCreationDefaults,
     placement: SessionPlacement,
+    runner_placement: Option<crate::SessionRunnerPlacementRequest>,
 }
 
 impl CreateSession {
@@ -263,6 +264,7 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
         }
     }
 
@@ -278,6 +280,7 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement,
+            runner_placement: None,
         }
     }
 
@@ -297,6 +300,7 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
         }
     }
 
@@ -316,6 +320,7 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement,
+            runner_placement: None,
         }
     }
 
@@ -351,6 +356,20 @@ impl CreateSession {
     /// Borrows the placement pinned by this creation record.
     pub const fn placement(&self) -> &SessionPlacement {
         &self.placement
+    }
+
+    /// Installs the complete optional runner-placement request.
+    pub fn with_runner_placement(
+        mut self,
+        runner_placement: Option<crate::SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = runner_placement;
+        self
+    }
+
+    /// Borrows the complete runner-placement request, when present.
+    pub const fn runner_placement(&self) -> Option<&crate::SessionRunnerPlacementRequest> {
+        self.runner_placement.as_ref()
     }
 
     /// Establishes the first immutable defaults version this creation
@@ -395,6 +414,7 @@ impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
             && self.placement == other.placement
+            && self.runner_placement == other.runner_placement
             && match (&self.creation_defaults, &other.creation_defaults) {
                 (
                     SessionCreationDefaults::Explicit(left),
@@ -419,6 +439,7 @@ impl std::hash::Hash for CreateSession {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.provenance.hash(state);
         self.placement.hash(state);
+        self.runner_placement.hash(state);
         match &self.creation_defaults {
             SessionCreationDefaults::Explicit(defaults) => {
                 0_u8.hash(state);
@@ -444,6 +465,7 @@ pub struct CreateSessionFromImportedFrontier {
     imported_frontier: ImportedTranscriptFrontier,
     relationship: ImportedSessionRelationship,
     initial_configuration_defaults: SessionConfigurationDefaults,
+    runner_placement: Option<crate::SessionRunnerPlacementRequest>,
 }
 
 impl CreateSessionFromImportedFrontier {
@@ -459,6 +481,7 @@ impl CreateSessionFromImportedFrontier {
             imported_frontier,
             relationship,
             initial_configuration_defaults,
+            runner_placement: None,
         }
     }
 
@@ -487,6 +510,20 @@ impl CreateSessionFromImportedFrontier {
         &self.initial_configuration_defaults
     }
 
+    /// Installs the complete optional runner-placement request.
+    pub fn with_runner_placement(
+        mut self,
+        runner_placement: Option<crate::SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = runner_placement;
+        self
+    }
+
+    /// Borrows the complete runner-placement request, when present.
+    pub const fn runner_placement(&self) -> Option<&crate::SessionRunnerPlacementRequest> {
+        self.runner_placement.as_ref()
+    }
+
     /// Establishes defaults version one for the session this command creates.
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
         VersionedSessionConfigurationDefaults::establish(
@@ -501,6 +538,7 @@ impl PartialEq for CreateSessionFromImportedFrontier {
         self.imported_frontier == other.imported_frontier
             && self.relationship == other.relationship
             && self.initial_configuration_defaults == other.initial_configuration_defaults
+            && self.runner_placement == other.runner_placement
     }
 }
 
@@ -511,6 +549,7 @@ impl std::hash::Hash for CreateSessionFromImportedFrontier {
         self.imported_frontier.hash(state);
         self.relationship.hash(state);
         self.initial_configuration_defaults.hash(state);
+        self.runner_placement.hash(state);
     }
 }
 
@@ -555,20 +594,36 @@ impl ImportedSessionSeed {
 /// This pure value does not claim that a transaction committed. It is carried
 /// by [`PreparedCreateSession`] before persistence and by
 /// [`ReconstitutedSessionCreation`] only after complete durable facts validate.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InitialSession {
     id: SessionId,
     provenance: SessionCreationProvenance,
     template_provenance: Option<SessionTemplateProvenance>,
     configuration_defaults: VersionedSessionConfigurationDefaults,
     placement: VersionedSessionPlacement,
+    runner_placement: Option<crate::SessionRunnerPlacement>,
+}
+
+impl std::hash::Hash for InitialSession {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.provenance.hash(state);
+        self.template_provenance.hash(state);
+        self.configuration_defaults.hash(state);
+        self.placement.hash(state);
+        self.runner_placement
+            .as_ref()
+            .map(crate::SessionRunnerPlacement::request)
+            .hash(state);
+    }
 }
 
 impl InitialSession {
-    pub(crate) const fn from_validated_imported_creation(
+    pub(crate) fn from_validated_imported_creation(
         id: SessionId,
         provenance: SessionCreationProvenance,
         configuration_defaults: VersionedSessionConfigurationDefaults,
+        runner_placement: Option<crate::SessionRunnerPlacementRequest>,
     ) -> Self {
         Self {
             id,
@@ -576,6 +631,8 @@ impl InitialSession {
             template_provenance: None,
             configuration_defaults,
             placement: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            runner_placement: runner_placement
+                .map(|request| crate::SessionRunnerPlacement::new(id, request)),
         }
     }
 
@@ -602,6 +659,11 @@ impl InitialSession {
     /// Borrows placement event one established by creation.
     pub const fn placement(&self) -> &VersionedSessionPlacement {
         &self.placement
+    }
+
+    /// Borrows runner placement revision one established by creation.
+    pub const fn runner_placement(&self) -> Option<&crate::SessionRunnerPlacement> {
+        self.runner_placement.as_ref()
     }
 }
 
@@ -1159,6 +1221,10 @@ impl CreateSession {
             template_provenance: self.template_provenance().cloned(),
             configuration_defaults: self.establish_initial_defaults(),
             placement: VersionedSessionPlacement::initial(self.placement.clone()),
+            runner_placement: self
+                .runner_placement
+                .clone()
+                .map(|request| crate::SessionRunnerPlacement::new(session, request)),
         };
         Ok(PreparedCreateSession {
             command: self,
@@ -1185,6 +1251,7 @@ pub struct CreateSessionReconstitutionInput {
     defaults_version: crate::SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
     placement: VersionedSessionPlacement,
+    runner_placement: Option<crate::SessionRunnerPlacement>,
 }
 
 impl CreateSessionReconstitutionInput {
@@ -1199,7 +1266,7 @@ impl CreateSessionReconstitutionInput {
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
-        Self::new_with_template_and_placement(
+        Self::new_with_runner_placement(
             command,
             result_session,
             session,
@@ -1209,6 +1276,7 @@ impl CreateSessionReconstitutionInput {
             defaults_version,
             defaults,
             VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            None,
         )
     }
 
@@ -1224,7 +1292,7 @@ impl CreateSessionReconstitutionInput {
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
-        Self::new_with_template_and_placement(
+        Self::new_with_runner_placement(
             command,
             result_session,
             session,
@@ -1234,6 +1302,7 @@ impl CreateSessionReconstitutionInput {
             defaults_version,
             defaults,
             VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            None,
         )
     }
 
@@ -1250,6 +1319,34 @@ impl CreateSessionReconstitutionInput {
         defaults: SessionConfigurationDefaults,
         placement: VersionedSessionPlacement,
     ) -> Self {
+        Self::new_with_runner_placement(
+            command,
+            result_session,
+            session,
+            provenance,
+            template_provenance,
+            defaults_session,
+            defaults_version,
+            defaults,
+            placement,
+            None,
+        )
+    }
+
+    /// Supplies complete creation facts including both placement axes.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new_with_runner_placement(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        defaults_session: SessionId,
+        defaults_version: crate::SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: VersionedSessionPlacement,
+        runner_placement: Option<crate::SessionRunnerPlacement>,
+    ) -> Self {
         Self {
             command,
             result_session,
@@ -1260,6 +1357,7 @@ impl CreateSessionReconstitutionInput {
             defaults_version,
             defaults,
             placement,
+            runner_placement,
         }
     }
 
@@ -1308,6 +1406,11 @@ impl CreateSessionReconstitutionInput {
         &self.placement
     }
 
+    /// Borrows stored runner placement revision one, when present.
+    pub const fn runner_placement(&self) -> Option<&crate::SessionRunnerPlacement> {
+        self.runner_placement.as_ref()
+    }
+
     /// Reconstructs the complete canonical creation without replaying effects.
     pub fn reconstitute(
         self,
@@ -1346,6 +1449,17 @@ impl CreateSessionReconstitutionInput {
             return Err(fail(
                 self,
                 CreateSessionReconstitutionFailure::PlacementMismatch,
+            ));
+        }
+        if self.command.runner_placement()
+            != self
+                .runner_placement
+                .as_ref()
+                .map(crate::SessionRunnerPlacement::request)
+        {
+            return Err(fail(
+                self,
+                CreateSessionReconstitutionFailure::RunnerPlacementMismatch,
             ));
         }
         if self.defaults_session != self.session {
@@ -1396,6 +1510,7 @@ impl CreateSessionReconstitutionInput {
                     self.defaults,
                 ),
                 placement: self.placement,
+                runner_placement: self.runner_placement,
             },
             applied_result: CreateSessionAppliedResult {
                 session: self.result_session,
@@ -1415,6 +1530,8 @@ pub enum CreateSessionReconstitutionFailure {
     TemplateProvenanceMismatch,
     /// Placement event one differs from the canonical creation payload.
     PlacementMismatch,
+    /// Runner placement revision one differs from the canonical request.
+    RunnerPlacementMismatch,
     /// The stored initial defaults row belongs to a different session.
     DefaultsSessionMismatch,
     /// Trusted source-frontier production is unavailable for this slice.

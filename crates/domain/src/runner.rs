@@ -547,7 +547,7 @@ pub enum RunnerToolPermissionOverride {
 }
 
 /// Checked bounded per-tool permission override inventory.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RunnerToolPermissionOverrides(BTreeMap<ToolName, RunnerToolPermissionOverride>);
 
 impl RunnerToolPermissionOverrides {
@@ -2196,7 +2196,7 @@ pub struct ProvisionedWorkspace {
 }
 
 /// Complete requested placement axes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionRunnerPlacementRequest {
     /// The runner selector that placement must satisfy.
     pub selector: RunnerSelector,
@@ -2327,7 +2327,7 @@ pub enum SessionRunnerPlacementState {
 }
 
 /// Session placement and affinity aggregate.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRunnerPlacement {
     session: SessionId,
     revision: RunnerGeneration,

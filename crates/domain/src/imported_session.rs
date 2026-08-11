@@ -276,6 +276,7 @@ impl CreateSessionFromImportedFrontier {
             session,
             provenance,
             self.establish_initial_defaults(),
+            self.runner_placement().cloned(),
         );
 
         Ok(PreparedCreateSessionFromImportedFrontier {
@@ -1268,6 +1269,7 @@ pub struct CreateSessionFromImportedFrontierReconstitutionInput {
     seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
     seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
     semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    runner_placement: Option<crate::SessionRunnerPlacement>,
 }
 
 impl CreateSessionFromImportedFrontierReconstitutionInput {
@@ -1286,6 +1288,38 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
         semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     ) -> Self {
+        Self::new_with_runner_placement(
+            command,
+            result_session,
+            session,
+            provenance,
+            defaults_session,
+            defaults_version,
+            defaults,
+            imported_conversation,
+            seed_records,
+            seed_snapshots,
+            semantic_entries,
+            None,
+        )
+    }
+
+    /// Supplies every stored creation fact including runner placement one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_runner_placement(
+        command: CreateSessionFromImportedFrontier,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        imported_conversation: ImportedConversation,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+        runner_placement: Option<crate::SessionRunnerPlacement>,
+    ) -> Self {
         Self {
             command,
             result_session,
@@ -1298,6 +1332,7 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
             seed_records,
             seed_snapshots,
             semantic_entries,
+            runner_placement,
         }
     }
 
@@ -1349,6 +1384,17 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
                 CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsMismatch,
             ));
         }
+        if self.command.runner_placement()
+            != self
+                .runner_placement
+                .as_ref()
+                .map(crate::SessionRunnerPlacement::request)
+        {
+            return Err(fail(
+                self,
+                CreateSessionFromImportedFrontierReconstitutionFailure::RunnerPlacementMismatch,
+            ));
+        }
         let projection = match validate_imported_seed_projection(
             self.session,
             self.provenance,
@@ -1369,6 +1415,10 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
             self.session,
             self.provenance,
             VersionedSessionConfigurationDefaults::establish(self.defaults),
+            self.runner_placement
+                .as_ref()
+                .map(crate::SessionRunnerPlacement::request)
+                .cloned(),
         );
         Ok(ReconstitutedSessionCreationFromImportedFrontier {
             command: self.command,
@@ -1436,6 +1486,11 @@ impl CreateSessionFromImportedFrontierReconstitutionInput {
     pub fn semantic_entries(&self) -> &[SemanticTranscriptEntryReconstitutionInput] {
         &self.semantic_entries
     }
+
+    /// Borrows stored runner placement revision one, when present.
+    pub const fn runner_placement(&self) -> Option<&crate::SessionRunnerPlacement> {
+        self.runner_placement.as_ref()
+    }
 }
 
 /// Why complete stored facts cannot reconstruct an applied imported creation.
@@ -1451,6 +1506,8 @@ pub enum CreateSessionFromImportedFrontierReconstitutionFailure {
     DefaultsVersionIsNotFirst,
     /// Stored initial defaults differ from the command payload.
     DefaultsMismatch,
+    /// Runner placement revision one differs from the canonical request.
+    RunnerPlacementMismatch,
     /// The imported seed projection is inconsistent.
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
