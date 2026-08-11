@@ -1399,7 +1399,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       return nil
     }
     let runnerID = runner.runnerID?.rawValue ?? "unassigned"
-    return "Runner \(runnerID) · \(runner.state.rawValue) · revision \(runner.placementRevision.rawValue)"
+    let directoryLabel = runner.workingDirectory.map {
+      "selected directory \(String(reflecting: $0.rawValue))"
+    } ?? "runner-default directory"
+    return SignalboxProcessPresentation.retainedLabel(
+      "Runner \(runnerID) · \(runner.state.rawValue) · health \(runner.connectionHealth.rawValue)"
+        + " · revision \(runner.placementRevision.rawValue)"
+        + " · sandbox \(runner.sandboxProfile.rawValue) · \(directoryLabel)"
+    )
   }
 
   init(
