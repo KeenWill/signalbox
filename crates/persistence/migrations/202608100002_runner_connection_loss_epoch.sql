@@ -424,6 +424,78 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_connection_loss_complete();
 
+ALTER TABLE runner_lease_generation
+    ADD COLUMN offer_connection_epoch numeric(20, 0),
+    ADD COLUMN offer_connection_event_ordinal numeric(20, 0),
+    ADD COLUMN offer_loss_epoch numeric(20, 0),
+    ADD CONSTRAINT runner_lease_offer_connection_shape CHECK (
+        (
+            offer_connection_epoch IS NULL
+            AND offer_connection_event_ordinal IS NULL
+            AND offer_loss_epoch IS NULL
+        )
+        OR (
+            offer_connection_epoch BETWEEN 1 AND 18446744073709551615
+            AND offer_connection_event_ordinal
+                BETWEEN 1 AND 18446744073709551615
+            AND (
+                offer_loss_epoch IS NULL
+                OR offer_loss_epoch BETWEEN 1 AND 18446744073709551615
+            )
+        )
+    ),
+    ADD CONSTRAINT runner_lease_offer_connection_fk
+        FOREIGN KEY (
+            registration_enrollment_id,
+            offer_connection_epoch,
+            offer_connection_event_ordinal
+        )
+        REFERENCES runner_connection_event (
+            enrollment_id,
+            connection_epoch,
+            event_ordinal
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT runner_lease_offer_loss_fk
+        FOREIGN KEY (registration_enrollment_id, offer_loss_epoch)
+        REFERENCES runner_connection_loss_epoch (enrollment_id, loss_epoch)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+DO $migration$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS generation
+          JOIN runner_current_lease_event AS current_lease
+            ON current_lease.lease_id = generation.lease_id
+           AND current_lease.generation = generation.generation
+          JOIN runner_lease_event AS lease_event
+            ON lease_event.lease_id = current_lease.lease_id
+           AND lease_event.generation = current_lease.generation
+           AND lease_event.event_ordinal = current_lease.event_ordinal
+          JOIN runner_connection_authority_head AS authority
+            ON authority.enrollment_id =
+                generation.registration_enrollment_id
+         WHERE lease_event.state_kind = 'offered'
+           AND authority.latest_loss_epoch IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION
+            'offered runner lease predates reconstructible loss authority';
+    END IF;
+END;
+$migration$;
+
+UPDATE runner_lease_generation AS generation
+   SET offer_connection_epoch = authority.connection_epoch,
+       offer_connection_event_ordinal = authority.connection_event_ordinal,
+       offer_loss_epoch = authority.latest_loss_epoch
+  FROM runner_connection_authority_head AS authority
+ WHERE authority.enrollment_id = generation.registration_enrollment_id;
+
 CREATE FUNCTION reject_runner_lease_generation_after_connection_loss()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -433,6 +505,13 @@ DECLARE
     connection runner_connection_event%ROWTYPE;
     loss runner_connection_loss_epoch%ROWTYPE;
 BEGIN
+    IF NEW.offer_connection_epoch IS NOT NULL
+       OR NEW.offer_connection_event_ordinal IS NOT NULL
+       OR NEW.offer_loss_epoch IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'runner lease offer authority is adapter-owned'
+            USING ERRCODE = '23514';
+    END IF;
     PERFORM 1
       FROM runner_enrollment
      WHERE enrollment_id = NEW.registration_enrollment_id
@@ -456,6 +535,10 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF connection.state_kind IS DISTINCT FROM 'lost' THEN
+        NEW.offer_connection_epoch := authority.connection_epoch;
+        NEW.offer_connection_event_ordinal :=
+            authority.connection_event_ordinal;
+        NEW.offer_loss_epoch := authority.latest_loss_epoch;
         RETURN NEW;
     END IF;
     SELECT epoch.*
@@ -483,3 +566,69 @@ CREATE TRIGGER runner_lease_generation_connection_loss_fence
 BEFORE INSERT ON runner_lease_generation
 FOR EACH ROW
 EXECUTE FUNCTION reject_runner_lease_generation_after_connection_loss();
+
+CREATE FUNCTION reject_runner_lease_claim_after_connection_loss()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    offered runner_lease_generation%ROWTYPE;
+    authority runner_connection_authority_head%ROWTYPE;
+    connection_state text;
+BEGIN
+    IF NEW.state_kind <> 'claimed' THEN
+        RETURN NEW;
+    END IF;
+    SELECT *
+      INTO offered
+      FROM runner_lease_generation AS lease_generation
+     WHERE lease_generation.lease_id = NEW.lease_id
+       AND lease_generation.generation = NEW.generation;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'runner lease claim lacks its generation'
+            USING ERRCODE = '23514';
+    END IF;
+    PERFORM 1
+      FROM runner_enrollment
+     WHERE enrollment_id = offered.registration_enrollment_id
+     FOR SHARE;
+    SELECT *
+      INTO authority
+      FROM runner_connection_authority_head
+     WHERE enrollment_id = offered.registration_enrollment_id
+     FOR SHARE;
+    IF offered.offer_connection_epoch IS NULL THEN
+        IF authority.enrollment_id IS NOT NULL THEN
+            RAISE EXCEPTION
+                'runner lease claim connection differs from its offer'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF authority.enrollment_id IS NULL
+       OR authority.connection_epoch IS DISTINCT FROM
+            offered.offer_connection_epoch
+       OR authority.latest_loss_epoch IS DISTINCT FROM
+            offered.offer_loss_epoch
+    THEN
+        RAISE EXCEPTION 'runner lease claim crossed a connection loss fence'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT state_kind
+      INTO connection_state
+      FROM runner_connection_event
+     WHERE enrollment_id = authority.enrollment_id
+       AND connection_epoch = authority.connection_epoch
+       AND event_ordinal = authority.connection_event_ordinal;
+    IF connection_state IS DISTINCT FROM 'connected' THEN
+        RAISE EXCEPTION 'runner lease claim lacks a live connection'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_lease_claim_connection_loss_fence
+BEFORE INSERT ON runner_lease_event
+FOR EACH ROW
+EXECUTE FUNCTION reject_runner_lease_claim_after_connection_loss();
