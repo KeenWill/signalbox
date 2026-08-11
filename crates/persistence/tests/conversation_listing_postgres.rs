@@ -36,7 +36,7 @@ use signalbox_persistence::{
         ConversationListingRepositoryError,
     },
     create_session::CreateSessionRepository,
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     session_metadata::SessionMetadataRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -91,6 +91,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;

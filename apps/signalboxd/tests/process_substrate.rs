@@ -6,7 +6,7 @@
 
 use std::error::Error;
 
-use signalbox_persistence::local_test_connection_options;
+use signalbox_persistence::{disposable_test_container_labels, local_test_connection_options};
 use signalboxd::{FencedHubDatabase, SingleHubGuard, SingleHubGuardError};
 use sqlx::{Connection, PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -26,6 +26,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dy
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
