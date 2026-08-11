@@ -51,7 +51,8 @@ pub(super) fn decode_push(arguments: &NormalizedToolArguments) -> Result<GitPush
     Ok(arguments)
 }
 
-/// One approval-gated push declaration and its configured-remote executor.
+/// One non-overridable approval-gated push declaration and its
+/// configured-remote executor.
 #[derive(Debug)]
 pub struct GitPushTools<Transport> {
     catalog: CompiledToolCatalog,
@@ -86,7 +87,7 @@ impl<Transport> GitPushTools<Transport> {
         let unresolved_detail = detail(PUSH_UNRESOLVED_DETAIL)?;
         let rejected_detail = detail(PUSH_REJECTED_DETAIL)?;
         let definition = compile_contract_definition::<PushContract>(
-            ToolPermissionDefault::Confirm,
+            ToolPermissionDefault::AlwaysConfirm,
             ToolEffectClass::ExternalEffect,
         )
         .map_err(|error| match error {
