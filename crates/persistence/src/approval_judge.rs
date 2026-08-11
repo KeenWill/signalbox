@@ -10,10 +10,9 @@ use signalbox_application::{
 use signalbox_domain::{
     ActiveTurnPhase, DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
     FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalStatement, ModelCallId,
-    ModelTargetCatalog, ProviderModelIdentity,
-    ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId, SessionSystemPrompt,
-    SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale, ToolRequest, ToolRequestId,
-    TurnAttemptId, TurnId,
+    ModelTargetCatalog, ProviderModelIdentity, ProviderReportedTokenUsage, ResolvedProviderTarget,
+    SessionId, SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture,
+    ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -1271,7 +1270,9 @@ mod tests {
     };
     use sqlx::types::Uuid;
 
-    use super::{ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, judged_turn_goal_statement};
+    use super::{
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, judged_turn_goal_statement,
+    };
 
     /// A goal commissioned with the given statement, as dispatch commissions it.
     fn commissioned(statement: &str) -> Goal {
@@ -1336,7 +1337,10 @@ mod tests {
 
         let resolved = judged_turn_goal_statement(superseded.generations(), Some(generation(1)));
 
-        assert_eq!(resolved, Ok(Some(goal_statement("land the reviewer fixes"))));
+        assert_eq!(
+            resolved,
+            Ok(Some(goal_statement("land the reviewer fixes")))
+        );
     }
 
     #[test]

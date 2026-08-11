@@ -6,7 +6,9 @@ state, user commands, model declarations, scheduler continuation, process wire,
 and terminal-client verbs. The domain and persistence surface was verified
 through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
 process, and terminal surfaces were verified through PR #384
-(`agent/goal-mode-runtime`). This bottom specification diff owns both stack
+(`agent/goal-mode-runtime`). Dispatch-composed commissions and the generation a
+turn's authority resolves to are verified against this PR
+(`agent/dispatch-session-goals`). This bottom specification diff owns both stack
 slices. Identity and durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
@@ -59,6 +61,24 @@ record either the appended event ordinal or a closed rejection, including
 acceptance and `acceptance_position_exhausted` when the session's positive
 accepted-input ordinal cannot advance. Equal replay returns the recorded result;
 structurally different reuse is a conflict.
+
+**Implemented behavior.** A commission need not originate from a user request.
+Repository-watch dispatch composes an attach for the session it is creating and
+commits it in that creation's own transaction, with its own durable command
+identity and the same receipt and event shapes any attach records; the goal
+statement is synthesized from the dispatch rather than supplied as text. Such a
+statement is system-authored in shape but not in every byte, because the
+identifiers it renders come from the watched repository, so a consumer placing
+it in a model prompt owes it exactly the quoting it owes any session text.
+
+**Implemented behavior.** Every goal turn records the generation it belongs to,
+and a consumer reading the authority a turn ran under reads that generation and
+not the session's current one, so a supersession while the turn is parked cannot
+broaden what that consumer sees. A turn the goal machinery did not schedule
+carries no such record, and a goal session runs those too. Such a turn reads the
+session's goal only while its lineage has exactly one generation — the condition
+under which no broadened replacement can exist — and otherwise resolves to no
+statement, leaving the consumer to treat the authority as unsettled.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no

@@ -2323,8 +2323,9 @@ mod tests {
             super::DispatchSessionParameters::try_from_event(event)?,
         );
 
-        let statement = action
-            .synthesized_goal_statement(&RepoWatchRuleId::try_new(String::from("watch-forward"))?)?;
+        let statement = action.synthesized_goal_statement(&RepoWatchRuleId::try_new(
+            String::from("watch-forward"),
+        )?)?;
 
         expect![[
             "Dispatched by rule watch-forward: template merge-forward, pull request #1 (head topic/watch, base main) in namespace/repo"

@@ -725,7 +725,9 @@ where
         {
             CurrentOriginConfiguration::Selected(configuration) => configuration,
             CurrentOriginConfiguration::UnknownAlias(_) => {
-                return Err(GoalCorruption::Inconsistent("dispatched goal turn model alias").into());
+                return Err(
+                    GoalCorruption::Inconsistent("dispatched goal turn model alias").into(),
+                );
             }
         };
     let position = match next_goal_turn_acceptance_position(connection, command.session()).await? {

@@ -20,7 +20,8 @@ persistence and rule-dispatch behavior below is verified against PR #446
 (`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
 against this PR (`agent/repo-watch-poll-performance`). The provider members the
 poller adopts as check-suite and check-run completion generations are verified
-against PR #541 (`fix/check-run-updated-at`).
+against PR #541 (`fix/check-run-updated-at`). The goal a dispatch commissions
+with its session is verified against this PR (`agent/dispatch-session-goals`).
 
 ## Configuration and credential boundary
 
@@ -327,7 +328,8 @@ one emitted `dispatch_session { template, params }` action in list order, where
 
 **Implemented behavior.** Dispatch context is the ratified tagged union:
 
-- `PullRequestContext { repo, number, head_sha, event }`; or
+- `PullRequestContext { repo, number, head_sha, head_branch, base_branch, event }`;
+  or
 - `BranchContext { repo, branch, workflow, conclusion, event }`.
 
 **Implemented behavior.** The embedded event is the complete triggering durable
@@ -359,6 +361,22 @@ delivery intent records the reserved submit-command, accepted-input, turn, and
 cancellation candidates beside the applied link. Equal recovery reuses the
 complete committed batch. A lost post-commit scheduler nudge remains recoverable
 by the ordinary eligibility sweep.
+
+**Implemented behavior.** The same transaction also commissions that session's
+goal, so no dispatched session is durably visible without a statement of the
+authority it was dispatched under. The statement is synthesized from the
+dispatching rule, the resolved template, and that action's typed parameters, and
+states only those facts: rule, template, and either the pull request with its
+head and base branches or the branch with its workflow and conclusion, each in
+its repository. It is composed by the dispatch rather than declared by the
+session, because only an already-attached goal admits a model declaration, so a
+session created without one has no transition available to it. Because
+commissioning schedules that generation's first goal turn, a dispatched session
+commits two queued turns: the tagged-context turn described above, whose
+accepted input belongs to its submit command, and the goal turn, whose input is
+the statement. The dispatched work turn is therefore not itself a goal turn.
+Pursuit also holds the batch's singleton until the goal reaches a terminal
+state, which is the release rule stated below rather than a new one.
 
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor

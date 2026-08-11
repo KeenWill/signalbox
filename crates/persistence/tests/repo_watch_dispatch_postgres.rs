@@ -18,9 +18,8 @@ use signalbox_domain::{
     GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionRequest, PullRequestBody,
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
     RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
     SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
     SessionTemplateName, SessionTemplateProvenance, TurnId, UserContent,
 };
