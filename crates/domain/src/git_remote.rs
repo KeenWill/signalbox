@@ -29,14 +29,6 @@ pub const fn max_git_remote_url_bytes() -> usize {
     MAX_GIT_REMOTE_URL_BYTES
 }
 
-/// Longest admitted workspace root in bytes.
-///
-/// The bound is smaller than a platform `PATH_MAX` because the durable record
-/// indexes the root together with the remote name, and a PostgreSQL B-tree
-/// index tuple may not exceed roughly a third of an 8 KiB page. A longer bound
-/// would let an otherwise valid mint fail on index insertion rather than here.
-const MAX_WORKSPACE_ROOT_BYTES: usize = 1024;
-
 /// Reference component suffix Git refuses.
 const REFUSED_NAME_SUFFIX: &str = ".lock";
 
@@ -61,8 +53,6 @@ pub enum GitRemoteTextError {
     Malformed,
     /// The destination did not name the required https scheme.
     UnsupportedScheme,
-    /// The workspace root was not an absolute path.
-    NotAbsolute,
 }
 
 impl fmt::Display for GitRemoteTextError {
@@ -78,7 +68,6 @@ impl fmt::Display for GitRemoteTextError {
             Self::UnsupportedScheme => {
                 formatter.write_str("Git remote destination was not an https URL")
             }
-            Self::NotAbsolute => formatter.write_str("Git remote workspace root was not absolute"),
         }
     }
 }
@@ -250,48 +239,19 @@ impl fmt::Debug for GitRemoteUrl {
     }
 }
 
-/// One absolute workspace root that scopes a minted remote.
-///
-/// A workspace has no durable record in this domain, so the daemon's pinned
-/// canonical root is the identity a minted destination is scoped by.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GitRemoteWorkspaceRoot(String);
-
-impl GitRemoteWorkspaceRoot {
-    /// Admits one bounded absolute path without ASCII control bytes.
-    ///
-    /// The control test is ASCII-only, matching what the SQL predicate's
-    /// `[:cntrl:]` class means under the `C` collation. A path may legitimately
-    /// carry non-ASCII bytes, so narrowing to ASCII outright is wrong here;
-    /// agreeing on which bytes are control is what keeps the durable store from
-    /// holding a root this type would refuse.
-    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
-        validate_text(&value, MAX_WORKSPACE_ROOT_BYTES)?;
-        if !value.starts_with('/') {
-            return Err(GitRemoteTextError::NotAbsolute);
-        }
-        if value.bytes().any(|byte| byte.is_ascii_control()) {
-            return Err(GitRemoteTextError::Malformed);
-        }
-        Ok(Self(value))
-    }
-
-    /// Borrows the workspace root.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Returns the owned workspace root.
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
 /// One live operator-minted destination resolved for a workspace.
+///
+/// The scope is a [`crate::WorkspaceId`], never a path. A mint keyed by a root
+/// path would be keyed by a spelling: `/srv/workspace` and `/srv/workspace/.`
+/// name one directory and would carry two independent live destinations under
+/// a rule that promised one. The workspace record canonicalizes once, at the
+/// moment it is minted, and every scope comparison after that is between
+/// identities — so there is no later point at which a normalization could be
+/// forgotten.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfiguredGitRemoteRecord {
     mint: crate::GitRemoteMintId,
-    workspace_root: GitRemoteWorkspaceRoot,
+    workspace: crate::WorkspaceId,
     name: GitRemoteName,
     url: GitRemoteUrl,
 }
@@ -300,13 +260,13 @@ impl ConfiguredGitRemoteRecord {
     /// Binds one durable mint identity to its scoped destination.
     pub const fn new(
         mint: crate::GitRemoteMintId,
-        workspace_root: GitRemoteWorkspaceRoot,
+        workspace: crate::WorkspaceId,
         name: GitRemoteName,
         url: GitRemoteUrl,
     ) -> Self {
         Self {
             mint,
-            workspace_root,
+            workspace,
             name,
             url,
         }
@@ -317,9 +277,9 @@ impl ConfiguredGitRemoteRecord {
         self.mint
     }
 
-    /// Borrows the workspace root this destination is scoped to.
-    pub const fn workspace_root(&self) -> &GitRemoteWorkspaceRoot {
-        &self.workspace_root
+    /// Returns the workspace this destination is scoped to.
+    pub const fn workspace(&self) -> crate::WorkspaceId {
+        self.workspace
     }
 
     /// Borrows the operator-chosen remote name.
@@ -337,7 +297,6 @@ impl ConfiguredGitRemoteRecord {
 mod tests {
     use super::*;
 
-    const WORKSPACE: &str = "/srv/signalbox/workspace";
     const NAME: &str = "origin";
     const URL: &str = "https://example.test/namespace/project.git";
 
@@ -508,19 +467,6 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_root_beyond_the_indexed_bound_is_refused() {
-        let root = format!("/{}", "a".repeat(MAX_WORKSPACE_ROOT_BYTES));
-
-        assert_eq!(
-            GitRemoteWorkspaceRoot::try_new(root),
-            Err(GitRemoteTextError::TooLong {
-                bytes: MAX_WORKSPACE_ROOT_BYTES + 1,
-                maximum: MAX_WORKSPACE_ROOT_BYTES,
-            })
-        );
-    }
-
-    #[test]
     fn a_destination_carrying_whitespace_is_refused() {
         assert_eq!(
             GitRemoteUrl::try_new("https://example.test/a project.git".to_owned()),
@@ -538,18 +484,21 @@ mod tests {
         assert!(rendered.contains("[MINTED]"));
     }
 
+    /// The record scopes a destination by workspace identity, so two spellings
+    /// of one root cannot reach it at all: there is no path on this type to
+    /// compare, and the identity is what the durable row is keyed by.
     #[test]
-    fn an_absolute_workspace_root_is_admitted() {
-        let root = GitRemoteWorkspaceRoot::try_new(WORKSPACE.to_owned()).expect("root is admitted");
+    fn a_record_scopes_its_destination_by_workspace_identity() {
+        let mint = crate::GitRemoteMintId::from_uuid(uuid::Uuid::from_u128(1));
+        let workspace = crate::WorkspaceId::from_uuid(uuid::Uuid::from_u128(2));
+        let name = GitRemoteName::try_new(NAME.to_owned()).expect("name is admitted");
+        let url = GitRemoteUrl::try_new(URL.to_owned()).expect("destination is admitted");
 
-        assert_eq!(root.as_str(), WORKSPACE);
-    }
+        let record = ConfiguredGitRemoteRecord::new(mint, workspace, name, url);
 
-    #[test]
-    fn a_relative_workspace_root_is_refused() {
-        assert_eq!(
-            GitRemoteWorkspaceRoot::try_new("workspace".to_owned()),
-            Err(GitRemoteTextError::NotAbsolute)
-        );
+        assert_eq!(record.mint(), mint);
+        assert_eq!(record.workspace(), workspace);
+        assert_eq!(record.name().as_str(), NAME);
+        assert_eq!(record.url().as_str(), URL);
     }
 }

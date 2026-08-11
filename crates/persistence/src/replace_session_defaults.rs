@@ -310,6 +310,7 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::CompactSession
                 | CommandKind::Goal
                 | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote,
             ) => {
@@ -356,6 +357,7 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::CompactSession
                     | CommandKind::Goal
                     | CommandKind::UpdateSessionPlacement
+                    | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
@@ -466,6 +468,7 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::CompactSession
                 | CommandKind::Goal
                 | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),

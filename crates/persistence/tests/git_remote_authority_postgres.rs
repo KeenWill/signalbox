@@ -4,17 +4,24 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-//! Pins the durable Git remote authority schema against the domain newtypes.
+//! Pins the durable workspace and Git remote authority schema against the
+//! domain newtypes.
 //!
 //! The migration's `CHECK` predicates restate, in SQL, rules the domain
 //! newtypes enforce in Rust. Nothing links the two declarations, so each rule is
 //! exercised here through the real constraint with the value the Rust
 //! constructor accepted or refused.
+//!
+//! The one-live-mint rule is carried by a unique constraint over the derived
+//! live view rather than by a counting trigger, so the tests below drive it at
+//! the isolation levels a counting trigger could not hold.
 
 use std::{error::Error, time::Duration};
 
-use signalbox_domain::{GitRemoteName, GitRemoteUrl, GitRemoteWorkspaceRoot};
-use signalbox_persistence::{local_test_connection_options, migrate};
+use signalbox_domain::{GitRemoteName, GitRemoteUrl, WorkspaceRootPath};
+use signalbox_persistence::{
+    disposable_test_container_labels, local_test_connection_options, migrate,
+};
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -26,7 +33,8 @@ const DATABASE_NAME: &str = "signalbox_git_remote_authority";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
-const WORKSPACE: &str = "/srv/signalbox/workspace";
+const WORKSPACE_ROOT: &str = "/srv/signalbox/workspace";
+const OTHER_WORKSPACE_ROOT: &str = "/srv/signalbox/workspace.sessions/second";
 const NAME: &str = "origin";
 const URL: &str = "https://example.test/namespace/project.git";
 
@@ -37,6 +45,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -53,9 +62,9 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
 
 /// One durable-command identity, distinct per seed and otherwise arbitrary.
 ///
-/// The seed carries no meaning beyond uniqueness. The three identity kinds are
-/// drawn from disjoint ranges so a transposed same-typed argument names nothing
-/// that exists rather than silently naming a row of the other kind.
+/// The seed carries no meaning beyond uniqueness. The identity kinds are drawn
+/// from disjoint ranges so a transposed same-typed argument names nothing that
+/// exists rather than silently naming a row of the other kind.
 fn command_id(seed: u128) -> Uuid {
     Uuid::from_u128(0xc0de_0000 + seed)
 }
@@ -68,6 +77,11 @@ fn mint_id(seed: u128) -> Uuid {
 /// One withdrawal identity, distinct per seed and otherwise arbitrary.
 fn withdrawal_id(seed: u128) -> Uuid {
     Uuid::from_u128(0xbeef_0000 + seed)
+}
+
+/// One workspace identity, distinct per seed and otherwise arbitrary.
+fn workspace_id(seed: u128) -> Uuid {
+    Uuid::from_u128(0x5eed_0000 + seed)
 }
 
 /// Records one durable command of the given kind.
@@ -87,25 +101,73 @@ async fn insert_command(
     .map(|_| ())
 }
 
-/// Records one mint row bound to an already-recorded command.
+/// Records one daemon-derived workspace, which carries no command provenance.
+async fn insert_derived_workspace(
+    connection: &mut PgConnection,
+    workspace: Uuid,
+    root_path: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO workspace (workspace_id, root_path, origin)
+         VALUES ($1, $2, 'daemon_derived')",
+    )
+    .bind(workspace)
+    .bind(root_path)
+    .execute(connection)
+    .await
+    .map(|_| ())
+}
+
+/// Records one daemon-derived workspace in its own committed transaction.
+async fn derived_workspace(
+    pool: &PgPool,
+    workspace: Uuid,
+    root_path: &str,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    insert_derived_workspace(&mut transaction, workspace, root_path).await?;
+    transaction.commit().await
+}
+
+/// Records one mint row bound to an already-recorded command and workspace.
 async fn insert_mint(
     connection: &mut PgConnection,
     mint: Uuid,
     command: Uuid,
-    workspace_root: &str,
+    workspace: Uuid,
     remote_name: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO configured_git_remote_mint
              (mint_id, command_id, command_kind, storage_version,
-              workspace_root, remote_name, remote_url)
+              workspace_id, remote_name, remote_url)
          VALUES ($1, $2, 'mint_git_remote', 1, $3, $4, $5)",
     )
     .bind(mint)
     .bind(command)
-    .bind(workspace_root)
+    .bind(workspace)
     .bind(remote_name)
     .bind(URL)
+    .execute(connection)
+    .await
+    .map(|_| ())
+}
+
+/// Records one withdrawal of an already-recorded mint.
+async fn insert_withdrawal(
+    connection: &mut PgConnection,
+    withdrawal: Uuid,
+    mint: Uuid,
+    command: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO configured_git_remote_withdrawal
+             (withdrawal_id, mint_id, command_id, command_kind, storage_version)
+         VALUES ($1, $2, $3, 'withdraw_git_remote', 1)",
+    )
+    .bind(withdrawal)
+    .bind(mint)
+    .bind(command)
     .execute(connection)
     .await
     .map(|_| ())
@@ -116,17 +178,28 @@ async fn mint(
     pool: &PgPool,
     command: Uuid,
     mint: Uuid,
-    workspace_root: &str,
+    workspace: Uuid,
     remote_name: &str,
 ) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
     insert_command(&mut transaction, command, "mint_git_remote").await?;
-    insert_mint(&mut transaction, mint, command, workspace_root, remote_name).await?;
+    insert_mint(&mut transaction, mint, command, workspace, remote_name).await?;
     transaction.commit().await
 }
 
-/// Counts mints that stand un-withdrawn.
+/// Counts the rows standing in the derived live view.
 async fn live_mints(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT count(*) FROM configured_git_remote_live")
+        .fetch_one(pool)
+        .await
+}
+
+/// Counts mints the append-only facts show as un-withdrawn.
+///
+/// The live view is what carries the uniqueness rule, and the facts are what it
+/// is derived from. Asserting both keeps a test from passing because the view
+/// was empty when the facts said otherwise.
+async fn un_withdrawn_mints(pool: &PgPool) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT count(*)
            FROM configured_git_remote_mint AS mint
@@ -139,18 +212,30 @@ async fn live_mints(pool: &PgPool) -> Result<i64, sqlx::Error> {
     .await
 }
 
+/// Asserts the live view and the facts agree on how many mints stand.
+#[track_caller]
+fn assert_counts_agree(live: i64, un_withdrawn: i64, expected: i64, context: &str) {
+    assert_eq!(live, expected, "the live view disagrees: {context}");
+    assert_eq!(
+        un_withdrawn, expected,
+        "the minting facts disagree: {context}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_minted_remote_commits_through_the_durable_command_registry() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
-    mint(&pool, command_id(1), mint_id(1), WORKSPACE, NAME).await?;
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
 
-    assert_eq!(
+    assert_counts_agree(
         live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
         1,
-        "the mint kind reaches the typed-record registry"
+        "the mint kind reaches the typed-record registry",
     );
     Ok(())
 }
@@ -159,43 +244,186 @@ async fn a_minted_remote_commits_through_the_durable_command_registry() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_later_mint_for_one_workspace_and_name_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    mint(&pool, command_id(1), mint_id(1), WORKSPACE, NAME).await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
 
-    let refused = mint(&pool, command_id(2), mint_id(2), WORKSPACE, NAME).await;
+    let refused = mint(&pool, command_id(2), mint_id(2), workspace_id(1), NAME).await;
 
     assert!(
         refused.is_err(),
         "one workspace and name resolve to at most one live destination"
     );
-    assert_eq!(live_mints(&pool).await?, 1);
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "the refused mint left the first destination standing alone",
+    );
     Ok(())
 }
 
-/// The deferred count trigger cannot see another transaction's uncommitted row,
-/// so `configured_git_remote_mint_serializes_name` takes an advisory lock held
-/// to end of transaction. This test fails if that trigger is removed: without
-/// it the contender's insert returns immediately, because the count is not
-/// checked until commit.
+/// The rule is scoped to one workspace, so the same name is mintable again for
+/// a different one. This is what distinguishes a per-workspace rule from a
+/// global one, and it fails if the uniqueness constraint loses its
+/// `workspace_id` column.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_simultaneous_mint_for_one_name_waits_for_the_holder() -> Result<(), Box<dyn Error>> {
+async fn one_name_is_mintable_once_per_workspace() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+    derived_workspace(&pool, workspace_id(2), OTHER_WORKSPACE_ROOT).await?;
+
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
+    mint(&pool, command_id(2), mint_id(2), workspace_id(2), NAME).await?;
+
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        2,
+        "one name stands live once in each of two workspaces",
+    );
+    Ok(())
+}
+
+/// A mint must name a workspace that exists. Without the foreign key an
+/// authority grant could be scoped to an identity nothing ever registered.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_mint_naming_no_workspace_is_refused() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let refused = mint(&pool, command_id(1), mint_id(1), workspace_id(9), NAME).await;
+
+    assert!(
+        refused.is_err(),
+        "a mint was scoped to a workspace that was never registered"
+    );
+    Ok(())
+}
+
+/// A snapshot taken before the winner commits cannot see the winning row, so a
+/// counting trigger would have admitted both mints here. The unique constraint
+/// consults the index instead, which no snapshot hides, and the second commit
+/// fails. This is the whole reason the live view exists.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_mint_is_refused_under_repeatable_read_after_a_concurrent_winner()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+
+    let mut contender = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *contender)
+        .await?;
+    // Force the snapshot before the winner commits, so the contender's later
+    // reads genuinely predate it.
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM configured_git_remote_live")
+        .fetch_one(&mut *contender)
+        .await?;
+
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
+
+    insert_command(&mut contender, command_id(2), "mint_git_remote").await?;
+    insert_mint(
+        &mut contender,
+        mint_id(2),
+        command_id(2),
+        workspace_id(1),
+        NAME,
+    )
+    .await?;
+
+    assert!(
+        contender.commit().await.is_err(),
+        "a second live destination committed from a snapshot that predated the first"
+    );
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "the winning mint stands alone",
+    );
+    Ok(())
+}
+
+/// A lone mint under `REPEATABLE READ` is admitted. The previous shape refused
+/// every isolation level but `READ COMMITTED`, because an advisory lock cannot
+/// refresh a snapshot; the constraint has no such dependency, so this fails if
+/// that refusal is reintroduced.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_mint_under_repeatable_read_is_admitted() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *transaction)
+        .await?;
+    insert_command(&mut transaction, command_id(1), "mint_git_remote").await?;
+    insert_mint(
+        &mut transaction,
+        mint_id(1),
+        command_id(1),
+        workspace_id(1),
+        NAME,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "a mint written outside READ COMMITTED was refused",
+    );
+    Ok(())
+}
+
+/// Two transactions holding uncommitted mints of one name must not both commit.
+/// The deferred constraint waits on the other transaction rather than reading
+/// past it, so exactly one survives.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn only_one_of_two_simultaneous_mints_for_one_name_commits() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
     let mut holder = pool.begin().await?;
     insert_command(&mut holder, command_id(1), "mint_git_remote").await?;
-    insert_mint(&mut holder, mint_id(1), command_id(1), WORKSPACE, NAME).await?;
+    insert_mint(
+        &mut holder,
+        mint_id(1),
+        command_id(1),
+        workspace_id(1),
+        NAME,
+    )
+    .await?;
 
     let mut contender = pool.begin().await?;
     insert_command(&mut contender, command_id(2), "mint_git_remote").await?;
-    let contended = tokio::time::timeout(
-        Duration::from_secs(3),
-        insert_mint(&mut contender, mint_id(2), command_id(2), WORKSPACE, NAME),
+    insert_mint(
+        &mut contender,
+        mint_id(2),
+        command_id(2),
+        workspace_id(1),
+        NAME,
     )
-    .await;
+    .await?;
+
+    holder.commit().await?;
+    let contended = tokio::time::timeout(Duration::from_secs(10), contender.commit()).await?;
 
     assert!(
         contended.is_err(),
-        "the contending mint inserted while an uncommitted mint held the same name"
+        "both simultaneous mints of one name committed"
+    );
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "exactly one of two simultaneous mints survived",
     );
     Ok(())
 }
@@ -204,28 +432,168 @@ async fn a_simultaneous_mint_for_one_name_waits_for_the_holder() -> Result<(), B
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_withdrawal_and_its_replacement_land_in_one_transaction() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    mint(&pool, command_id(1), mint_id(1), WORKSPACE, NAME).await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
 
     let mut transaction = pool.begin().await?;
     insert_command(&mut transaction, command_id(2), "withdraw_git_remote").await?;
-    sqlx::query(
-        "INSERT INTO configured_git_remote_withdrawal
-             (withdrawal_id, mint_id, command_id, command_kind, storage_version)
-         VALUES ($1, $2, $3, 'withdraw_git_remote', 1)",
+    insert_withdrawal(
+        &mut transaction,
+        withdrawal_id(1),
+        mint_id(1),
+        command_id(2),
     )
-    .bind(withdrawal_id(1))
-    .bind(mint_id(1))
-    .bind(command_id(2))
-    .execute(&mut *transaction)
     .await?;
     insert_command(&mut transaction, command_id(3), "mint_git_remote").await?;
-    insert_mint(&mut transaction, mint_id(2), command_id(3), WORKSPACE, NAME).await?;
+    insert_mint(
+        &mut transaction,
+        mint_id(2),
+        command_id(3),
+        workspace_id(1),
+        NAME,
+    )
+    .await?;
     transaction.commit().await?;
 
-    assert_eq!(
+    assert_counts_agree(
         live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
         1,
-        "the replacement is the sole live destination"
+        "the replacement is the sole live destination",
+    );
+    Ok(())
+}
+
+/// The replacement may also be written before the withdrawal that frees the
+/// name. The constraint is deferred precisely so the store is not forced into
+/// one statement order.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_replacement_may_precede_its_withdrawal_in_one_transaction() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
+
+    let mut transaction = pool.begin().await?;
+    insert_command(&mut transaction, command_id(2), "mint_git_remote").await?;
+    insert_mint(
+        &mut transaction,
+        mint_id(2),
+        command_id(2),
+        workspace_id(1),
+        NAME,
+    )
+    .await?;
+    insert_command(&mut transaction, command_id(3), "withdraw_git_remote").await?;
+    insert_withdrawal(
+        &mut transaction,
+        withdrawal_id(1),
+        mint_id(1),
+        command_id(3),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "the replacement written first is the sole live destination",
+    );
+    Ok(())
+}
+
+/// A withdrawal retires its mint from the live view, freeing the name.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_withdrawn_mint_stops_standing_live() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
+
+    let mut transaction = pool.begin().await?;
+    insert_command(&mut transaction, command_id(2), "withdraw_git_remote").await?;
+    insert_withdrawal(
+        &mut transaction,
+        withdrawal_id(1),
+        mint_id(1),
+        command_id(2),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        0,
+        "the withdrawn destination still stood",
+    );
+    mint(&pool, command_id(3), mint_id(2), workspace_id(1), NAME).await?;
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "the freed name was not mintable again",
+    );
+    Ok(())
+}
+
+/// The live view carries the uniqueness rule, so it must be provably derived.
+/// A row written by hand for a mint that never existed is what would disarm it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_hand_written_live_row_is_refused() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
+
+    let mut transaction = pool.begin().await?;
+    let inserted = sqlx::query(
+        "INSERT INTO configured_git_remote_live (workspace_id, remote_name, mint_id)
+         VALUES ($1, 'backup', $2)",
+    )
+    .bind(workspace_id(1))
+    .bind(mint_id(1))
+    .execute(&mut *transaction)
+    .await;
+
+    let refused = match inserted {
+        Err(error) => Err(error),
+        Ok(_) => transaction.commit().await,
+    };
+
+    assert!(
+        refused.is_err(),
+        "a live row misstating a mint's scope was admitted"
+    );
+    Ok(())
+}
+
+/// Deleting a live row for a mint no withdrawal names would silently free the
+/// name while the facts still show the destination standing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_a_live_row_without_a_withdrawal_is_refused() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+    mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM configured_git_remote_live WHERE mint_id = $1")
+        .bind(mint_id(1))
+        .execute(&mut *transaction)
+        .await?;
+
+    assert!(
+        transaction.commit().await.is_err(),
+        "a live row was retired with no withdrawal behind it"
+    );
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "the destination still stands after the refused retirement",
     );
     Ok(())
 }
@@ -235,17 +603,18 @@ async fn a_withdrawal_and_its_replacement_land_in_one_transaction() -> Result<()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_mint_row_stating_another_command_kind_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
     let mut transaction = pool.begin().await?;
     let refused = sqlx::query(
         "INSERT INTO configured_git_remote_mint
              (mint_id, command_id, command_kind, storage_version,
-              workspace_root, remote_name, remote_url)
+              workspace_id, remote_name, remote_url)
          VALUES ($1, $2, 'goal', 1, $3, $4, $5)",
     )
     .bind(mint_id(1))
     .bind(command_id(1))
-    .bind(WORKSPACE)
+    .bind(workspace_id(1))
     .bind(NAME)
     .bind(URL)
     .execute(&mut *transaction)
@@ -269,10 +638,18 @@ async fn a_mint_row_stating_another_command_kind_is_refused() -> Result<(), Box<
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_mint_bound_to_a_command_of_another_kind_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
     let mut transaction = pool.begin().await?;
     insert_command(&mut transaction, command_id(1), "goal").await?;
-    insert_mint(&mut transaction, mint_id(1), command_id(1), WORKSPACE, NAME).await?;
+    insert_mint(
+        &mut transaction,
+        mint_id(1),
+        command_id(1),
+        workspace_id(1),
+        NAME,
+    )
+    .await?;
 
     let refused = sqlx::query("SET CONSTRAINTS configured_git_remote_mint_command_fk IMMEDIATE")
         .execute(&mut *transaction)
@@ -289,14 +666,152 @@ async fn a_mint_bound_to_a_command_of_another_kind_is_refused() -> Result<(), Bo
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_mint_naming_no_durable_command_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
     let mut transaction = pool.begin().await?;
-    insert_mint(&mut transaction, mint_id(1), command_id(1), WORKSPACE, NAME).await?;
+    insert_mint(
+        &mut transaction,
+        mint_id(1),
+        command_id(1),
+        workspace_id(1),
+        NAME,
+    )
+    .await?;
 
     assert!(
         transaction.commit().await.is_err(),
         "a mint binds to one durable command of its own kind"
     );
+    Ok(())
+}
+
+/// An operator-registered workspace is a human act and carries the durable
+/// command that registered it, reaching the typed-record registry the same way
+/// every other command-bound row does.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_operator_registered_workspace_commits_through_its_command() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+
+    let mut transaction = pool.begin().await?;
+    insert_command(&mut transaction, command_id(1), "register_workspace").await?;
+    sqlx::query(
+        "INSERT INTO workspace
+             (workspace_id, root_path, origin, command_id, command_kind, storage_version)
+         VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)",
+    )
+    .bind(workspace_id(1))
+    .bind(WORKSPACE_ROOT)
+    .bind(command_id(1))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let registered: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workspace WHERE origin = 'operator_registered'")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(registered, 1, "the registered workspace did not commit");
+    Ok(())
+}
+
+/// The origin and the command provenance are one fact stated twice, so a
+/// derived row claiming a command is refused.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_derived_workspace_claiming_command_provenance_is_refused() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+
+    let mut transaction = pool.begin().await?;
+    insert_command(&mut transaction, command_id(1), "register_workspace").await?;
+    let refused = sqlx::query(
+        "INSERT INTO workspace
+             (workspace_id, root_path, origin, command_id, command_kind, storage_version)
+         VALUES ($1, $2, 'daemon_derived', $3, 'register_workspace', 1)",
+    )
+    .bind(workspace_id(1))
+    .bind(WORKSPACE_ROOT)
+    .bind(command_id(1))
+    .execute(&mut *transaction)
+    .await;
+
+    assert!(
+        refused.is_err(),
+        "a daemon-derived workspace claimed command provenance"
+    );
+    Ok(())
+}
+
+/// The same rule in the other direction: a new authority scope cannot be
+/// registered without the human act that authorized it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_operator_registered_workspace_without_a_command_is_refused()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let mut transaction = pool.begin().await?;
+    let refused = sqlx::query(
+        "INSERT INTO workspace (workspace_id, root_path, origin)
+         VALUES ($1, $2, 'operator_registered')",
+    )
+    .bind(workspace_id(1))
+    .bind(WORKSPACE_ROOT)
+    .execute(&mut *transaction)
+    .await;
+
+    assert!(
+        refused.is_err(),
+        "a new authority scope was registered with no command behind it"
+    );
+    Ok(())
+}
+
+/// One directory is one workspace. Without this the identity above the path
+/// stops being unique and two grants could stand for the same directory.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn two_workspaces_cannot_share_one_root() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
+
+    let refused = derived_workspace(&pool, workspace_id(2), WORKSPACE_ROOT).await;
+
+    assert!(
+        refused.is_err(),
+        "one root was registered as two workspaces"
+    );
+    Ok(())
+}
+
+/// The aliasing spellings the previous path-keyed shape would have admitted as
+/// distinct scopes. Each names the same directory as [`WORKSPACE_ROOT`], and
+/// each must die at the durable boundary rather than at some later comparison.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_workspace_root_aliasing_another_spelling_is_refused() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    for (seed, alias) in [
+        "/srv/signalbox/workspace/.",
+        "/srv/signalbox/nested/../workspace",
+        "/srv//signalbox/workspace",
+        "/srv/signalbox/workspace/",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refused =
+            derived_workspace(&pool, workspace_id(u128::try_from(seed)? + 1), alias).await;
+
+        assert!(
+            refused.is_err(),
+            "the workspace table admitted the aliasing spelling {alias:?}"
+        );
+    }
     Ok(())
 }
 
@@ -315,7 +830,7 @@ async fn url_predicate(pool: &PgPool, candidate: &str) -> Result<bool, sqlx::Err
 }
 
 async fn workspace_predicate(pool: &PgPool, candidate: &str) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT configured_git_remote_workspace_is_valid($1)")
+    sqlx::query_scalar("SELECT workspace_root_path_is_valid($1)")
         .bind(candidate)
         .fetch_one(pool)
         .await
@@ -353,7 +868,7 @@ async fn assert_workspace_predicate_agrees(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         workspace_predicate(pool, candidate).await?,
-        GitRemoteWorkspaceRoot::try_new(candidate.to_owned()).is_ok(),
+        WorkspaceRootPath::try_new(candidate.to_owned()).is_ok(),
         "the SQL and Rust workspace rules disagree about {candidate:?}"
     );
     Ok(())
@@ -419,18 +934,32 @@ async fn the_workspace_predicate_agrees_with_the_domain_newtype() -> Result<(), 
     let longest = format!("/{}", "a".repeat(1023));
     let beyond = format!("/{}", "a".repeat(1024));
 
-    assert_workspace_predicate_agrees(&pool, WORKSPACE).await?;
+    assert_workspace_predicate_agrees(&pool, WORKSPACE_ROOT).await?;
+    assert_workspace_predicate_agrees(&pool, OTHER_WORKSPACE_ROOT).await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/proyectos/año/workspace").await?;
     assert_workspace_predicate_agrees(&pool, "/").await?;
     assert_workspace_predicate_agrees(&pool, "workspace").await?;
     assert_workspace_predicate_agrees(&pool, "").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/signalbox/workspace/.").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/signalbox/workspace/..").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/signalbox/nested/../workspace").await?;
+    assert_workspace_predicate_agrees(&pool, "/./workspace").await?;
+    assert_workspace_predicate_agrees(&pool, "/../workspace").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv//signalbox").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/signalbox/workspace/").await?;
+    assert_workspace_predicate_agrees(&pool, "/..").await?;
+    assert_workspace_predicate_agrees(&pool, "/.").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/..workspace").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/...").await?;
     assert_workspace_predicate_agrees(&pool, "/srv/\u{00a0}workspace").await?;
     assert_workspace_predicate_agrees(&pool, longest.as_str()).await?;
     assert_workspace_predicate_agrees(&pool, beyond.as_str()).await?;
     Ok(())
 }
 
-/// The workspace bound exists so the composite index tuple stays inside
-/// PostgreSQL's B-tree limit; this mints at the longest admitted root and name.
+/// The workspace bound exists so the unique index tuple stays inside
+/// PostgreSQL's B-tree limit; this registers at the longest admitted root and
+/// mints at the longest admitted name.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_longest_admitted_workspace_root_indexes() -> Result<(), Box<dyn Error>> {
@@ -438,19 +967,21 @@ async fn the_longest_admitted_workspace_root_indexes() -> Result<(), Box<dyn Err
     let longest = format!("/{}", "a".repeat(1023));
     let longest_name = "n".repeat(255);
 
+    derived_workspace(&pool, workspace_id(1), longest.as_str()).await?;
     mint(
         &pool,
         command_id(1),
         mint_id(1),
-        longest.as_str(),
+        workspace_id(1),
         longest_name.as_str(),
     )
     .await?;
 
-    assert_eq!(
+    assert_counts_agree(
         live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
         1,
-        "the bound keeps an index tuple within its limit"
+        "the bound keeps an index tuple within its limit",
     );
     Ok(())
 }
@@ -462,7 +993,6 @@ async fn the_longest_admitted_workspace_root_indexes() -> Result<(), Box<dyn Err
 /// real table so the durable boundary itself is what refuses the value.
 async fn mint_through_the_table(
     pool: &PgPool,
-    workspace_root: &str,
     remote_name: &str,
     remote_url: &str,
 ) -> Result<(), sqlx::Error> {
@@ -471,12 +1001,12 @@ async fn mint_through_the_table(
     sqlx::query(
         "INSERT INTO configured_git_remote_mint
              (mint_id, command_id, command_kind, storage_version,
-              workspace_root, remote_name, remote_url)
+              workspace_id, remote_name, remote_url)
          VALUES ($1, $2, 'mint_git_remote', 1, $3, $4, $5)",
     )
     .bind(mint_id(1))
     .bind(command_id(1))
-    .bind(workspace_root)
+    .bind(workspace_id(1))
     .bind(remote_name)
     .bind(remote_url)
     .execute(&mut *transaction)
@@ -488,8 +1018,9 @@ async fn mint_through_the_table(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_table_refuses_a_name_the_newtype_refuses() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
-    let refused = mint_through_the_table(&pool, WORKSPACE, ".origin", URL).await;
+    let refused = mint_through_the_table(&pool, ".origin", URL).await;
 
     assert!(
         refused.is_err(),
@@ -502,8 +1033,9 @@ async fn the_table_refuses_a_name_the_newtype_refuses() -> Result<(), Box<dyn Er
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_table_refuses_a_destination_the_newtype_refuses() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
-    let refused = mint_through_the_table(&pool, WORKSPACE, NAME, "https://?").await;
+    let refused = mint_through_the_table(&pool, NAME, "https://?").await;
 
     assert!(
         refused.is_err(),
@@ -517,33 +1049,11 @@ async fn the_table_refuses_a_destination_the_newtype_refuses() -> Result<(), Box
 async fn the_table_refuses_a_workspace_root_the_newtype_refuses() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
-    let refused = mint_through_the_table(&pool, "workspace", NAME, URL).await;
+    let refused = derived_workspace(&pool, workspace_id(1), "workspace").await;
 
     assert!(
         refused.is_err(),
-        "the mint table admitted a workspace root GitRemoteWorkspaceRoot refuses"
-    );
-    Ok(())
-}
-
-/// The advisory-lock guard is the whole enforcement of the one-live-mint rule,
-/// so it must not depend on how the caller opened its transaction. A snapshot
-/// taken before the holder commits cannot see the winning row.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn a_mint_under_repeatable_read_is_refused() -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
-
-    let mut transaction = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *transaction)
-        .await?;
-    insert_command(&mut transaction, command_id(1), "mint_git_remote").await?;
-    let refused = insert_mint(&mut transaction, mint_id(1), command_id(1), WORKSPACE, NAME).await;
-
-    assert!(
-        refused.is_err(),
-        "a mint was admitted under an isolation level its uniqueness guard cannot hold"
+        "the workspace table admitted a root WorkspaceRootPath refuses"
     );
     Ok(())
 }

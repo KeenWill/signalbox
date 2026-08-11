@@ -123,6 +123,7 @@ impl SessionPlacementRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
+                | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote,
             ) => {
@@ -169,6 +170,7 @@ impl SessionPlacementRepository {
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession
                     | CommandKind::Goal
+                    | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },

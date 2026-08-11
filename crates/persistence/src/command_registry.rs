@@ -30,6 +30,8 @@ pub(crate) const COMPACT_SESSION_KIND: &str =
 pub(crate) const GOAL_KIND: &str = durable_command_kind_to_str(CommandKind::Goal);
 pub(crate) const UPDATE_SESSION_PLACEMENT_KIND: &str =
     durable_command_kind_to_str(CommandKind::UpdateSessionPlacement);
+pub(crate) const REGISTER_WORKSPACE_KIND: &str =
+    durable_command_kind_to_str(CommandKind::RegisterWorkspace);
 pub(crate) const MINT_GIT_REMOTE_KIND: &str =
     durable_command_kind_to_str(CommandKind::MintGitRemote);
 pub(crate) const WITHDRAW_GIT_REMOTE_KIND: &str =
@@ -52,7 +54,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 13] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 14] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -127,6 +129,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 13] = [
         kind: CommandKind::UpdateSessionPlacement,
         spelling: UPDATE_SESSION_PLACEMENT_KIND,
         typed_table: "update_session_placement_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::RegisterWorkspace,
+        spelling: REGISTER_WORKSPACE_KIND,
+        typed_table: "workspace",
         minimum_version: 1,
         maximum_version: 1,
     },

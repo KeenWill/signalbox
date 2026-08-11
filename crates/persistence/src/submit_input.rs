@@ -686,6 +686,7 @@ impl SubmitInputRepository {
                 | CommandKind::CompactSession
                 | CommandKind::Goal
                 | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote,
             ) => Err(Self::wrong_kind(command_id)),
@@ -778,6 +779,7 @@ where
             | CommandKind::CompactSession
             | CommandKind::Goal
             | CommandKind::UpdateSessionPlacement
+            | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote,
         ) => {
@@ -819,6 +821,7 @@ where
                 | CommandKind::CompactSession
                 | CommandKind::Goal
                 | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote,
             ) => Ok(TransactionDecision::Rollback(
