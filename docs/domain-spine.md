@@ -81,6 +81,8 @@ pub struct ReviewFindingId(/* private */);
 pub struct ReviewExternalLinkId(/* private */);
 pub struct RepoWatchEventId(/* private */);
 pub struct RepoWatchDispatchId(/* private */);
+pub struct GitRemoteMintId(/* private */);
+pub struct GitRemoteWithdrawalId(/* private */);
 ```
 
 Six more identities with the same shape are defined in their owning modules and
@@ -5208,6 +5210,47 @@ impl ReconstitutedReplaceSessionMetadata {
 }
 ```
 
+## domain: git_remote
+
+```rust
+pub enum GitRemoteTextError {
+    Empty,
+    ContainsNull,
+    TooLong { bytes: usize, maximum: usize },
+    Malformed,
+    UnsupportedScheme,
+    NotAbsolute,
+}
+// impl Display + std::error::Error
+
+pub struct GitRemoteName { /* private */ }
+impl GitRemoteName {
+    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError>;
+    // accessors: as_str(), into_string()
+}
+pub struct GitRemoteUrl { /* private */ }
+impl GitRemoteUrl {
+    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError>;
+    // accessors: as_str(), into_string()
+}
+// impl Debug redacts the destination
+pub struct GitRemoteWorkspaceRoot { /* private */ }
+impl GitRemoteWorkspaceRoot {
+    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError>;
+    // accessors: as_str(), into_string()
+}
+pub struct ConfiguredGitRemoteRecord { /* private */ }
+impl ConfiguredGitRemoteRecord {
+    pub const fn new(
+        mint: GitRemoteMintId,
+        workspace_root: GitRemoteWorkspaceRoot,
+        name: GitRemoteName,
+        url: GitRemoteUrl,
+    ) -> Self;
+    // accessors: mint(), workspace_root(), name(), url()
+}
+```
+
 ## application: approval_judge
 
 ```rust
@@ -9841,11 +9884,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types          |
 | -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 24                    |
+| domain: lib.rs identities                          | 26                    |
 | domain: actor                                      | 1                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
+| domain: git_remote                                 | 5                     |
 | domain: session                                    | 22                    |
 | domain: session_delegation                         | 37 (+3 free fn)       |
 | domain: imported_session                           | 18                    |
@@ -9877,7 +9921,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **752 (+10 free fn)** |
+| **signalbox-domain total**                         | **759 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
