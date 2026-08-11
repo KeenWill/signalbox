@@ -680,8 +680,9 @@ the implemented session and external-link evidence.
   base64 chunking over the local socket — remain undecided.
 - **Store lifecycle beyond append-only.** A native network-filesystem store
   kind, replica-set routes, replica retirement, a marked-deleted state, and
-  garbage collection remain undecided; the append-only catalog and a
-  mark/sweep-not-refcount leaning are the constraints they design against.
+  garbage collection remain undecided. The append-only catalog is their fixed
+  constraint; mark/sweep rather than reference counting is nonbinding
+  exploration guidance only.
 
 ## Destination features (target model)
 
