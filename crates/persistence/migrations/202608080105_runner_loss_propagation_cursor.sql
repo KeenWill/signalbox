@@ -1,7 +1,8 @@
 -- Every durable runner loss owns one restartable, bounded session-propagation
--- cursor. Existing losses predate placement-relative propagation and were
--- absorbed by migration 202608080104's compatibility baseline, so they begin
--- complete without inventing a processed session identity.
+-- cursor. Losses already absorbed by migration 202608080104's compatibility
+-- baseline begin complete without inventing a processed session identity. A
+-- loss committed after that migration but before this one begins pending when
+-- an affected current placement still retains an older baseline.
 
 CREATE TABLE runner_connection_loss_propagation (
     enrollment_id uuid NOT NULL,
@@ -31,8 +32,32 @@ INSERT INTO runner_connection_loss_propagation (
     propagated_through_session_id,
     state_kind
 )
-SELECT enrollment_id, loss_epoch, NULL, 'completed'
-  FROM runner_connection_loss_epoch;
+SELECT loss.enrollment_id,
+       loss.loss_epoch,
+       NULL,
+       CASE
+           WHEN EXISTS (
+               SELECT 1
+                 FROM runner_current_session_placement AS current_placement
+                 JOIN runner_session_placement_record AS placement
+                   ON placement.session_id = current_placement.session_id
+                  AND placement.event_ordinal = current_placement.event_ordinal
+                WHERE placement.loss_fence_enrollment_id = loss.enrollment_id
+                  AND (
+                       placement.observed_runner_loss_epoch IS NULL
+                       OR placement.observed_runner_loss_epoch < loss.loss_epoch
+                  )
+                  AND (
+                       placement.state_kind = 'pinned'
+                       OR (
+                           placement.state_kind = 'unpinned'
+                           AND placement.selector_kind = 'identity'
+                       )
+                  )
+           ) THEN 'pending'
+           ELSE 'completed'
+       END
+  FROM runner_connection_loss_epoch AS loss;
 
 CREATE FUNCTION guard_runner_connection_loss_propagation()
 RETURNS trigger
