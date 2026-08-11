@@ -116,6 +116,18 @@ other. This also excludes every store's reserved `.publish-v1` subtree from
 staging ownership and prevents either startup sweep from encountering the
 other's files.
 
+Each filesystem root also owns a private exact-mode-0600
+`.signalbox-blob-namespace-v1` marker whose complete bytes are the configured
+canonical `namespace_id` plus one LF. Startup loads recorded store bindings
+before initializing roots. If a binding already exists, the marker must already
+exist as a no-follow regular file with exact ownership, mode, and bytes; absence
+or disagreement fails startup before socket admission, and startup never creates
+it. With no recorded binding, initialization atomically creates the marker
+without clobbering, syncs the file and root directory, or validates an existing
+exact marker. Why: if a configured mount is absent at restart, the underlying
+directory must not be admitted as the recorded namespace merely because its
+current path and device identity are locally unique.
+
 A `filesystem` store entry contains exactly `name`, `namespace_id`,
 `kind = "filesystem"`, and an absolute `root_directory`. An `s3` entry contains
 exactly `name`, `namespace_id`, `kind = "s3"`, an absolute HTTP(S) `endpoint`,
@@ -322,6 +334,11 @@ the same ordered parts array. The process protocol's version-one in-place
 editing window is why this lands as the canonical shape rather than a
 compatibility variant beside the string form.
 
+An input and prospective rendered frontier containing no attachment digest have
+both attachment sums equal to zero and bypass blob configuration, catalog, and
+store access. Text-only submission therefore remains available when
+`[blob_storage]` is omitted under the empty-catalog startup rule.
+
 The one-time satellite migration inserts exactly one ordinal-zero text part for
 every pre-migration command and accepted-input row, verifies one complete
 ordered sequence per parent row, updates every `SubmitInput` record to storage
@@ -407,13 +424,15 @@ digests. More than `blob_storage.max_blob_bytes` closes the unsent call through
 `AttachmentPreparationFailure::TooLarge { maximum_bytes }` before any store I/O
 or durable send authorization. Repeated occurrences of one digest do not
 multiply the sum or verification work. Preparation holds no database transaction
-during store I/O and retains no attachment bytes. A digest with no recorded
-matching replica closes the unsent call through the typed missing-attachment
-preparation failure. When every recorded candidate can be read but all fail
-length or digest verification, preparation closes it through the typed
-corrupt-attachment failure. Neither path permits provider interaction or tool
-authorization. When no candidate verifies and at least one candidate remains
-temporarily unavailable, preparation releases its store and preparation
+during store I/O and retains no attachment bytes. A rendered request with no
+distinct attachment digest bypasses blob configuration, catalog, and store
+access, preserving the existing text-only preparation path. A digest with no
+recorded matching replica closes the unsent call through the typed
+missing-attachment preparation failure. When every recorded candidate can be
+read but all fail length or digest verification, preparation closes it through
+the typed corrupt-attachment failure. Neither path permits provider interaction
+or tool authorization. When no candidate verifies and at least one candidate
+remains temporarily unavailable, preparation releases its store and preparation
 resources, leaves the call `Prepared`, records no turn outcome, and returns the
 sanitized typed unavailable operator failure so a later pass can retry the same
 unsent call. The eligibility sweep includes an active turn whose current model
