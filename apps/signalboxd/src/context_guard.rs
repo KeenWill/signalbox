@@ -149,7 +149,6 @@ pub struct ContextGuardedTurnPass<Counter, Catalog, Execution> {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
-    compaction_credential_reference: Arc<str>,
     execution: Execution,
 }
 
@@ -169,10 +168,6 @@ where
             .field("runtime_models", &self.runtime_models)
             .field("model_configuration", &self.model_configuration)
             .field("compaction_model", &"[context compaction model]")
-            .field(
-                "compaction_credential_reference",
-                &self.compaction_credential_reference,
-            )
             .field("execution", &self.execution)
             .finish()
     }
@@ -189,7 +184,6 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
         runtime_models: RuntimeModelCatalog,
         model_configuration: HubModelConfiguration,
         compaction_model: Arc<dyn ContextCompactionModel>,
-        compaction_credential_reference: impl Into<Arc<str>>,
         execution: Execution,
     ) -> Self {
         Self {
@@ -200,7 +194,6 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
             runtime_models,
             model_configuration,
             compaction_model,
-            compaction_credential_reference: compaction_credential_reference.into(),
             execution,
         }
     }
@@ -245,7 +238,6 @@ where
         let runtime_models = self.runtime_models.clone();
         let model_configuration = self.model_configuration.clone();
         let compaction_model = Arc::clone(&self.compaction_model);
-        let compaction_credential_reference = Arc::clone(&self.compaction_credential_reference);
         let execution = self.execution.clone();
         async move {
             execution.resume_active(session).await.map_err(|source| {
@@ -309,10 +301,9 @@ where
                             return Err(ContextGuardedTurnPassError::ContextStillExceeded(turn));
                         }
                         match compact_automatically(
-                            model_calls.pool(),
+                            &model_calls,
                             &model_configuration,
                             &compaction_model,
-                            &compaction_credential_reference,
                             session,
                             turn,
                         )

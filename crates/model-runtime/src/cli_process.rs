@@ -55,6 +55,7 @@ pub struct CliEnvironmentVariable {
 pub struct CliEnvironmentOverride {
     name: &'static str,
     value: OsString,
+    replaces_inherited: bool,
 }
 
 impl CliEnvironmentOverride {
@@ -63,12 +64,27 @@ impl CliEnvironmentOverride {
         Self {
             name,
             value: value.into(),
+            replaces_inherited: false,
+        }
+    }
+
+    /// Replaces one value whose name is already admitted by the adapter's
+    /// inherited environment policy.
+    pub fn replacing_inherited(name: &'static str, value: impl Into<OsString>) -> Self {
+        Self {
+            name,
+            value: value.into(),
+            replaces_inherited: true,
         }
     }
 
     /// Returns the fixed environment-variable name.
     pub const fn name(&self) -> &'static str {
         self.name
+    }
+
+    fn replaces_inherited(&self) -> bool {
+        self.replaces_inherited
     }
 
     fn into_parts(self) -> (&'static str, OsString) {
@@ -337,28 +353,36 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let environment_policy = environment;
-    let environment =
-        match allowlisted_environment(environment_policy, labels, |name| std::env::var_os(name)) {
-            Ok(environment) => environment,
-            Err(rejection) => {
-                // Nothing was sent: the rejection precedes `SendCommenced` and the
-                // spawn itself. The diagnostic names only the variable and the
-                // accurate reason, never the value.
-                return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
-                    cause: UnsentCause::ConnectFailed(TransportFacts::new(rejection.diagnostic())),
-                });
+    let environment_overrides =
+        match validated_environment_overrides(environment_overrides, environment_policy) {
+            Ok(overrides) => overrides,
+            Err(name) => {
+                return invalid_process_request(
+                    labels,
+                    &format!("child-environment override `{name}` is duplicate or invalid"),
+                );
             }
         };
-    let environment_overrides = match validated_environment_overrides(
-        environment_overrides,
-        environment_policy.iter().map(|variable| variable.name()),
-    ) {
-        Ok(overrides) => overrides,
-        Err(name) => {
-            return invalid_process_request(
-                labels,
-                &format!("child-environment override `{name}` is duplicate or invalid"),
-            );
+    let replaced_names = environment_overrides
+        .iter()
+        .filter(|value| value.replaces_inherited())
+        .map(CliEnvironmentOverride::name)
+        .collect::<std::collections::BTreeSet<_>>();
+    let environment = match allowlisted_environment(environment_policy, labels, |name| {
+        if replaced_names.contains(name) {
+            None
+        } else {
+            std::env::var_os(name)
+        }
+    }) {
+        Ok(environment) => environment,
+        Err(rejection) => {
+            // Nothing was sent: the rejection precedes `SendCommenced` and the
+            // spawn itself. The diagnostic names only the variable and the
+            // accurate reason, never the value.
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(TransportFacts::new(rejection.diagnostic())),
+            });
         }
     };
     for (name, value) in environment {
@@ -898,16 +922,36 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
 }
 
 fn validated_environment_overrides(
-    overrides: Vec<CliEnvironmentOverride>,
-    inherited_names: impl IntoIterator<Item = &'static str>,
+    mut overrides: Vec<CliEnvironmentOverride>,
+    inherited_policy: &'static [CliEnvironmentVariable],
 ) -> Result<Vec<CliEnvironmentOverride>, &'static str> {
-    let mut names = inherited_names
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    for override_value in &overrides {
+    let inherited_names = inherited_policy
+        .iter()
+        .map(|variable| (variable.name(), *variable))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut override_names = std::collections::BTreeSet::new();
+    for override_value in &mut overrides {
         let name = override_value.name();
-        if name.is_empty() || name.contains('=') || name.contains('\0') || !names.insert(name) {
+        let inherited_conflict =
+            inherited_names.contains_key(name) && !override_value.replaces_inherited();
+        let missing_replacement =
+            override_value.replaces_inherited() && !inherited_names.contains_key(name);
+        if name.is_empty()
+            || name.contains('=')
+            || name.contains('\0')
+            || !override_names.insert(name)
+            || inherited_conflict
+            || missing_replacement
+        {
             return Err(name);
+        }
+        if override_value.replaces_inherited() {
+            let Some(variable) = inherited_names.get(name) else {
+                return Err(name);
+            };
+            let value = std::mem::take(&mut override_value.value);
+            override_value.value =
+                prepared_environment_value(*variable, value).map_err(|_| name)?;
         }
     }
     Ok(overrides)
@@ -2011,12 +2055,37 @@ mod tests {
 
     #[test]
     fn adapter_environment_override_cannot_replace_an_inherited_value() {
-        let overrides = vec![CliEnvironmentOverride::new("PATH", "fixture-path")];
+        let inherited_name = TEST_ENVIRONMENT[7].name();
+        let overrides = vec![CliEnvironmentOverride::new(inherited_name, "fixture-path")];
 
-        assert!(matches!(
-            validated_environment_overrides(overrides, ["PATH"]),
-            Err("PATH")
-        ));
+        let rejected = validated_environment_overrides(overrides, TEST_ENVIRONMENT)
+            .err()
+            .expect("an ordinary override cannot replace an inherited value");
+
+        assert_eq!(rejected, inherited_name);
+    }
+
+    #[test]
+    fn explicit_replacement_is_admitted_only_for_an_inherited_name() {
+        let replacement = CliEnvironmentOverride::replacing_inherited("PATH", "fixture-path");
+
+        let admitted = validated_environment_overrides(vec![replacement], TEST_ENVIRONMENT)
+            .expect("the replacement names an allowlisted inherited value");
+
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].name(), "PATH");
+    }
+
+    #[test]
+    fn explicit_replacement_rejects_a_name_outside_the_inherited_policy() {
+        let replacement =
+            CliEnvironmentOverride::replacing_inherited("UNDECLARED_VALUE", "fixture");
+
+        let rejected = validated_environment_overrides(vec![replacement], TEST_ENVIRONMENT)
+            .err()
+            .expect("a replacement cannot widen the inherited allowlist");
+
+        assert_eq!(rejected, "UNDECLARED_VALUE");
     }
 
     #[test]
@@ -2027,12 +2096,9 @@ mod tests {
             "fixture-relative",
         )];
 
-        let rejected_name = validated_environment_overrides(
-            overrides,
-            TEST_ENVIRONMENT.iter().map(|variable| variable.name()),
-        )
-        .err()
-        .expect("an override cannot replace an absent declared value");
+        let rejected_name = validated_environment_overrides(overrides, TEST_ENVIRONMENT)
+            .err()
+            .expect("an override cannot replace an absent declared value");
 
         assert_eq!(rejected_name, declared_name);
     }
@@ -2042,10 +2108,35 @@ mod tests {
         let override_name = "FIXTURE_OUTPUT_LIMIT";
         let overrides = vec![CliEnvironmentOverride::new(override_name, "64")];
 
-        let admitted = validated_environment_overrides(overrides, ["PATH"])
+        let admitted = validated_environment_overrides(overrides, TEST_ENVIRONMENT)
             .expect("the fixed control is distinct from inherited names");
 
         assert_eq!(admitted[0].name(), override_name);
+    }
+
+    #[test]
+    fn explicit_credential_home_replacement_is_absolutized() {
+        let replacement =
+            CliEnvironmentOverride::replacing_inherited("CLAUDE_CONFIG_DIR", "relative-home");
+
+        let admitted = validated_environment_overrides(vec![replacement], TEST_ENVIRONMENT)
+            .expect("credential-home replacement uses the inherited value policy");
+
+        assert!(std::path::Path::new(&admitted[0].value).is_absolute());
+    }
+
+    #[test]
+    fn explicit_proxy_replacement_rejects_embedded_userinfo() {
+        let replacement = CliEnvironmentOverride::replacing_inherited(
+            "HTTP_PROXY",
+            "http://alice:synthetic-value@proxy.example:8080",
+        );
+
+        let rejected = validated_environment_overrides(vec![replacement], TEST_ENVIRONMENT)
+            .err()
+            .expect("replacement values retain the inherited proxy policy");
+
+        assert_eq!(rejected, "HTTP_PROXY");
     }
 
     /// Assembles the environment with exactly `name=value` set and returns the

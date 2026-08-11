@@ -57,7 +57,15 @@ use tokio::io::AsyncReadExt;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
-/// Non-secret reference pinned into every Anthropic operation.
+use crate::credential_pools::{
+    CredentialDelivery, CredentialPool, CredentialProfile, parse_credential_pools,
+    parse_credential_profiles,
+};
+
+/// Non-secret reference the process binds its Anthropic key file to when no
+/// configured route names that adapter, so a deployment serving Codex alone
+/// still has one durable default. A configured Anthropic route supplies its own
+/// profile name instead, which this build never compares against this value.
 pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
 
 /// Non-secret reference pinned into every OpenAI operation.
@@ -74,6 +82,20 @@ const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 
+/// One provider-availability cause a pool trigger can react to.
+///
+/// Only these three carry proof that the request was not accepted, so only they
+/// can authorize an availability successor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AvailabilityCause {
+    /// The account's quota for the period is spent.
+    QuotaExhausted,
+    /// The provider rate limited this request.
+    RateLimited,
+    /// The provider reported itself overloaded.
+    Overloaded,
+}
+
 /// Adapter implementations this daemon build can construct.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModelAdapter {
@@ -88,7 +110,7 @@ pub enum ModelAdapter {
 }
 
 impl ModelAdapter {
-    fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
         match value {
             "anthropic" => Ok(Self::Anthropic),
             "claude_cli" => Ok(Self::ClaudeCli),
@@ -97,6 +119,76 @@ impl ModelAdapter {
             _ => Err(HubModelConfigurationError::UnsupportedAdapter {
                 adapter: Arc::from(value),
             }),
+        }
+    }
+
+    /// Reports whether this adapter's contract admits one credential delivery.
+    ///
+    /// This is a permission rather than an asserted subset: a pair is admitted
+    /// exactly where a delivery contract defines how the secret reaches that
+    /// adapter's provider, and startup rejects every pair no contract defines.
+    /// Direct HTTP adapters authenticate each request themselves, so only
+    /// `file` is defined for them; the CLI adapters additionally own an
+    /// external login, and the Codex profile-specific deliveries are defined
+    /// here even though no surface supplies them yet — which `delivers` below,
+    /// not this predicate, is what decides.
+    pub(crate) fn admits_delivery(self, delivery: &str) -> bool {
+        match self {
+            Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),
+            Self::ClaudeCli => matches!(delivery, "ambient" | "file"),
+            Self::CodexCli => matches!(delivery, "ambient" | "file" | "codex_home" | "oauth"),
+        }
+    }
+
+    /// Reports whether this build supplies a surface for one delivery.
+    ///
+    /// A delivery the grammar admits but no surface honors is a startup
+    /// failure rather than an inert setting, on the same principle as the
+    /// capacity-dependent pool keys.
+    pub(crate) fn delivers(self, delivery: &str) -> bool {
+        match self {
+            Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),
+            Self::ClaudeCli => matches!(delivery, "ambient" | "file"),
+            Self::CodexCli => matches!(delivery, "ambient"),
+        }
+    }
+
+    /// Reports whether this adapter observes remaining provider capacity.
+    ///
+    /// Neither composed runtime does. Listing the variants rather than
+    /// answering `false` outright makes a later adapter state its own answer.
+    pub(crate) const fn reports_remaining_capacity(self) -> bool {
+        match self {
+            Self::Anthropic | Self::ClaudeCli | Self::CodexCli | Self::OpenAi => false,
+        }
+    }
+
+    /// Reports whether this adapter can supply the typed proof that a provider
+    /// rejected a request before accepting it for one exact availability cause,
+    /// which is what authorizes an availability successor.
+    ///
+    /// Only a decoded native error envelope carries that proof, and each adapter
+    /// names native tokens for only some causes
+    /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
+    /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
+    /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
+    /// `insufficient_quota` but reaches overload only by status. Both CLI
+    /// adapters classify from rendered failure prose, which the same contract
+    /// refuses as a derivation, so neither admits any cause until its CLI
+    /// exposes a stable machine-readable discriminator. Listing every pair
+    /// rather than matching on a group makes a later adapter state its own
+    /// answer.
+    pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
+        match (self, cause) {
+            (Self::Anthropic, AvailabilityCause::RateLimited | AvailabilityCause::Overloaded) => {
+                true
+            }
+            (Self::Anthropic, AvailabilityCause::QuotaExhausted) => false,
+            (Self::OpenAi, AvailabilityCause::RateLimited | AvailabilityCause::QuotaExhausted) => {
+                true
+            }
+            (Self::OpenAi, AvailabilityCause::Overloaded) => false,
+            (Self::ClaudeCli | Self::CodexCli, _) => false,
         }
     }
 
@@ -124,7 +216,7 @@ pub enum BillingKind {
 }
 
 impl BillingKind {
-    fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
         match value {
             "api_metered" => Ok(Self::ApiMetered),
             "subscription" => Ok(Self::Subscription),
@@ -254,6 +346,7 @@ impl ClaudeCliConfiguration {
 pub struct ResolvedModelRoute {
     model_family: Arc<str>,
     adapter: ModelAdapter,
+    credential_pool: Arc<str>,
     credential_profile: Arc<str>,
     target: ResolvedProviderTarget,
 }
@@ -280,7 +373,13 @@ impl ResolvedModelRoute {
             .then_some(MIGRATED_ANTHROPIC_MODEL_FAMILY)
     }
 
-    /// Non-secret credential profile pinned for new sessions.
+    /// Non-secret credential pool whose members may authenticate this family.
+    pub fn credential_pool(&self) -> &str {
+        &self.credential_pool
+    }
+
+    /// Non-secret credential profile pinned for new sessions: the pool member
+    /// preparation prefers while no member is excluded.
     pub fn credential_profile(&self) -> &str {
         &self.credential_profile
     }
@@ -294,6 +393,7 @@ impl ResolvedModelRoute {
 #[derive(Clone, Debug)]
 struct AdapterMapping {
     adapter: ModelAdapter,
+    credential_pool: Arc<str>,
     credential_profile: Arc<str>,
 }
 
@@ -432,14 +532,16 @@ pub struct HubModelConfiguration {
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
+    credential_profiles: HashMap<Arc<str>, CredentialProfile>,
+    credential_pools: HashMap<Arc<str>, CredentialPool>,
     model_capabilities: ModelCapabilityCatalog,
     runtime_model_capabilities: RuntimeModelCapabilityCatalog,
     model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
-    billing_kinds: HashMap<Arc<str>, BillingKind>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
     provider_model_adapters: HashMap<String, ModelAdapter>,
     session_credential_pin: SessionCredentialPin,
+    fallback_credential_profile: Arc<str>,
     credential_families: ModelCredentialFamilyCatalog,
     codex_cli: Option<CodexCliConfiguration>,
     codex_cli_credential_profile: Option<Arc<str>>,
@@ -476,6 +578,7 @@ impl HubModelConfiguration {
             &[
                 "version",
                 "credential_profiles",
+                "credential_pools",
                 "adapter_mappings",
                 "claude_cli",
                 "codex_cli",
@@ -569,27 +672,9 @@ impl HubModelConfiguration {
             git_identity,
             exec_supervisor_executable,
         )?;
-        let profile_tables = document
-            .get("credential_profiles")
-            .and_then(|item| item.as_array_of_tables())
-            .ok_or(HubModelConfigurationError::MissingCredentialProfiles)?;
-        if profile_tables.is_empty() {
-            return Err(HubModelConfigurationError::MissingCredentialProfiles);
-        }
-        let mut billing_kinds = HashMap::with_capacity(profile_tables.len());
-        for profile in profile_tables {
-            reject_unknown_fields(profile, &["name", "billing_kind"])?;
-            let name = validated_name(required_string(profile, "name")?)?;
-            let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
-            if billing_kinds
-                .insert(Arc::clone(&name), billing_kind)
-                .is_some()
-            {
-                return Err(HubModelConfigurationError::DuplicateCredentialProfile {
-                    credential_profile: name,
-                });
-            }
-        }
+        let credential_profiles = parse_credential_profiles(document.get("credential_profiles"))?;
+        let credential_pools =
+            parse_credential_pools(document.get("credential_pools"), &credential_profiles)?;
         let tool_approval_postures =
             parse_tool_approval_postures(document.get("tool_approval_postures"))?;
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
@@ -618,42 +703,68 @@ impl HubModelConfiguration {
         let mut codex_cli_credential_profile = None;
         let mut claude_cli_credential_profile = None;
         for mapping in mapping_tables {
-            reject_unknown_fields(mapping, &["model_family", "adapter", "credential_profile"])?;
+            reject_unknown_fields(mapping, &["model_family", "adapter", "credential_pool"])?;
             let family = validated_name(required_string(mapping, "model_family")?)?;
             let adapter = ModelAdapter::parse(required_string(mapping, "adapter")?)?;
-            let credential_profile =
-                validated_name(required_string(mapping, "credential_profile")?)?;
-            if !billing_kinds.contains_key(&credential_profile)
-                || (adapter == ModelAdapter::Anthropic
-                    && credential_profile.as_ref() != ANTHROPIC_CREDENTIAL_REFERENCE)
-                || (adapter == ModelAdapter::OpenAi
-                    && credential_profile.as_ref() != OPENAI_CREDENTIAL_REFERENCE)
-            {
-                return Err(HubModelConfigurationError::UnknownCredentialProfile {
-                    adapter,
-                    credential_profile,
+            let credential_pool = validated_name(required_string(mapping, "credential_pool")?)?;
+            let Some(pool) = credential_pools.get(&credential_pool) else {
+                return Err(HubModelConfigurationError::UnknownCredentialPool {
+                    model_family: family,
+                    credential_pool,
+                });
+            };
+            if pool.adapter() != adapter {
+                return Err(HubModelConfigurationError::ConflictingPoolAdapters {
+                    credential_pool,
                 });
             }
-            if adapter == ModelAdapter::CodexCli {
-                if codex_cli_credential_profile
+            let credential_profile = pool
+                .preferred_member()
+                .map(|member| Arc::<str>::from(member.profile()))
+                .ok_or_else(|| HubModelConfigurationError::EmptyCredentialPool {
+                    credential_pool: Arc::clone(&credential_pool),
+                })?;
+            let adapter_profile = match adapter {
+                ModelAdapter::CodexCli => &mut codex_cli_credential_profile,
+                ModelAdapter::ClaudeCli => &mut claude_cli_credential_profile,
+                ModelAdapter::Anthropic | ModelAdapter::OpenAi => {
+                    // Direct HTTP runtimes resolve the operation's pinned
+                    // profile from the complete file-access catalog.
+                    let entry = AdapterMapping {
+                        adapter,
+                        credential_pool,
+                        credential_profile: Arc::clone(&credential_profile),
+                    };
+                    if mappings.contains_key(&family) {
+                        return Err(HubModelConfigurationError::DuplicateModelFamily {
+                            model_family: family,
+                        });
+                    }
+                    mappings.insert(Arc::clone(&family), entry);
+                    session_credentials
+                        .push(SessionModelCredential::new(family, credential_profile));
+                    continue;
+                }
+            };
+            // Codex still carries one credential reference into its runtime,
+            // so two families preferring different profiles cannot both be
+            // served. Claude now receives the complete adapter-scoped catalog
+            // and resolves each operation's pinned reference, so differing
+            // preferences are admitted; the retained value is only the
+            // runtime's default for an operation that pins nothing.
+            if adapter == ModelAdapter::CodexCli
+                && adapter_profile
                     .as_ref()
                     .is_some_and(|profile| profile != &credential_profile)
-                {
-                    return Err(HubModelConfigurationError::ConflictingCodexCredentialProfiles);
-                }
-                codex_cli_credential_profile = Some(Arc::clone(&credential_profile));
+            {
+                return Err(
+                    HubModelConfigurationError::ConflictingAdapterCredentialProfiles { adapter },
+                );
             }
-            if adapter == ModelAdapter::ClaudeCli {
-                if claude_cli_credential_profile
-                    .as_ref()
-                    .is_some_and(|profile| profile != &credential_profile)
-                {
-                    return Err(HubModelConfigurationError::ConflictingClaudeCredentialProfiles);
-                }
-                claude_cli_credential_profile = Some(Arc::clone(&credential_profile));
-            }
+            adapter_profile.get_or_insert_with(|| Arc::clone(&credential_profile));
             let entry = AdapterMapping {
                 adapter,
+                credential_pool,
                 credential_profile: Arc::clone(&credential_profile),
             };
             if mappings.contains_key(&family) {
@@ -664,6 +775,10 @@ impl HubModelConfiguration {
             mappings.insert(Arc::clone(&family), entry);
             session_credentials.push(SessionModelCredential::new(family, credential_profile));
         }
+        let fallback_credential_profile = session_credentials
+            .first()
+            .map(|credential| Arc::from(credential.credential_reference()))
+            .ok_or(HubModelConfigurationError::InvalidField)?;
         let session_credential_pin = SessionCredentialPin::try_new(session_credentials)
             .map_err(|_| HubModelConfigurationError::InvalidField)?;
 
@@ -770,6 +885,8 @@ impl HubModelConfiguration {
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
+        let mut target_model_families = HashMap::with_capacity(models.len());
+        let mut target_fast_targets = HashMap::new();
         let mut target_provider_models = HashMap::with_capacity(models.len());
         let mut selectable_targets = HashSet::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
@@ -882,6 +999,14 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
+            if let Some(previous) = target_model_families.insert(target, Arc::clone(&model_family))
+                && previous != model_family
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
+            if let Some(fast_target) = fast_target {
+                target_fast_targets.insert(target, fast_target);
+            }
             if let Some(previous) = target_provider_models.insert(target, provider_model.clone())
                 && previous != provider_model
             {
@@ -898,6 +1023,7 @@ impl HubModelConfiguration {
                 ResolvedModelRoute {
                     model_family,
                     adapter: mapping.adapter,
+                    credential_pool: Arc::clone(&mapping.credential_pool),
                     credential_profile: Arc::clone(&mapping.credential_profile),
                     target,
                 },
@@ -965,6 +1091,7 @@ impl HubModelConfiguration {
                     required_positive_u32(serving_target, "context_window_tokens")?;
                 target_provider_models.insert(target, provider_model.clone());
                 target_adapters.insert(target, mapping.adapter);
+                target_model_families.insert(target, Arc::clone(&model_family));
                 if let Some(previous) =
                     provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                     && previous != mapping.adapter
@@ -1032,31 +1159,32 @@ impl HubModelConfiguration {
             .into_iter()
             .filter_map(|(target, rates)| rates.map(|rates| (target, rates)))
             .collect();
-        let credential_families =
-            ModelCredentialFamilyCatalog::try_new(routes.values().map(|route| {
-                (
-                    route.target,
-                    Arc::<str>::from(route.model_family.as_ref()),
-                    route
-                        .uses_anthropic_adapter()
-                        .then(|| Arc::<str>::from(MIGRATED_ANTHROPIC_MODEL_FAMILY)),
-                )
-            }))
-            .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let credential_families = ModelCredentialFamilyCatalog::try_new(
+            target_model_families.into_iter().map(|(target, family)| {
+                let migration_fallback = (target_adapters.get(&target)
+                    == Some(&ModelAdapter::Anthropic))
+                .then(|| Arc::<str>::from(MIGRATED_ANTHROPIC_MODEL_FAMILY));
+                (target, family, migration_fallback)
+            }),
+        )
+        .and_then(|catalog| catalog.with_fast_targets(target_fast_targets))
+        .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         Ok(Self {
             targets,
             runtime_models,
             direct_selections,
             aliases,
             routes,
+            credential_profiles,
+            credential_pools,
             model_capabilities,
             runtime_model_capabilities,
             model_settings_lower_layers,
-            billing_kinds,
             billing_rates,
             target_adapters,
             provider_model_adapters,
             session_credential_pin,
+            fallback_credential_profile,
             credential_families,
             codex_cli,
             codex_cli_credential_profile,
@@ -1205,7 +1333,10 @@ impl HubModelConfiguration {
         cache_read_input_tokens: Option<u64>,
     ) -> Option<DerivedModelCallCost> {
         let rates = self.billing_rates.get(&target)?;
-        let billing_kind = *self.billing_kinds.get(credential_profile)?;
+        let billing_kind = self
+            .credential_profiles
+            .get(credential_profile)?
+            .billing_kind();
         let input_tokens = match input.semantics? {
             ProcessModelCallInputTokenSemantics::CacheInclusive => {
                 match (
@@ -1232,6 +1363,44 @@ impl HubModelConfiguration {
             rate_version: Arc::clone(&rates.version),
             billing_kind,
         })
+    }
+
+    /// Iterates every file-delivered profile for one adapter and its path.
+    ///
+    /// The catalog is deliberately not narrowed to currently preferred pool
+    /// members: an existing session may still pin any declared profile after a
+    /// configuration edit or restart. It is narrowed to the declared adapter
+    /// so a historical reference cannot deliver one provider's secret to
+    /// another provider after an adapter remap.
+    pub fn file_credential_profiles(
+        &self,
+        adapter: ModelAdapter,
+    ) -> impl Iterator<Item = (&str, &Path)> {
+        self.credential_profiles
+            .values()
+            .filter(move |profile| profile.adapter() == adapter)
+            .filter_map(|profile| {
+                profile
+                    .delivery()
+                    .path()
+                    .map(|path| (profile.name(), path.as_path()))
+            })
+    }
+
+    /// Returns a configuration-owned compatibility fallback for persistence
+    /// paths that predate per-family session credential snapshots.
+    pub fn fallback_credential_profile(&self) -> &str {
+        &self.fallback_credential_profile
+    }
+
+    /// Returns one declared credential profile by its exact name.
+    pub fn credential_profile(&self, name: &str) -> Option<&CredentialProfile> {
+        self.credential_profiles.get(name)
+    }
+
+    /// Returns one declared credential pool by its exact name.
+    pub fn credential_pool(&self, name: &str) -> Option<&CredentialPool> {
+        self.credential_pools.get(name)
     }
 
     /// Returns validated Codex CLI paths when that adapter is configured.
@@ -1282,7 +1451,35 @@ impl HubModelConfiguration {
                     CredentialReference::new(credential_profile),
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
-                ClaudeCliRuntime::new(runtime_configuration)
+                let credentials = FileCredentialAccess::from_files(
+                    self.file_credential_profiles(ModelAdapter::ClaudeCli).map(
+                        |(reference, path)| {
+                            (CredentialReference::new(reference), path.to_path_buf())
+                        },
+                    ),
+                );
+                let ambient_reference = self
+                    .credential_profiles
+                    .values()
+                    .find(|profile| {
+                        profile.adapter() == ModelAdapter::ClaudeCli
+                            && matches!(profile.delivery(), CredentialDelivery::Ambient)
+                    })
+                    .map(|profile| CredentialReference::new(profile.name()));
+                let file_env_key = self
+                    .credential_profiles
+                    .values()
+                    .filter(|profile| profile.adapter() == ModelAdapter::ClaudeCli)
+                    .find_map(|profile| profile.delivery().env_key());
+                match file_env_key {
+                    Some(file_env_key) => ClaudeCliRuntime::new_with_credential_catalog(
+                        runtime_configuration,
+                        credentials,
+                        ambient_reference,
+                        file_env_key,
+                    ),
+                    None => ClaudeCliRuntime::new(runtime_configuration),
+                }
             })
             .transpose()
     }
@@ -2247,7 +2444,7 @@ fn validate_model_count(count: usize) -> Result<(), HubModelConfigurationError> 
     }
 }
 
-fn validated_name(value: &str) -> Result<Arc<str>, HubModelConfigurationError> {
+pub(crate) fn validated_name(value: &str) -> Result<Arc<str>, HubModelConfigurationError> {
     if value.is_empty() || value.trim() != value || value.contains('\0') {
         Err(HubModelConfigurationError::InvalidField)
     } else {
@@ -2255,7 +2452,7 @@ fn validated_name(value: &str) -> Result<Arc<str>, HubModelConfigurationError> {
     }
 }
 
-fn reject_unknown_fields(
+pub(crate) fn reject_unknown_fields(
     table: &Table,
     allowed: &[&str],
 ) -> Result<(), HubModelConfigurationError> {
@@ -2266,7 +2463,10 @@ fn reject_unknown_fields(
     }
 }
 
-fn required_string<'a>(table: &'a Table, key: &str) -> Result<&'a str, HubModelConfigurationError> {
+pub(crate) fn required_string<'a>(
+    table: &'a Table,
+    key: &str,
+) -> Result<&'a str, HubModelConfigurationError> {
     table
         .get(key)
         .and_then(|item| item.as_str())
@@ -2708,6 +2908,103 @@ pub enum HubModelConfigurationError {
     },
     /// A credential profile declared no supported billing kind.
     InvalidBillingKind,
+    /// A profile's `billing_kind` contradicts the authentication its delivery
+    /// establishes.
+    ///
+    /// Both spellings are carried because a refusal naming only the profile
+    /// leaves an operator to rediscover which of its two fields to edit.
+    DisagreeingCredentialBillingKind {
+        /// Exact profile name whose two fields disagree.
+        credential_profile: Arc<str>,
+        /// Exact delivery spelling that fixes the authentication kind.
+        delivery: Arc<str>,
+        /// Exact billing kind the profile declared alongside it.
+        billing_kind: Arc<str>,
+    },
+    /// A credential profile named no delivery, or its delivery's own fields
+    /// were absent or malformed.
+    InvalidCredentialDelivery,
+    /// A credential profile named a delivery its adapter does not admit.
+    UnsupportedCredentialDelivery {
+        /// Build-provided adapter whose admitted deliveries were checked.
+        adapter: ModelAdapter,
+        /// Exact delivery spelling that adapter does not admit.
+        delivery: Arc<str>,
+    },
+    /// A credential profile named a delivery the grammar admits but no surface
+    /// in this build supplies.
+    UndeliveredCredentialDelivery {
+        /// Exact delivery spelling no composed surface honors.
+        delivery: Arc<str>,
+    },
+    /// No nonempty credential pool array exists.
+    MissingCredentialPools,
+    /// One credential pool appeared more than once.
+    DuplicateCredentialPool {
+        /// Exact repeated pool name.
+        credential_pool: Arc<str>,
+    },
+    /// A credential pool declared no members.
+    EmptyCredentialPool {
+        /// Exact pool name that admitted no member.
+        credential_pool: Arc<str>,
+    },
+    /// One profile appeared twice among a pool's members.
+    DuplicatePoolMember {
+        /// Exact pool name carrying the repetition.
+        credential_pool: Arc<str>,
+        /// Exact repeated profile name.
+        credential_profile: Arc<str>,
+    },
+    /// A pool member named no declared credential profile.
+    UnknownPoolMemberProfile {
+        /// Exact pool name carrying the member.
+        credential_pool: Arc<str>,
+        /// Exact profile spelling absent from the profile registry.
+        credential_profile: Arc<str>,
+    },
+    /// An adapter mapping named no declared credential pool.
+    UnknownCredentialPool {
+        /// Exact family key whose mapping named the pool.
+        model_family: Arc<str>,
+        /// Exact pool spelling absent from the pool registry.
+        credential_pool: Arc<str>,
+    },
+    /// A pool's members carried different adapters, or a mapping's adapter
+    /// disagreed with its pool's.
+    ConflictingPoolAdapters {
+        /// Exact pool name carrying the disagreement.
+        credential_pool: Arc<str>,
+    },
+    /// A pool member's priority was absent, zero, or outside `u32`.
+    InvalidMemberPriority {
+        /// Exact pool name carrying the member.
+        credential_pool: Arc<str>,
+    },
+    /// A pool named no supported tie-break or exhaustion behavior.
+    InvalidCredentialPoolPolicy,
+    /// A pool trigger named no supported action.
+    UnknownCredentialPoolAction,
+    /// A pool trigger carried an action that cause does not admit.
+    InadmissibleCredentialPoolAction {
+        /// Exact trigger key whose configured action it does not admit.
+        trigger: Arc<str>,
+    },
+    /// A headroom reserve was outside zero through ninety-nine percent.
+    InvalidHeadroomReserve,
+    /// A pool's selection depends on remaining capacity its adapter does not
+    /// report, so the setting could never take effect.
+    UnobservedCapacityPolicy {
+        /// Exact pool name carrying the unobservable setting.
+        credential_pool: Arc<str>,
+    },
+    /// A pool configures `switch_now` for an adapter that cannot prove a
+    /// provider did not accept the request, so the substitution could never
+    /// take effect.
+    UnprovableSubstitutionPolicy {
+        /// Exact pool name carrying the unusable action.
+        credential_pool: Arc<str>,
+    },
     /// The daemon tool mapping registry was incomplete or malformed.
     InvalidToolMappings,
     /// Mapped daemon tools were configured without the required Git identity.
@@ -2739,13 +3036,6 @@ pub enum HubModelConfigurationError {
         /// Exact adapter spelling from the rejected mapping.
         adapter: Arc<str>,
     },
-    /// A mapping named no credential profile provided for its adapter.
-    UnknownCredentialProfile {
-        /// Build-provided adapter whose profile registry was checked.
-        adapter: ModelAdapter,
-        /// Exact profile spelling absent from that registry.
-        credential_profile: Arc<str>,
-    },
     /// One model family appeared more than once in the mapping table.
     DuplicateModelFamily {
         /// Exact repeated family key.
@@ -2758,14 +3048,16 @@ pub enum HubModelConfigurationError {
     },
     /// One provider-native model spelling was routed to different adapters.
     ConflictingProviderModelRoute,
-    /// Codex model families selected more than one credential profile.
-    ConflictingCodexCredentialProfiles,
+    /// One adapter's model families resolved to more than one credential
+    /// profile, which this build's single runtime per adapter cannot serve.
+    ConflictingAdapterCredentialProfiles {
+        /// Build-provided adapter whose families disagreed.
+        adapter: ModelAdapter,
+    },
     /// A Codex mapping exists without its required process configuration.
     MissingCodexCliConfiguration,
     /// Codex paths were malformed, relative, or named no existing directory.
     InvalidCodexCliConfiguration,
-    /// Claude model families selected more than one credential profile.
-    ConflictingClaudeCredentialProfiles,
     /// A Claude mapping exists without its required process configuration.
     MissingClaudeCliConfiguration,
     /// Claude paths were malformed, relative, or named no existing directory.
@@ -2853,6 +3145,56 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidBillingKind => {
                 "model configuration contains an invalid credential billing kind"
             }
+            Self::DisagreeingCredentialBillingKind { .. } => {
+                "model configuration declares a billing kind its credential delivery cannot authenticate"
+            }
+            Self::InvalidCredentialDelivery => {
+                "model configuration contains an invalid credential delivery"
+            }
+            Self::UnsupportedCredentialDelivery { .. } => {
+                "model configuration names a credential delivery its adapter does not admit"
+            }
+            Self::UndeliveredCredentialDelivery { .. } => {
+                "model configuration names a credential delivery this build does not supply"
+            }
+            Self::MissingCredentialPools => "model configuration has no credential pools",
+            Self::DuplicateCredentialPool { .. } => "model configuration repeats a credential pool",
+            Self::EmptyCredentialPool { .. } => {
+                "model configuration contains a credential pool with no members"
+            }
+            Self::DuplicatePoolMember { .. } => {
+                "model configuration repeats a credential pool member"
+            }
+            Self::UnknownPoolMemberProfile { .. } => {
+                "model configuration pools an undeclared credential profile"
+            }
+            Self::UnknownCredentialPool { .. } => {
+                "model configuration names an undeclared credential pool"
+            }
+            Self::ConflictingPoolAdapters { .. } => {
+                "model configuration gives one credential pool conflicting adapters"
+            }
+            Self::InvalidMemberPriority { .. } => {
+                "model configuration contains an invalid credential pool priority"
+            }
+            Self::InvalidCredentialPoolPolicy => {
+                "model configuration contains an invalid credential pool policy"
+            }
+            Self::UnknownCredentialPoolAction => {
+                "model configuration contains an unknown credential pool action"
+            }
+            Self::InadmissibleCredentialPoolAction { .. } => {
+                "model configuration gives a credential pool trigger an inadmissible action"
+            }
+            Self::InvalidHeadroomReserve => {
+                "model configuration contains an invalid headroom reserve"
+            }
+            Self::UnprovableSubstitutionPolicy { .. } => {
+                "model configuration gives a credential pool a substitution its adapter cannot prove"
+            }
+            Self::UnobservedCapacityPolicy { .. } => {
+                "model configuration depends on provider capacity no adapter reports"
+            }
             Self::InvalidToolMappings => {
                 "model configuration contains invalid daemon tool mappings"
             }
@@ -2874,9 +3216,6 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidField => "model configuration has a missing or mistyped field",
             Self::InvalidIdentity => "model configuration contains an invalid identity",
             Self::UnsupportedAdapter { .. } => "model configuration names an unsupported adapter",
-            Self::UnknownCredentialProfile { .. } => {
-                "model configuration names an unknown adapter credential profile"
-            }
             Self::DuplicateModelFamily { .. } => {
                 "model configuration repeats a model family mapping"
             }
@@ -2886,17 +3225,14 @@ impl fmt::Display for HubModelConfigurationError {
             Self::ConflictingProviderModelRoute => {
                 "model configuration routes one provider model to conflicting adapters"
             }
-            Self::ConflictingCodexCredentialProfiles => {
-                "model configuration routes Codex through conflicting credential profiles"
+            Self::ConflictingAdapterCredentialProfiles { .. } => {
+                "model configuration routes one adapter through conflicting credential profiles"
             }
             Self::MissingCodexCliConfiguration => {
                 "model configuration maps Codex CLI without Codex CLI settings"
             }
             Self::InvalidCodexCliConfiguration => {
                 "model configuration contains invalid Codex CLI settings"
-            }
-            Self::ConflictingClaudeCredentialProfiles => {
-                "model configuration routes Claude CLI through conflicting credential profiles"
             }
             Self::MissingClaudeCliConfiguration => {
                 "model configuration maps Claude CLI without Claude CLI settings"
@@ -3000,17 +3336,21 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
 /// request preparation so rotation is visible without restarting signalboxd.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
-    path: Arc<PathBuf>,
-    reference: CredentialReference,
+    paths: Arc<HashMap<CredentialReference, PathBuf>>,
     maximum_bytes: Option<usize>,
 }
 
 impl FileCredentialAccess {
     /// Binds one non-secret credential reference to one deployment file.
     pub fn new(path: PathBuf, reference: CredentialReference) -> Self {
+        Self::from_files([(reference, path)])
+    }
+
+    /// Binds a complete set of non-secret credential references to deployment
+    /// files. Each resolution selects and rereads only its mapped path.
+    pub fn from_files(files: impl IntoIterator<Item = (CredentialReference, PathBuf)>) -> Self {
         Self {
-            path: Arc::new(path),
-            reference,
+            paths: Arc::new(files.into_iter().collect()),
             maximum_bytes: None,
         }
     }
@@ -3021,15 +3361,16 @@ impl FileCredentialAccess {
         maximum_bytes: usize,
     ) -> Self {
         Self {
-            path: Arc::new(path),
-            reference,
+            paths: Arc::new(HashMap::from([(reference, path)])),
             maximum_bytes: Some(maximum_bytes),
         }
     }
 
     /// Returns the non-secret reference accepted by this source.
-    pub fn credential_reference(&self) -> CredentialReference {
-        self.reference.clone()
+    pub fn credential_reference(&self) -> Option<CredentialReference> {
+        (self.paths.len() == 1)
+            .then(|| self.paths.keys().next().cloned())
+            .flatten()
     }
 }
 
@@ -3037,8 +3378,8 @@ impl fmt::Debug for FileCredentialAccess {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FileCredentialAccess")
-            .field("path", &"[credential file]")
-            .field("reference", &self.reference)
+            .field("paths", &"[credential file map]")
+            .field("reference_count", &self.paths.len())
             .finish()
     }
 }
@@ -3048,17 +3389,12 @@ impl CredentialAccess for FileCredentialAccess {
         &self,
         reference: &CredentialReference,
     ) -> Result<CredentialValue, CredentialAccessError> {
-        if reference != &self.reference {
-            return Err(CredentialAccessError::new(
-                reference.clone(),
-                CredentialAccessFailure::Unmapped,
-            ));
-        }
+        let path = self.paths.get(reference).ok_or_else(|| {
+            CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
+        })?;
         let file_bytes = match self.maximum_bytes {
-            Some(maximum_bytes) => {
-                read_bounded_credential_file(self.path.as_ref(), maximum_bytes).await
-            }
-            None => tokio::fs::read(self.path.as_ref()).await,
+            Some(maximum_bytes) => read_bounded_credential_file(path, maximum_bytes).await,
+            None => tokio::fs::read(path).await,
         };
         match file_bytes {
             Ok(file_bytes) => Ok(CredentialValue::new(credential_bytes(&file_bytes))),
@@ -3094,6 +3430,7 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         path::{Path, PathBuf},
         sync::Arc,
         time::Duration,
@@ -3113,6 +3450,13 @@ mod tests {
     use signalbox_tools_web::{WEB_FETCH_NAME, WebFetchEgressPolicy};
     use uuid::Uuid;
 
+    use crate::credential_pools::{
+        CredentialDelivery, CredentialPoolAction, CredentialPoolExhaustion, CredentialPoolTieBreak,
+        CredentialPoolTrigger, MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES,
+        MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES, MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS,
+        MAX_CREDENTIAL_POOL_MEMBERS,
+    };
+
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
@@ -3122,6 +3466,30 @@ mod tests {
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
+    const ANTHROPIC_OVERFLOW_PROFILE: &str = "anthropic-overflow";
+
+    /// The exact pool block [`CONFIGURATION`] declares, so a test that cares
+    /// about pool shape states its own replacement in full.
+    /// The exact pool name [`ANTHROPIC_POOL`] declares.
+    ///
+    /// Bound once so a rename of the fixture cannot leave an assertion
+    /// comparing against a stale literal (testing-style rule 6); the helper
+    /// below asserts the fixture still spells it.
+    const ANTHROPIC_POOL_NAME: &str = "anthropic-main";
+
+    const ANTHROPIC_POOL: &str = r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#;
+
+    /// The exact Codex pool block [`CONFIGURATION`] declares.
+    const CODEX_POOL: &str = r#"[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
+
     const WATCH_REPOSITORY: &str = "namespace/project";
     const SECOND_WATCH_REPOSITORY: &str = "namespace/second";
     const WATCH_CREDENTIAL_FILE: &str = "/run/credentials/repository-watch-token";
@@ -3150,16 +3518,40 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_profiles]]
+name = "anthropic-overflow"
+adapter = "anthropic"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-overflow"
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{ profile = "codex-subscription-primary", priority = 1 }]
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -3213,16 +3605,39 @@ alias_id = "30000000-0000-4000-8000-000000000001"
 selection_id = "10000000-0000-4000-8000-000000000001"
 "#;
 
+    /// Replaces the whole Anthropic pool block, leaving every other table as
+    /// [`CONFIGURATION`] declares it.
+    fn configuration_with_anthropic_pool(pool: &str) -> String {
+        assert!(
+            CONFIGURATION.contains(ANTHROPIC_POOL),
+            "fixture declares the pool block tests replace"
+        );
+        assert!(
+            ANTHROPIC_POOL.contains(ANTHROPIC_POOL_NAME),
+            "the bound pool name is the one the fixture block declares"
+        );
+        CONFIGURATION.replace(ANTHROPIC_POOL, pool)
+    }
+
     const OPENAI_PROFILE: &str = "openai-primary";
     const OPENAI_MAPPING_AND_MODEL: &str = r#"
 [[credential_profiles]]
 name = "openai-primary"
+adapter = "openai"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/openai-primary"
+
+[[credential_pools]]
+name = "openai-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{ profile = "openai-primary", priority = 1 }]
 
 [[adapter_mappings]]
 model_family = "openai"
 adapter = "openai"
-credential_profile = "openai-primary"
+credential_pool = "openai-main"
 
 [[models]]
 selection_id = "10000000-0000-4000-8000-00000000000e"
@@ -3316,12 +3731,20 @@ reasoning_levels = ["high"]
             r#"{CONFIGURATION}
 [[credential_profiles]]
 name = "{CLAUDE_SUBSCRIPTION_PROFILE}"
+adapter = "claude_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "claude-code-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{{ profile = "{CLAUDE_SUBSCRIPTION_PROFILE}", priority = 1 }}]
 
 [[adapter_mappings]]
 model_family = "claude_code"
 adapter = "claude_cli"
-credential_profile = "{CLAUDE_SUBSCRIPTION_PROFILE}"
+credential_pool = "claude-code-main"
 
 [claude_cli]
 executable = "{}"
@@ -3340,7 +3763,7 @@ working_directory = "{}"
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "{CODEX_SUBSCRIPTION_PROFILE}"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "{}"
@@ -3355,16 +3778,18 @@ working_directory = "{}"
         executable: &Path,
         working_directory: &Path,
     ) -> String {
+        let configuration = CONFIGURATION
+            .replace("codex-subscription-primary", "codex-api-primary")
+            .replace(
+                "billing_kind = \"subscription\"",
+                "billing_kind = \"api_metered\"",
+            );
         format!(
-            r#"{CONFIGURATION}
-[[credential_profiles]]
-name = "codex-api-primary"
-billing_kind = "api_metered"
-
+            r#"{configuration}
 [[adapter_mappings]]
 model_family = "codex-api"
 adapter = "codex_cli"
-credential_profile = "codex-api-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "{}"
@@ -4686,19 +5111,1293 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn configuration_rejects_a_profile_the_adapter_does_not_provide() {
-        let unknown_profile_name = "unknown-profile";
-        let unknown_profile = CONFIGURATION.replace(
-            "credential_profile = \"anthropic-primary\"",
-            &format!("credential_profile = \"{unknown_profile_name}\""),
+    fn configuration_rejects_a_mapping_naming_an_undeclared_pool() {
+        let undeclared_pool_name = "undeclared-pool";
+        let undeclared_pool = CONFIGURATION.replace(
+            "credential_pool = \"anthropic-main\"",
+            &format!("credential_pool = \"{undeclared_pool_name}\""),
         );
 
         assert_eq!(
-            HubModelConfiguration::parse(&unknown_profile).err(),
-            Some(HubModelConfigurationError::UnknownCredentialProfile {
-                adapter: ModelAdapter::Anthropic,
-                credential_profile: Arc::from(unknown_profile_name),
+            HubModelConfiguration::parse(&undeclared_pool).err(),
+            Some(HubModelConfigurationError::UnknownCredentialPool {
+                model_family: Arc::from("anthropic"),
+                credential_pool: Arc::from(undeclared_pool_name),
             })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_pool_member_naming_an_undeclared_profile() {
+        let undeclared_profile_name = "undeclared-profile";
+        let undeclared_profile = CONFIGURATION.replace(
+            "members = [{ profile = \"anthropic-primary\", priority = 1 }]",
+            &format!("members = [{{ profile = \"{undeclared_profile_name}\", priority = 1 }}]"),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&undeclared_profile).err(),
+            Some(HubModelConfigurationError::UnknownPoolMemberProfile {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+                credential_profile: Arc::from(undeclared_profile_name),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_admits_a_profile_name_no_build_constant_states() {
+        let deployment_chosen_name = "acct-7f3";
+        let renamed = CONFIGURATION.replace("anthropic-primary", deployment_chosen_name);
+        let configured =
+            HubModelConfiguration::parse(&renamed).expect("a deployment names its own accounts");
+
+        let route = configured
+            .resolve_direct_model(configured_judge_selection_fixture())
+            .expect("the configured selection resolves");
+
+        assert_eq!(route.credential_profile(), deployment_chosen_name);
+    }
+
+    #[test]
+    fn route_pins_the_preferred_member_of_its_pool() {
+        let pool_name = "anthropic-main";
+        let preferred_profile = ANTHROPIC_CREDENTIAL_REFERENCE;
+        let pool = format!(
+            r#"[[credential_pools]]
+name = "{pool_name}"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [
+  {{ profile = "anthropic-overflow", priority = 2 }},
+  {{ profile = "{preferred_profile}", priority = 1 }},
+]"#
+        );
+        let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(&pool))
+            .expect("a two-member pool is valid");
+
+        let route = configured
+            .resolve_direct_model(configured_judge_selection_fixture())
+            .expect("the configured selection resolves");
+
+        assert_eq!(route.credential_pool(), pool_name);
+        assert_eq!(route.credential_profile(), preferred_profile);
+    }
+
+    #[test]
+    fn equal_priorities_resolve_to_the_first_listed_member() {
+        let first_listed_profile = ANTHROPIC_OVERFLOW_PROFILE;
+        let pool = format!(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [
+  {{ profile = "{first_listed_profile}", priority = 1 }},
+  {{ profile = "anthropic-primary", priority = 1 }},
+]"#,
+        );
+        let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(&pool))
+            .expect("equal priorities are valid");
+
+        let route = configured
+            .resolve_direct_model(configured_judge_selection_fixture())
+            .expect("the configured selection resolves");
+
+        assert_eq!(route.credential_profile(), first_listed_profile);
+    }
+
+    #[test]
+    fn omitted_trigger_keys_select_the_staying_action() {
+        let configured =
+            HubModelConfiguration::parse(CONFIGURATION).expect("the fixture omits every trigger");
+
+        let pool = configured
+            .credential_pool("anthropic-main")
+            .expect("the fixture declares the pool");
+
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::QuotaExhausted),
+            CredentialPoolAction::Stay
+        );
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::RateLimited),
+            CredentialPoolAction::Stay
+        );
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::Overloaded),
+            CredentialPoolAction::Stay
+        );
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::CredentialRejected),
+            CredentialPoolAction::Stay
+        );
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::HeadroomLow),
+            CredentialPoolAction::Stay
+        );
+    }
+
+    #[test]
+    fn configured_trigger_actions_are_typed() {
+        let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "round_robin"
+on_pool_exhausted = "fail"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+on_quota_exhausted = "switch_next_turn"
+on_rate_limited = "switch_now"
+on_overloaded = "avoid_new_sessions"
+on_credential_rejected = "quarantine""#,
+        ))
+        .expect("every configured action is admitted for its trigger");
+
+        let pool = configured
+            .credential_pool("anthropic-main")
+            .expect("the fixture declares the pool");
+
+        assert_eq!(pool.tie_break(), CredentialPoolTieBreak::RoundRobin);
+        assert_eq!(pool.on_pool_exhausted(), CredentialPoolExhaustion::Fail);
+        // Anthropic's mapping has no quota token, so only rate limiting can
+        // carry the proof `switch_now` requires.
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::QuotaExhausted),
+            CredentialPoolAction::SwitchNextTurn
+        );
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::RateLimited),
+            CredentialPoolAction::SwitchNow
+        );
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::Overloaded),
+            CredentialPoolAction::AvoidNewSessions
+        );
+        assert_eq!(
+            pool.action(CredentialPoolTrigger::CredentialRejected),
+            CredentialPoolAction::Quarantine
+        );
+    }
+
+    #[test]
+    fn configuration_requires_at_least_one_credential_pool() {
+        let without_pools = configuration_with_anthropic_pool("").replace(CODEX_POOL, "");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&without_pools).err(),
+            Some(HubModelConfigurationError::MissingCredentialPools)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oversized_credential_profile_name() {
+        let oversized_name = "p".repeat(MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES + 1);
+        let configuration = CONFIGURATION.replacen(
+            "name = \"anthropic-primary\"",
+            &format!("name = \"{oversized_name}\""),
+            1,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oversized_credential_pool_name() {
+        let oversized_name = "p".repeat(MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES + 1);
+        let configuration = CONFIGURATION.replacen(
+            "name = \"anthropic-main\"",
+            &format!("name = \"{oversized_name}\""),
+            1,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_too_many_credential_pool_members() {
+        let repeated_member = "{ profile = \"anthropic-primary\", priority = 1 }";
+        let members = vec![repeated_member; MAX_CREDENTIAL_POOL_MEMBERS + 1].join(",\n");
+        let oversized_pool = configuration_with_anthropic_pool(&format!(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{members}]"#,
+        ));
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oversized_pool).err(),
+            Some(HubModelConfigurationError::InvalidCredentialPoolPolicy)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_pool_with_no_members() {
+        let empty_pool = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = []"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&empty_pool).err(),
+            Some(HubModelConfigurationError::EmptyCredentialPool {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_repeated_pool_member() {
+        let repeated_member = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [
+  { profile = "anthropic-primary", priority = 1 },
+  { profile = "anthropic-primary", priority = 2 },
+]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&repeated_member).err(),
+            Some(HubModelConfigurationError::DuplicatePoolMember {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+                credential_profile: Arc::from("anthropic-primary"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_repeated_pool_name() {
+        let repeated_pool = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-overflow", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&repeated_pool).err(),
+            Some(HubModelConfigurationError::DuplicateCredentialPool {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_member_priority_below_one() {
+        let zero_priority = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 0 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&zero_priority).err(),
+            Some(HubModelConfigurationError::InvalidMemberPriority {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_member_priority_above_u32() {
+        let overflowing_priority = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 4294967296 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&overflowing_priority).err(),
+            Some(HubModelConfigurationError::InvalidMemberPriority {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_pool_members_disagreeing_on_adapter() {
+        let mixed_adapters = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [
+  { profile = "anthropic-primary", priority = 1 },
+  { profile = "codex-subscription-primary", priority = 2 },
+]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&mixed_adapters).err(),
+            Some(HubModelConfigurationError::ConflictingPoolAdapters {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_mapping_disagreeing_with_its_pool_adapter() {
+        let disagreeing_mapping = CONFIGURATION.replace(
+            "adapter = \"anthropic\"\ncredential_pool = \"anthropic-main\"",
+            "adapter = \"codex_cli\"\ncredential_pool = \"anthropic-main\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&disagreeing_mapping).err(),
+            Some(HubModelConfigurationError::ConflictingPoolAdapters {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_allows_a_direct_adapter_to_resolve_multiple_profiles() {
+        let second_anthropic_pool = format!(
+            r#"{CONFIGURATION}
+[[credential_pools]]
+name = "anthropic-batch"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-overflow", priority = 1 }}]
+
+[[adapter_mappings]]
+model_family = "anthropic-batch"
+adapter = "anthropic"
+credential_pool = "anthropic-batch"
+"#
+        );
+
+        let configuration = HubModelConfiguration::parse(&second_anthropic_pool)
+            .expect("direct HTTP profiles resolve per operation");
+
+        assert_eq!(
+            configuration
+                .session_credential_pin()
+                .credentials()
+                .map(|credential| credential.credential_reference())
+                .collect::<Vec<_>>(),
+            vec!["anthropic-primary", "anthropic-overflow"]
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_tie_break() {
+        let unknown_tie_break = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "coin_flip"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_tie_break).err(),
+            Some(HubModelConfigurationError::InvalidCredentialPoolPolicy)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_exhaustion_behavior() {
+        let unknown_exhaustion = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "retry_forever"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_exhaustion).err(),
+            Some(HubModelConfigurationError::InvalidCredentialPoolPolicy)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_trigger_action() {
+        let unknown_action = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+on_rate_limited = "escalate""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_action).err(),
+            Some(HubModelConfigurationError::UnknownCredentialPoolAction)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_switching_now_on_a_rejected_credential() {
+        let switching_now = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+on_credential_rejected = "switch_now""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&switching_now).err(),
+            Some(
+                HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                    trigger: Arc::from("on_credential_rejected"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_switching_now_on_low_headroom() {
+        let switching_now = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+on_headroom_low = "switch_now""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&switching_now).err(),
+            Some(
+                HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                    trigger: Arc::from("on_headroom_low"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_headroom_reserve_no_adapter_reports() {
+        let reserved = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+headroom_reserve_percent = 10
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&reserved).err(),
+            Some(HubModelConfigurationError::UnobservedCapacityPolicy {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_mistyped_headroom_reserve_table() {
+        let reserved = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
+[credential_pools.headroom_reserve_percent]
+value = 10"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&reserved).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_member_headroom_reserve_no_adapter_reports() {
+        let reserved = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_percent = 10 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&reserved).err(),
+            Some(HubModelConfigurationError::UnobservedCapacityPolicy {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_switch_now_no_cli_adapter_can_prove() {
+        let substituting = CONFIGURATION.replace(
+            CODEX_POOL,
+            &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&substituting).err(),
+            Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
+                credential_pool: Arc::from("codex-main"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_admits_switch_now_where_the_adapter_proves_non_acceptance() {
+        let substituting = configuration_with_anthropic_pool(&format!(
+            "{ANTHROPIC_POOL}\non_rate_limited = \"switch_now\""
+        ));
+
+        HubModelConfiguration::parse(&substituting)
+            .expect("a decoded native envelope authorizes the successor for this adapter");
+    }
+
+    #[test]
+    fn configuration_rejects_switch_now_for_a_cause_the_adapter_cannot_prove() {
+        // Anthropic's mapping has no quota token, so this pair could reach
+        // `switch_now` only through a status-derived fallback carrying no proof.
+        let substituting = configuration_with_anthropic_pool(&format!(
+            "{ANTHROPIC_POOL}\non_quota_exhausted = \"switch_now\""
+        ));
+
+        assert_eq!(
+            HubModelConfiguration::parse(&substituting).err(),
+            Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_least_used_ties_no_adapter_can_resolve() {
+        let least_used = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "least_used"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&least_used).err(),
+            Some(HubModelConfigurationError::UnobservedCapacityPolicy {
+                credential_pool: Arc::from(ANTHROPIC_POOL_NAME),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_headroom_reserve_leaving_nothing_usable() {
+        let full_reserve = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+headroom_reserve_percent = 100
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&full_reserve).err(),
+            Some(HubModelConfigurationError::InvalidHeadroomReserve)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_pool_field() {
+        let unknown_field = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+on_provider_moody = "quarantine"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_field).err(),
+            Some(HubModelConfigurationError::UnknownField)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_pool_member_field() {
+        let unknown_field = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_field).err(),
+            Some(HubModelConfigurationError::UnknownField)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_delivery_its_adapter_does_not_admit() {
+        let ambient_anthropic = CONFIGURATION.replace(
+            "delivery = \"file\"\nfile = \"/run/secrets/anthropic-primary\"",
+            "delivery = \"ambient\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&ambient_anthropic).err(),
+            Some(HubModelConfigurationError::UnsupportedCredentialDelivery {
+                adapter: ModelAdapter::Anthropic,
+                delivery: Arc::from("ambient"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_delivery_this_build_supplies_no_surface_for() {
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            "delivery = \"codex_home\"\ncodex_home = \"/var/lib/signalbox/codex/account-a\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from("codex_home"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_validates_an_undelivered_credential_home_before_refusing_it() {
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_the_largest_credential_home_concurrency_bound() {
+        // The bound is capped because a contended wait durably names every live
+        // reservation holding it. At the cap the grammar admits the field, so
+        // the profile reaches its undelivered refusal rather than a range one.
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}"
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from("codex_home"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {}",
+                MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oversized_credential_home_before_refusing_it() {
+        let oversized_path = format!("/{}", "a".repeat(MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES));
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!("delivery = \"codex_home\"\ncodex_home = \"{oversized_path}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_nul_containing_credential_file_path() {
+        let credential_file = CONFIGURATION.replace(
+            "file = \"/run/secrets/anthropic-primary\"",
+            "file = \"/run/secrets/contains\\u0000nul\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_file).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_validates_an_undelivered_codex_file_before_refusing_it() {
+        // `file` admits only `api_metered`, so the profile takes that kind to
+        // reach the env-key validation this test is about.
+        let credential_file = CONFIGURATION
+            .replace(
+                "billing_kind = \"subscription\"",
+                "billing_kind = \"api_metered\"",
+            )
+            .replace(
+                "delivery = \"ambient\"",
+                "delivery = \"file\"\nfile = \"/run/secrets/codex-primary\"\nenv_key = \"HOME\"",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_file).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_parses_a_valid_codex_file_before_refusing_it() {
+        // `file` admits only `api_metered`, so the profile takes that kind and
+        // the refusal this test asserts is the undelivered one.
+        let credential_file = CONFIGURATION
+            .replace(
+                "billing_kind = \"subscription\"",
+                "billing_kind = \"api_metered\"",
+            )
+            .replace(
+                "delivery = \"ambient\"",
+                "delivery = \"file\"\nfile = \"/run/secrets/codex-primary\"\nenv_key = \"OPENAI_API_KEY\"",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_file).err(),
+            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from("file"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_validates_undelivered_oauth_before_refusing_it() {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "http://example.test/token"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    /// Asserts one OAuth scope element is refused by the scope-token byte set.
+    ///
+    /// Single-quoted TOML literals pass the byte through verbatim, which is
+    /// what lets a space, quote, or backslash reach the check at all.
+    #[track_caller]
+    fn assert_oauth_scope_rejected(scope: &str) {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"oauth\"\n\
+                 client_id = \"synthetic-client\"\n\
+                 token_url = \"https://example.test/token\"\n\
+                 device_authorization_url = \"https://example.test/device\"\n\
+                 scopes = ['{scope}']"
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_scope_holding_a_space() {
+        // A space would become two scopes on the wire.
+        assert_oauth_scope_rejected("read write");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_scope_holding_a_quote() {
+        assert_oauth_scope_rejected("read\"quoted");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_scope_holding_a_backslash() {
+        assert_oauth_scope_rejected("read\\slash");
+    }
+
+    #[test]
+    fn configuration_rejects_a_non_ascii_oauth_scope() {
+        // Control bytes are outside the set too, but TOML rejects them first.
+        assert_oauth_scope_rejected("r\u{e9}ad");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_fragment() {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token#stale"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    /// Asserts one OAuth `token_url` is refused by the endpoint grammar itself,
+    /// before the delivery's undelivered result.
+    ///
+    /// User information never reaches the request target, so it cannot
+    /// distinguish two provisioning tuples, and it would put a secret in the
+    /// static catalog. The delivery is undelivered either way; these tests
+    /// assert the grammar refuses the endpoint first, on its own terms.
+    #[track_caller]
+    fn assert_oauth_token_url_rejected(token_url: &str) {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "{token_url}"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_subscription_billing_kind_on_a_file_delivery() {
+        // `file` presents a provider API key, so its billing kind is fixed.
+        // The refusal names the profile and both disagreeing spellings, because
+        // naming only the profile leaves the operator to find which field to
+        // edit.
+        let disagreeing = CONFIGURATION.replace(
+            r#"name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "api_metered""#,
+            r#"name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "subscription""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&disagreeing).err(),
+            Some(
+                HubModelConfigurationError::DisagreeingCredentialBillingKind {
+                    credential_profile: Arc::from("anthropic-primary"),
+                    delivery: Arc::from("file"),
+                    billing_kind: Arc::from("subscription"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_api_metered_billing_kind_on_an_oauth_delivery() {
+        // `oauth` constructs a subscription login. The disagreement is refused
+        // on its own terms even though the delivery is undelivered, so the
+        // contradiction is not masked by the refusal that would follow it.
+        let disagreeing = CONFIGURATION
+            .replace(
+                r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription""#,
+                r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "api_metered""#,
+            )
+            .replace(
+                "delivery = \"ambient\"",
+                r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&disagreeing).err(),
+            Some(
+                HubModelConfigurationError::DisagreeingCredentialBillingKind {
+                    credential_profile: Arc::from("codex-subscription-primary"),
+                    delivery: Arc::from("oauth"),
+                    billing_kind: Arc::from("api_metered"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn configuration_admits_a_subscription_oauth_profile_before_refusing_it() {
+        // The legal `oauth` pairing passes the agreement rule and reaches the
+        // undelivered refusal, which is what proves the rule admitted it.
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from("oauth"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_admits_an_api_metered_ambient_profile() {
+        // `ambient` names a login the operator established outside the daemon,
+        // which may be billed either way, so both kinds are admitted.
+        let ambient = CONFIGURATION.replace(
+            r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription""#,
+            r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "api_metered""#,
+        );
+
+        assert!(HubModelConfiguration::parse(&ambient).is_ok());
+    }
+
+    #[test]
+    fn configuration_admits_a_subscription_ambient_profile() {
+        // The checked-in fixture already pairs `ambient` with `subscription`;
+        // asserting it here states the other half of that delivery's rule.
+        assert!(HubModelConfiguration::parse(CONFIGURATION).is_ok());
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_username() {
+        assert_oauth_token_url_rejected("https://alice@example.test/token");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_username_and_password() {
+        assert_oauth_token_url_rejected("https://alice:secret@example.test/token");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_password_alone() {
+        assert_oauth_token_url_rejected("https://:secret@example.test/token");
+    }
+
+    #[test]
+    fn configuration_rejects_a_device_endpoint_holding_user_information() {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+device_authorization_url = "https://alice:secret@example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_parses_valid_oauth_before_refusing_it() {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from("oauth"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unknown_delivery() {
+        let unknown_delivery =
+            CONFIGURATION.replace("delivery = \"ambient\"", "delivery = \"telepathy\"");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown_delivery).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_relative_credential_file() {
+        let relative_file = CONFIGURATION.replace(
+            "file = \"/run/secrets/anthropic-primary\"",
+            "file = \"secrets/anthropic-primary\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&relative_file).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_direct_adapter_file_environment_key() {
+        let environment_key = CONFIGURATION.replace(
+            "file = \"/run/secrets/anthropic-primary\"",
+            "file = \"/run/secrets/anthropic-primary\"\nenv_key = \"ANTHROPIC_API_KEY\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&environment_key).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_claude_file_delivery_with_its_fixed_environment_key() {
+        const CLAUDE_FILE: &str = "/run/secrets/claude-api-primary";
+        const CLAUDE_ENV_KEY: &str = "ANTHROPIC_API_KEY";
+        let claude_file = CONFIGURATION.replace(
+            r#"adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"adapter = "claude_cli"
+billing_kind = "api_metered"
+delivery = "file"
+file = "{CLAUDE_FILE}"
+env_key = "{CLAUDE_ENV_KEY}""#,
+            ),
+        );
+
+        let configured = HubModelConfiguration::parse(&claude_file)
+            .expect("Claude file delivery is part of the supplied grammar");
+        let profile = configured
+            .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+            .expect("the replaced fixture profile remains declared");
+        assert_eq!(
+            profile.delivery(),
+            &CredentialDelivery::File {
+                path: PathBuf::from(CLAUDE_FILE),
+                env_key: Some(Arc::from(CLAUDE_ENV_KEY)),
+            }
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_another_claude_file_environment_key() {
+        let claude_file = CONFIGURATION.replace(
+            r#"adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            r#"adapter = "claude_cli"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/claude-api-primary"
+env_key = "HOME""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&claude_file).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_duplicate_normalized_file_paths_for_one_adapter() {
+        let duplicate_path = CONFIGURATION.replace(
+            "file = \"/run/secrets/anthropic-overflow\"",
+            "file = \"/run/secrets/./nested/../anthropic-primary\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&duplicate_path).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_duplicate_ambient_profiles_for_one_cli_adapter() {
+        let duplicate_ambient = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_profiles]]
+name = "codex-subscription-overflow"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&duplicate_ambient).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn file_delivery_records_the_absolute_path_it_reads() {
+        let configured = HubModelConfiguration::parse(CONFIGURATION).expect("the fixture is valid");
+
+        let profile = configured
+            .credential_profile("anthropic-primary")
+            .expect("the fixture declares the profile");
+
+        assert_eq!(
+            profile.delivery(),
+            &CredentialDelivery::File {
+                path: PathBuf::from("/run/secrets/anthropic-primary"),
+                env_key: None,
+            }
+        );
+    }
+
+    #[test]
+    fn configuration_debug_redacts_credential_file_paths() {
+        let configured = HubModelConfiguration::parse(CONFIGURATION).expect("the fixture is valid");
+        let credential_path = configured
+            .credential_profile("anthropic-primary")
+            .expect("the fixture declares the profile")
+            .delivery()
+            .path()
+            .expect("the fixture profile uses file delivery")
+            .to_string_lossy();
+
+        assert!(!format!("{configured:?}").contains(credential_path.as_ref()));
+    }
+
+    #[test]
+    fn file_profile_catalog_is_complete_within_and_closed_across_adapters() {
+        let configured =
+            HubModelConfiguration::parse(&format!("{CONFIGURATION}\n{OPENAI_MAPPING_AND_MODEL}"))
+                .expect("the combined fixture is valid");
+        let anthropic_profiles = configured
+            .file_credential_profiles(ModelAdapter::Anthropic)
+            .map(|(reference, _)| reference)
+            .collect::<HashSet<_>>();
+        let openai_profiles = configured
+            .file_credential_profiles(ModelAdapter::OpenAi)
+            .map(|(reference, _)| reference)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            anthropic_profiles,
+            HashSet::from([ANTHROPIC_CREDENTIAL_REFERENCE, ANTHROPIC_OVERFLOW_PROFILE,])
+        );
+        assert_eq!(openai_profiles, HashSet::from([OPENAI_PROFILE]));
+    }
+
+    #[test]
+    fn codex_only_configuration_delivers_no_anthropic_file() {
+        let executable = tempfile::NamedTempFile::new().expect("a temporary executable is created");
+        let working_directory = tempfile::tempdir().expect("a temporary directory is created");
+        let configured = HubModelConfiguration::parse(&format!(
+            r#"
+version = 1
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{{ profile = "codex-subscription-primary", priority = 1 }}]
+
+[[adapter_mappings]]
+model_family = "codex"
+adapter = "codex_cli"
+credential_pool = "codex-main"
+
+[codex_cli]
+executable = "{}"
+working_directory = "{}"
+
+[compaction]
+prompt = "Summarize."
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000009"
+target_id = "20000000-0000-4000-8000-000000000009"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#,
+            executable.path().display(),
+            working_directory.path().display(),
+        ))
+        .expect("a Codex-only configuration is valid");
+
+        assert_eq!(
+            configured
+                .file_credential_profiles(ModelAdapter::Anthropic)
+                .next(),
+            None
         );
     }
 
@@ -5051,19 +6750,28 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn configuration_rejects_an_openai_mapping_naming_another_profile() {
+    fn configuration_accepts_an_opaque_openai_profile_name() {
         let other_profile = "openai-secondary";
-        let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
-            "credential_profile = \"openai-primary\"",
-            &format!("credential_profile = \"{other_profile}\""),
+        let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}")
+            .replace(
+                "name = \"openai-primary\"",
+                &format!("name = \"{other_profile}\""),
+            )
+            .replace(
+                "profile = \"openai-primary\"",
+                &format!("profile = \"{other_profile}\""),
+            );
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-00000000000e").expect("fixture UUID is valid"),
         );
 
         assert_eq!(
-            HubModelConfiguration::parse(&configuration).err(),
-            Some(HubModelConfigurationError::UnknownCredentialProfile {
-                adapter: ModelAdapter::OpenAi,
-                credential_profile: Arc::from(other_profile),
-            })
+            HubModelConfiguration::parse(&configuration)
+                .expect("opaque profile name is valid")
+                .resolve_direct_model(selection)
+                .expect("the OpenAI route exists")
+                .credential_profile(),
+            other_profile
         );
     }
 
@@ -5470,6 +7178,54 @@ context_window_tokens = 200000
         );
     }
 
+    #[test]
+    fn alternate_target_selects_its_serving_family_credential_profile() {
+        let fast_family = "anthropic-fast";
+        let fast_profile = ANTHROPIC_OVERFLOW_PROFILE;
+        let configuration = format!(
+            r#"{}
+
+[[credential_pools]]
+name = "{fast_family}"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{{ profile = "{fast_profile}", priority = 1 }}]
+
+[[adapter_mappings]]
+model_family = "{fast_family}"
+adapter = "anthropic"
+credential_pool = "{fast_family}"
+
+[[serving_targets]]
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "{fast_family}"
+provider_model = "synthetic-fast-target"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#,
+            CONFIGURATION.replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"alternate_target\"\nfast_target_id = \"20000000-0000-4000-8000-000000000002\"",
+            )
+        );
+        let configuration =
+            HubModelConfiguration::parse(&configuration).expect("serving family is valid");
+        let selected_target = configured_target(&configuration);
+        let credential_pin = configuration.session_credential_pin();
+        let serving_credential = credential_pin
+            .credentials()
+            .find(|credential| credential.model_family() == fast_family)
+            .expect("serving family has a pinned credential");
+
+        assert_eq!(
+            configuration
+                .credential_family_catalog()
+                .family_for_call(selected_target, FastMode::Enabled),
+            Some(fast_family)
+        );
+        assert_eq!(serving_credential.credential_reference(), fast_profile);
+    }
+
     /// INV-035: credential references stay scoped while paths and values stay
     /// out of errors and debug output.
     #[tokio::test]
@@ -5488,7 +7244,11 @@ context_window_tokens = 200000
         );
         assert_eq!(
             source
-                .resolve(&source.credential_reference())
+                .resolve(
+                    &source
+                        .credential_reference()
+                        .expect("the fixture source has one reference"),
+                )
                 .await
                 .expect_err("fixture path does not exist")
                 .failure,
@@ -5508,7 +7268,9 @@ context_window_tokens = 200000
             path.clone(),
             CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
         );
-        let reference = source.credential_reference();
+        let reference = source
+            .credential_reference()
+            .expect("the fixture source has one reference");
         assert_eq!(
             source
                 .resolve(&reference)
@@ -5529,6 +7291,42 @@ context_window_tokens = 200000
         std::fs::remove_file(path).expect("fixture file is removable");
     }
 
+    /// INV-035: a historical session pin can resolve any declared file
+    /// profile, not only the member currently preferred by a pool.
+    #[tokio::test]
+    async fn inv035_file_credential_catalog_resolves_each_declared_profile() {
+        let directory = tempfile::tempdir().expect("fixture directory is available");
+        let primary_path = directory.path().join("primary");
+        let historical_path = directory.path().join("historical");
+        let primary_value = b"primary-test-value";
+        let historical_value = b"historical-test-value";
+        std::fs::write(&primary_path, primary_value).expect("primary fixture is writable");
+        std::fs::write(&historical_path, historical_value).expect("historical fixture is writable");
+        let primary = CredentialReference::new("primary-profile");
+        let historical = CredentialReference::new("historical-profile");
+        let source = FileCredentialAccess::from_files([
+            (primary.clone(), primary_path),
+            (historical.clone(), historical_path),
+        ]);
+
+        assert_eq!(
+            source
+                .resolve(&primary)
+                .await
+                .expect("primary profile resolves")
+                .expose_bytes(),
+            primary_value
+        );
+        assert_eq!(
+            source
+                .resolve(&historical)
+                .await
+                .expect("historical profile resolves")
+                .expose_bytes(),
+            historical_value
+        );
+    }
+
     #[tokio::test]
     async fn bounded_file_credentials_reject_before_accumulating_past_the_limit() {
         const ACCEPTED_BYTES: usize = 8;
@@ -5544,7 +7342,11 @@ context_window_tokens = 200000
 
         assert_eq!(
             source
-                .resolve(&source.credential_reference())
+                .resolve(
+                    &source
+                        .credential_reference()
+                        .expect("the fixture source has one reference"),
+                )
                 .await
                 .expect_err("oversized credential is rejected")
                 .failure,
@@ -5604,7 +7406,11 @@ context_window_tokens = 200000
         );
 
         let resolved = source
-            .resolve(&source.credential_reference())
+            .resolve(
+                &source
+                    .credential_reference()
+                    .expect("the fixture source has one reference"),
+            )
             .await
             .expect("fixture value resolves");
 

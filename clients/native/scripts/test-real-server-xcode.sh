@@ -177,17 +177,26 @@ TEMPLATE_CONFIGURATION="$TEMPORARY_ROOT/templates.toml"
 ANTHROPIC_CREDENTIAL="$TEMPORARY_ROOT/anthropic-api-key"
 BRAVE_CREDENTIAL="$TEMPORARY_ROOT/brave-api-key"
 GITHUB_CREDENTIAL="$TEMPORARY_ROOT/github-token"
-cat >"$MODEL_CONFIGURATION" <<'EOF'
+cat >"$MODEL_CONFIGURATION" <<EOF
 version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "$ANTHROPIC_CREDENTIAL"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Synthetic real-server harness compaction prompt."
@@ -242,7 +251,6 @@ env \
 	DATABASE_URL="postgres://$DATABASE_USER@127.0.0.1:$POSTGRES_PORT/signalbox_native_real?sslmode=verify-full&sslrootcert=$TLS_ROOT_CERTIFICATE" \
 	SIGNALBOX_CONFIG_FILE="$MODEL_CONFIGURATION" \
 	SIGNALBOX_TEMPLATE_CONFIG_FILE="$TEMPLATE_CONFIGURATION" \
-	ANTHROPIC_API_KEY_FILE="$ANTHROPIC_CREDENTIAL" \
 	BRAVE_API_KEY_FILE="$BRAVE_CREDENTIAL" \
 	GITHUB_TOKEN_FILE="$GITHUB_CREDENTIAL" \
 	SIGNALBOX_SOCKET_PATH="$SOCKET_PATH" \
