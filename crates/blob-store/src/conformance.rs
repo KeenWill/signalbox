@@ -16,6 +16,8 @@ use crate::{
 
 const FIRST_CONTENT: &[u8] = b"shared blob-store conformance fixture";
 const DIFFERENT_CONTENT: &[u8] = b"different bytes";
+const RANGE_OFFSET: usize = 7;
+const RANGE_LENGTH: usize = 10;
 const FIRST_CONTENT_LENGTH: NonZeroU64 = match NonZeroU64::new(FIRST_CONTENT.len() as u64) {
     Some(length) => length,
     None => NonZeroU64::MIN,
@@ -25,8 +27,23 @@ fn reader(bytes: &[u8]) -> BlobReader {
     Box::new(std::io::Cursor::new(bytes.to_vec()))
 }
 
-fn expected() -> ExpectedBlob {
+/// Returns the shared valid publication fixture.
+pub fn fixture_content() -> &'static [u8] {
+    FIRST_CONTENT
+}
+
+/// Returns bytes that do not match the shared expected fixture.
+pub fn corrupt_fixture_content() -> &'static [u8] {
+    DIFFERENT_CONTENT
+}
+
+/// Returns the shared expected fixture identity.
+pub fn expected_fixture() -> ExpectedBlob {
     ExpectedBlob::new(BlobDigest::digest(FIRST_CONTENT), FIRST_CONTENT_LENGTH)
+}
+
+fn expected() -> ExpectedBlob {
+    expected_fixture()
 }
 
 /// Proves new publication and exact-byte streaming read-back.
@@ -55,6 +72,34 @@ pub async fn assert_put_and_exact_read_back(store: &dyn BlobStore) {
         .await
         .expect("the bounded conformance fixture reads completely");
     assert_eq!(actual, FIRST_CONTENT);
+}
+
+/// Proves an exact bounded range reads without materializing the whole object.
+pub async fn assert_exact_range_read_back(store: &dyn BlobStore) {
+    let expected = expected();
+    let outcome = store
+        .put(expected, reader(FIRST_CONTENT))
+        .await
+        .expect("the conformance store publishes valid fixture bytes");
+    let offset = u64::try_from(RANGE_OFFSET).expect("the fixture offset fits u64");
+    let byte_length =
+        NonZeroU64::new(u64::try_from(RANGE_LENGTH).expect("the fixture range length fits u64"))
+            .expect("the fixture range is nonempty");
+    let opened = store
+        .open_range(outcome.key(), offset, byte_length)
+        .await
+        .expect("the published conformance range opens");
+    assert_eq!(opened.byte_length(), byte_length.get());
+    let mut actual = Vec::new();
+    opened
+        .into_reader()
+        .read_to_end(&mut actual)
+        .await
+        .expect("the bounded conformance range reads completely");
+    assert_eq!(
+        actual,
+        FIRST_CONTENT[RANGE_OFFSET..RANGE_OFFSET + RANGE_LENGTH]
+    );
 }
 
 /// Proves repeated publication verifies and deduplicates the final destination.
@@ -114,4 +159,30 @@ pub async fn assert_verification_failure(store: &dyn BlobStore) {
         .await
         .expect_err("failed verification must not leave a final object");
     assert_eq!(missing.kind(), BlobStoreFailureKind::NotFound);
+}
+
+/// Proves a valid re-ingest atomically repairs an injected corrupt destination.
+pub async fn assert_corrupt_destination_is_repaired(store: &dyn BlobStore) {
+    let expected = expected();
+    let outcome = store
+        .put(expected, reader(FIRST_CONTENT))
+        .await
+        .expect("the valid fixture repairs the corrupt destination");
+    assert_eq!(
+        outcome,
+        BlobPutOutcome::Repaired {
+            key: BlobObjectKey::for_digest(expected.digest())
+        }
+    );
+    let opened = store
+        .open(outcome.key())
+        .await
+        .expect("the repaired conformance object opens");
+    let mut actual = Vec::new();
+    opened
+        .into_reader()
+        .read_to_end(&mut actual)
+        .await
+        .expect("the repaired conformance object reads completely");
+    assert_eq!(actual, FIRST_CONTENT);
 }

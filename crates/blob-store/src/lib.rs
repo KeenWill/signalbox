@@ -194,6 +194,8 @@ impl Error for EmptyBlobError {}
 pub enum BlobPutOutcome {
     /// This operation atomically published and verified the object.
     Published { key: BlobObjectKey },
+    /// This operation atomically replaced a corrupt recorded object.
+    Repaired { key: BlobObjectKey },
     /// The final key already contained the exact expected bytes.
     AlreadyPresent { key: BlobObjectKey },
 }
@@ -202,7 +204,7 @@ impl BlobPutOutcome {
     /// Returns the exact key whose durable bytes were verified.
     pub const fn key(&self) -> &BlobObjectKey {
         match self {
-            Self::Published { key } | Self::AlreadyPresent { key } => key,
+            Self::Published { key } | Self::Repaired { key } | Self::AlreadyPresent { key } => key,
         }
     }
 }
@@ -261,6 +263,14 @@ pub trait BlobStore: Send + Sync {
 
     /// Opens one recorded object as a stream without materializing it.
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob>;
+
+    /// Opens one exact nonempty range after a caller-scoped full verification.
+    fn open_range<'a>(
+        &'a self,
+        key: &'a BlobObjectKey,
+        offset: u64,
+        byte_length: NonZeroU64,
+    ) -> BlobStoreFuture<'a, OpenedBlob>;
 }
 
 /// Closed class of one adapter failure.

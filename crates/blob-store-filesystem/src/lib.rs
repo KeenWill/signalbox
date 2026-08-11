@@ -11,7 +11,7 @@ use signalbox_blob_store::{
 };
 use signalbox_domain::BlobDigest;
 use tempfile::NamedTempFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -56,13 +56,26 @@ impl FilesystemBlobStore {
     ) -> Result<BlobPutOutcome, BlobStoreError> {
         let key = BlobObjectKey::for_digest(expected.digest());
         let destination = self.path(&key);
-        if tokio::fs::try_exists(&destination)
+        let repair_destination = if tokio::fs::try_exists(&destination)
             .await
             .map_err(|source| BlobStoreError::io("inspect destination", source))?
         {
-            verify_file(&destination, expected).await?;
-            return Ok(BlobPutOutcome::AlreadyPresent { key });
-        }
+            match verify_file(&destination, expected).await {
+                Ok(()) => return Ok(BlobPutOutcome::AlreadyPresent { key }),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        signalbox_blob_store::BlobStoreFailureKind::NotFound
+                            | signalbox_blob_store::BlobStoreFailureKind::VerificationFailed
+                    ) =>
+                {
+                    true
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
 
         let parent = self.ensure_destination_parent(&key).await?;
         let temporary = NamedTempFile::new_in(&parent)
@@ -119,6 +132,11 @@ impl FilesystemBlobStore {
             .map_err(|source| BlobStoreError::io("sync temporary object", source))?;
         drop(output);
 
+        if repair_destination {
+            return replace_corrupt_destination(temporary, destination, parent, key, expected)
+                .await;
+        }
+
         let destination_for_publish = destination.clone();
         let publication = tokio::task::spawn_blocking(move || {
             temporary.persist_noclobber(&destination_for_publish)
@@ -133,9 +151,23 @@ impl FilesystemBlobStore {
                 Ok(BlobPutOutcome::Published { key })
             }
             Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                drop(error.file);
-                verify_file(&destination, expected).await?;
-                Ok(BlobPutOutcome::AlreadyPresent { key })
+                match verify_file(&destination, expected).await {
+                    Ok(()) => {
+                        drop(error.file);
+                        Ok(BlobPutOutcome::AlreadyPresent { key })
+                    }
+                    Err(verification)
+                        if matches!(
+                            verification.kind(),
+                            signalbox_blob_store::BlobStoreFailureKind::NotFound
+                                | signalbox_blob_store::BlobStoreFailureKind::VerificationFailed
+                        ) =>
+                    {
+                        replace_corrupt_destination(error.file, destination, parent, key, expected)
+                            .await
+                    }
+                    Err(verification) => Err(verification),
+                }
             }
             Err(error) => Err(BlobStoreError::io("atomically publish object", error.error)),
         }
@@ -155,6 +187,39 @@ impl FilesystemBlobStore {
             .await
             .map_err(|source| BlobStoreError::io("inspect object", source))?;
         Ok(OpenedBlob::new(metadata.len(), Box::new(file)))
+    }
+
+    async fn open_range_inner(
+        &self,
+        key: &BlobObjectKey,
+        offset: u64,
+        byte_length: std::num::NonZeroU64,
+    ) -> Result<OpenedBlob, BlobStoreError> {
+        let path = self.path(key);
+        let mut file = tokio::fs::File::open(&path).await.map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                BlobStoreError::not_found("open object range")
+            } else {
+                BlobStoreError::io("open object range", source)
+            }
+        })?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|source| BlobStoreError::io("inspect object range", source))?;
+        let end = offset
+            .checked_add(byte_length.get())
+            .ok_or_else(|| BlobStoreError::unavailable("validate object range"))?;
+        if end > metadata.len() {
+            return Err(BlobStoreError::unavailable("validate object range"));
+        }
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|source| BlobStoreError::io("seek object range", source))?;
+        Ok(OpenedBlob::new(
+            byte_length.get(),
+            Box::new(file.take(byte_length.get())),
+        ))
     }
 
     async fn ensure_destination_parent(
@@ -202,6 +267,33 @@ impl BlobStore for FilesystemBlobStore {
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
         Box::pin(self.open_inner(key))
     }
+
+    fn open_range<'a>(
+        &'a self,
+        key: &'a BlobObjectKey,
+        offset: u64,
+        byte_length: std::num::NonZeroU64,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(self.open_range_inner(key, offset, byte_length))
+    }
+}
+
+async fn replace_corrupt_destination(
+    temporary: NamedTempFile,
+    destination: PathBuf,
+    parent: PathBuf,
+    key: BlobObjectKey,
+    expected: ExpectedBlob,
+) -> Result<BlobPutOutcome, BlobStoreError> {
+    let destination_for_publish = destination.clone();
+    let persisted = tokio::task::spawn_blocking(move || temporary.persist(destination_for_publish))
+        .await
+        .map_err(|source| BlobStoreError::io("join atomic repair", source))?
+        .map_err(|error| BlobStoreError::io("atomically repair object", error.error))?;
+    drop(persisted);
+    sync_directory(parent).await?;
+    verify_file(&destination, expected).await?;
+    Ok(BlobPutOutcome::Repaired { key })
 }
 
 async fn verify_file(path: &PathBuf, expected: ExpectedBlob) -> Result<(), BlobStoreError> {
