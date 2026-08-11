@@ -2,9 +2,9 @@
 // supervising caller) and the `signalbox-exec-supervisor` binary (the
 // supervised process) that emits them on its stdout trailer.
 //
-// `LauncherStatus` and `SupervisorStatus` report exit code, timeout,
-// cancellation, spawn failure, or supervision failure, each carrying
-// `SupervisorCaptureCompleteness` for stdout and stderr independently.
+// `LauncherStatus` reports exit, spawn failure, or supervision failure;
+// `SupervisorStatus` additionally reports timeout and cancellation. Only
+// `Exited` carries `SupervisorCaptureCompleteness` for stdout and stderr.
 //
 // Kept as a plain comment, not a `//!` inner doc comment: this file is also
 // spliced into `signalbox-exec-supervisor.rs` via

@@ -794,7 +794,7 @@ struct RecordReviewFindingArguments {
     /// Identity assigned to the new finding.
     #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
     finding_id: CanonicalUuid,
-    /// Exact repository-relative file path.
+    /// Exact opaque file-path key.
     #[arg(long)]
     file_path: String,
     /// Optional positive first line of the finding location; required with `--line-end`.
