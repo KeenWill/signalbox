@@ -2387,19 +2387,14 @@ deployment-side rules that code cannot enforce are stated in
   `Unreadable` — all reference-only errors, so a failure names an account
   without disclosing which path served it.
 
-- **External and daemon-owned CLI logins.** An `ambient` profile leaves login
-  resolution to the CLI under the adapter's existing child-environment contract.
-  A `codex_home` profile instead names a login store whose contents the daemon
-  never reads or interprets — it opens entries for metadata alone, which is what
-  the custody walk's descriptor-relative `fstat` requires — and supplies that
-  directory as the fresh Codex process's credential home. An `oauth` profile
-  inverts this — the daemon holds the rotating authorization and hands each
-  process a scratch home carrying everything that home requires except the
-  refresh token, which is the one value the daemon never places there; the
-  complete contents are stated once by
-  [the `oauth` delivery](#the-oauth-delivery) and are not enumerated again here.
-  Whether two profiles denote two independent logins is neither promised nor
-  assumed by this inventory: it is
+- **External CLI logins.** An `ambient` profile leaves login resolution to the
+  CLI under the adapter's existing child-environment contract. It is the only
+  CLI login delivery this build supplies: a `codex_home` or `oauth` profile is
+  validated and then rejected before anything about it is retained, so what
+  those channels would require of the daemon is stated under
+  [committed unimplemented functionality](#committed-unimplemented-functionality--credential-lifecycle)
+  below rather than here. Whether two profiles denote two independent logins is
+  neither promised nor assumed by this inventory: it is
   [one property with a per-delivery disposition](#distinct-members-are-distinct-authorizations),
   established for some deliveries and required of the deployment for others. The
   adapter invents no credential-value shape of its own. The profile's configured
@@ -2529,6 +2524,21 @@ reader can take an entry's position for its tier.
   and not from its pool table. A reference naming no current registration cannot
   be migrated, and blocks scheduling rather than being guessed at or dropped —
   the same failure the freeze rule above produces, for the same reason.
+
+- **Reserved CLI login channels.** No present composition or runtime retains a
+  `codex_home` or `oauth` profile: each is validated for field grammar and then
+  rejected as `UndeliveredCredentialDelivery`
+  (`apps/signalboxd/src/credential_pools.rs:214`), so no present surface opens a
+  login store, records its identity, or constructs a scratch home. The child
+  that admits `codex_home` must name a login store whose contents it must never
+  read or interpret — opening entries for metadata alone, which is what the
+  custody walk's descriptor-relative `fstat` requires — and must supply that
+  directory as the fresh Codex process's credential home. The child that admits
+  `oauth` must invert this: it must hold the rotating authorization itself and
+  hand each process a scratch home carrying everything that home requires except
+  the refresh token, which is the one value it must never place there. The
+  complete contents are stated once by
+  [the `oauth` delivery](#the-oauth-delivery) and are not enumerated again here.
 
 - **Codex file resolution.** No present composition or runtime delivers a Codex
   `file` profile; the parser validates its fields and then rejects it at
