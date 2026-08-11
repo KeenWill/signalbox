@@ -968,8 +968,11 @@ impl GitHubRepositoryPoller {
                     if run.status == "completed" {
                         observations.push(RepoWatchCheckRunObservation::new(
                             object_id(run.id)?,
-                            RepoWatchCheckCompletionGeneration::try_new(run.updated_at)
-                                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                            RepoWatchCheckCompletionGeneration::try_new(
+                                run.completed_at
+                                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                            )
+                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             CheckRunName::try_new(run.name)
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
@@ -2063,7 +2066,7 @@ struct CheckRunResponse {
     status: String,
     name: String,
     conclusion: Option<String>,
-    updated_at: String,
+    completed_at: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2298,7 +2301,7 @@ mod tests {
     const CHECK_RUN_NAME: &str = "build";
     const CHECK_SUITE_COMPLETION_GENERATION: &str = "2026-08-03T12:34:56Z";
     const CHECK_RUN_COMPLETED_AT: &str = "2026-08-03T12:35:07Z";
-    const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:08Z";
+    const CHECK_RUN_UPDATED_AT: &str = "2026-08-03T12:35:08Z";
     const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
     const REVIEWER: &str = "signal-reviewer";
@@ -2394,7 +2397,7 @@ mod tests {
                     "name": CHECK_RUN_NAME,
                     "conclusion": "failure",
                     "completed_at": CHECK_RUN_COMPLETED_AT,
-                    "updated_at": CHECK_RUN_COMPLETION_GENERATION
+                    "updated_at": CHECK_RUN_UPDATED_AT
                 },
                 {
                     "id": IN_PROGRESS_CHECK_RUN_ID,
@@ -2407,6 +2410,27 @@ mod tests {
             ]
         })
         .to_string()
+    }
+
+    fn check_runs_without_an_updated_at_field() -> String {
+        let mut runs = serde_json::from_str::<serde_json::Value>(&check_runs())
+            .expect("fixture check runs are JSON");
+        for run in runs["check_runs"]
+            .as_array_mut()
+            .expect("fixture check runs are an array")
+        {
+            run.as_object_mut()
+                .expect("fixture check run is an object")
+                .remove("updated_at");
+        }
+        runs.to_string()
+    }
+
+    fn check_runs_without_a_completion_timestamp() -> String {
+        let mut runs = serde_json::from_str::<serde_json::Value>(&check_runs())
+            .expect("fixture check runs are JSON");
+        runs["check_runs"][0]["completed_at"] = serde_json::Value::Null;
+        runs.to_string()
     }
 
     fn empty_check_runs() -> &'static str {
@@ -2935,6 +2959,19 @@ mod tests {
         ]
     }
 
+    fn typed_observation_responses_with_check_runs(body: String) -> Vec<ScriptedResponse> {
+        complete_typed_observation_responses()
+            .into_iter()
+            .map(|response| {
+                if response.target == COMPLETED_SUITE_CHECK_RUNS_TARGET {
+                    ScriptedResponse::ok(COMPLETED_SUITE_CHECK_RUNS_TARGET, body.clone())
+                } else {
+                    response
+                }
+            })
+            .collect()
+    }
+
     async fn complete_typed_observation() -> RepoWatchObservation {
         let server = ScriptedServer::start(complete_typed_observation_responses()).await;
         let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3379,8 +3416,48 @@ mod tests {
             pull.completed_check_runs()[0]
                 .completion_generation()
                 .as_str(),
-            CHECK_RUN_COMPLETION_GENERATION
+            CHECK_RUN_COMPLETED_AT
         );
+    }
+
+    #[tokio::test]
+    async fn a_check_run_without_an_updated_at_field_is_observed() {
+        let server = ScriptedServer::start(typed_observation_responses_with_check_runs(
+            check_runs_without_an_updated_at_field(),
+        ))
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
+        server.finish().await;
+
+        let pull = &observation.state().pull_requests()[0];
+        assert_eq!(
+            pull.completed_check_runs()[0]
+                .completion_generation()
+                .as_str(),
+            CHECK_RUN_COMPLETED_AT
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_check_run_without_a_completion_timestamp_is_rejected() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(PULLS_TARGET, pulls_with_one()),
+            ScriptedResponse::ok(PULL_DETAIL_TARGET, pull_detail()),
+            ScriptedResponse::ok(CHECK_SUITES_TARGET, check_suites()),
+            ScriptedResponse::ok(
+                COMPLETED_SUITE_CHECK_RUNS_TARGET,
+                check_runs_without_a_completion_timestamp(),
+            ),
+        ])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let rejected = fixture.poller.poll(None).await.err();
+        server.finish().await;
+
+        assert_eq!(rejected, Some(RepositoryWatchAttemptError::InvalidResponse));
     }
 
     #[tokio::test]
