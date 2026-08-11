@@ -200,8 +200,12 @@ BEGIN
                 AND ROW(connection.state_kind, connection.cause_kind) <>
                     ROW('suspect', 'heartbeat_missed'))
            OR (NEW.state_kind = 'connected'
-                AND ROW(connection.state_kind, connection.cause_kind) <>
-                    ROW('connected', 'heartbeat_recovered'))
+                AND connection.state_kind <> 'connected')
+           OR (NEW.state_kind = 'connected'
+                AND connection.cause_kind NOT IN (
+                    'established',
+                    'heartbeat_recovered'
+                ))
         THEN
             RAISE EXCEPTION 'runner connection outbox source does not match placement'
                 USING ERRCODE = '23514';
