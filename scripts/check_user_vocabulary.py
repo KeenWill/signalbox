@@ -332,11 +332,13 @@ ALLOWLIST = (
         "pre-rename migration fixtures",
         re.compile(
             r"^crates/persistence/tests/(?:conversation_import_postgres|"
+            r"runner_protocol_postgres|"
             r"postgres_integration/(?:approval_decisions|"
             r"model_call_execution_and_recovery))[.]rs$"
         ),
         re.compile(
             r'^const RETIRED_CREATION_CAUSE: &str = "owner_initiated";$|'
+            r'^\s*"owner_initiated",$|'
             r"^\s*\(request_id, decision_kind, decision_source, "
             r"owner_command_id\)$|"
             r"^\s*VALUES \(\$1, 'approve', 'owner_command', \$2\)\",$|"

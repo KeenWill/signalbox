@@ -2511,6 +2511,20 @@ async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
 ) -> Result<Uuid, sqlx::Error> {
+    insert_outbox_session_fixture_with_creation_cause(pool, session_seed, "user_initiated").await
+}
+
+/// Seeds the outbox session fixture with an explicit `creation_cause`.
+///
+/// `202608110001_user_role_storage_vocabulary` renamed the stored value, so a
+/// fixture seeding a pool held before it must write the retired spelling: the
+/// `CHECK` in force there admits nothing else, and the insert fails with
+/// `23514` before the migration under test runs.
+async fn insert_outbox_session_fixture_with_creation_cause(
+    pool: &PgPool,
+    session_seed: u128,
+    creation_cause: &str,
+) -> Result<Uuid, sqlx::Error> {
     let session = Uuid::from_u128(session_seed);
     let command = Uuid::from_u128(session_seed ^ 0x1000);
     let model = outbox_session_fixture_model_selection(session_seed);
@@ -2526,9 +2540,10 @@ async fn insert_outbox_session_fixture(
     .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
-         VALUES ($1, 'user_initiated', 'none')",
+         VALUES ($1, $2, 'none')",
     )
     .bind(session)
+    .bind(creation_cause)
     .execute(&mut *transaction)
     .await?;
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
@@ -2560,7 +2575,7 @@ async fn insert_outbox_session_fixture(
              result_kind, created_session_id)
          VALUES (
             $1, 'create_session', 1,
-            'user_initiated', 'none', 1,
+            $4, 'none', 1,
             'direct', $2, NULL,
             'applied', $3
          )",
@@ -2568,6 +2583,7 @@ async fn insert_outbox_session_fixture(
     .bind(command)
     .bind(model.into_uuid())
     .bind(session)
+    .bind(creation_cause)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;

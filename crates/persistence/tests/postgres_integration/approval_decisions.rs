@@ -916,7 +916,14 @@ async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result
 async fn approval_event_migration_backfills_a_prior_explicit_decision() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = postgres_before_approval_event_migration().await?;
-    insert_outbox_session_fixture(&pool, APPROVAL_FIXTURE_SEED + 1).await?;
+    // This pool stands before the storage-vocabulary rename, so the fixture
+    // must write the spelling its CHECK constraints still admit.
+    insert_outbox_session_fixture_with_creation_cause(
+        &pool,
+        APPROVAL_FIXTURE_SEED + 1,
+        "owner_initiated",
+    )
+    .await?;
     let request = insert_pre_approval_tool_request(&pool, APPROVAL_FIXTURE_SEED).await?;
     let session = Uuid::from_u128(APPROVAL_FIXTURE_SEED + 1);
     let turn = Uuid::from_u128(APPROVAL_FIXTURE_SEED + 2);
