@@ -2526,7 +2526,7 @@ async fn insert_outbox_session_fixture(
     .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
-         VALUES ($1, 'owner_initiated', 'none')",
+         VALUES ($1, 'user_initiated', 'none')",
     )
     .bind(session)
     .execute(&mut *transaction)
@@ -2560,7 +2560,7 @@ async fn insert_outbox_session_fixture(
              result_kind, created_session_id)
          VALUES (
             $1, 'create_session', 1,
-            'owner_initiated', 'none', 1,
+            'user_initiated', 'none', 1,
             'direct', $2, NULL,
             'applied', $3
          )",
@@ -3557,8 +3557,8 @@ async fn insert_user_approval_decision_event(
     .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
-            (request_id, decision_kind, decision_source, owner_command_id)
-         VALUES ($1, 'approve', 'owner_command', $2)",
+            (request_id, decision_kind, decision_source, user_command_id)
+         VALUES ($1, 'approve', 'user_command', $2)",
     )
     .bind(request.into_uuid())
     .bind(command)

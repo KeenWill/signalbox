@@ -2351,7 +2351,7 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
          INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000401',
-             'owner_initiated', 'none');
+             'user_initiated', 'none');
          INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id)
@@ -2367,7 +2367,7 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
              result_kind, created_session_id)
          VALUES
             ('10000000-0000-4000-8000-000000000401',
-             'create_session', 1, 'owner_initiated', 'none', 1,
+             'create_session', 1, 'user_initiated', 'none', 1,
              'direct', '80000000-0000-7000-8000-000000000401', NULL,
              'applied', '70000000-0000-7000-8000-000000000401');
          INSERT INTO durable_command
@@ -2391,7 +2391,7 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
             ('30000000-0000-4000-8000-000000000401',
              'submit_input', 1,
              '70000000-0000-7000-8000-000000000401',
-             'owner', NULL, NULL, 'text', 'queued before migration',
+             'user', NULL, NULL, 'text', 'queued before migration',
              'start_when_no_active_turn', NULL, 1,
              'use_session_default', NULL, NULL, NULL,
              'applied', NULL,

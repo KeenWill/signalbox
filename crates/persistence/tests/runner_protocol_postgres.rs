@@ -829,7 +829,7 @@ async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Er
         .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
-         VALUES ($1, 'owner_initiated', 'none')",
+         VALUES ($1, 'user_initiated', 'none')",
     )
     .bind(session)
     .execute(pool)
@@ -928,8 +928,8 @@ async fn replace_approval_with_user_command(
         .await?;
     let updated = sqlx::query(
         "UPDATE tool_approval_decision
-            SET decision_source = 'owner_command',
-                owner_command_id = $2
+            SET decision_source = 'user_command',
+                user_command_id = $2
           WHERE request_id = $1",
     )
     .bind(uuid(facts.request))

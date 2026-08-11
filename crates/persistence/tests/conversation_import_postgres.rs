@@ -326,7 +326,7 @@ async fn insert_imported_session_scaffolding(
              imported_frontier_position, imported_relationship_kind)
          VALUES
             ('40000000-0000-4000-8000-000000000039',
-             'owner_initiated', 'imported_conversation',
+             'user_initiated', 'imported_conversation',
              '10000000-0000-4000-8000-000000000039',
              '20000000-0000-4000-8000-000000000040', 2, 'resume');
          INSERT INTO session_scheduler (session_id)
@@ -351,7 +351,7 @@ async fn insert_imported_session_scaffolding(
              'create_session_from_imported_frontier', 1,
              '10000000-0000-4000-8000-000000000039',
              '20000000-0000-4000-8000-000000000040', 2, 'resume',
-             'owner_initiated', 'imported_conversation', 1,
+             'user_initiated', 'imported_conversation', 1,
              'direct', '50000000-0000-4000-8000-000000000039', NULL,
              'applied', '40000000-0000-4000-8000-000000000039');
          INSERT INTO context_frontier

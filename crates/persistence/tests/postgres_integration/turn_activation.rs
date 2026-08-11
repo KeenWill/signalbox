@@ -2837,7 +2837,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
              result_last_position)
          VALUES
             ($1, 'submit_input', 1, $2,
-             'owner', NULL, NULL, 'text', 'cross-wired steering',
+             'user', NULL, NULL, 'text', 'cross-wired steering',
              'next_safe_point', $3, NULL, NULL, NULL, NULL, NULL,
              'applied', NULL, $2, $4, NULL, $3,
              NULL, NULL, NULL, NULL, NULL, NULL)",

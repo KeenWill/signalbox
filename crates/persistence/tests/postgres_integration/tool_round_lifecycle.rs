@@ -1505,7 +1505,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
-             owner_command_id)
+             user_command_id)
          VALUES ($1, 'approve', 'session_blanket', NULL, NULL)",
     )
     .bind(denied_request.into_uuid())
@@ -1567,8 +1567,8 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let malformed_denial_error = sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
-             owner_command_id)
-         VALUES ($1, 'deny', 'owner_command', E'unsafe\\nreason', $2)",
+             user_command_id)
+         VALUES ($1, 'deny', 'user_command', E'unsafe\\nreason', $2)",
     )
     .bind(denied_request.into_uuid())
     .bind(malformed_command)
@@ -2120,7 +2120,7 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
         "SELECT count(*)
            FROM tool_approval_decision
           WHERE request_id IN ($1, $2)
-            AND owner_command_id = $3",
+            AND user_command_id = $3",
     )
     .bind(first_request.into_uuid())
     .bind(second_request.into_uuid())

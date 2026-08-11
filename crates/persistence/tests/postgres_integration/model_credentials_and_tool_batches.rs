@@ -1275,7 +1275,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             (SELECT count(*) FROM tool_approval_decision
               WHERE request_id = $2
                 AND decision_kind = 'approve'
-                AND decision_source = 'owner_command'),
+                AND decision_source = 'user_command'),
             (SELECT count(*) FROM tool_attempt
               WHERE attempt_id = $3
                 AND state_kind = 'terminal'

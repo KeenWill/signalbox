@@ -408,10 +408,10 @@ claimed identifier under a different claimed agency. For metadata replacement,
 the recorded actor is also the applied last-writer provenance.
 
 Storage follows the closed-discriminator convention: `actor_kind`
-(`owner`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
+(`user`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
 in `submit_input_command` and `replace_session_metadata_command`. Metadata
-receipts additionally carry constructor-selected `issuer_kind` (`owner`/`tool`)
+receipts additionally carry constructor-selected `issuer_kind` (`user`/`tool`)
 and `issuer_tool_request_id` columns, sealed separately from the actor
 projection. The issuer migration fixes every pre-issuer receipt to the user
 agency that its legacy constructor required, rather than trusting the actor

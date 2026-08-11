@@ -361,7 +361,7 @@ pub(crate) enum SessionCreationCauseStorageKind {
 /// Encodes a session-creation cause as its closed PostgreSQL spelling.
 pub(crate) const fn session_creation_cause_to_str(value: &SessionCreationCause) -> &'static str {
     match value {
-        SessionCreationCause::UserInitiated => "owner_initiated",
+        SessionCreationCause::UserInitiated => "user_initiated",
         SessionCreationCause::Delegated { .. } => "delegated",
     }
 }
@@ -371,7 +371,7 @@ pub(crate) fn session_creation_cause_from_str(
     value: &str,
 ) -> Option<SessionCreationCauseStorageKind> {
     match value {
-        "owner_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
+        "user_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
         "delegated" => Some(SessionCreationCauseStorageKind::Delegated),
         _ => None,
     }
@@ -486,7 +486,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
     value: ToolApprovalDecisionSourceStorageKind,
 ) -> &'static str {
     match value {
-        ToolApprovalDecisionSourceStorageKind::UserCommand => "owner_command",
+        ToolApprovalDecisionSourceStorageKind::UserCommand => "user_command",
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
@@ -497,7 +497,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
     value: &str,
 ) -> Option<ToolApprovalDecisionSourceStorageKind> {
     match value {
-        "owner_command" => Some(ToolApprovalDecisionSourceStorageKind::UserCommand),
+        "user_command" => Some(ToolApprovalDecisionSourceStorageKind::UserCommand),
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
@@ -1860,7 +1860,8 @@ mod tests {
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-        StoredModelSettingsError, ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid,
+        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
+        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid,
         accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
         approval_judge_recommendation_to_str, approval_judge_state_from_str,
         approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
@@ -1892,7 +1893,8 @@ mod tests {
         session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         session_placement_rejection_from_str, session_placement_result_kind_from_str,
-        session_placement_result_kind_to_str, tool_approval_posture_from_str,
+        session_placement_result_kind_to_str, tool_approval_decision_source_from_str,
+        tool_approval_decision_source_to_str, tool_approval_posture_from_str,
         tool_approval_posture_to_str, tool_attempt_disposition_from_str,
         tool_attempt_disposition_to_str, tool_permission_default_from_str,
         tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
@@ -2308,6 +2310,44 @@ mod tests {
             Some(SessionCreationCauseStorageKind::Delegated)
         );
         assert_eq!(session_creation_cause_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn tool_approval_decision_source_mapping_is_closed() {
+        for kind in [
+            ToolApprovalDecisionSourceStorageKind::UserCommand,
+            ToolApprovalDecisionSourceStorageKind::PolicyAuto,
+            ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+            ToolApprovalDecisionSourceStorageKind::Delegate,
+        ] {
+            assert_eq!(
+                tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(kind)),
+                Some(kind)
+            );
+        }
+        assert_eq!(
+            tool_approval_decision_source_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
+
+    /// Pins the stored spellings literally rather than only round-tripping
+    /// them. A rename that moved the encoder and the decoder together would
+    /// round-trip perfectly and still fail against every row already written,
+    /// so the round-trip tests above cannot catch it on their own. These are
+    /// the exact strings the closed `CHECK` constraints admit.
+    #[test]
+    fn storage_spells_the_human_principal_user() {
+        assert_eq!(
+            session_creation_cause_to_str(&SessionCreationCause::UserInitiated),
+            "user_initiated"
+        );
+        assert_eq!(
+            tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::UserCommand
+            ),
+            "user_command"
+        );
     }
 
     #[test]
