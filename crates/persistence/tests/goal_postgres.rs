@@ -44,6 +44,7 @@ use signalbox_persistence::{
         PrepareContextCompactionRequest,
     },
     create_session::CreateSessionRepository,
+    disposable_test_container_labels,
     goal::{
         GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
     },
@@ -90,6 +91,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
