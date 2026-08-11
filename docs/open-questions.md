@@ -219,6 +219,21 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   as an enforced pin-bump gate; it does not block the existing mechanical pin or
   live compatibility gates.
 
+## Codex CLI image capability features
+
+- **Whether the pinned CLI's image features return once accepted input carries
+  images.** The adapter hard-disables `image_generation` and `view_image`. Each
+  adds a model-visible tool that the adapter's structured-output envelope does
+  not carry, and `view_image` — which loads a local image file into the
+  conversation context — is enabled by default in the pinned inventory, so
+  classifying it as non-capability would leave it live rather than merely
+  acknowledged. Accepted input is text-only today, so neither feature has
+  anything to act on. When the content extensions recorded under accepted-input
+  content above carry image and file content, decide whether either name is
+  re-enabled and how the bytes reach the spawned CLI. Blocks re-enabling either
+  name; it does not block the present disables, which stand on the capability
+  rule alone.
+
 ## Model fallback and provenance
 
 - **Automatic fallback.** Decided and specified: what a selection attempt can
