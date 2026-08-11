@@ -16,8 +16,9 @@ from the watcher.
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
-persistence, differ, polling, and rule-dispatch behavior below is verified
-against this PR (`agent/repo-watch-dispatch`).
+persistence and rule-dispatch behavior below is verified against PR #446
+(`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
+against this PR (`agent/repo-watch-poll-performance`).
 
 ## Configuration and credential boundary
 
