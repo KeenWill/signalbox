@@ -36,8 +36,9 @@ use signalbox_model_runtime::{
     ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
 };
 use signalbox_persistence::{
-    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
-    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+    disposable_test_container_labels, local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
@@ -168,6 +169,7 @@ impl RunningIdleFixture {
             .with_password(DATABASE_PASSWORD)
             .with_fsync_enabled()
             .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
             .start()
             .await?;
         let host = container.get_host().await?;
@@ -264,6 +266,7 @@ impl RunningChatFixture {
             .with_password(DATABASE_PASSWORD)
             .with_fsync_enabled()
             .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
             .start()
             .await?;
         let host = container.get_host().await?;
