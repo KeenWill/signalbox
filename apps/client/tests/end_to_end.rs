@@ -49,10 +49,9 @@ use signalbox_process_protocol::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnExecution, ActivatedTurnPass,
-    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SessionTemplateConfiguration,
+    ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, FileCredentialAccess,
+    HubModelConfiguration, LocalProcessListener, ModelAdapter, PostgresProviderModelExecution,
+    ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -80,12 +79,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -386,6 +395,24 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
         )
         .into()
     })
+}
+
+fn required_canonical_uuid_environment(name: &'static str) -> Result<Uuid, Box<dyn Error>> {
+    let text = required_environment(name)?.into_string().map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{name} must be valid UTF-8"),
+        )
+    })?;
+    let uuid = Uuid::parse_str(&text)?;
+    if uuid.hyphenated().to_string() != text {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{name} must be canonical lowercase UUID text"),
+        )
+        .into());
+    }
+    Ok(uuid)
 }
 
 /// S35 / INV-047: the shipped client lists daemon-owned templates, creates from one
@@ -1694,12 +1721,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -1923,12 +1960,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -2162,12 +2209,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -2657,12 +2714,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -2863,37 +2930,38 @@ context_window_tokens = 200000
 #[ignore = "requires PostgreSQL, a local socket, and an explicitly configured real Anthropic call"]
 async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<dyn Error>> {
     let configuration_file = PathBuf::from(required_environment("SIGNALBOX_E2E_CONFIG_FILE")?);
-    let credential_file = PathBuf::from(required_environment(
-        "SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE",
-    )?);
-    let selection_text = required_environment("SIGNALBOX_E2E_SELECTION_ID")?
-        .into_string()
-        .map_err(|_| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                "SIGNALBOX_E2E_SELECTION_ID must be valid UTF-8",
-            )
-        })?;
-    let selection_uuid = Uuid::parse_str(&selection_text)?;
-    if selection_uuid.hyphenated().to_string() != selection_text {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "SIGNALBOX_E2E_SELECTION_ID must be canonical lowercase UUID text",
-        )
-        .into());
-    }
+    let selection_uuid = required_canonical_uuid_environment("SIGNALBOX_E2E_SELECTION_ID")?;
 
     let model_configuration = HubModelConfiguration::read(&configuration_file)?;
-    let credential_access = FileCredentialAccess::new(
-        credential_file,
-        CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+    let selection = DirectModelSelection::from_uuid(selection_uuid);
+    let credential_profile = model_configuration
+        .resolve_direct_model(selection)
+        .filter(|route| route.uses_anthropic_adapter())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "SIGNALBOX_E2E_SELECTION_ID must select the Anthropic adapter",
+            )
+        })?
+        .credential_profile()
+        .to_owned();
+    let credential_access = FileCredentialAccess::from_files(
+        model_configuration
+            .file_credential_profiles(ModelAdapter::Anthropic)
+            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
     );
-    let credential_reference =
-        ModelCallCredentialReference::new(credential_access.credential_reference().as_str());
+    let credential_reference = ModelCallCredentialReference::new(credential_profile);
     let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)?;
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let targets = model_configuration.target_catalog();
+    // Captured before the configuration moves into the process runtime.
+    // Production composition attaches this catalog so every call resolves the
+    // credential its session pinned for the *serving* family; under fast mode
+    // that is the alternate target's family, not the selected one. Without it
+    // the repository falls back to one reference for every call and the smoke
+    // would authenticate a fast call with the base family's account.
+    let credential_families = model_configuration.credential_family_catalog();
 
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
@@ -2909,7 +2977,8 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     );
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(pool.clone(), targets, credential_reference),
+            PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
+                .with_session_credentials(credential_families),
             InProcessAttemptDispatchGate::default(),
             provider,
         ));
@@ -2936,7 +3005,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
             vec![
                 String::from("create"),
                 String::from("--model"),
-                selection_text,
+                selection_uuid.hyphenated().to_string(),
             ],
             None,
         ),
