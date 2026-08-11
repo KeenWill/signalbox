@@ -1743,12 +1743,20 @@ impl GitHubRepositoryPoller {
         if response.status() != StatusCode::OK {
             return Err(RepositoryWatchAttemptError::Rejected);
         }
-        self.cache().remove(&key);
+        // The cached pair stays in place while this body is read and parsed.
+        // Two open pull requests sharing a head SHA fetch the same check-suite
+        // and check-run keys concurrently, so dropping the pair before the
+        // await would let a concurrent `304` resolve its accepted state against
+        // a hole and fail an otherwise valid attempt. A changed response
+        // replaces the pair atomically below, and only an unparseable one
+        // invalidates it.
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
         let has_next_page = has_next_link(&response)?;
         let bytes = self.read_bounded(response).await?;
-        let value = serde_json::from_slice::<T>(&bytes)
-            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+        let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
+            self.cache().remove(&key);
+            return Err(RepositoryWatchAttemptError::InvalidResponse);
+        };
         let accepted = ConditionalJsonResponse {
             page_is_full: page_item_count.is_some_and(|item_count| item_count(&value) == PAGE_SIZE),
             value,
