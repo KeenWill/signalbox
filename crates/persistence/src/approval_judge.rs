@@ -1281,7 +1281,8 @@ mod tests {
     use std::num::NonZeroU64;
 
     use signalbox_domain::{
-        DurableCommandId, Goal, GoalGeneration, GoalStatement, GoalUserProvenance, SessionId,
+        DurableCommandId, Goal, GoalGeneration, GoalModelProvenance, GoalReport, GoalStatement,
+        GoalUserProvenance, SessionId, ToolRequestId, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -1380,6 +1381,27 @@ mod tests {
             .expect("a pursuing generation admits stopping");
 
         let resolved = judged_turn_goal_statement(stopped.generations(), None);
+
+        assert_eq!(resolved, Ok(None));
+    }
+
+    /// An achieved generation is discharged rather than withdrawn, and a
+    /// discharged authority states nothing about a request still parked under
+    /// it, so it resolves to no statement exactly as a stopped one does.
+    #[test]
+    fn an_unrecorded_turn_refuses_an_achieved_goal() {
+        let achieved = commissioned("land the reviewer fixes")
+            .declare_achieved(
+                GoalReport::try_new(String::from("the fixes are landed"))
+                    .expect("the fixture report is admitted"),
+                GoalModelProvenance::new(
+                    TurnId::from_uuid(Uuid::from_u128(5)),
+                    ToolRequestId::from_uuid(Uuid::from_u128(6)),
+                ),
+            )
+            .expect("a pursuing generation admits achievement");
+
+        let resolved = judged_turn_goal_statement(achieved.generations(), None);
 
         assert_eq!(resolved, Ok(None));
     }
