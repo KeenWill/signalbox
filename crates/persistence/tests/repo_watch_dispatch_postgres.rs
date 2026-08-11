@@ -587,7 +587,7 @@ async fn dispatched_sessions_are_commissioned_with_their_synthesized_goal()
     let fixture = dispatch_fixture().await?;
     let expected = synthesized_dispatch_goal(&fixture)?;
 
-    assert_eq!(fixture.sessions.len(), 2);
+    assert_eq!(fixture.sessions.len(), fixture.rule.actions().len());
     assert_commissioned_with(&fixture, fixture.session(0), &expected).await?;
     assert_commissioned_with(&fixture, fixture.session(1), &expected).await?;
     Ok(())

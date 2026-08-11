@@ -8674,6 +8674,9 @@ pub enum GoalState {
     UserStopped,
     Superseded { by_generation: GoalGeneration },
 }
+impl GoalState {
+    pub const fn is_open(&self) -> bool;
+}
 pub struct GoalGenerationSnapshot { /* private generation + statement + state */ }
 impl GoalGenerationSnapshot {
     // accessors: generation(), statement(), state()
