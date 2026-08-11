@@ -827,8 +827,8 @@ tools:
   [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
   requires exactly one canonical blob `digest`. It returns text containing
   compact JSON with that `digest`, canonical-decimal-string `byte_length`, and
-  numeric `replica_count`. Its permission default is `Auto` and its effect class
-  is `EffectFree`.
+  canonical-decimal-string `replica_count`. Its permission default is `Auto` and
+  its effect class is `EffectFree`.
 - `blob_read`, as owned by the
   [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
   requires exactly one canonical blob `digest` plus `offset_bytes` and
@@ -898,18 +898,19 @@ closes it the same way with exact fixed detail `blob_turn_byte_budget_exceeded`.
 Either closure resolves the logical request, crosses no executor or store
 boundary, leaves previously charged bytes charged, and permits the next model
 round. A successful reservation is not refunded by a later denial or failure.
-Store I/O occurs only after durable authorization. A missing or corrupt recorded
-replica, or a read for which no candidate verifies and at least one candidate is
-unavailable, becomes trustworthy content-silent `ExecutionFailed` evidence with
-the respective exact fixed detail `blob_missing`, `blob_corrupt`, or
-`blob_unavailable`. When no candidate is unavailable, any readable candidate
-that fails verification selects `blob_corrupt`; `blob_missing` applies only when
-every candidate is absent. It resolves the logical request and permits the next
-model round rather than entering the effect-free crash-loss path or failing the
-turn; a later request may retry `blob_unavailable` within the remaining per-turn
-budget. The compact result must also fit the ordinary 1 MiB text-result bound;
-admission accounts for JSON and base64 overhead rather than producing a result
-that the ordinary result boundary would reject.
+Store I/O occurs only after durable authorization. An individual missing,
+corrupt, or unavailable replica falls through to the next recorded candidate.
+Only after no candidate verifies does the read become trustworthy content-silent
+`ExecutionFailed` evidence with the respective exact fixed detail
+`blob_missing`, `blob_corrupt`, or `blob_unavailable`. Any unavailable candidate
+takes precedence; otherwise any readable candidate that fails verification
+selects `blob_corrupt`, and `blob_missing` applies only when every candidate is
+absent. It resolves the logical request and permits the next model round rather
+than entering the effect-free crash-loss path or failing the turn; a later
+request may retry `blob_unavailable` within the remaining per-turn budget. The
+compact result must also fit the ordinary 1 MiB text-result bound; admission
+accounts for JSON and base64 overhead rather than producing a result that the
+ordinary result boundary would reject.
 
 For both web tools, an explicit shipped `Human` posture supersedes the
 declaration's `Confirm` default and the session blanket, so a request parks for

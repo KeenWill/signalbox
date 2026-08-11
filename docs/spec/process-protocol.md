@@ -2307,12 +2307,15 @@ unavailable for that mutation; omitting it preserves the existing single text
 part read from standard input. Conversation content therefore never appears in
 process arguments. Chat accepts the same closed object through `:part JSON` by
 appending it to a pending sequence without submitting it; `:send` submits the
-nonempty pending sequence and clears it only when the loop awaits neither a
-queued nor active reply. While either reply is pending, `:send` reports a local
-busy error and retains the exact pending sequence. `:clear` discards it locally.
-A malformed part clears the sequence and reports a local parse error. An
-ordinary input line keeps its immediate one-text-part meaning only while no part
-is pending; otherwise the client refuses it and requires `:send` or `:clear`.
+nonempty pending sequence only when the loop awaits neither a queued nor active
+reply. It clears the sequence only after validating the resulting
+`input_submitted` receipt; any rejection, connection loss, cancellation, or
+ambiguous outcome retains the exact sequence. While either reply is pending,
+`:send` reports a local busy error and likewise retains it. `:clear` discards it
+locally. A malformed part clears the sequence and reports a local parse error.
+An ordinary input line keeps its immediate one-text-part meaning only while no
+part is pending; otherwise the client refuses it and requires `:send` or
+`:clear`.
 
 The terminal client provides these delegation commands for exact already-issued
 tool requests:

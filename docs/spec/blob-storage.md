@@ -91,13 +91,15 @@ inventing a storage location. Once the catalog is nonempty, omission is a
 startup error because every recorded store must remain resolvable. When present,
 the table requires an absolute `staging_directory`, a positive decimal-u64
 `max_blob_bytes`, one through 32 `[[blob_storage.stores]]` entries with distinct
-validated `name` values and distinct canonical UUID `namespace_id` values, and a
-`[blob_storage.routes]` table containing exactly `user_attachment`,
-`tool_artifact`, `imported_source`, and `generated_artifact`. Every route names
-a declared store. When conversation import is enabled, `max_blob_bytes` must be
-at least `conversation_import.max_source_bytes`, including that table's default.
-The table follows the version-one catalog grammar and rejects unknown or
-kind-inapplicable fields.
+`name` values matching `[a-z][a-z0-9_-]{0,63}` and distinct canonical UUID
+`namespace_id` values, and a `[blob_storage.routes]` table containing exactly
+`user_attachment`, `tool_artifact`, `imported_source`, and `generated_artifact`.
+Every route names a declared store. When conversation import is enabled,
+`max_blob_bytes` must be at least `conversation_import.max_source_bytes`,
+including that table's default. The table follows the version-one catalog
+grammar and rejects unknown or kind-inapplicable fields. Every catalog query and
+in-memory traversal orders store names by unsigned ASCII bytes; persistence uses
+bytewise `C` collation for that order rather than a deployment locale.
 
 Configured store entries must also name distinct physical namespaces. After
 initializing filesystem roots, startup resolves each opened directory's
@@ -220,15 +222,16 @@ is a future optimization, not a version-one upload path.
 ## Wire vocabulary
 
 Blob upload copies the chunked conversation-import lifecycle over the local
-process protocol: `begin_blob_upload` declares the expected digest, expected
-byte length, and the user-attachment operation from which the daemon derives the
-`user_attachment` storage class. No client-controlled class selects a route.
-After validating any known length, begin short-circuits only for a verified
-replica that a live read verifies in that routed store; a missing or corrupt
-recorded object proceeds to upload for repair. `append_blob_upload` carries
-nonempty padded-base64 chunks with at most 4,194,304 decoded bytes, spooled to
-staging and never assembled in memory; `commit_blob_upload` returns the verified
-digest and length; `abort_blob_upload` discards the staging state.
+process protocol: `begin_blob_upload` declares only the expected digest and
+expected byte length. The request kind is the fixed user-attachment operation,
+from which the daemon derives the `user_attachment` storage class; no operation
+or client-controlled class field selects a route. After validating any known
+length, begin short-circuits only for a verified replica that a live read
+verifies in that routed store; a missing or corrupt recorded object proceeds to
+upload for repair. `append_blob_upload` carries nonempty padded-base64 chunks
+with at most 4,194,304 decoded bytes, spooled to staging and never assembled in
+memory; `commit_blob_upload` returns the verified digest and length;
+`abort_blob_upload` discards the staging state.
 
 Reads are `read_blob_metadata { digest }`, returning the digest, byte length,
 and bounded replica count, and
@@ -341,18 +344,18 @@ Models reach attachment content the same way they reach every other effect:
 through tools, explicitly, within declared bounds. This stack ships a
 daemon-registered blob-read tool family over the catalog. `blob_metadata`
 accepts exactly `{ digest }` and returns text containing compact JSON with
-`digest`, canonical-decimal-string `byte_length`, and numeric `replica_count`.
-`blob_read` accepts exactly `{ digest, offset_bytes, length_bytes }`, with both
-numeric values expressed as canonical decimal-u64 strings, and returns text
-containing compact JSON with `digest`, `offset_bytes`, and canonical padded
-`bytes_base64`. The stub's stated length is the model's sizing information. Each
-read admits 1 through 524,288 decoded bytes, each turn admits at most 2,097,152
-decoded bytes across admitted read requests, and the existing tool-result and
-target-context caps further limit the encoded result. At preparation the daemon
-derives an allow-set from attachment stubs in the rendered frontier; a
-catalogued digest outside that set is unauthorized. Results use the existing
-text-only tool-result arm and never enter a provider message as image or
-document media.
+`digest`, canonical-decimal-string `byte_length`, and canonical-decimal-string
+`replica_count`. `blob_read` accepts exactly
+`{ digest, offset_bytes, length_bytes }`, with both numeric values expressed as
+canonical decimal-u64 strings, and returns text containing compact JSON with
+`digest`, `offset_bytes`, and canonical padded `bytes_base64`. The stub's stated
+length is the model's sizing information. Each read admits 1 through 524,288
+decoded bytes, each turn admits at most 2,097,152 decoded bytes across admitted
+read requests, and the existing tool-result and target-context caps further
+limit the encoded result. At preparation the daemon derives an allow-set from
+attachment stubs in the rendered frontier; a catalogued digest outside that set
+is unauthorized. Results use the existing text-only tool-result arm and never
+enter a provider message as image or document media.
 
 Content-type-aware readers are committed unimplemented functionality: no present
 surface provides one, and neither its exact inventory nor the formats it
