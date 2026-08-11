@@ -1,3 +1,11 @@
+//! Integration coverage for `SandboxedCommandRunner` / `TokioProcessRunner`
+//! driving the real compiled `signalbox-exec-supervisor` binary.
+//!
+//! Exercises supervisor-executable identity pinning, spawn-failure
+//! propagation at each stage, capture-byte limits, ambient-environment
+//! clearing, dispatch-marker and exit/signal reporting, and descendant
+//! process-tree cleanup on both leader completion and timeout.
+
 #![cfg(target_os = "linux")]
 
 use std::{

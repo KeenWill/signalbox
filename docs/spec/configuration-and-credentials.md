@@ -34,6 +34,10 @@ verified against this PR (`agent/mcp-bridge-wiring`).
 The rule binding one provider-model spelling to one adapter is verified against
 this PR (`agent/adapter-model-catalogs`).
 
+The blob catalog and input-modality grammar below are the foundation proposal
+from PR #553 (`agent/blob-storage-foundation`) and become verified with its
+implementing child stack.
+
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
 (`agent/credential-reference-total`). This includes signalboxd configuration
@@ -541,13 +545,20 @@ provenance of these layers are owned by
 [Model and session settings](model-session-settings.md).
 
 Each `[[models]]` record declares its capability surface with
-`reasoning_levels`, `fast_mode`, and `service_tiers`. Omitted arrays are empty,
-and omitted fast mode means `unsupported`. `request_control` authorizes the
-adapter's request-level fast control. `alternate_target` additionally requires
-`fast_target_id`; that identity must name a non-selectable `[[serving_targets]]`
-record with its own exact `model_family`, provider model, `max_output_tokens`,
-and `context_window_tokens`. Every serving record states its family, and that
-family must name one declared `[[adapter_mappings]]` entry; the mapping, not the
+`reasoning_levels`, `fast_mode`, `service_tiers`, and `input_modalities`.
+`input_modalities` is a nonempty array from the closed set `text`, `image`, and
+`document`; it rejects duplicates and must contain `text`. Omission means
+exactly `["text"]`. Every `[[serving_targets]]` record admits the same member
+and default. The model-capability process projection always materializes the
+selectable record's modalities in the closed order `text`, `image`, `document`,
+and call preparation uses the effective serving record's set. Omitted reasoning
+and service-tier arrays are empty, and omitted fast mode means `unsupported`.
+`request_control` authorizes the adapter's request-level fast control.
+`alternate_target` additionally requires `fast_target_id`; that identity must
+name a non-selectable `[[serving_targets]]` record with its own exact
+`model_family`, provider model, `max_output_tokens`, and
+`context_window_tokens`. Every serving record states its family, and that family
+must name one declared `[[adapter_mappings]]` entry; the mapping, not the
 selectable record naming the target, supplies the serving record's adapter and
 credential pool, so nothing is inferred from the pointing model. At preparation
 the enabled call resolves that family's pinned reference from the session's
@@ -572,6 +583,29 @@ Single-shot import rejects a source above the configured value before
 conversion. Begin rejects a declaration above the configured value before
 assembly, append rejects the first observed size above it, and commit rechecks
 the value against the actual appended byte count.
+
+The optional `[blob_storage]` table has exactly `staging_directory`,
+`max_blob_bytes`, `stores`, and `routes`. The directory is absolute and the
+positive size is an integer admitted as an unsigned 64-bit value. There are one
+through 32 `[[blob_storage.stores]]` entries with distinct names. A filesystem
+entry has exactly `name`, `kind = "filesystem"`, and absolute `root_directory`.
+An S3 entry has exactly `name`, `kind = "s3"`, absolute HTTP(S) `endpoint`,
+nonempty ASCII `region` and `bucket` of at most 255 bytes each, and absolute
+`credentials_file`; endpoint user information, query, and fragment are invalid,
+and HTTP requires a literal loopback host. `[blob_storage.routes]` has exactly
+`user_attachment`, `tool_artifact`, `imported_source`, and `generated_artifact`,
+each naming one declared store.
+
+An S3 credentials file passes the ordinary protected-file checks, is at most
+16,384 bytes, and is strict TOML with exactly `version = 1`, nonempty
+`access_key_id` of at most 256 bytes, and nonempty `secret_access_key` of at
+most 4,096 bytes. It is read once per logical operation. No ambient credential
+source is consulted. Unknown root, store, route, or credential members fail
+startup. When blob storage is present, `max_blob_bytes` must be at least the
+effective conversation-import maximum. When it is absent, startup succeeds only
+if the blob catalog and legacy imported-source backlog are both empty; blob and
+import operations are unavailable. Every store name already recorded in the
+replica catalog must resolve to the same configured storage namespace.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
 contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional

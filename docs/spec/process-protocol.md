@@ -44,6 +44,10 @@ The session-metadata last-writer actor inventory, its native and terminal-client
 projections, and the totality of the daemon projection that produces it are
 verified against this PR (`fix/review-read-snapshot-permit`).
 
+The blob lifecycle messages and multipart content arrays below are the
+foundation proposal from PR #553 (`agent/blob-storage-foundation`) and become
+verified with its implementing child stack.
+
 The coherent review-orchestration snapshot's single-transaction construction,
 the pool capacity it draws, and the writer independence that follows from both
 are verified against this PR (`agent/review-snapshot-mvcc`).
@@ -246,7 +250,7 @@ that variant.
 | `resume_goal`                           | `command_id` and `session_id` (canonical UUID strings), `guidance` (string or null)                                                                                                                                                                                                                           | Resume the blocked current generation, optionally using exact guidance as its next turn input.                                                                                                                                                                                                                                                                                  |
 | `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                                                                                                                                                                       | Terminalize the pursuing or blocked current generation by explicit user action, with an explicit delegated-child scope.                                                                                                                                                                                                                                                         |
 | `supersede_goal`                        | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                                                                  | Atomically supersede the current generation and begin pursuing a new immutable statement in the same lineage.                                                                                                                                                                                                                                                                   |
-| `submit_input`                          | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for steering), `model_settings` (settings overlay), and optional `delivery`                                                                                   | Submit exact user text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                                                                                                                                                           |
+| `submit_input`                          | `command_id` and `session_id` (canonical UUID strings), `content` (ordered content-part array), `expected_defaults_version` (canonical decimal string, or null only for steering), `model_settings` (settings overlay), and optional `delivery`                                                               | Submit exact user content with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                                                                                                                                                        |
 | `read_transcript`                       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                                                          | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                                                                                                                                                  |
 | `follow_session`                        | `session_id` (canonical UUID string)                                                                                                                                                                                                                                                                          | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; also receive ephemeral provider-text deltas.                                                                                                                                                                 |
 | `spawn_session`                         | `session_id`, `turn_id`, and `tool_request_id` (canonical UUID strings), `task` (string), and `relationship` (closed object)                                                                                                                                                                                  | Execute one exact already-issued spawn request.                                                                                                                                                                                                                                                                                                                                 |
@@ -260,10 +264,16 @@ that variant.
 | `append_conversation_import`            | `chunk` (nonempty canonical padded base64 string carrying at most 4 MiB decoded bytes)                                                                                                                                                                                                                        | Append exact source bytes to the import in progress on this connection.                                                                                                                                                                                                                                                                                                         |
 | `commit_conversation_import`            | none                                                                                                                                                                                                                                                                                                          | Verify the assembled size, then convert and idempotently resolve or insert the complete source.                                                                                                                                                                                                                                                                                 |
 | `abort_conversation_import`             | none                                                                                                                                                                                                                                                                                                          | Discard the import in progress on this connection.                                                                                                                                                                                                                                                                                                                              |
+| `begin_blob_upload`                     | `expected_digest` (canonical blob-digest string), `expected_length_bytes` (canonical decimal string)                                                                                                                                                                                                          | Begin one per-connection user-attachment upload or report that the routed store already holds verified bytes.                                                                                                                                                                                                                                                                   |
+| `append_blob_upload`                    | `chunk` (nonempty canonical padded base64 string carrying at most 4 MiB decoded bytes)                                                                                                                                                                                                                        | Append exact bytes to the blob upload in progress on this connection.                                                                                                                                                                                                                                                                                                           |
+| `commit_blob_upload`                    | none                                                                                                                                                                                                                                                                                                          | Verify, publish, and catalog the assembled blob upload.                                                                                                                                                                                                                                                                                                                         |
+| `abort_blob_upload`                     | none                                                                                                                                                                                                                                                                                                          | Discard the blob upload in progress on this connection.                                                                                                                                                                                                                                                                                                                         |
+| `read_blob_metadata`                    | `digest` (canonical blob-digest string)                                                                                                                                                                                                                                                                       | Read bounded catalog metadata for one blob.                                                                                                                                                                                                                                                                                                                                     |
+| `read_blob_chunk`                       | `digest` (canonical blob-digest string), `offset_bytes` and `length_bytes` (canonical decimal strings)                                                                                                                                                                                                        | Read one exact bounded byte range through the recorded replica catalog.                                                                                                                                                                                                                                                                                                         |
 | `create_session_from_imported_frontier` | `command_id` and `imported_conversation_id` (canonical UUID strings), `through_position` (positive canonical decimal string), `relationship` (`resume` or `fork`), `initial_model_selection` (selection object), `model_settings` (settings overlay), `runner_placement` (proposed; placement object or null) | Create an independent live session seeded through the selected inclusive imported position.                                                                                                                                                                                                                                                                                     |
 | `replace_session_defaults`              | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `model_settings` (settings overlay), `dangerous_tool_auto_approval` (boolean), `system_prompt` (string or null)                                         | Install one complete immutable defaults epoch as the user actor, conditional on the exact current epoch.                                                                                                                                                                                                                                                                        |
-| `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay)                                                                                                           | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
-| `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                          | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin and explicitly selecting delegated-child scope.                                                                                                                                                                                                          |
+| `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (ordered content-part array), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay)                                                                                       | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
+| `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (ordered content-part array), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                      | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin and explicitly selecting delegated-child scope.                                                                                                                                                                                                          |
 | `decide_tool_request`                   | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                                                              | Supply the user decision for one pending tool request through the canonical decision command.                                                                                                                                                                                                                                                                                   |
 | `read_session_defaults`                 | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                                                                   | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                                                                                                                                                          |
 | `list_conversations`                    | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                                                           | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                                                                                                                                                  |
@@ -311,6 +321,17 @@ the client observed; an idle slot or a changed turn is a typed rejection rather
 than a retarget. Unknown delivery tags or members, explicit JSON null in place
 of a delivery object, and every other correlation of delivery with the nullable
 defaults member are malformed.
+
+The `content` member on `submit_input`, `reconcile_turn`, and `stop_turn` is a
+nonempty array of at most 256 closed part objects. A text part is exactly
+`{ "type": "text", "text": T }`. An attachment part is exactly
+`{ "type": "attachment", "digest": D, "kind": K, "media_type": M, "display_filename": F }`,
+where `D` is a canonical blob digest, `K` is `image`, `document`, or `file`, and
+`F` is a string or JSON null. Adjacent text parts are malformed. The aggregate
+text bytes and attachment member bounds are owned by
+[blob storage](blob-storage.md#multipart-user-content); the wire applies them
+before application construction. A one-part text array is the sole spelling of
+legacy text content.
 
 ### Credential-exclusion administration
 
@@ -834,11 +855,11 @@ version `1`, selecting a session never requires a feature-specific version gate.
 The proposed runner requests and runner-bearing projections remain outside the
 implemented vocabulary until their implementing stack lands.
 
-Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
-boundary before application construction or mutation and returns
+Submitted content carries at most 1 MiB of aggregate text UTF-8. The daemon
+applies that boundary before application construction or mutation and returns
 `invalid_request` when it is exceeded. This leaves enough space for worst-case
 JSON escaping when the same accepted content is projected in a queued turn or
-durable update event. This section owns the exact capacity.
+durable update event. This section owns the exact text capacity.
 
 The conversation-import transport in this section was verified against PR #401
 (`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`).
@@ -864,17 +885,36 @@ equal the declared count before passing the complete bytes to the unchanged
 converter seam. Abort or disconnect discards partial per-connection state. The
 source path remains client-local and never appears in a request.
 
+Blob digest strings are exactly `sha256:` followed by 64 lowercase hexadecimal
+characters. Blob upload admits at most one in-progress upload per connection,
+independently of conversation-import state. Begin validates the declared length
+against `blob_storage.max_blob_bytes` and any catalogued identity before it can
+return `blob_upload_already_present`; otherwise it returns `blob_upload_begun`
+and creates disk-backed staging. Append accepts only a nonempty chunk of at most
+4 MiB decoded bytes and acknowledges the cumulative count. Commit requires that
+count and the streaming digest to match both declarations, then publishes and
+catalogues the blob. Abort, disconnect, or a terminal upload refusal discards
+staging.
+
+`read_blob_chunk` admits lengths from 1 through 4 MiB. Checked
+`offset_bytes + length_bytes` must not overflow or cross the catalogued byte
+length. The response is exact rather than truncating at end-of-blob. Upload and
+read state, length, digest, and range failures use closed, content-silent
+`invalid_request` detail; an absent digest is `not_found`, storage availability
+is `unavailable`, and an ambiguous catalog commit is `commit_ambiguous`.
+
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
-that variant. Every accepted non-review mutation or conversation-import
-transport request — `create_session`, `create_session_from_template`,
-`create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
-`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, `compact_session`, `update_session_placement`,
-`import_conversation`, `begin_conversation_import`,
+that variant. Every accepted non-review mutation, conversation-import transport
+request, or blob-upload transport request — `create_session`,
+`create_session_from_template`, `create_session_from_imported_frontier`,
+`submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
+`replace_session_metadata`, `replace_session_defaults`, `compact_session`,
+`update_session_placement`, `import_conversation`, `begin_conversation_import`,
 `append_conversation_import`, `commit_conversation_import`,
-`abort_conversation_import`, `spawn_session`, `await_session`,
+`abort_conversation_import`, `begin_blob_upload`, `append_blob_upload`,
+`commit_blob_upload`, `abort_blob_upload`, `spawn_session`, `await_session`,
 `send_session_message`, `replace_lost_runner`, `abandon_lost_runner`, or
 `promote_pending_runner` — produces exactly one of:
 
@@ -913,6 +953,12 @@ transport request — `create_session`, `create_session_from_template`,
 - `conversation_import_begun` with the admitted `declared_size_bytes`;
 - `conversation_import_appended` with the exact `assembled_size_bytes`;
 - `conversation_import_aborted` with no additional member;
+- `blob_upload_begun` with the `expected_digest` and admitted
+  `expected_length_bytes`;
+- `blob_upload_already_present` with `digest` and `byte_length`;
+- `blob_upload_appended` with the exact `assembled_size_bytes`;
+- `blob_upload_committed` with the verified `digest` and `byte_length`;
+- `blob_upload_aborted` with no additional member;
 - `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
   `relationship`;
 - `session_await_registered` with `tool_request_id`, `child_session_id`, and
@@ -929,6 +975,13 @@ transport request — `create_session`, `create_session_from_template`,
   `enrollment_id`, and `registration_revision`; it names no session, because
   promotion changes no session placement; or
 - `error` with a stable `code` and a non-sensitive `message`.
+
+`read_blob_metadata` returns
+`blob_metadata { digest, byte_length, replica_count }` and `read_blob_chunk`
+returns `blob_chunk { digest, offset_bytes, bytes }`. Lengths, offsets, and the
+replica count are canonical decimal strings; `bytes` is canonical padded base64
+for exactly the admitted range. A client validates every echo and count before
+presenting or writing bytes.
 
 **Implemented behavior.** An accepted goal mutation returns
 `goal_transition_applied { session_id, event_ordinal, generation }`. A
@@ -1188,9 +1241,12 @@ The model-capability catalog is the parallel ordered sequence
 in direct-selection identity order, and
 `model_capabilities_end { capability_count }`. The item contains only the
 client-visible direct selection identity, ordered reasoning-level and
-provider-tagged service-tier sets, and fast-mode support Boolean. The exact
-settings vocabulary and the prohibition on exposing an alternate fast serving
-identity are owned by
+provider-tagged service-tier sets, fast-mode support Boolean, and the ordered
+nonempty `input_modalities` set. Modalities use exactly `text`, `image`, or
+`document`; `text` is always present, duplicates are invalid, and projection
+uses that closed order regardless of configuration order. The exact settings
+vocabulary and the prohibition on exposing an alternate fast serving identity
+are owned by
 [model/session settings](model-session-settings.md#local-process-representation).
 Reasoning-level and service-tier overlay members admit `inherit`,
 `provider_default`, or `value`; fast-mode overlay members admit only `inherit`
@@ -2174,6 +2230,9 @@ below. The client accepts a global `--socket <path>` override or reads
 - `follow <session-uuid>`;
 - conversation import operations described by the
   [conversation-import operational surface](conversation-import.md#operational-surface);
+- `blob upload <file>`;
+- `blob metadata <sha256-digest>`;
+- `blob read <sha256-digest> --offset <decimal> --length <decimal> --output <file>`;
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--descendants] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
@@ -2449,6 +2508,15 @@ one-segment path into global read.
 process argument: the client reads one bounded file snapshot before socket I/O
 and rejects an empty, oversized, non-UTF-8, or U+0000-bearing prompt locally,
 then sends the exact text.
+
+`blob upload` opens the named regular file once, streams it with a bounded
+buffer to determine its digest and length, rewinds the same descriptor, and uses
+begin, bounded appends, and commit on one connection. It validates every
+cumulative acknowledgement and the final identity; an already-present receipt
+sends no append. `blob metadata` prints only digest, byte length, and replica
+count. `blob read` makes one bounded exact-range request, validates its digest,
+offset, and decoded length, then writes only those bytes to the named output.
+Local paths never cross the wire or appear in daemon logs.
 
 **Implemented behavior.** The `goal` verbs expose only commission, inspection,
 resume, stop, and supersession. Mutations print a generated command identity

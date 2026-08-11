@@ -900,6 +900,13 @@ folding, or any other rewriting, and equality is the exact ordered scalar
 sequence — normalization-distinct spellings are unequal. That exact value
 participates in `SubmitInput` replay equality (INV-012).
 
+Multipart `UserContent` is committed unimplemented functionality: no present
+surface provides it. The compatibility constraint is that the current text value
+becomes the single text part of an ordered nonempty content sequence without
+changing its exact scalar equality, while content-addressed attachment parts
+join the same replay and transcript authority. The cross-crate part contract is
+owned by [blob storage](blob-storage.md#multipart-user-content).
+
 Why (exact, unnormalized): replay equality must not depend on a normalization
 policy; search or display projections may normalize without changing accepted
 intent.

@@ -15,11 +15,11 @@ use signalbox_domain::{
     GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
     GoalUserAction, MergeableState, ModelChangeAdjustment, ModelSettingSource,
     ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, ServiceTier,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
-    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
-    ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
-    ValidatedModelSettings,
+    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
+    RunnerPlacementLossSource, ServiceTier, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
+    SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
+    TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -1099,6 +1099,27 @@ pub(crate) fn tool_permission_default_from_str(value: &str) -> Option<ToolPermis
     }
 }
 
+/// Encodes a runner placement loss source as its closed PostgreSQL spelling.
+pub(crate) const fn runner_placement_loss_source_to_str(
+    value: RunnerPlacementLossSource,
+) -> &'static str {
+    match value {
+        RunnerPlacementLossSource::Connection => "connection",
+        RunnerPlacementLossSource::Registration => "registration",
+    }
+}
+
+/// Decodes a runner placement loss source from its closed PostgreSQL spelling.
+pub(crate) fn runner_placement_loss_source_from_str(
+    value: &str,
+) -> Option<RunnerPlacementLossSource> {
+    match value {
+        "connection" => Some(RunnerPlacementLossSource::Connection),
+        "registration" => Some(RunnerPlacementLossSource::Registration),
+        _ => None,
+    }
+}
+
 /// Encodes a frozen per-tool approval posture as its closed PostgreSQL spelling.
 pub(crate) const fn tool_approval_posture_to_str(value: ToolApprovalPosture) -> &'static str {
     match value {
@@ -1784,10 +1805,10 @@ mod tests {
         DescendantTerminationScope, DirectModelSelection, DurableCommandId, FastMode,
         FastModeOverlay, FastModeSupport, MergeableState, ModelCapabilities, ModelChangeAdjustment,
         ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-        ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, ServiceTier,
-        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
-        SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolPermissionDefault,
-        TurnId,
+        ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, RunnerPlacementLossSource,
+        ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
+        SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
+        ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -1824,7 +1845,8 @@ mod tests {
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
         repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
         repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
-        repo_watch_thread_state_to_str, session_creation_cause_from_str,
+        repo_watch_thread_state_to_str, runner_placement_loss_source_from_str,
+        runner_placement_loss_source_to_str, session_creation_cause_from_str,
         session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         session_placement_rejection_from_str, session_placement_result_kind_from_str,
@@ -2751,6 +2773,23 @@ mod tests {
         assert_eq!(encoded, "always_confirm");
         assert_eq!(decoded, ToolPermissionDefault::AlwaysConfirm);
         assert_eq!(tool_permission_default_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn runner_placement_loss_source_mapping_is_closed() {
+        assert_eq!(
+            runner_placement_loss_source_from_str(runner_placement_loss_source_to_str(
+                RunnerPlacementLossSource::Connection,
+            )),
+            Some(RunnerPlacementLossSource::Connection),
+        );
+        assert_eq!(
+            runner_placement_loss_source_from_str(runner_placement_loss_source_to_str(
+                RunnerPlacementLossSource::Registration,
+            )),
+            Some(RunnerPlacementLossSource::Registration),
+        );
+        assert_eq!(runner_placement_loss_source_from_str("unknown"), None);
     }
 
     #[test]

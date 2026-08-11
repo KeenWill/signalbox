@@ -1,3 +1,9 @@
+//! Compile-fail coverage for `ToolSchema`'s derive diagnostics.
+//!
+//! Each case in `tests/ui/` pairs a rejected input with a checked `.stderr`
+//! golden, proving the derive's diagnostics stay spanned on the offending
+//! field rather than the macro call site.
+
 #[test]
 fn missing_description_names_its_field() {
     trybuild::TestCases::new().compile_fail("tests/ui/missing_description.rs");

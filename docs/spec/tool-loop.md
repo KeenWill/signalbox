@@ -22,6 +22,10 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture â
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The daemon blob-read declarations below are the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and become verified with its implementing
+child stack.
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -817,6 +821,16 @@ tools:
 - `echo` requires exactly one `text` string and returns the same canonical
   compact `{"text": ...}` object. Its permission default is `Auto` and its
   effect class is `EffectFree`: execution observes no external state.
+- `blob_metadata` requires exactly one canonical blob `digest`. It returns text
+  containing compact JSON with that `digest`, canonical-decimal-string
+  `byte_length`, and numeric `replica_count`. Its permission default is `Auto`
+  and its effect class is `EffectFree`.
+- `blob_read` requires exactly one canonical blob `digest` plus `offset_bytes`
+  and `length_bytes` as canonical decimal-u64 strings. Length is 1 through
+  524,288 bytes; checked offset plus length must lie within the blob. It returns
+  text containing compact JSON with the `digest`, `offset_bytes`, and canonical
+  padded `bytes_base64`. Its permission default is `Auto` and its effect class
+  is `EffectFree`.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
   invalid. Before dispatch, its canonical origin must satisfy the
@@ -865,6 +879,17 @@ tools:
   acknowledgement returns `Ambiguous` evidence. Metadata value and replacement
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
+
+Both blob tools authorize only digests present in attachment stubs in the
+rendered frontier for the issuing turn. The read declaration's requested decoded
+length is charged once by tool-request identity to a durable per-turn counter
+before authorization; replay never charges twice, and exceeding 2,097,152 bytes
+is a typed preparation failure. Failed or denied requests do not refund the
+charge. Store I/O occurs only after durable authorization, and a missing or
+corrupt recorded replica becomes content-silent `ExecutionFailed` evidence. The
+compact result must also fit the ordinary 1 MiB text-result bound; admission
+accounts for JSON and base64 overhead rather than producing a result that the
+ordinary result boundary would reject.
 
 For both web tools, an explicit shipped `Human` posture supersedes the
 declaration's `Confirm` default and the session blanket, so a request parks for

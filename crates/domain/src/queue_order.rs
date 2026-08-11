@@ -471,8 +471,7 @@ mod tests {
     }
 
     /// Ordinary work with free turn and position knobs, for rejection tests
-    /// where the turn/position relation itself is under test
-    /// (`docs/agents/testing-style.md`, rule 4).
+    /// where the turn/position relation itself is under test (TS-4).
     fn ordinary(turn: u128, position: SessionInputPosition) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
             session_id(100),
@@ -482,8 +481,7 @@ mod tests {
     }
 
     /// Interrupt work with free turn, position, and predecessor knobs, for
-    /// rejection tests where their relation itself is under test
-    /// (`docs/agents/testing-style.md`, rule 4).
+    /// rejection tests where their relation itself is under test (TS-4).
     fn interrupt(
         turn: u128,
         position: SessionInputPosition,
@@ -497,7 +495,7 @@ mod tests {
     }
 
     /// Ordinary work accepted at the given ordinal; its turn seed derives
-    /// from that one knob, decorrelated (`docs/agents/testing-style.md`, rule 4).
+    /// from that one knob, decorrelated (TS-4).
     fn accepted_ordinary(acceptance: u64) -> AcceptedInputQueueWork {
         accepted_ordinary_in_session(session_id(100), acceptance)
     }
@@ -514,7 +512,7 @@ mod tests {
 
     /// Interrupt work accepted at the given ordinal, immediately after the
     /// exact predecessor fixture; its turn seed derives from that one knob,
-    /// decorrelated (`docs/agents/testing-style.md`, rule 4).
+    /// decorrelated (TS-4).
     fn accepted_interrupt(
         acceptance: u64,
         predecessor: AcceptedInputQueueWork,
@@ -541,8 +539,8 @@ mod tests {
     }
 
     /// One derived slot's snapshot row: only the acceptance ordinal and
-    /// priority fact the derivation depends on (`docs/agents/testing-style.md`,
-    /// rule 12). The field names are the rendered column headers.
+    /// priority fact the derivation depends on (TS-12). The field names are
+    /// the rendered column headers.
     #[derive(Debug)]
     #[allow(
         dead_code,
@@ -589,7 +587,7 @@ mod tests {
     }
 
     /// The rendering helper contains lookup and branching logic, so it gets
-    /// its own tests (`docs/agents/testing-style.md`, rule 2): rows follow the
+    /// its own tests (TS-2): rows follow the
     /// derived order under a one-based derived index, not fact iteration
     /// order.
     #[test]
