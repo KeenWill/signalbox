@@ -802,7 +802,9 @@ fn derive_check_events(
     }
     for run in current.completed_check_runs() {
         if !previous.completed_check_runs().iter().any(|prior| {
-            prior.id() == run.id() && prior.completion_generation() == run.completion_generation()
+            prior.id() == run.id()
+                && prior.completion_generation() == run.completion_generation()
+                && prior.conclusion() == run.conclusion()
         }) {
             push_pull_request_event(
                 repository,
@@ -2376,6 +2378,84 @@ mod tests {
                 conclusion: current_run.conclusion(),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn edited_check_run_conclusion_emits_again_under_one_generation() -> Result<(), Box<dyn Error>>
+    {
+        let previous_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Success,
+        );
+        let previous = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![previous_run],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Failure,
+        );
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![current_run.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::CheckRunCompleted {
+                name: current_run.name().clone(),
+                conclusion: current_run.conclusion(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_check_run_emits_no_event() -> Result<(), Box<dyn Error>> {
+        let run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Success,
+        );
+        let previous = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![run.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![run],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert!(derive(Some(&previous), &current)?.is_empty());
         Ok(())
     }
 
