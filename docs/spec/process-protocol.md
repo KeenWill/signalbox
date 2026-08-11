@@ -2276,9 +2276,9 @@ below. The client accepts a global `--socket <path>` override or reads
 - `goal resume <session-uuid> [--guidance <text> | --guidance-file <path>] [--command-id <uuid>]`;
 - `goal stop <session-uuid> [--descendants] [--command-id <uuid>]`;
 - `goal supersede <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
-- `send <session-uuid> [--part-json <json>]... [--command-id <uuid> --defaults-version <decimal>]`;
-- `send <session-uuid> --queue [--part-json <json>]... [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
-- `steer <session-uuid> [--part-json <json>]... [--command-id <uuid> --turn <uuid>]`;
+- `send <session-uuid> [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal>]`;
+- `send <session-uuid> --queue [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
+- `steer <session-uuid> [--parts-file <path>] [--command-id <uuid> --turn <uuid>]`;
 - `model <session-uuid> (--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path> | --clear-system-prompt] [--command-id <uuid> --defaults-version <decimal> --dangerous-tool-auto-approval <disabled|approve-all>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
@@ -2287,8 +2287,8 @@ below. The client accepts a global `--socket <path>` override or reads
 - `blob upload <file>`;
 - `blob metadata <sha256-digest>`;
 - `blob read <sha256-digest> --offset <decimal> --length <decimal> --output <file>`;
-- `reconcile <session-uuid> <turn-uuid> [--part-json <json>]... [--command-id <uuid> --defaults-version <decimal>]`;
-- `stop <session-uuid> [--descendants] [--part-json <json>]... [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
+- `reconcile <session-uuid> <turn-uuid> [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal>]`;
+- `stop <session-uuid> [--descendants] [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
 - `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
 - `runner status`;
@@ -2298,18 +2298,21 @@ below. The client accepts a global `--socket <path>` override or reads
   and
 - `chat <session-uuid>`.
 
-For the five content-authoring mutations above, each repeatable `--part-json`
-value is exactly one closed text or attachment part object and encounter order
-is content order. Supplying any part flag makes standard input unavailable for
-that mutation; omitting all part flags preserves the existing single text part
-read from standard input. This gives uploaded attachment digests a first-party
-authoring path without adding another equivalent wire spelling. Chat accepts the
-same `:part JSON` object by appending it to a pending sequence without
-submitting it; `:send` submits the nonempty pending sequence and clears it, and
-`:clear` discards it locally. A malformed part clears the sequence and reports a
-local parse error. An ordinary input line keeps its immediate one-text-part
-meaning only while no part is pending; otherwise the client refuses it and
-requires `:send` or `:clear`.
+For the five content-authoring mutations above, `--parts-file` names a file
+whose complete UTF-8 contents are exactly one nonempty JSON array of closed text
+or attachment part objects; array order is content order. The client reads it
+with the same bounded-input and owner-private regular-file checks as other
+content-bearing file options. Supplying the option makes standard input
+unavailable for that mutation; omitting it preserves the existing single text
+part read from standard input. Conversation content therefore never appears in
+process arguments. Chat accepts the same closed object through `:part JSON` by
+appending it to a pending sequence without submitting it; `:send` submits the
+nonempty pending sequence and clears it only when the loop awaits neither a
+queued nor active reply. While either reply is pending, `:send` reports a local
+busy error and retains the exact pending sequence. `:clear` discards it locally.
+A malformed part clears the sequence and reports a local parse error. An
+ordinary input line keeps its immediate one-text-part meaning only while no part
+is pending; otherwise the client refuses it and requires `:send` or `:clear`.
 
 The terminal client provides these delegation commands for exact already-issued
 tool requests:
@@ -2754,22 +2757,26 @@ line:
 `provider_text_delta session=<session> turn=<turn> call=<call> part=<index> content=<text>`.
 Accepted `transcript_user_entry` members use the terminal line shape owned by
 [blob storage](blob-storage.md#multipart-user-content), preserving their ordered
-part JSON without rendering attachment bytes. By default its trailing text field
-escapes line feed and every other C0 code point, DEL, and C1 code point, so
-provider output cannot forge another event line or execute terminal controls;
-`--raw-output` remains the explicit opt-in to unchanged text. Snapshots render a
-model boundary as `model_identity_changed` with its turn, defaults version,
-selected model, source session, and entry identity. By default every
-process-derived text field written to a terminal preserves line feed but renders
-every other C0 code point, DEL, and C1 code points as visible `\u{...}` escapes,
-preventing ESC/OSC execution. A metadata title or tag shares its output line
-with named neighbors, so `search` escapes line feed in those two fields as well,
-and a tag additionally escapes its own delimiters and escape introducer, using
-the same `\u{...}` vocabulary; no metadata value can forge another result row,
-field, or tag. `--raw-output` is the explicit opt-in that writes those fields
-unchanged; the same safe-rendering choice covers assistant text, typed
-diagnostics, and durable updates. Each complete raw text value is flushed before
-the client awaits another frame, without adding a delimiter.
+part JSON without rendering attachment bytes. That JSON's default terminal
+serialization additionally renders DEL and C1 characters inside string values as
+lowercase four-hex-digit JSON escapes; `--raw-output` is the explicit opt-in to
+ordinary compact JSON that may carry those characters literally. By default the
+provider-delta trailing text field escapes line feed and every other C0 code
+point, DEL, and C1 code point, so provider output cannot forge another event
+line or execute terminal controls; `--raw-output` remains the explicit opt-in to
+unchanged text. Snapshots render a model boundary as `model_identity_changed`
+with its turn, defaults version, selected model, source session, and entry
+identity. By default every process-derived text field written to a terminal
+preserves line feed but renders every other C0 code point, DEL, and C1 code
+points as visible `\u{...}` escapes, preventing ESC/OSC execution. A metadata
+title or tag shares its output line with named neighbors, so `search` escapes
+line feed in those two fields as well, and a tag additionally escapes its own
+delimiters and escape introducer, using the same `\u{...}` vocabulary; no
+metadata value can forge another result row, field, or tag. `--raw-output` is
+the explicit opt-in that writes those fields unchanged; the same safe-rendering
+choice covers assistant text, typed diagnostics, and durable updates. Each
+complete raw text value is flushed before the client awaits another frame,
+without adding a delimiter.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.

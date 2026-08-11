@@ -132,34 +132,46 @@ non-userspace storage. Startup rejects network, userspace, and unclassified
 mounts rather than admitting an uninterruptible remote operation into the
 daemon. Native network-filesystem support therefore remains outside this version
 until it has an isolatable, bounded-operation contract. Publication writes
-through a same-filesystem temporary file, syncs the complete temporary file,
-atomically renames it to the final content-addressed path, syncs affected
-directory metadata, and then completely verifies the final bytes before catalog
-registration; a failed durability or verification operation makes the store
-unavailable and records no replica. `s3` speaks the S3-compatible API against an
-explicit endpoint with explicit file-delivered static credentials; ambient
-credential discovery (process environment, provider configuration files,
-instance metadata) is rejected by construction, and an object store's own
-integrity metadata is never treated as content identity. Multiple stores are
-enabled simultaneously and routed by class; routing by media type or filename is
-inexpressible. Why: class is a classification Signalbox itself made, while media
-type and filename are caller-supplied strings, and a caller-supplied string must
-not select which infrastructure gains authority over bytes.
+through a create-new file directly beneath a reserved `.publish-v1` child of the
+store root, syncs the complete temporary file, atomically renames it to the
+final content-addressed path, syncs affected directory metadata, and then
+completely verifies the final bytes before catalog registration; a failed
+durability or verification operation makes the store unavailable and records no
+replica. Before socket admission and after acquiring the exclusive daemon lock,
+startup removes every regular file from each `.publish-v1` child. A symlink,
+subdirectory, entry with a different UID, or otherwise unprovable occupant fails
+startup rather than being followed or removed. The configured root,
+`.publish-v1`, and every created directory are owned by the daemon's effective
+UID with exact mode `0700`; a symlink, another UID, or any group or other
+permission fails startup. Store-local temporary and final blob files are
+create-new regular files owned by that UID with exact mode `0600`, are opened
+without following links, and retain that mode across publication. `s3` speaks
+the S3-compatible API against an explicit endpoint with explicit file-delivered
+static credentials; ambient credential discovery (process environment, provider
+configuration files, instance metadata) is rejected by construction, and an
+object store's own integrity metadata is never treated as content identity.
+Multiple stores are enabled simultaneously and routed by class; routing by media
+type or filename is inexpressible. Why: class is a classification Signalbox
+itself made, while media type and filename are caller-supplied strings, and a
+caller-supplied string must not select which infrastructure gains authority over
+bytes.
 
 Blobs are large: the substrate supports multi-gigabyte objects, so every daemon
 path — ingest, verification, replica copy, read — streams and none materializes
 a whole blob in memory. Bounded in-memory materialization exists only at
 explicitly bounded consumers, and each such consumer names its bound.
 
-The configured staging directory is a daemon-owned private directory. The daemon
-creates one `uploads-v1` child with mode `0700` and holds the installation's
-exclusive daemon lock while using it; upload spools are create-new mode `0600`
-regular files directly beneath that child. Before socket admission, startup
-removes every regular spool in that child. A symlink, subdirectory, entry whose
-UID differs from the daemon's effective UID, or otherwise unprovable occupant
-fails startup rather than being followed or removed. Clean shutdown cancels
-active uploads and performs the same sweep. This reclaims crash leftovers
-without treating unrelated paths as Signalbox-owned.
+The configured staging directory is a daemon-owned private directory on storage
+the host positively classifies as local, non-network, and non-userspace by the
+same admission rule as a filesystem-store root; an unclassified staging mount
+fails startup. The daemon creates one `uploads-v1` child with mode `0700` and
+holds the installation's exclusive daemon lock while using it; upload spools are
+create-new mode `0600` regular files directly beneath that child. Before socket
+admission, startup removes every regular spool in that child. A symlink,
+subdirectory, entry whose UID differs from the daemon's effective UID, or
+otherwise unprovable occupant fails startup rather than being followed or
+removed. Clean shutdown cancels active uploads and performs the same sweep. This
+reclaims crash leftovers without treating unrelated paths as Signalbox-owned.
 
 Every S3 logical operation has a 10-second connect timeout, a 60-second
 no-progress read/write timeout, and a 24-hour whole-operation deadline. The
@@ -174,6 +186,14 @@ read-back timeout or cancellation returns unavailable when nonacceptance is
 proved and ambiguous publication otherwise, releases the bulk-ingest permit, and
 leaves at most an unregistered orphan; retry live-verifies the deterministic key
 before completing registration.
+
+An S3 store is admitted only when its bucket lifecycle configuration contains an
+enabled rule covering the complete `sha256/` object-key prefix (or the whole
+bucket) that aborts incomplete multipart uploads after one day. Startup reads a
+bounded 65,536-byte lifecycle response with the configured static credential and
+fails closed when the rule cannot be proved; the credential therefore needs that
+read permission. This external bucket rule is the crash and credential-loss
+bound for uploaded parts that never became a final object.
 
 ## Ingest and the transaction boundary
 
@@ -230,17 +250,22 @@ result `unavailable` because the daemon cannot prove the blob unusable;
 otherwise any digest or length mismatch makes it `blob_corrupt`, and an
 all-missing set makes it `blob_missing`. An absent catalog identity remains
 `not_found`. The scope may reuse verification for later ranges only while the
-adapter pins the exact verified object instance: a retained open handle, an
-opaque version with conditional range reads, or an equivalent stable-instance
-proof. An adapter that cannot prove the same instance re-verifies before each
-range. Its least-recently-used verification inventory holds at most eight
-digests; eviction makes a later range verify again, and the inventory is
-discarded at scope end or on any candidate failure. Bytes flow only through the
-daemon: no client receives a store credential, bucket name, filesystem path, or
-presigned URL. Client-facing blob messages and content-part blob references
-expose only the digest spelling, never placement; catalog rows separately retain
-byte length, creation time, store name, and object key, while content parts
-retain their attachment metadata.
+adapter pins an immutable object generation and makes every range conditional on
+that exact generation. A retained filesystem handle pins an inode but not its
+contents and is never sufficient: filesystem replicas are completely reverified
+before every range. An S3 adapter without a usable immutable version token
+likewise reverifies before every range. The least-recently-used inventory of
+generation-pinned verifications holds at most eight digests; eviction makes a
+later range verify again, and the inventory is discarded at scope end or on any
+candidate failure. An inventory entry is only a bounded immutable-generation
+token of at most 1,024 bytes and never retains a file descriptor, socket,
+request, or store client; conditional reads acquire and release their operation
+resources independently. Bytes flow only through the daemon: no client receives
+a store credential, bucket name, filesystem path, or presigned URL.
+Client-facing blob messages and content-part blob references expose only the
+digest spelling, never placement; catalog rows separately retain byte length,
+creation time, store name, and object key, while content parts retain their
+attachment metadata.
 
 ## Multipart user content
 
@@ -288,10 +313,15 @@ separate mirrored records rather than shared mutable authority.
 The terminal client renders one accepted user entry as exactly one line:
 `user_content source_session=<uuid> entry=<uuid> accepted_input=<uuid> turn=<uuid> parts=<json>`.
 Here `<json>` is the canonical compact ordered parts array from the wire
-contract, including its fixed object-member order and ordinary JSON escaping.
-Text cannot forge another terminal line, attachment metadata and interleaving
-remain visible, and transcript, follow, and chat never render blob bytes.
-`--raw-output` does not decode or otherwise alter this structural JSON.
+contract, including its fixed object-member order. Default terminal
+serialization uses ordinary JSON escaping and additionally emits DEL and every
+C1 code point in string values as the lowercase four-hex-digit escapes `\u007f`
+and `\u0080` through `\u009f`. Parsing the JSON therefore preserves the ordered
+part values while text and filenames cannot forge another terminal line or
+execute controls. Attachment metadata and interleaving remain visible, and
+transcript, follow, and chat never render blob bytes. `--raw-output` uses the
+ordinary compact JSON spelling without the added DEL/C1 escapes and is the
+explicit opt-in to those literal code points; neither mode renders blob bytes.
 
 ## Attachment visibility and model reads
 
@@ -345,10 +375,12 @@ contained by isolation rather than entrusted to an ever-growing validator.
 
 Before a prepared model call can cross durable send authorization, preparation
 streams and verifies the length and SHA-256 of at least one recorded replica for
-every distinct attachment whose stub enters the rendered request. The accepted
-input's distinct attachment lengths were already bounded in aggregate by
-`blob_storage.max_blob_bytes`; repeated occurrences of one digest do not
-multiply this verification work. Preparation holds no database transaction
+every distinct attachment whose stub enters the rendered request. The complete
+rendered request first checked-sums the catalogued lengths of its distinct
+digests. More than `blob_storage.max_blob_bytes` closes the unsent call through
+`AttachmentPreparationFailure::TooLarge { maximum_bytes }` before any store I/O
+or durable send authorization. Repeated occurrences of one digest do not
+multiply the sum or verification work. Preparation holds no database transaction
 during store I/O and retains no attachment bytes. A digest with no recorded
 matching replica closes the unsent call through the typed missing-attachment
 preparation failure. When every recorded candidate can be read but all fail
@@ -358,17 +390,20 @@ authorization. When no candidate verifies and at least one candidate remains
 temporarily unavailable, preparation releases its store and preparation
 resources, leaves the call `Prepared`, records no turn outcome, and returns the
 sanitized typed unavailable operator failure so a later pass can retry the same
-unsent call. Authoritative cancellation aborts store I/O without relabeling
-cancellation as an attachment failure. Successful verification seeds the
-turn-scoped bounded verification inventory used by later blob reads.
+unsent call. The eligibility sweep includes an active turn whose current model
+call remains `Prepared`, so this retryable durable shape receives another pass;
+the per-session in-flight deduplication prevents concurrent execution.
+Authoritative cancellation aborts store I/O without relabeling cancellation as
+an attachment failure. Successful verification seeds the turn-scoped bounded
+verification inventory used by later blob reads.
 
-Model capability records gain an input-modality axis (`text`, `image`,
-`document`) on the same closed-set shape as the existing capability axes,
-declared per target and projected to clients like the rest of the capability
-record. Omission from an existing configuration means exactly `text`, and the
-projection materializes that default explicitly. Version-one rendered messages
-in this stack carry only text, attachment stubs, and text-only blob-read
-results; no present surface materializes attachment bytes into a prepared call.
+The model and serving-target modality grammar, defaults, effective selection,
+and client projection are owned by
+[configuration and credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
+The attachment-specific compatibility constraint is that version-one rendered
+messages in this stack carry only text, attachment stubs, and text-only
+blob-read results; no present surface materializes attachment bytes into a
+prepared call.
 
 Modality-unsupported preparation failure is committed unimplemented
 functionality: no present surface can trigger it because the current request
@@ -396,12 +431,13 @@ under the `imported_source` route without an open database transaction, then
 locks and rechecks the row before atomically recording the digest and clearing
 `raw_bytes`. Publication without registration may leave the ordinary orphan;
 failure before the row transition leaves legacy authority intact. Restart skips
-transitioned rows, re-verifies an existing routed replica, and resumes remaining
-rows. A legacy row larger than `max_blob_bytes` makes startup fail until the
-operator raises that ceiling; changing the current new-import admission bound
-never invalidates acknowledged legacy bytes. Startup fails closed until no
-legacy row remains, after which all reads use the blob reference and the
-nullable legacy column contains no bytes. New imports write only blob
+transitioned rows without reading or re-verifying their blobs and resumes only
+rows that still carry legacy `raw_bytes`; ordinary reads perform transitioned
+blob verification. A legacy row larger than `max_blob_bytes` makes startup fail
+until the operator raises that ceiling; changing the current new-import
+admission bound never invalidates acknowledged legacy bytes. Startup fails
+closed until no legacy row remains, after which all reads use the blob reference
+and the nullable legacy column contains no bytes. New imports write only blob
 references.
 
 ## Open edges

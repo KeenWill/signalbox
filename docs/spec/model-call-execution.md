@@ -477,21 +477,25 @@ command. This proposal is accepted with the implementing stack's merge.
    failure in a separate guarded transaction; an adapter defect is an operator
    failure and commits no provider-failure closure.
 3. **Attachment preparation (no transaction).** Before send authorization, the
-   application streams and verifies at least one recorded replica for every
-   distinct attachment represented in the rendered request. It retains no blob
-   bytes and holds no database transaction during store I/O. No matching
-   recorded replica returns `AttachmentPreparationFailure::Missing`; every
-   readable candidate failing verification returns
-   `AttachmentPreparationFailure::Corrupt`. Either guarded failure transaction
-   closes the still-unsent call, attempt, and turn as known failure without
-   provider cause. When no candidate verifies and at least one remains
-   temporarily unavailable, `AttachmentPreparationFailure::Unavailable` is a
-   sanitized operator failure: it releases all store and preparation resources,
-   leaves the call `Prepared`, commits no turn outcome, and permits a later
-   execution pass to retry the same unsent call. Authoritative cancellation
-   aborts store I/O, returns `NoWork`, and never substitutes an attachment
-   failure for the cancellation closure. A successful check seeds only the
-   bounded turn-scoped verification inventory owned by
+   application checked-sums the catalogued lengths of every distinct attachment
+   represented across the complete rendered request. A sum above
+   `blob_storage.max_blob_bytes` returns
+   `AttachmentPreparationFailure::TooLarge { maximum_bytes }` and closes the
+   unsent call, attempt, and turn as known failure before store I/O or
+   authorization. Otherwise it streams and verifies at least one recorded
+   replica for each digest. It retains no blob bytes and holds no database
+   transaction during store I/O. No matching recorded replica returns
+   `AttachmentPreparationFailure::Missing`; every readable candidate failing
+   verification returns `AttachmentPreparationFailure::Corrupt`. Either guarded
+   failure transaction closes the still-unsent call, attempt, and turn as known
+   failure without provider cause. When no candidate verifies and at least one
+   remains temporarily unavailable, `AttachmentPreparationFailure::Unavailable`
+   is a sanitized operator failure: it releases all store and preparation
+   resources, leaves the call `Prepared`, commits no turn outcome, and permits a
+   later execution pass to retry the same unsent call. Authoritative
+   cancellation aborts store I/O, returns `NoWork`, and never substitutes an
+   attachment failure for the cancellation closure. A successful check seeds
+   only the bounded turn-scoped verification inventory owned by
    [blob storage](blob-storage.md#wire-vocabulary).
 4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
