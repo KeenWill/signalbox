@@ -806,7 +806,7 @@ mod tests {
     /// The complete stored facts backing one applied replacement, mirroring
     /// [`ReplaceSessionDefaultsReconstitutionInput::applied`] field for field
     /// so a test perturbs exactly the named facts it cares about
-    /// (`docs/agents/testing-style.md`, rules 4 and 5).
+    /// (TS-4, TS-5).
     #[derive(Clone)]
     struct AppliedFacts {
         result_session: crate::SessionId,
@@ -1195,7 +1195,7 @@ mod tests {
 
         /// One fail-closed perturbation and the typed failure it produced,
         /// rendered as a snapshot row supplementing the targeted asserts
-        /// above (`docs/agents/testing-style.md`, rules 10 and 12). The field names
+        /// above (TS-10, TS-12). The field names
         /// are the rendered column headers.
         #[derive(Debug)]
         #[allow(
