@@ -1,7 +1,8 @@
 # Identity, commands, and telemetry correlation
 
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
+The user-vocabulary surface on this page was re-verified through PR #565
+(`agent/storage-vocabulary-rename`), which renamed the stored actor and issuer
+discriminators this page states.
 
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity

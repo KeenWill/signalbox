@@ -927,8 +927,8 @@ async fn approval_event_migration_backfills_a_prior_explicit_decision() -> Resul
         .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
-            (request_id, decision_kind, decision_source, user_command_id)
-         VALUES ($1, 'approve', 'user_command', $2)",
+            (request_id, decision_kind, decision_source, owner_command_id)
+         VALUES ($1, 'approve', 'owner_command', $2)",
     )
     .bind(request)
     .bind(command)

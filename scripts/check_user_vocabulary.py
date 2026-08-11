@@ -321,6 +321,31 @@ ALLOWLIST = (
         ),
     ),
     Allowance(
+        # Fixtures that seed a database standing at an earlier migration, so
+        # that a later migration can be exercised against real rows. The
+        # CHECK constraints in force at that point admit only the retired
+        # spelling, so writing the current one fails with `23514` before the
+        # migration under test ever runs. This is not compatibility with the
+        # retired vocabulary: it is the evidence that the rename upgrades data
+        # that was written before it, and every one of these lines is inside a
+        # test whose pool is deliberately held short of the rename.
+        "pre-rename migration fixtures",
+        re.compile(
+            r"^crates/persistence/tests/(?:conversation_import_postgres|"
+            r"postgres_integration/(?:approval_decisions|"
+            r"model_call_execution_and_recovery))[.]rs$"
+        ),
+        re.compile(
+            r'^const RETIRED_CREATION_CAUSE: &str = "owner_initiated";$|'
+            r"^\s*\(request_id, decision_kind, decision_source, "
+            r"owner_command_id\)$|"
+            r"^\s*VALUES \(\$1, 'approve', 'owner_command', \$2\)\",$|"
+            r"^\s*'owner_initiated', 'none'\);$|"
+            r"^\s*'create_session', 1, 'owner_initiated', 'none', 1,$|"
+            r"^\s*'owner', NULL, NULL, 'text', 'queued before migration',$"
+        ),
+    ),
+    Allowance(
         "imported-conversation record owner identifiers",
         re.compile(
             r"^crates/(?:application/src/conversation_import|"

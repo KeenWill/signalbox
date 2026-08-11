@@ -2314,17 +2314,30 @@ mod tests {
 
     #[test]
     fn tool_approval_decision_source_mapping_is_closed() {
-        for kind in [
-            ToolApprovalDecisionSourceStorageKind::UserCommand,
-            ToolApprovalDecisionSourceStorageKind::PolicyAuto,
-            ToolApprovalDecisionSourceStorageKind::SessionBlanket,
-            ToolApprovalDecisionSourceStorageKind::Delegate,
-        ] {
-            assert_eq!(
-                tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(kind)),
-                Some(kind)
-            );
-        }
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::UserCommand,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::UserCommand)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::PolicyAuto,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::Delegate,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::Delegate)
+        );
         assert_eq!(
             tool_approval_decision_source_from_str(UNKNOWN_DISCRIMINATOR),
             None

@@ -105,6 +105,24 @@ ALTER TABLE tool_approval_decision
     DROP CONSTRAINT tool_approval_decision_source_closed,
     DROP CONSTRAINT tool_approval_decision_source_shape;
 
+-- The two creation-provenance foreign keys carry `creation_cause` inside the
+-- key itself, so rewriting the value changes the referenced key rather than
+-- merely a column beside it. Both are `ON UPDATE RESTRICT`, and RESTRICT is
+-- checked by an internal trigger that `DISABLE TRIGGER USER` does not touch and
+-- that PostgreSQL never defers -- declaring the imported-frontier key
+-- `DEFERRABLE INITIALLY DEFERRED` does not change that, because RESTRICT is
+-- specified to fire immediately regardless. On a populated database the first
+-- session that has a creation command would abort the rewrite before either
+-- side could move. Releasing both keys is the only way to migrate the parent
+-- and the child together; section 4 restores them, which revalidates every row
+-- against the rewritten vocabulary.
+
+ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_provenance_fk;
+
+ALTER TABLE create_session_from_imported_frontier_command
+    DROP CONSTRAINT create_session_from_imported_frontier_command_provenance_fk;
+
 -- 3. Rewrite the stored values.
 --
 -- Each of these tables is append-only, enforced by a BEFORE UPDATE OR DELETE
@@ -147,17 +165,28 @@ UPDATE session_metadata
    SET actor_kind = 'user'
  WHERE actor_kind = 'owner';
 
-UPDATE replace_session_metadata_command
-   SET actor_kind = 'user'
- WHERE actor_kind = 'owner';
+-- `replace_session_metadata_command_result_shape` requires an applied receipt's
+-- `result_actor_kind` to equal its `actor_kind`. That constraint names no
+-- retired value, so section 2 does not release it and it stays in force here:
+-- rewriting the two columns in separate statements would leave the row
+-- disagreeing with itself between them and raise a check violation on the
+-- first. One statement moves every correlated actor field at once. `issuer_kind`
+-- joins them because it is the same row and the same rewrite, not because that
+-- constraint reads it.
 
 UPDATE replace_session_metadata_command
-   SET result_actor_kind = 'user'
- WHERE result_actor_kind = 'owner';
-
-UPDATE replace_session_metadata_command
-   SET issuer_kind = 'user'
- WHERE issuer_kind = 'owner';
+   SET actor_kind =
+           CASE WHEN actor_kind = 'owner' THEN 'user' ELSE actor_kind END,
+       result_actor_kind =
+           CASE
+               WHEN result_actor_kind = 'owner' THEN 'user'
+               ELSE result_actor_kind
+           END,
+       issuer_kind =
+           CASE WHEN issuer_kind = 'owner' THEN 'user' ELSE issuer_kind END
+ WHERE actor_kind = 'owner'
+    OR result_actor_kind = 'owner'
+    OR issuer_kind = 'owner';
 
 UPDATE submit_input_command
    SET actor_kind = 'user'
@@ -372,6 +401,43 @@ ALTER TABLE tool_approval_decision
                 AND octet_length(rationale) BETWEEN 1 AND 4096
             )
         );
+
+-- Restore the creation-provenance keys released in section 2, in their
+-- originating shape. Adding a foreign key validates every existing row, so this
+-- is also the proof that the parent and child vocabularies were rewritten
+-- consistently: a session whose cause moved without its command, or the
+-- reverse, fails here rather than surviving as a silently unreferenced row.
+
+ALTER TABLE create_session_command
+    ADD CONSTRAINT create_session_command_provenance_fk
+        FOREIGN KEY (created_session_id, creation_cause, ancestry_kind)
+        REFERENCES session (session_id, creation_cause, ancestry_kind)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT;
+
+ALTER TABLE create_session_from_imported_frontier_command
+    ADD CONSTRAINT create_session_from_imported_frontier_command_provenance_fk
+        FOREIGN KEY (
+            created_session_id,
+            creation_cause,
+            ancestry_kind,
+            imported_conversation_id,
+            imported_frontier_entry_id,
+            imported_frontier_position,
+            imported_relationship_kind
+        )
+        REFERENCES session (
+            session_id,
+            creation_cause,
+            ancestry_kind,
+            imported_conversation_id,
+            imported_frontier_entry_id,
+            imported_frontier_position,
+            imported_relationship_kind
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
 
 -- 5. Replace the trigger functions that name the retired vocabulary.
 --

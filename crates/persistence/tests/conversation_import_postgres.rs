@@ -310,10 +310,30 @@ async fn insert_imported_source_scaffolding(
     Ok(facts)
 }
 
+/// The `creation_cause` a fixture writes.
+///
+/// `202608110001_user_role_storage_vocabulary` renamed the stored value, so the
+/// spelling a fixture must use depends on where its database stands. A fixture
+/// seeding a database held at an earlier migration has to write the retired
+/// spelling: the `CHECK` in force at that point admits nothing else, and the
+/// insert would fail before the migration under test could run. A fixture
+/// seeding a fully migrated database writes the current spelling for the
+/// mirror-image reason.
+const CURRENT_CREATION_CAUSE: &str = "user_initiated";
+const RETIRED_CREATION_CAUSE: &str = "owner_initiated";
+
 async fn insert_imported_session_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(
+    insert_imported_session_scaffolding_with_creation_cause(transaction, CURRENT_CREATION_CAUSE)
+        .await
+}
+
+async fn insert_imported_session_scaffolding_with_creation_cause(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+    creation_cause: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(&format!(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
          VALUES
@@ -326,7 +346,7 @@ async fn insert_imported_session_scaffolding(
              imported_frontier_position, imported_relationship_kind)
          VALUES
             ('40000000-0000-4000-8000-000000000039',
-             'user_initiated', 'imported_conversation',
+             '{creation_cause}', 'imported_conversation',
              '10000000-0000-4000-8000-000000000039',
              '20000000-0000-4000-8000-000000000040', 2, 'resume');
          INSERT INTO session_scheduler (session_id)
@@ -351,15 +371,15 @@ async fn insert_imported_session_scaffolding(
              'create_session_from_imported_frontier', 1,
              '10000000-0000-4000-8000-000000000039',
              '20000000-0000-4000-8000-000000000040', 2, 'resume',
-             'user_initiated', 'imported_conversation', 1,
+             '{creation_cause}', 'imported_conversation', 1,
              'direct', '50000000-0000-4000-8000-000000000039', NULL,
              'applied', '40000000-0000-4000-8000-000000000039');
          INSERT INTO context_frontier
             (owning_session_id, context_frontier_id, member_count)
          VALUES
             ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039', 2);",
-    )
+             '70000000-0000-4000-8000-000000000039', 2);"
+    ))
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -368,8 +388,19 @@ async fn insert_imported_session_scaffolding(
 async fn insert_imported_resume_seed_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<ImportedSeedFacts, sqlx::Error> {
+    insert_imported_resume_seed_scaffolding_with_creation_cause(
+        transaction,
+        CURRENT_CREATION_CAUSE,
+    )
+    .await
+}
+
+async fn insert_imported_resume_seed_scaffolding_with_creation_cause(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+    creation_cause: &str,
+) -> Result<ImportedSeedFacts, sqlx::Error> {
     let facts = insert_imported_source_scaffolding(transaction).await?;
-    insert_imported_session_scaffolding(transaction).await?;
+    insert_imported_session_scaffolding_with_creation_cause(transaction, creation_cause).await?;
     Ok(facts)
 }
 
@@ -427,7 +458,13 @@ async fn inv015_frontier_prefix_migration_preserves_existing_complete_snapshots(
     let (container, pool) = postgres_before_frontier_prefixes().await?;
     let second_frontier = Uuid::from_u128(0x7000_0000_0000_4000_8000_0000_0000_0040);
     let mut transaction = pool.begin().await?;
-    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    // This database stands before the rename migration, so the fixture must
+    // write the spelling that its CHECK constraints still admit.
+    let seed = insert_imported_resume_seed_scaffolding_with_creation_cause(
+        &mut transaction,
+        RETIRED_CREATION_CAUSE,
+    )
+    .await?;
     insert_imported_semantic_prefix(&mut transaction, seed).await?;
     sqlx::query(
         "INSERT INTO context_frontier_member
