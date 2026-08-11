@@ -2060,21 +2060,97 @@ public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxRootPlacementGlobalReadIntent: String, Decodable, Equatable, Sendable {
+  case acknowledged
+}
+
+public enum SignalboxSessionPlacement: Decodable, Equatable, Sendable {
+  case pathless
+  case scoped(path: String)
+  case rootGlobalRead(path: String, intent: SignalboxRootPlacementGlobalReadIntent)
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let kind: String = try decoder.decode("kind")
+    switch kind {
+    case "pathless":
+      try payload.rejectUnadmittedFields(["kind"], decoder: decoder)
+      try payload.requireFields(["kind"], decoder: decoder)
+      self = .pathless
+    case "scoped":
+      try payload.rejectUnadmittedFields(["kind", "path"], decoder: decoder)
+      try payload.requireFields(["kind", "path"], decoder: decoder)
+      let path: String = try decoder.decode("path")
+      try Self.validatePath(path, root: false, decoder: decoder)
+      self = .scoped(path: path)
+    case "root_global_read":
+      try payload.rejectUnadmittedFields(["kind", "path", "intent"], decoder: decoder)
+      try payload.requireFields(["kind", "path", "intent"], decoder: decoder)
+      let path: String = try decoder.decode("path")
+      try Self.validatePath(path, root: true, decoder: decoder)
+      self = .rootGlobalRead(
+        path: path,
+        intent: try decoder.decode("intent")
+      )
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("kind")],
+          debugDescription: "Session placement is outside the closed vocabulary."
+        )
+      )
+    }
+  }
+
+  private static func validatePath(
+    _ path: String,
+    root: Bool,
+    decoder: Decoder
+  ) throws {
+    let segments = path.split(separator: ".", omittingEmptySubsequences: false)
+    let segmentsValid = !segments.isEmpty && segments.count <= 64
+      && segments.allSatisfy { segment in
+        !segment.isEmpty && segment.utf8.count <= 64
+          && segment.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57)
+              || (byte >= 65 && byte <= 90)
+              || (byte >= 97 && byte <= 122)
+              || byte == 45
+              || byte == 95
+          }
+      }
+    guard path.utf8.count <= 4_159, segmentsValid, (segments.count == 1) == root else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("path")],
+          debugDescription: "Session placement path is invalid."
+        )
+      )
+    }
+  }
+}
+
 public struct SignalboxProcessSessionSummary: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let defaultsVersion: SignalboxCanonicalUInt64
   public let modelSelection: SignalboxModelSelection
+  public let placementVersion: SignalboxCanonicalUInt64
+  public let placement: SignalboxSessionPlacement
   public let runner: SignalboxRunnerProjection?
 
   public init(
     sessionID: SignalboxCanonicalUUID,
     defaultsVersion: SignalboxCanonicalUInt64,
     modelSelection: SignalboxModelSelection,
+    placementVersion: SignalboxCanonicalUInt64,
+    placement: SignalboxSessionPlacement,
     runner: SignalboxRunnerProjection?
   ) {
     self.sessionID = sessionID
     self.defaultsVersion = defaultsVersion
     self.modelSelection = modelSelection
+    self.placementVersion = placementVersion
+    self.placement = placement
     self.runner = runner
   }
 
@@ -2089,6 +2165,16 @@ public struct SignalboxProcessSessionSummary: Decodable, Equatable, Sendable {
     sessionID = try decoder.decode("session_id")
     defaultsVersion = try decoder.decode("defaults_version")
     modelSelection = try decoder.decode("model_selection")
+    placementVersion = try decoder.decode("placement_version")
+    guard placementVersion.rawValue > 0 else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("placement_version")],
+          debugDescription: "Session placement version must be positive."
+        )
+      )
+    }
+    placement = try decoder.decode("placement")
     runner = try decoder.decodeIfPresent("runner")
   }
 }
