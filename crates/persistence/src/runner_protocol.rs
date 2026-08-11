@@ -7226,6 +7226,9 @@ async fn append_lease_event_in(
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
     lock_runner_session_scheduler(transaction, correlation.dispatch.session()).await?;
+    if lease.state() == RunnerLeaseState::Claimed {
+        lock_runner_lease_claim_connection_authority(transaction, &correlation).await?;
+    }
     let current_event = sqlx::query(RUNNER_LEASE_HEAD)
         .bind(correlation.lease.into_uuid())
         .bind(Decimal::from(correlation.generation.get()))
@@ -7271,6 +7274,43 @@ async fn append_lease_event_in(
     .bind(Decimal::from(correlation.generation.get()))
     .bind(Decimal::from(event_ordinal))
     .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn lock_runner_lease_claim_connection_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    correlation: &RunnerLeaseCorrelation,
+) -> Result<(), RunnerProtocolStoreError> {
+    let enrollment: Uuid = sqlx::query_scalar(
+        "SELECT registration_enrollment_id
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RunnerProtocolStoreError::Domain(
+        RunnerDomainError::InvalidState,
+    ))?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR SHARE",
+    )
+    .bind(enrollment)
+    .fetch_one(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR SHARE",
+    )
+    .bind(enrollment)
+    .fetch_optional(&mut **transaction)
     .await?;
     Ok(())
 }
