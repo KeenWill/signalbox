@@ -454,3 +454,96 @@ async fn the_longest_admitted_workspace_root_indexes() -> Result<(), Box<dyn Err
     );
     Ok(())
 }
+
+/// Attempts one mint carrying the given text, returning the database's verdict.
+///
+/// The agreement tests call the predicate functions directly, which cannot see
+/// a `CHECK` that was dropped or attached to the wrong column. These drive the
+/// real table so the durable boundary itself is what refuses the value.
+async fn mint_through_the_table(
+    pool: &PgPool,
+    workspace_root: &str,
+    remote_name: &str,
+    remote_url: &str,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    insert_command(&mut transaction, command_id(1), "mint_git_remote").await?;
+    sqlx::query(
+        "INSERT INTO configured_git_remote_mint
+             (mint_id, command_id, command_kind, storage_version,
+              workspace_root, remote_name, remote_url)
+         VALUES ($1, $2, 'mint_git_remote', 1, $3, $4, $5)",
+    )
+    .bind(mint_id(1))
+    .bind(command_id(1))
+    .bind(workspace_root)
+    .bind(remote_name)
+    .bind(remote_url)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_table_refuses_a_name_the_newtype_refuses() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let refused = mint_through_the_table(&pool, WORKSPACE, ".origin", URL).await;
+
+    assert!(
+        refused.is_err(),
+        "the mint table admitted a name GitRemoteName refuses"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_table_refuses_a_destination_the_newtype_refuses() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let refused = mint_through_the_table(&pool, WORKSPACE, NAME, "https://?").await;
+
+    assert!(
+        refused.is_err(),
+        "the mint table admitted a destination GitRemoteUrl refuses"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_table_refuses_a_workspace_root_the_newtype_refuses() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let refused = mint_through_the_table(&pool, "workspace", NAME, URL).await;
+
+    assert!(
+        refused.is_err(),
+        "the mint table admitted a workspace root GitRemoteWorkspaceRoot refuses"
+    );
+    Ok(())
+}
+
+/// The advisory-lock guard is the whole enforcement of the one-live-mint rule,
+/// so it must not depend on how the caller opened its transaction. A snapshot
+/// taken before the holder commits cannot see the winning row.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_mint_under_repeatable_read_is_refused() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *transaction)
+        .await?;
+    insert_command(&mut transaction, command_id(1), "mint_git_remote").await?;
+    let refused = insert_mint(&mut transaction, mint_id(1), command_id(1), WORKSPACE, NAME).await;
+
+    assert!(
+        refused.is_err(),
+        "a mint was admitted under an isolation level its uniqueness guard cannot hold"
+    );
+    Ok(())
+}

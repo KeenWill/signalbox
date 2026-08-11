@@ -205,11 +205,24 @@ $$;
 -- transaction, following the review-identity guard's precedent. A withdrawal
 -- that would have freed the name but commits afterwards makes the mint fail
 -- closed rather than admit a second live destination.
+--
+-- The lock serializes, but it cannot refresh a snapshot. Under `REPEATABLE
+-- READ` the contender's snapshot predates the holder's commit, so its deferred
+-- count would still not see the winning row and both could commit. The
+-- isolation level is therefore rejected outright rather than assumed: this
+-- guard is the whole enforcement, so it must not depend on how a caller opened
+-- its transaction. Accepted cost, and a constraint on the store that follows:
+-- a mint must be written in a `READ COMMITTED` transaction.
 CREATE FUNCTION guard_configured_git_remote_mint_insert()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION
+            'configured Git remote mints require read committed isolation'
+            USING ERRCODE = '25001';
+    END IF;
     PERFORM pg_advisory_xact_lock(
         hashtextextended(
             NEW.workspace_root || chr(31) || NEW.remote_name,

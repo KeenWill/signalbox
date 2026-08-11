@@ -205,9 +205,15 @@ fn push_receipts_canonicalize_equivalent_object_identifier_spelling() {
     assert_eq!(receipt.commit(), fixture.initial.to_string());
 }
 
-/// The durable mint vocabulary must stay a subset of the reference grammar the
-/// push executor applies, or a mint could name a destination it can never
-/// resolve. Nothing but this test links the two rule sets.
+/// Guards the subset relation between the durable mint vocabulary and the
+/// reference grammar this executor applies: a name the domain admits but
+/// `gix_validate` refuses would mint a destination that can never resolve.
+///
+/// This test enforces the relation; it does not own it. The owning statement
+/// belongs in the cross-component specification for Git remote authority,
+/// which is not written yet because it must also state how a mint is scoped —
+/// the decision still open on this pull request. Point this comment at that
+/// statement once it lands.
 #[track_caller]
 fn assert_minted_name_builds_a_configured_remote(candidate: &str) {
     assert!(

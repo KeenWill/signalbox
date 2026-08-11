@@ -7,7 +7,7 @@ The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
 through PR #254 (`agent/fix-parked-approval-interrupt`), was verified again in
-PR #227 (`agent/review-workflow-persistence`), and was verified again in PR #549
+PR #227 (`agent/review-workflow-persistence`), and was verified again in this PR
 (`agent/git-remote-authority`); the metadata command issuer proof was verified
 through PR #265 (`agent/tool-batch-tier0`); the `apps/signalboxd`
 migration-invocation home was verified through PR #258
