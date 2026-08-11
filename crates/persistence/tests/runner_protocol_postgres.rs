@@ -97,7 +97,7 @@ const SERIALIZATION_TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
-const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608080103;
+const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608100002;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -14992,6 +14992,62 @@ async fn s31_inv043_inv044_exact_selection_loss_rejects_post_reconnect_pin()
     assert_eq!(loaded.placement().request(), pin.placement.request());
     assert_eq!(loaded.placement().revision(), pin.placement.revision());
     assert_eq!(loaded.placement().state(), &expected_unpinned_state);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: an exact identity selected before its enrollment exists
+/// derives its first loss baseline at pin when no intervening loss exists.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_pre_enrollment_exact_selection_pins_without_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the newly enrolled exact selection prepares its initial pin");
+    let expected_state = pin.placement.state().clone();
+    store.store_pin(&pin, &registration).await?;
+    let baseline: (Uuid, Option<Decimal>) = sqlx::query_as(
+        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the first-baseline pin remains current");
+
+    assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
+    assert_eq!(baseline.1, None);
+    assert_eq!(loaded.placement().state(), &expected_state);
     drop(pool);
     Ok(())
 }
