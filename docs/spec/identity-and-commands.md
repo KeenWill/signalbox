@@ -1,6 +1,6 @@
 # Identity, commands, and telemetry correlation
 
-The user-vocabulary surface on this page was re-verified through PR #565
+The user-vocabulary surface on this page was re-verified through this PR
 (`agent/storage-vocabulary-rename`), which renamed the stored actor and issuer
 discriminators this page states.
 
