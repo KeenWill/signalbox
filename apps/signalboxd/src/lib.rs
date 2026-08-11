@@ -36,6 +36,7 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 use tracing::Instrument;
+pub mod approval_judge_eval;
 mod configuration;
 mod context_guard;
 mod conversation_introspection;
