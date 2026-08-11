@@ -6,6 +6,7 @@ use std::{
     error::Error,
     fmt,
     num::NonZeroU64,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -65,6 +66,7 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
+const MAX_CONCURRENT_PULL_REQUEST_FETCHES: usize = 8;
 const MAX_AGGREGATE_WIRE_BYTES: usize = 512 * 1024 * 1024;
 
 const REVIEW_THREADS_QUERY: &str = r#"
@@ -204,7 +206,7 @@ async fn supervise_repository_tasks(
 struct RepositoryWatchTask {
     repository: RepositorySlug,
     interval: Duration,
-    poller: GitHubRepositoryPoller,
+    poller: Arc<GitHubRepositoryPoller>,
     store: PostgresRepoWatchStore,
     dispatch_store: PostgresRepoWatchDispatchStore,
     rules: Vec<RepoWatchRule>,
@@ -248,12 +250,12 @@ impl RepositoryWatchTask {
         Ok(Self {
             repository: configuration.repository().clone(),
             interval: configuration.poll_interval(),
-            poller: GitHubRepositoryPoller::try_new(
+            poller: Arc::new(GitHubRepositoryPoller::try_new(
                 configuration.repository().clone(),
                 signal_reviewers,
                 credentials,
                 credential_reference,
-            )?,
+            )?),
             store,
             dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
             rules,
@@ -639,6 +641,7 @@ enum RepositoryWatchAttemptError {
     MissingCachedResource,
     ResourceLimit,
     Normalization,
+    PullRequestFetchAbandoned,
     Differ,
     Dispatch,
     Persistence,
@@ -658,6 +661,7 @@ impl RepositoryWatchAttemptError {
             Self::MissingCachedResource => "github_not_modified_without_accepted_state",
             Self::ResourceLimit => "repository_resource_limit_exceeded",
             Self::Normalization => "repository_state_invalid",
+            Self::PullRequestFetchAbandoned => "repository_pull_request_fetch_abandoned",
             Self::Differ => "repository_differ_failed",
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
@@ -691,7 +695,7 @@ struct GitHubRepositoryPoller {
     client: Client,
     rest_base: Url,
     graphql_url: Url,
-    cache: PollCache,
+    cache: Mutex<PollCache>,
 }
 
 impl GitHubRepositoryPoller {
@@ -742,24 +746,28 @@ impl GitHubRepositoryPoller {
             client,
             rest_base,
             graphql_url,
-            cache: PollCache::default(),
+            cache: Mutex::new(PollCache::default()),
         })
     }
 
+    fn cache(&self) -> MutexGuard<'_, PollCache> {
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     async fn poll(
-        &mut self,
+        self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
-        self.cache.begin_poll();
+        self.cache().begin_poll();
         let result = self.poll_complete(previous).await;
         if result.is_ok() {
-            self.cache.complete_poll();
+            self.cache().complete_poll();
         }
         result
     }
 
     async fn poll_complete(
-        &mut self,
+        self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
         let mut pull_numbers = self.fetch_open_pull_numbers().await?;
@@ -770,20 +778,7 @@ impl GitHubRepositoryPoller {
                 }
             }
         }
-        let mut pull_requests = Vec::with_capacity(pull_numbers.len());
-        for number in pull_numbers {
-            let previous_pull_request = previous.and_then(|observation| {
-                observation
-                    .state()
-                    .pull_requests()
-                    .iter()
-                    .find(|pull_request| pull_request.context().number().get() == number)
-            });
-            pull_requests.push(
-                self.fetch_pull_request(number, previous_pull_request)
-                    .await?,
-            );
-        }
+        let pull_requests = self.fetch_pull_requests(pull_numbers, previous).await?;
         let branch_heads = self.fetch_branch_heads().await?;
         let workflows = self.fetch_workflows().await?;
         let mut workflow_runs = Vec::new();
@@ -808,9 +803,41 @@ impl GitHubRepositoryPoller {
         ))
     }
 
-    async fn fetch_open_pull_numbers(
-        &mut self,
-    ) -> Result<BTreeSet<u64>, RepositoryWatchAttemptError> {
+    async fn fetch_pull_requests(
+        self: &Arc<Self>,
+        pull_numbers: BTreeSet<u64>,
+        previous: Option<&RepoWatchObservation>,
+    ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
+        let mut pull_requests = Vec::with_capacity(pull_numbers.len());
+        let mut pending = pull_numbers.into_iter();
+        let mut fetches = JoinSet::new();
+        loop {
+            while fetches.len() < MAX_CONCURRENT_PULL_REQUEST_FETCHES {
+                let Some(number) = pending.next() else {
+                    break;
+                };
+                let poller = Arc::clone(self);
+                let previous_pull_request = previous
+                    .and_then(|observation| previous_pull_request(observation, number))
+                    .cloned();
+                fetches.spawn(async move {
+                    poller
+                        .fetch_pull_request(number, previous_pull_request.as_ref())
+                        .await
+                });
+            }
+            let Some(fetched) = fetches.join_next().await else {
+                break;
+            };
+            pull_requests.push(
+                fetched.map_err(|_| RepositoryWatchAttemptError::PullRequestFetchAbandoned)??,
+            );
+        }
+        pull_requests.sort_by_key(|pull_request| pull_request.context().number().get());
+        Ok(pull_requests)
+    }
+
+    async fn fetch_open_pull_numbers(&self) -> Result<BTreeSet<u64>, RepositoryWatchAttemptError> {
         let mut numbers = BTreeSet::new();
         let mut page = 1_u16;
         loop {
@@ -838,7 +865,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_pull_request(
-        &mut self,
+        &self,
         number: u64,
         previous_pull_request: Option<&RepoWatchPullRequestState>,
     ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
@@ -894,7 +921,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_check_suites(
-        &mut self,
+        &self,
         head: &CommitSha,
     ) -> Result<
         (Vec<RepoWatchCheckSuiteObservation>, Vec<GitHubObjectId>),
@@ -940,7 +967,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_check_runs(
-        &mut self,
+        &self,
         suite_ids: &[GitHubObjectId],
     ) -> Result<Vec<RepoWatchCheckRunObservation>, RepositoryWatchAttemptError> {
         let mut observations = Vec::new();
@@ -989,7 +1016,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_reviews(
-        &mut self,
+        &self,
         number: u64,
         previous: Option<&[RepoWatchReviewObservation]>,
     ) -> Result<Vec<RepoWatchReviewObservation>, RepositoryWatchAttemptError> {
@@ -1047,7 +1074,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_threads(
-        &mut self,
+        &self,
         number: u64,
     ) -> Result<Vec<RepoWatchThreadObservation>, RepositoryWatchAttemptError> {
         let (namespace, name) = self
@@ -1113,7 +1140,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_reactions(
-        &mut self,
+        &self,
         number: u64,
         previous: Option<&[RepoWatchReactionObservation]>,
     ) -> Result<Vec<RepoWatchReactionObservation>, RepositoryWatchAttemptError> {
@@ -1160,7 +1187,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_comment_ids(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         suffix: &[&str],
     ) -> Result<Vec<GitHubObjectId>, RepositoryWatchAttemptError> {
@@ -1193,7 +1220,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_reaction_pages(
-        &mut self,
+        &self,
         suffix: &[&str],
         subject: ReactionSubject,
         previous: Option<&[RepoWatchReactionObservation]>,
@@ -1260,7 +1287,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_branch_heads(
-        &mut self,
+        &self,
     ) -> Result<Vec<RepoWatchBranchHead>, RepositoryWatchAttemptError> {
         let mut heads = Vec::new();
         let mut page = 1_u16;
@@ -1295,9 +1322,7 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    async fn fetch_workflows(
-        &mut self,
-    ) -> Result<Vec<WorkflowResponse>, RepositoryWatchAttemptError> {
+    async fn fetch_workflows(&self) -> Result<Vec<WorkflowResponse>, RepositoryWatchAttemptError> {
         let mut workflows = Vec::new();
         let mut page = 1_u16;
         loop {
@@ -1330,7 +1355,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_workflow_runs(
-        &mut self,
+        &self,
         branches: &[RepoWatchBranchHead],
         workflow: &WorkflowResponse,
         previous: &[RepoWatchWorkflowRunObservation],
@@ -1462,7 +1487,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn conditional_json<T>(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         method: Method,
         url: Url,
@@ -1478,7 +1503,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn conditional_json_page<T>(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         method: Method,
         url: Url,
@@ -1492,7 +1517,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn conditional_json_response<T>(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         method: Method,
         url: Url,
@@ -1504,7 +1529,7 @@ impl GitHubRepositoryPoller {
     {
         let key = ResourceKey::new(resource_kind, &method, &url, body.as_deref());
         let page_is_at_cap = page_item_count.is_some() && result_page(&url) == MAX_RESULT_PAGES;
-        self.cache.touch(key.clone())?;
+        self.cache().touch(key.clone())?;
         let credential = self
             .credentials
             .resolve(&self.credential_reference)
@@ -1528,7 +1553,8 @@ impl GitHubRepositoryPoller {
             .header(ACCEPT, "application/vnd.github+json")
             .header("X-GitHub-Api-Version", API_VERSION)
             .header(USER_AGENT, USER_AGENT_VALUE);
-        if let Some(entity_tag) = self.cache.entity_tag(&key) {
+        let cached_entity_tag = self.cache().entity_tag(&key).cloned();
+        if let Some(entity_tag) = cached_entity_tag {
             request = request.header(IF_NONE_MATCH, entity_tag.as_str());
         }
         if let Some(body) = body {
@@ -1539,9 +1565,9 @@ impl GitHubRepositoryPoller {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Request)?;
         if response.status() == StatusCode::NOT_MODIFIED {
-            let mut accepted = self.cache.accepted::<ConditionalJsonResponse<T>>(&key)?;
+            let mut accepted = self.cache().accepted::<ConditionalJsonResponse<T>>(&key)?;
             if let Some(entity_tag) = response.headers().get(ETAG).map(entity_tag).transpose()? {
-                self.cache.replace_entity_tag(&key, entity_tag)?;
+                self.cache().replace_entity_tag(&key, entity_tag)?;
             }
             if page_item_count.is_some() && accepted.page_is_full && !accepted.has_next_page {
                 accepted.has_next_page = true;
@@ -1551,11 +1577,13 @@ impl GitHubRepositoryPoller {
         if response.status() != StatusCode::OK {
             return Err(RepositoryWatchAttemptError::Rejected);
         }
-        self.cache.remove(&key);
+        self.cache().remove(&key);
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
         let has_next_page = has_next_link(&response)?;
-        let bytes = read_bounded(response, self.cache.remaining_poll_wire_bytes()?).await?;
-        self.cache.record_poll_wire_bytes(bytes.len())?;
+        let reservation = self.cache().reserve_poll_wire_bytes()?;
+        let bytes = read_bounded(response, reservation).await?;
+        self.cache()
+            .release_poll_wire_bytes(reservation, bytes.len());
         let value = serde_json::from_slice::<T>(&bytes)
             .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
         let accepted = ConditionalJsonResponse {
@@ -1565,10 +1593,10 @@ impl GitHubRepositoryPoller {
         };
         match response_entity_tag {
             Some(entity_tag) if !page_is_at_cap => {
-                self.cache
+                self.cache()
                     .insert(key, entity_tag, bytes.len(), accepted.clone())?;
             }
-            Some(_) | None => self.cache.remove(&key),
+            Some(_) | None => self.cache().remove(&key),
         }
         Ok(accepted)
     }
@@ -1725,6 +1753,18 @@ impl PollCache {
         Ok(())
     }
 
+    fn reserve_poll_wire_bytes(&mut self) -> Result<usize, RepositoryWatchAttemptError> {
+        let reservation = self.remaining_poll_wire_bytes()?.min(MAX_RESPONSE_BYTES);
+        self.record_poll_wire_bytes(reservation)?;
+        Ok(reservation)
+    }
+
+    fn release_poll_wire_bytes(&mut self, reservation: usize, consumed: usize) {
+        self.poll_wire_bytes = self
+            .poll_wire_bytes
+            .saturating_sub(reservation.saturating_sub(consumed));
+    }
+
     fn entity_tag(&self, key: &ResourceKey) -> Option<&EntityTag> {
         self.resources.get(key).map(|resource| &resource.entity_tag)
     }
@@ -1857,6 +1897,17 @@ async fn read_bounded(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+fn previous_pull_request(
+    previous: &RepoWatchObservation,
+    number: u64,
+) -> Option<&RepoWatchPullRequestState> {
+    previous
+        .state()
+        .pull_requests()
+        .iter()
+        .find(|pull_request| pull_request.context().number().get() == number)
 }
 
 fn next_page(page: u16) -> Result<u16, RepositoryWatchAttemptError> {
@@ -2202,25 +2253,37 @@ struct PageInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, num::NonZeroU64, path::PathBuf, sync::Arc, time::Duration};
+    use std::{
+        collections::BTreeSet,
+        fs,
+        num::NonZeroU64,
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
         sync::{Notify, watch},
         task::{JoinHandle, JoinSet},
+        time::sleep,
     };
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PullResponse,
-        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse, dispatch_context_json,
-        normalize_checks_outcome, normalize_pull_request_context, object_id, rule_activation_error,
+        MAX_AGGREGATE_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES, MergeableState, PAGE_SIZE,
+        PollCache, PullResponse, ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead,
+        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchReactionObservation,
+        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchRuntimeConstructionError, ResourceKey, ReviewState, Url, WorkflowName,
+        WorkflowResponse, dispatch_context_json, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, rule_activation_error,
         supervise_repository_tasks,
     };
     use signalbox_domain::{
@@ -2266,6 +2329,9 @@ mod tests {
     const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str =
         "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=2";
     const EMPTY_LIST: &str = "[]";
+    const EMPTY_CHECK_SUITE_LIST: &str = "{\"check_suites\":[]}";
+    const CONCURRENT_FETCH_PULL_NUMBERS: std::ops::RangeInclusive<u64> = 1..=9;
+    const CONCURRENT_FETCH_DELAY: Duration = Duration::from_millis(20);
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
     const CACHE_RESOURCE_KEY: &str = "fixture/resource";
@@ -2729,74 +2795,182 @@ mod tests {
 
     struct ScriptedResponse {
         method: &'static str,
-        target: &'static str,
+        target: String,
         validator: Option<&'static str>,
         status: &'static str,
         entity_tag: Option<&'static str>,
         link: Option<&'static str>,
         body: String,
+        delay: Duration,
     }
 
     impl ScriptedResponse {
-        fn ok(target: &'static str, body: impl Into<String>) -> Self {
+        fn ok(target: impl Into<String>, body: impl Into<String>) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.into(),
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
                 body: body.into(),
+                delay: Duration::ZERO,
             }
         }
 
-        fn ok_with_next(target: &'static str, body: impl Into<String>) -> Self {
+        fn ok_with_next(target: impl Into<String>, body: impl Into<String>) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.into(),
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: Some(NEXT_PAGE_LINK),
                 body: body.into(),
+                delay: Duration::ZERO,
             }
         }
 
-        fn conditional_ok(target: &'static str, body: impl Into<String>) -> Self {
+        fn conditional_ok(target: impl Into<String>, body: impl Into<String>) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.into(),
                 validator: Some(ENTITY_TAG),
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
                 body: body.into(),
+                delay: Duration::ZERO,
             }
         }
 
-        fn not_modified(target: &'static str) -> Self {
+        fn not_modified(target: impl Into<String>) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.into(),
                 validator: Some(ENTITY_TAG),
                 status: "304 Not Modified",
                 entity_tag: None,
                 link: None,
                 body: String::new(),
+                delay: Duration::ZERO,
             }
         }
 
-        fn post(target: &'static str, body: impl Into<String>) -> Self {
+        fn delayed(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
+        }
+
+        fn post(target: impl Into<String>, body: impl Into<String>) -> Self {
             Self {
                 method: "POST",
-                target,
+                target: target.into(),
                 validator: None,
                 status: "200 OK",
                 entity_tag: None,
                 link: None,
                 body: body.into(),
+                delay: Duration::ZERO,
             }
         }
+    }
+
+    struct ConcurrentScriptedState {
+        responses: Mutex<Vec<ScriptedResponse>>,
+        in_flight: AtomicUsize,
+        peak_in_flight: AtomicUsize,
+        unmatched: AtomicUsize,
+    }
+
+    struct ConcurrentScriptedServer {
+        base_url: Url,
+        state: Arc<ConcurrentScriptedState>,
+        task: JoinHandle<()>,
+    }
+
+    impl ConcurrentScriptedServer {
+        async fn start(responses: Vec<ScriptedResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback listener binds");
+            let address = listener.local_addr().expect("listener has an address");
+            let base_url =
+                Url::parse(&format!("http://{address}/")).expect("loopback address forms a URL");
+            let state = Arc::new(ConcurrentScriptedState {
+                responses: Mutex::new(responses),
+                in_flight: AtomicUsize::new(0),
+                peak_in_flight: AtomicUsize::new(0),
+                unmatched: AtomicUsize::new(0),
+            });
+            let task = tokio::spawn({
+                let state = Arc::clone(&state);
+                async move {
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move { serve_matched_response(stream, &state).await });
+                    }
+                }
+            });
+            Self {
+                base_url,
+                state,
+                task,
+            }
+        }
+
+        async fn finish(self) -> usize {
+            self.task.abort();
+            let remaining = self
+                .state
+                .responses
+                .lock()
+                .expect("scripted responses are readable")
+                .len();
+            assert_eq!(remaining, 0, "every scripted response is consumed");
+            assert_eq!(
+                self.state.unmatched.load(Ordering::SeqCst),
+                0,
+                "every request matches a scripted response"
+            );
+            self.state.peak_in_flight.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn serve_matched_response(mut stream: TcpStream, state: &ConcurrentScriptedState) {
+        let in_flight = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        state.peak_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        let request = read_request(&mut stream).await;
+        let start_line = request
+            .lines()
+            .next()
+            .expect("request has a start line")
+            .to_owned();
+        let matched = {
+            let mut responses = state
+                .responses
+                .lock()
+                .expect("scripted responses are readable");
+            responses
+                .iter()
+                .position(|response| {
+                    start_line == format!("{} {} HTTP/1.1", response.method, response.target)
+                })
+                .map(|position| responses.remove(position))
+        };
+        match matched {
+            Some(response) => write_response(&mut stream, &response).await,
+            None => {
+                state.unmatched.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("unmatched refusal can be written");
+            }
+        }
+        state.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 
     struct ScriptedServer {
@@ -2828,8 +3002,7 @@ mod tests {
         }
     }
 
-    async fn serve_response(listener: &TcpListener, response: ScriptedResponse) {
-        let (mut stream, _) = listener.accept().await.expect("scripted request arrives");
+    async fn read_request(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         loop {
             let mut chunk = [0_u8; 1_024];
@@ -2843,22 +3016,11 @@ mod tests {
             }
             assert_ne!(read, 0, "request headers must be complete");
         }
-        let request = String::from_utf8(request).expect("request headers are UTF-8");
-        let start_line = request.lines().next().expect("request has a start line");
-        assert_eq!(
-            start_line,
-            format!("{} {} HTTP/1.1", response.method, response.target)
-        );
-        let lowercase_request = request.to_ascii_lowercase();
-        assert!(lowercase_request.contains(&format!("authorization: bearer {}", CREDENTIAL_VALUE)));
-        match response.validator {
-            Some(validator) => assert!(
-                request
-                    .lines()
-                    .any(|line| line.eq_ignore_ascii_case(&format!("if-none-match: {validator}")))
-            ),
-            None => assert!(!lowercase_request.contains("if-none-match:")),
-        }
+        String::from_utf8(request).expect("request headers are UTF-8")
+    }
+
+    async fn write_response(stream: &mut TcpStream, response: &ScriptedResponse) {
+        sleep(response.delay).await;
         let entity_tag = response
             .entity_tag
             .map(|value| format!("ETag: {value}\r\n"))
@@ -2881,8 +3043,29 @@ mod tests {
             .expect("scripted response can be written");
     }
 
+    async fn serve_response(listener: &TcpListener, response: ScriptedResponse) {
+        let (mut stream, _) = listener.accept().await.expect("scripted request arrives");
+        let request = read_request(&mut stream).await;
+        let start_line = request.lines().next().expect("request has a start line");
+        assert_eq!(
+            start_line,
+            format!("{} {} HTTP/1.1", response.method, response.target)
+        );
+        let lowercase_request = request.to_ascii_lowercase();
+        assert!(lowercase_request.contains(&format!("authorization: bearer {}", CREDENTIAL_VALUE)));
+        match response.validator {
+            Some(validator) => assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case(&format!("if-none-match: {validator}")))
+            ),
+            None => assert!(!lowercase_request.contains("if-none-match:")),
+        }
+        write_response(&mut stream, &response).await;
+    }
+
     struct PollerFixture {
-        poller: GitHubRepositoryPoller,
+        poller: Arc<GitHubRepositoryPoller>,
         _credential_directory: TempDir,
     }
 
@@ -2918,7 +3101,7 @@ mod tests {
             rest_base,
         )?;
         Ok(PollerFixture {
-            poller,
+            poller: Arc::new(poller),
             _credential_directory: credential_directory,
         })
     }
@@ -2959,6 +3142,87 @@ mod tests {
         ]
     }
 
+    fn minimal_pull_head_sha(number: u64) -> String {
+        format!("{number:040x}")
+    }
+
+    fn minimal_pull_detail(number: u64) -> String {
+        serde_json::json!({
+            "number": number,
+            "state": "open",
+            "merged_at": null,
+            "mergeable": true,
+            "head": {
+                "sha": minimal_pull_head_sha(number),
+                "ref": format!("{HEAD_BRANCH}-{number}"),
+                "repo": { "full_name": PROVIDER_HEAD_REPOSITORY }
+            },
+            "base": {
+                "sha": BASE_SHA,
+                "ref": BASE_BRANCH,
+                "repo": { "full_name": PROVIDER_BASE_REPOSITORY }
+            },
+            "title": PULL_TITLE,
+            "body": PULL_BODY,
+            "labels": [],
+            "draft": false,
+            "user": { "login": PROVIDER_PULL_AUTHOR }
+        })
+        .to_string()
+    }
+
+    fn empty_threads() -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": { "hasNextPage": false, "endCursor": null }
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn minimal_pull_responses(number: u64) -> Vec<ScriptedResponse> {
+        let head_sha = minimal_pull_head_sha(number);
+        vec![
+            ScriptedResponse::ok(
+                format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}"),
+                minimal_pull_detail(number),
+            )
+            .delayed(CONCURRENT_FETCH_DELAY),
+            ScriptedResponse::ok(
+                format!(
+                    "/repos/{WATCHED_REPOSITORY}/commits/{head_sha}/check-suites?filter=all&per_page=100&page=1"
+                ),
+                EMPTY_CHECK_SUITE_LIST,
+            ),
+            ScriptedResponse::ok(
+                format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}/reviews?per_page=100&page=1"),
+                EMPTY_LIST,
+            ),
+            ScriptedResponse::post(THREADS_TARGET, empty_threads()),
+            ScriptedResponse::ok(
+                format!(
+                    "/repos/{WATCHED_REPOSITORY}/issues/{number}/reactions?per_page=100&page=1"
+                ),
+                EMPTY_LIST,
+            ),
+            ScriptedResponse::ok(
+                format!("/repos/{WATCHED_REPOSITORY}/issues/{number}/comments?per_page=100&page=1"),
+                EMPTY_LIST,
+            ),
+            ScriptedResponse::ok(
+                format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}/comments?per_page=100&page=1"),
+                EMPTY_LIST,
+            ),
+        ]
+    }
+
     fn typed_observation_responses_with_check_runs(body: String) -> Vec<ScriptedResponse> {
         complete_typed_observation_responses()
             .into_iter()
@@ -2974,7 +3238,7 @@ mod tests {
 
     async fn complete_typed_observation() -> RepoWatchObservation {
         let server = ScriptedServer::start(complete_typed_observation_responses()).await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
         observation
@@ -3038,7 +3302,7 @@ mod tests {
                 .collect(),
         )
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let first = fixture
             .poller
             .poll(None)
@@ -3063,14 +3327,14 @@ mod tests {
                 .collect(),
         )
         .await;
-        let mut first_poller =
+        let first_poller =
             poller_fixture(server.base_url.clone()).expect("first poller is constructed");
         let first = first_poller
             .poller
             .poll(None)
             .await
             .expect("first poll succeeds");
-        let mut restarted = poller_fixture(server.base_url.clone()).expect("poller restarts");
+        let restarted = poller_fixture(server.base_url.clone()).expect("poller restarts");
         let after_restart = restarted
             .poller
             .poll(Some(&first))
@@ -3090,7 +3354,7 @@ mod tests {
             ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
 
@@ -3105,7 +3369,7 @@ mod tests {
             ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
@@ -3125,7 +3389,7 @@ mod tests {
             ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let first = fixture
             .poller
             .poll(None)
@@ -3149,7 +3413,7 @@ mod tests {
             foreign_then_watched_workflow_runs(),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
 
@@ -3173,7 +3437,7 @@ mod tests {
             active_rerun_then_stale_workflow_run(),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
         let previous = previous_main_workflow_run();
@@ -3202,7 +3466,7 @@ mod tests {
             active_rerun_then_stale_workflow_run(),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
         let previous = older_main_workflow_run();
@@ -3231,7 +3495,7 @@ mod tests {
             ScriptedResponse::ok(SECOND_MAIN_WORKFLOW_PAGE_TARGET, main_workflow_run()),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
 
@@ -3263,7 +3527,7 @@ mod tests {
             ])
             .collect();
         let server = ScriptedServer::start(responses).await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let first = fixture
             .poller
             .poll(None)
@@ -3421,12 +3685,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_pull_request_fetches_stay_within_their_bound_and_keep_number_order() {
+        let numbers: BTreeSet<u64> = CONCURRENT_FETCH_PULL_NUMBERS.collect();
+        let responses = numbers
+            .iter()
+            .flat_map(|number| minimal_pull_responses(*number))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let pull_requests = fixture
+            .poller
+            .fetch_pull_requests(numbers.clone(), None)
+            .await
+            .expect("every open pull request is fetched");
+        let peak_in_flight = server.finish().await;
+
+        let fetched: Vec<u64> = pull_requests
+            .iter()
+            .map(|pull_request| pull_request.context().number().get())
+            .collect();
+        assert_eq!(fetched, numbers.into_iter().collect::<Vec<u64>>());
+        assert!(peak_in_flight > 1);
+        assert!(peak_in_flight <= MAX_CONCURRENT_PULL_REQUEST_FETCHES);
+    }
+
+    #[tokio::test]
     async fn a_check_run_without_an_updated_at_field_is_observed() {
         let server = ScriptedServer::start(typed_observation_responses_with_check_runs(
             check_runs_without_an_updated_at_field(),
         ))
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
@@ -3452,7 +3742,7 @@ mod tests {
             ),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let rejected = fixture.poller.poll(None).await.err();
         server.finish().await;
@@ -3492,7 +3782,7 @@ mod tests {
             identity_less_review(RETAINED_REVIEW_IDS[0]),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let previous = submitted_review(RETAINED_REVIEW_IDS[0]);
 
         let reviews = fixture
@@ -3512,7 +3802,7 @@ mod tests {
             identity_less_review(RETAINED_REVIEW_IDS[0]),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let reviews = fixture
             .poller
@@ -3548,7 +3838,7 @@ mod tests {
     #[tokio::test]
     async fn no_signal_reviewers_skip_every_reaction_request() {
         let server = ScriptedServer::start(Vec::new()).await;
-        let mut fixture = poller_fixture_with_signal_reviewers(server.base_url.clone(), Vec::new())
+        let fixture = poller_fixture_with_signal_reviewers(server.base_url.clone(), Vec::new())
             .expect("poller is constructed");
 
         let reactions = fixture
@@ -3569,7 +3859,7 @@ mod tests {
             ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let reactions = fixture
             .poller
@@ -3589,7 +3879,7 @@ mod tests {
             ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let previous = RepoWatchReactionObservation::new(
             ReactionSubject::PullRequestBody,
             RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
@@ -3618,7 +3908,7 @@ mod tests {
         .await;
         let current_reviewer = RepoWatchAuthorLogin::try_new(String::from(AMBIENT_REACTOR))
             .expect("current reviewer fixture is valid");
-        let mut fixture =
+        let fixture =
             poller_fixture_with_signal_reviewers(server.base_url.clone(), vec![current_reviewer])
                 .expect("poller is constructed");
         let previous = RepoWatchReactionObservation::new(
