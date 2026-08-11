@@ -10,22 +10,23 @@ use tokio::io::AsyncRead;
 #[cfg(feature = "test-support")]
 pub mod conformance;
 
-/// Maximum UTF-8 bytes in one durable deployment store name.
-pub const MAX_BLOB_STORE_NAME_BYTES: usize = 128;
+/// Maximum ASCII bytes in one durable deployment store name.
+pub const MAX_BLOB_STORE_NAME_BYTES: usize = 64;
 
 /// A validated durable deployment identity for one blob store.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BlobStoreName(Arc<str>);
 
 impl BlobStoreName {
-    /// Admits one nonempty, trimmed, NUL-free deployment store name.
+    /// Admits one canonical lowercase-ASCII deployment store name.
     pub fn try_new(value: impl Into<Arc<str>>) -> Result<Self, BlobStoreNameError> {
         let value = value.into();
-        if value.is_empty()
-            || value.trim() != value.as_ref()
-            || value.contains('\0')
-            || value.len() > MAX_BLOB_STORE_NAME_BYTES
-        {
+        let mut bytes = value.as_bytes().iter().copied();
+        let valid_first = bytes.next().is_some_and(|byte| byte.is_ascii_lowercase());
+        let valid_rest = bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte)
+        });
+        if !valid_first || !valid_rest || value.len() > MAX_BLOB_STORE_NAME_BYTES {
             Err(BlobStoreNameError { rejected: value })
         } else {
             Ok(Self(value))
@@ -44,7 +45,7 @@ impl fmt::Display for BlobStoreName {
     }
 }
 
-/// A deployment store name was empty, untrimmed, oversized, or contained NUL.
+/// A deployment store name did not match `[a-z][a-z0-9_-]{0,63}`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobStoreNameError {
     rejected: Arc<str>,
@@ -418,7 +419,7 @@ impl Error for BlobStoreError {
 mod tests {
     use signalbox_domain::BlobDigest;
 
-    use super::{BlobObjectKey, BlobStoreName, ExpectedBlob};
+    use super::{BlobObjectKey, BlobStoreName, ExpectedBlob, MAX_BLOB_STORE_NAME_BYTES};
 
     #[test]
     fn object_key_is_content_derived_and_sharded() {
@@ -436,8 +437,19 @@ mod tests {
     }
 
     #[test]
-    fn store_name_rejects_untrimmed_spelling() {
+    fn store_name_rejects_noncanonical_spelling() {
+        let admitted = "primary_store-1";
+
         assert!(BlobStoreName::try_new(" primary ").is_err());
+        assert!(BlobStoreName::try_new("Primary").is_err());
+        assert!(BlobStoreName::try_new("é").is_err());
+        assert!(BlobStoreName::try_new("a".repeat(MAX_BLOB_STORE_NAME_BYTES + 1)).is_err());
+        assert_eq!(
+            BlobStoreName::try_new(admitted)
+                .expect("the canonical fixture is admitted")
+                .as_str(),
+            admitted
+        );
     }
 
     #[test]
