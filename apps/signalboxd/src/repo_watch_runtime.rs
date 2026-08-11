@@ -65,7 +65,14 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
-const MAX_AGGREGATE_WIRE_BYTES: usize = 64 * 1024 * 1024;
+// One polling attempt may transfer this many response bytes. The dogfooded
+// repository exceeds 64 MiB in a single attempt, and the bound fails the
+// attempt rather than shedding, so it has to clear real event volume.
+const MAX_POLL_WIRE_BYTES: usize = 512 * 1024 * 1024;
+// What one poller may retain between attempts, which is per watched repository
+// and therefore multiplies by the configured repository count. Deliberately not
+// raised with the per-attempt bound: transfer is transient, retention is not.
+const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -968,8 +975,11 @@ impl GitHubRepositoryPoller {
                     if run.status == "completed" {
                         observations.push(RepoWatchCheckRunObservation::new(
                             object_id(run.id)?,
-                            RepoWatchCheckCompletionGeneration::try_new(run.updated_at)
-                                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                            RepoWatchCheckCompletionGeneration::try_new(
+                                run.completed_at
+                                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                            )
+                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             CheckRunName::try_new(run.name)
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
@@ -1563,7 +1573,7 @@ impl GitHubRepositoryPoller {
         match response_entity_tag {
             Some(entity_tag) if !page_is_at_cap => {
                 self.cache
-                    .insert(key, entity_tag, bytes.len(), accepted.clone())?;
+                    .insert(key, entity_tag, bytes.len(), accepted.clone());
             }
             Some(_) | None => self.cache.remove(&key),
         }
@@ -1702,7 +1712,7 @@ impl PollCache {
     }
 
     fn remaining_poll_wire_bytes(&self) -> Result<usize, RepositoryWatchAttemptError> {
-        MAX_AGGREGATE_WIRE_BYTES
+        MAX_POLL_WIRE_BYTES
             .checked_sub(self.poll_wire_bytes)
             .ok_or(RepositoryWatchAttemptError::ResourceLimit)
     }
@@ -1715,7 +1725,7 @@ impl PollCache {
             .poll_wire_bytes
             .checked_add(wire_bytes)
             .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
-        if projected > MAX_AGGREGATE_WIRE_BYTES {
+        if projected > MAX_POLL_WIRE_BYTES {
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
         self.poll_wire_bytes = projected;
@@ -1737,14 +1747,25 @@ impl PollCache {
             .ok_or(RepositoryWatchAttemptError::MissingCachedResource)
     }
 
+    // Admission is an accelerator, never a precondition for an observation: a
+    // resource that does not fit is shed and simply refetched unconditionally
+    // on the next attempt. Failing the attempt instead would let the retention
+    // bound cap the transfer bound, because every resource already fetched in
+    // the current attempt is touched and therefore not evictable.
     fn insert<T: Any + Send + Sync>(
         &mut self,
         key: ResourceKey,
         entity_tag: EntityTag,
         wire_bytes: usize,
         accepted: T,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        self.insert_with_resource_limit(key, entity_tag, wire_bytes, accepted, MAX_CACHED_RESOURCES)
+    ) {
+        self.insert_with_resource_limit(
+            key,
+            entity_tag,
+            wire_bytes,
+            accepted,
+            MAX_CACHED_RESOURCES,
+        );
     }
 
     fn insert_with_resource_limit<T: Any + Send + Sync>(
@@ -1754,24 +1775,29 @@ impl PollCache {
         wire_bytes: usize,
         accepted: T,
         resource_limit: usize,
-    ) -> Result<(), RepositoryWatchAttemptError> {
+    ) {
         while !self.resources.contains_key(&key) && self.resources.len() >= resource_limit {
             if !self.evict_one_untouched() {
                 break;
             }
         }
         if !self.resources.contains_key(&key) && self.resources.len() >= resource_limit {
-            return Err(RepositoryWatchAttemptError::ResourceLimit);
+            return;
         }
-        let mut projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
-        while projected_bytes > MAX_AGGREGATE_WIRE_BYTES {
+        let Ok(mut projected_bytes) = self.projected_cached_bytes(&key, wire_bytes) else {
+            return;
+        };
+        while projected_bytes > MAX_CACHED_WIRE_BYTES {
             if !self.evict_one_untouched() {
                 break;
             }
-            projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
+            let Ok(next_projection) = self.projected_cached_bytes(&key, wire_bytes) else {
+                return;
+            };
+            projected_bytes = next_projection;
         }
-        if projected_bytes > MAX_AGGREGATE_WIRE_BYTES {
-            return Err(RepositoryWatchAttemptError::ResourceLimit);
+        if projected_bytes > MAX_CACHED_WIRE_BYTES {
+            return;
         }
         self.resources.insert(
             key,
@@ -1782,7 +1808,6 @@ impl PollCache {
             },
         );
         self.cached_wire_bytes = projected_bytes;
-        Ok(())
     }
 
     fn projected_cached_bytes(
@@ -2063,7 +2088,12 @@ struct CheckRunResponse {
     status: String,
     name: String,
     conclusion: Option<String>,
-    updated_at: String,
+    /// The provider defines `updated_at` on a check suite and never on a check
+    /// run: a run carries `started_at` and `completed_at` only. A completed
+    /// run's completion generation is therefore its `completed_at`, which the
+    /// provider populates exactly when the run reaches `completed`; a required
+    /// member the provider does not define makes every real page undecodable.
+    completed_at: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2211,13 +2241,14 @@ mod tests {
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PullResponse,
-        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse, dispatch_context_json,
-        normalize_checks_outcome, normalize_pull_request_context, object_id, rule_activation_error,
+        MAX_CACHED_WIRE_BYTES, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache,
+        PullResponse, ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead,
+        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchReactionObservation,
+        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchRuntimeConstructionError, ResourceKey, ReviewState, Url, WorkflowName,
+        WorkflowResponse, dispatch_context_json, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, rule_activation_error,
         supervise_repository_tasks,
     };
     use signalbox_domain::{
@@ -2296,8 +2327,12 @@ mod tests {
     const PULL_AUTHOR: &str = "pull-author";
     const PULL_LABEL: &str = "watch-me";
     const CHECK_RUN_NAME: &str = "build";
+    /// The completed check suite's `updated_at`, the provider member the poller
+    /// adopts as a suite's completion generation. It differs from the run's so
+    /// a poller reading a suite's generation onto a run cannot pass.
     const CHECK_SUITE_COMPLETION_GENERATION: &str = "2026-08-03T12:34:56Z";
-    const CHECK_RUN_COMPLETED_AT: &str = "2026-08-03T12:35:07Z";
+    /// The completed check run's `completed_at`, the provider member the poller
+    /// adopts as a run's completion generation.
     const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:08Z";
     const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
@@ -2385,6 +2420,12 @@ mod tests {
         .to_string()
     }
 
+    /// One completed and one unfinished check run, carrying the members the
+    /// poller reads and no member the provider does not define. `updated_at` is
+    /// absent because the provider defines it on a check suite and never on a
+    /// check run; a fixture that supplied it would describe a page no provider
+    /// can send. [`provider_defined_check_runs`] carries the provider's
+    /// complete member set.
     fn check_runs() -> String {
         serde_json::json!({
             "check_runs": [
@@ -2393,20 +2434,68 @@ mod tests {
                     "status": "completed",
                     "name": CHECK_RUN_NAME,
                     "conclusion": "failure",
-                    "completed_at": CHECK_RUN_COMPLETED_AT,
-                    "updated_at": CHECK_RUN_COMPLETION_GENERATION
+                    "completed_at": CHECK_RUN_COMPLETION_GENERATION
                 },
                 {
                     "id": IN_PROGRESS_CHECK_RUN_ID,
                     "status": "in_progress",
                     "name": IN_PROGRESS_CHECK_RUN_NAME,
                     "conclusion": null,
-                    "completed_at": null,
-                    "updated_at": QUEUED_CHECK_SUITE_UPDATED_AT
+                    "completed_at": null
                 }
             ]
         })
         .to_string()
+    }
+
+    /// A completed check run carrying exactly the member set the provider's
+    /// check-runs response defines for a run — the payload the decoder must
+    /// survive. Only the members the decoder reads carry meaningful values,
+    /// drawn from this module's constants; every other member exists so that
+    /// the set is complete and its value is arbitrary, with the nested `app`,
+    /// `check_suite`, `output`, and `pull_requests` bodies abridged, since it is
+    /// the top-level member names that this fixture pins. `updated_at` is not
+    /// among them, so a decoder requiring it rejects this page.
+    fn provider_defined_check_runs() -> String {
+        serde_json::json!({
+            "check_runs": [
+                {
+                    "app": { "id": 15368, "slug": "github-actions" },
+                    "check_suite": { "id": COMPLETED_CHECK_SUITE_IDS[0] },
+                    "completed_at": CHECK_RUN_COMPLETION_GENERATION,
+                    "conclusion": "failure",
+                    "details_url": "https://provider.invalid/checks/21",
+                    "external_id": "b1a5bc25-67cd-58b1-b7c0-449a03988c8c",
+                    "head_sha": HEAD_SHA,
+                    "html_url": "https://provider.invalid/checks/21",
+                    "id": COMPLETED_CHECK_RUN_IDS[0],
+                    "name": CHECK_RUN_NAME,
+                    "node_id": "CR_provider_defined_check_run",
+                    "output": {
+                        "annotations_count": 0,
+                        "annotations_url": "https://provider.invalid/checks/21/annotations",
+                        "summary": null,
+                        "text": null,
+                        "title": null
+                    },
+                    "pull_requests": [],
+                    "started_at": "2026-08-03T12:30:00Z",
+                    "status": "completed",
+                    "url": "https://provider.invalid/checks/21"
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    /// The provider-defined page with the completion time the provider
+    /// populates on every completed run removed. A run that reports `completed`
+    /// without one carries no generation the differ could compare.
+    fn completed_check_run_without_a_completion_time() -> String {
+        let mut page = serde_json::from_str::<serde_json::Value>(&provider_defined_check_runs())
+            .expect("provider-defined check-runs fixture is JSON");
+        page["check_runs"][0]["completed_at"] = serde_json::Value::Null;
+        page.to_string()
     }
 
     fn empty_check_runs() -> &'static str {
@@ -3383,6 +3472,54 @@ mod tests {
         );
     }
 
+    /// A required member the provider does not define fails every check-runs
+    /// page, and therefore every poll, closed. Decoding the provider's complete
+    /// member set is what proves the decoder asks only for members that arrive.
+    #[tokio::test]
+    async fn every_check_run_member_the_decoder_requires_exists_in_the_provider_payload() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            COMPLETED_SUITE_CHECK_RUNS_TARGET,
+            provider_defined_check_runs(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let suite =
+            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+
+        let runs = fixture
+            .poller
+            .fetch_check_runs(std::slice::from_ref(&suite))
+            .await
+            .expect("a page carrying the provider's complete check-run member set must decode");
+        server.finish().await;
+
+        assert_eq!(runs.len(), COMPLETED_CHECK_RUN_IDS.len());
+        assert_eq!(
+            runs[0].completion_generation().as_str(),
+            CHECK_RUN_COMPLETION_GENERATION
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_check_run_without_a_completion_time_is_an_invalid_response() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            COMPLETED_SUITE_CHECK_RUNS_TARGET,
+            completed_check_run_without_a_completion_time(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let suite =
+            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+
+        let result = fixture
+            .poller
+            .fetch_check_runs(std::slice::from_ref(&suite))
+            .await;
+        server.finish().await;
+
+        assert_eq!(result, Err(RepositoryWatchAttemptError::InvalidResponse));
+    }
+
     #[tokio::test]
     async fn a_complete_poll_normalizes_submitted_reviews() {
         let observation = complete_typed_observation().await;
@@ -3619,16 +3756,18 @@ mod tests {
     }
 
     #[test]
-    fn process_local_cache_rejects_a_resource_beyond_its_total_wire_bound() {
+    fn process_local_cache_sheds_a_resource_beyond_its_total_wire_bound() {
         let mut cache = PollCache::default();
-        let result = cache.insert(
-            ResourceKey(CACHE_RESOURCE_KEY.to_owned()),
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+
+        cache.insert(
+            key.clone(),
             EntityTag(ENTITY_TAG.to_owned()),
-            MAX_AGGREGATE_WIRE_BYTES + 1,
+            MAX_CACHED_WIRE_BYTES + 1,
             Vec::<u8>::new(),
         );
 
-        assert_eq!(result, Err(RepositoryWatchAttemptError::ResourceLimit));
+        assert_eq!(cache.entity_tag(&key), None);
     }
 
     #[test]
@@ -3637,24 +3776,20 @@ mod tests {
         let retained = ResourceKey(CACHE_RETAINED_KEY.to_owned());
         let stale = ResourceKey(CACHE_STALE_KEY.to_owned());
         let replacement = ResourceKey(CACHE_REPLACEMENT_KEY.to_owned());
-        cache
-            .insert_with_resource_limit(
-                retained.clone(),
-                EntityTag(ENTITY_TAG.to_owned()),
-                CACHE_WIRE_BYTES,
-                Vec::<u8>::new(),
-                TEST_CACHE_RESOURCE_LIMIT,
-            )
-            .expect("retained cache fixture is admitted");
-        cache
-            .insert_with_resource_limit(
-                stale.clone(),
-                EntityTag(ENTITY_TAG.to_owned()),
-                CACHE_WIRE_BYTES,
-                Vec::<u8>::new(),
-                TEST_CACHE_RESOURCE_LIMIT,
-            )
-            .expect("stale cache fixture is admitted");
+        cache.insert_with_resource_limit(
+            retained.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+        cache.insert_with_resource_limit(
+            stale.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
         cache.begin_poll();
         cache
             .touch(retained.clone())
@@ -3663,15 +3798,13 @@ mod tests {
             .touch(replacement.clone())
             .expect("replacement cache fixture is touched");
 
-        cache
-            .insert_with_resource_limit(
-                replacement.clone(),
-                EntityTag(ENTITY_TAG.to_owned()),
-                CACHE_WIRE_BYTES,
-                Vec::<u8>::new(),
-                TEST_CACHE_RESOURCE_LIMIT,
-            )
-            .expect("replacement evicts the untouched stale fixture");
+        cache.insert_with_resource_limit(
+            replacement.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
 
         assert_eq!(cache.resources.len(), TEST_CACHE_RESOURCE_LIMIT);
         assert!(cache.resources.contains_key(&retained));
@@ -3680,11 +3813,50 @@ mod tests {
     }
 
     #[test]
+    fn process_local_cache_sheds_at_capacity_when_every_entry_is_touched() {
+        let mut cache = PollCache::default();
+        let first = ResourceKey(CACHE_RETAINED_KEY.to_owned());
+        let second = ResourceKey(CACHE_STALE_KEY.to_owned());
+        let admitted = ResourceKey(CACHE_REPLACEMENT_KEY.to_owned());
+        cache.insert_with_resource_limit(
+            first.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+        cache.insert_with_resource_limit(
+            second.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+        cache.begin_poll();
+        cache.touch(first.clone()).expect("first entry is touched");
+        cache
+            .touch(second.clone())
+            .expect("second entry is touched");
+
+        cache.insert_with_resource_limit(
+            admitted.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+
+        assert_eq!(cache.entity_tag(&admitted), None);
+        assert!(cache.resources.contains_key(&first));
+        assert!(cache.resources.contains_key(&second));
+    }
+
+    #[test]
     fn one_poll_rejects_response_bytes_beyond_its_aggregate_wire_bound() {
         let mut cache = PollCache::default();
         cache.begin_poll();
         cache
-            .record_poll_wire_bytes(MAX_AGGREGATE_WIRE_BYTES)
+            .record_poll_wire_bytes(MAX_POLL_WIRE_BYTES)
             .expect("exact aggregate wire bound is accepted");
 
         assert_eq!(

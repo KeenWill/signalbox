@@ -33,7 +33,7 @@ use signalbox_domain::{
     WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use signalbox_persistence::{
-    MIGRATOR, local_test_connection_options, migrate,
+    MIGRATOR, disposable_test_container_labels, local_test_connection_options, migrate,
     runner_protocol::{
         RunnerProtocolCorruption, RunnerProtocolStore, RunnerProtocolStoreError,
         StoredValidatedRunnerRegistration,
@@ -110,6 +110,7 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box
         .with_db_name(DATABASE_NAME)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;

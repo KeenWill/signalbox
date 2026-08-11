@@ -219,21 +219,6 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   as an enforced pin-bump gate; it does not block the existing mechanical pin or
   live compatibility gates.
 
-## Claude Code CLI smoke credential delivery
-
-- **How the compatibility-smoke credential reaches the wrapped CLI.** The
-  adapter clears the child environment and forwards only an allowlist that
-  deliberately carries no direct credential value, with a unit test asserting
-  `ANTHROPIC_API_KEY` never reaches the child; the CLI is expected to resolve
-  its own login from the forwarded credential home. An environment-scoped API
-  key therefore reaches the smoke's test process but not the CLI it spawns.
-  Decide whether the adapter's allowlist gains an explicit direct-credential
-  variable — a deliberate narrowing of that contract, with the accepted exposure
-  recorded — or the workflow writes a credential store the CLI reads under the
-  already-forwarded credential home. Blocks the live Claude compatibility smoke
-  from authenticating; it blocks neither the derived pin nor the credential-free
-  version gate, both of which are in force.
-
 ## Model fallback and provenance
 
 - **Automatic fallback.** Decided and specified: what a selection attempt can
@@ -462,6 +447,28 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
+- **Turn-origin instructions in the approval-judge request.** The delegated
+  request context carries session-scoped authority — the goal generation the
+  judged turn is bound to, the template name, and the system prompt frozen for
+  that turn — but no turn-origin content. A delegation-origin child turn's exact
+  parent-supplied task is therefore not shown, so a child created from a broad
+  template may ask for an effect its delegated task never covered while the
+  judge sees only the wider session authority. Freezing that task alongside the
+  session-level fields is undecided, because each added field is further
+  attacker-influenced text placed inside the judge's own prompt, and the
+  injection posture is what makes any session-derived context admissible at all.
+  Recorded as a design question rather than a blocker; authority the context
+  does not settle escalates rather than approves.
+- **Per-template thread-resolution policy.** Whether a session template may
+  choose its own posture toward
+  [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog)
+  — so that one template resolves the reviewer threads it has answered while
+  another may only reply and leave resolution to the reviewer — is undecided.
+  Deciding it requires the template configuration surface to carry per-template
+  tool posture at all, which is itself open under
+  [Template storage and authoring](#template-storage-and-authoring). Recorded as
+  a design question rather than a blocker; it blocks only a per-template choice,
+  never the posture the daemon composition already applies.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
   remain undecided.
@@ -497,6 +504,25 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   `git` usage sees. Recorded as a design question rather than a blocker; the
   forced configuration and the effective-URL check remain the version-one
   boundary.
+- **Several bound workspaces per session, and explicit session relocation.** A
+  session binds one workspace root, derived from the configured root by the
+  fixed session-UUID formula owned by
+  [configuration and credentials](spec/configuration-and-credentials.md#derived-session-workspace-roots),
+  which is what keeps the set of roots the daemon can open a property of
+  deployment configuration alone. Two operations are anticipated on that
+  mechanism and are inexpressible today: a session bound to several workspaces
+  at once, and an operator moving or pinning a session's workspace deliberately.
+  Both are explicit rebinds of the per-session instance rather than anything
+  derived from placement — they compose with runner placement without being
+  selected by it, and the workspace portability question under
+  [scheduling and runners](#scheduling-and-runners) owns carrying a workspace
+  between runners rather than rebinding one inside a daemon. Deciding them needs
+  what names a further root without letting a session name a path, how the
+  isolation comparisons that today refuse a directory shared between two
+  sessions read across several roots one session holds, and what a rebind owes
+  executors already retained against the previous root. Recorded as a design
+  question rather than a blocker; the one-root-per-session derivation remains
+  correct until it is answered. (S15)
 
 ## Identity, credentials, and resource governance
 
