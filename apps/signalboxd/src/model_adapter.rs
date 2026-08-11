@@ -291,6 +291,7 @@ mod tests {
         ProviderReportedModel, ReasoningLevel, RequestedTarget, ResolvedTarget, Script,
         ScriptedModel, ServiceTier, TerminalEvidence, TokenUsage,
     };
+    use signalbox_model_runtime_claude_cli::SUPPORTED_CLAUDE_CLI_VERSION;
 
     use crate::configuration::HubModelConfiguration;
 
@@ -642,13 +643,14 @@ test -z "${ANTHROPIC_API_KEY+x}" || exit 41
 grep -q '"apiKeyHelper"' "${CLAUDE_CONFIG_DIR}/settings.json" || exit 42
 test "$(cat "${CLAUDE_CONFIG_DIR}/credential")" = '<file-credential>' || exit 43
 cat >/dev/null
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"019c0000-0000-7000-8000-000000000002","tools":[],"mcp_servers":[{"name":"signalbox_tools","status":"connected"}],"model":"<provider-model>","slash_commands":[],"skills":[],"plugins":[],"claude_code_version":"2.1.220"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"019c0000-0000-7000-8000-000000000002","tools":[],"mcp_servers":[{"name":"signalbox_tools","status":"connected"}],"model":"<provider-model>","slash_commands":[],"skills":[],"plugins":[],"claude_code_version":"<claude-cli-version>"}'
 printf '%s\n' '{"type":"assistant","parent_tool_use_id":null,"message":{"model":"<provider-model>","id":"message-1","role":"assistant","content":[{"type":"text","text":"<completion-text>"}],"usage":{"input_tokens":8,"output_tokens":4}}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"019c0000-0000-7000-8000-000000000002","stop_reason":"end_turn","terminal_reason":"completed","result":"<completion-text>","errors":[],"usage":{"input_tokens":8,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'
 "#
             .replace("<completion-text>", expected_completion)
             .replace("<file-credential>", file_credential)
-            .replace("<provider-model>", provider_model),
+            .replace("<provider-model>", provider_model)
+            .replace("<claude-cli-version>", SUPPORTED_CLAUDE_CLI_VERSION),
         )
         .expect("fake Claude executable is writable");
         let mut permissions = std::fs::metadata(&executable)
