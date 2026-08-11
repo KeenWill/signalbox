@@ -3,8 +3,9 @@
 //!
 //! Exercises supervisor-executable identity pinning, spawn-failure
 //! propagation at each stage, capture-byte limits, ambient-environment
-//! clearing, dispatch-marker and exit/signal reporting, and descendant
-//! process-tree cleanup on both leader completion and timeout.
+//! clearing, dispatch-marker and exit/signal reporting, target stderr
+//! forwarding, and descendant process-tree cleanup on both leader
+//! completion and timeout.
 
 #![cfg(target_os = "linux")]
 
@@ -30,6 +31,7 @@ const EXPLICIT_ENVIRONMENT_NAME: &str = "SIGNALBOX_EXEC_FIXTURE";
 const EXPLICIT_ENVIRONMENT_VALUE: &str = "visible";
 const SUCCESSFUL_EXIT_CODE: i32 = 0;
 const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
+const TARGET_STDERR_OUTPUT: &str = "target-stderr";
 const TARGET_TERMINATION_SIGNAL: &str = "PIPE";
 const REPLACEMENT_SUPERVISOR_EXIT_CODE: i32 = 99;
 const SUPERVISOR_PIN_DIRECTORY: &str = "signalbox-exec-supervisor-pin";
@@ -345,6 +347,52 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
             }
         );
         assert_eq!(result.stderr.bytes, EXPECTED_DISPATCH_MARKER);
+        Ok(())
+    })
+    .await
+}
+
+/// A dispatched target that writes to stderr must still be reaped and reported.
+///
+/// The supervisor writes its dispatch marker under `std::io::stderr().lock()`.
+/// Holding that guard across the target run deadlocks the helper thread that
+/// copies the target's stderr, because that helper writes through
+/// `&mut std::io::stderr()` and `ReentrantLock` re-enters only for the thread
+/// that already owns it. Every other dispatch test asserts stderr is exactly
+/// the marker, so a silent target cannot observe it; this one writes a byte.
+#[tokio::test]
+async fn production_dispatcher_forwards_target_stderr_without_deadlocking()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let supervisor = test_bin_path!("signalbox-exec-supervisor");
+        let request = ProcessRequest {
+            program: supervisor.into_os_string(),
+            arguments: vec![
+                OsString::from(DISPATCH_MODE),
+                fixture_program("sh")?.into_os_string(),
+                OsString::from("-c"),
+                OsString::from(format!("printf %s {TARGET_STDERR_OUTPUT} 1>&2")),
+            ],
+            working_directory: std::env::current_dir()?,
+            timeout: Duration::from_secs(5),
+            capture_bytes: 1024,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
+        };
+
+        let result = production_runner()?.run(request).await;
+
+        let mut expected_stderr = EXPECTED_DISPATCH_MARKER.to_vec();
+        expected_stderr.extend_from_slice(TARGET_STDERR_OUTPUT.as_bytes());
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::Exited {
+                code: Some(SUCCESSFUL_EXIT_CODE),
+            }
+        );
+        assert_eq!(result.stderr.bytes, expected_stderr);
+        assert_eq!(result.stderr.completeness, CaptureCompleteness::Complete);
         Ok(())
     })
     .await
