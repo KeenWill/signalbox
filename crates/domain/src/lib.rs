@@ -14,6 +14,7 @@ mod context_compaction;
 mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
+mod git_remote;
 mod goal;
 mod goal_command;
 mod imported_conversation;
@@ -41,6 +42,7 @@ mod turn_attempt;
 mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
+mod workspace;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -69,6 +71,10 @@ pub use context_frontier::{
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
+pub use git_remote::{
+    ConfiguredGitRemoteRecord, GitRemoteName, GitRemoteTextError, GitRemoteUrl,
+    max_git_remote_name_bytes, max_git_remote_url_bytes,
+};
 pub use goal::{
     Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent, GoalEventKind, GoalEventOrdinal,
     GoalGeneration, GoalGenerationSnapshot, GoalGuidance, GoalModelBlockedReasonKind,
@@ -370,6 +376,7 @@ pub use turn_lifecycle::{
 pub use user_content::{
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
 };
+pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {
@@ -520,6 +527,21 @@ define_identity!(
     RepoWatchDispatchId
 );
 
+define_identity!(
+    /// Identifies one durable workspace an authority grant may be scoped to.
+    WorkspaceId
+);
+
+define_identity!(
+    /// Identifies one durable operator-minted Git push destination.
+    GitRemoteMintId
+);
+
+define_identity!(
+    /// Identifies one durable withdrawal of a minted Git push destination.
+    GitRemoteWithdrawalId
+);
+
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Behavior-irrelevant test plumbing shared across unit-test modules.
@@ -573,11 +595,11 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputId, ContextFrontierId, DurableCommandId, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RepoWatchDispatchId,
-        RepoWatchEventId, RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
-        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
-        WorkspaceManifestId,
+        AcceptedInputId, ContextFrontierId, DurableCommandId, GitRemoteMintId,
+        GitRemoteWithdrawalId, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
+        ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId, RunnerAuthenticationId,
+        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
+        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceId, WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -618,5 +640,8 @@ mod tests {
         assert_uuid_contract!(WorkspaceManifestId);
         assert_uuid_contract!(RepoWatchEventId);
         assert_uuid_contract!(RepoWatchDispatchId);
+        assert_uuid_contract!(WorkspaceId);
+        assert_uuid_contract!(GitRemoteMintId);
+        assert_uuid_contract!(GitRemoteWithdrawalId);
     }
 }

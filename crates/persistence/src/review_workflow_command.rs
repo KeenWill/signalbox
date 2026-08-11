@@ -153,7 +153,21 @@ async fn inspect_existing(
             }
             Ok(ClaimInspection::Recorded(decode_result(&row)?))
         }
-        Some(_) => Ok(ClaimInspection::Conflicting),
+        Some(
+            CommandKind::CreateSession
+            | CommandKind::CreateSessionFromImportedFrontier
+            | CommandKind::ReplaceSessionDefaults
+            | CommandKind::ReplaceSessionMetadata
+            | CommandKind::SubmitInput
+            | CommandKind::DecideToolRequest
+            | CommandKind::ReviewOrchestration
+            | CommandKind::CompactSession
+            | CommandKind::Goal
+            | CommandKind::UpdateSessionPlacement
+            | CommandKind::RegisterWorkspace
+            | CommandKind::MintGitRemote
+            | CommandKind::WithdrawGitRemote,
+        ) => Ok(ClaimInspection::Conflicting),
     }
 }
 

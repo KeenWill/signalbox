@@ -1,16 +1,16 @@
-#![allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
-)]
-
 //! End-to-end adapter tests against a canned loopback HTTP server.
 //!
 //! No live provider is contacted and no credential exists: the server is a
 //! local socket replaying canned bytes, which lets these tests assert the
 //! real transport path — headers sent, redirect discipline, connect-failure
 //! classification, and stream-integrity evidence — deterministically.
+
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
+)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1165,7 +1165,7 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
 
     assert!(matches!(
         error,
-        signalbox_model_runtime_openai::OpenAiConstructionError::InvalidBaseUrl { .. }
+        OpenAiConstructionError::InvalidBaseUrl { .. }
     ));
 }
 
@@ -1179,7 +1179,7 @@ fn an_authority_less_base_url_fails_construction() {
 
     assert!(matches!(
         error,
-        signalbox_model_runtime_openai::OpenAiConstructionError::InvalidBaseUrl { .. }
+        OpenAiConstructionError::InvalidBaseUrl { .. }
     ));
 }
 
@@ -1217,6 +1217,6 @@ fn a_non_http_base_url_scheme_fails_construction() {
 
     assert!(matches!(
         error,
-        signalbox_model_runtime_openai::OpenAiConstructionError::InvalidBaseUrl { .. }
+        OpenAiConstructionError::InvalidBaseUrl { .. }
     ));
 }
