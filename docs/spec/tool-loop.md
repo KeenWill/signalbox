@@ -19,6 +19,9 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 `Delegated` admitted, `Auto` refused — is verified through this PR
 (`agent/approval-posture-alwaysconfirm`).
 
+The per-session workspace root the workspace, local Git, and execution families
+bind is verified against this PR (`agent/per-session-workspaces`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -298,8 +301,36 @@ family's code owns its exact argument schemas, permission defaults, effect
 classes, bounds, and execution results; this cross-crate contract owns only
 their composition into one daemon catalog and name-directed executor. Mapped
 families are absent when their complete deployment configuration is absent.
-Local Git and execution tools bind the same configured workspace root used by
-the workspace families.
+
+The workspace read, workspace mutation, local Git, and execution families all
+bind one workspace root, and that root is per session. Each session's root is
+derived from the configured root by a fixed formula owned by
+[configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry);
+a session supplies no path and cannot select another session's root. The
+executors bound to one root are composed once per session and retained under a
+bound, so two sessions executing concurrently write two trees, hold two pinned
+root descriptors, and take two independent serialization domains for the
+mutation and Git families rather than one process-wide domain. One session takes
+exactly one such domain at a time: a retained set a request still holds is never
+released, so a second set is never composed beside one already mutating that
+session's tree. Sessions with no derived directory share the configured root's
+own composition, which is what every session bound before the derivation
+existed.
+
+The catalog stays one process-lifetime immutable compiled value across that
+change. Every declaration a workspace-root-bound family advertises — its name,
+description, schema, permission default, and effect class — is a property of the
+family's code rather than of the repository it binds. The one compiled value
+that is not is the local Git argument validator, which carries the pinned
+repository's object format. A session whose repository selects another format is
+therefore refused rather than validated against the configured root's width, and
+the refusal has two shapes because catalog preflight runs before any session
+executor is resolved. An argument carrying a full object identifier in the
+session's own format is refused at preflight as invalid arguments, since the one
+compiled validator admits only the format it was compiled with. Every other
+argument reaches composition, which rejects the disagreeing repository and
+closes the request as a known tool failure whose sanitized detail names the
+closed reason. Neither shape redirects the request to another session's root.
 
 Every advertised argument schema declares an object at its root and carries no
 root keyword outside that object declaration (INV-055). One request carries the

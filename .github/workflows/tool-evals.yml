@@ -1,0 +1,219 @@
+# Report-only model-in-the-loop evaluations for daemon tool families. Each
+# matrix job drives the real PostgreSQL daemon tool loop through the direct
+# OpenAI adapter, running both a forced per-tool tier and one unforced family
+# task. Every family uses gpt-5-nano, the selected floor tier. Model behavior
+# is never a merge gate.
+#
+# Accepted trust boundary. The live exchange must execute proposed repository
+# code against the real OpenAI API. That repository-controlled test process can
+# read the API key from its step environment. The workflow therefore trusts
+# anyone with write access to this repository, the same trust required to push
+# executable code to main, and excludes fork authors in three independent
+# places: GitHub withholds secrets from ordinary fork pull_request runs; the
+# secretless eligibility job rejects a fork before any credentialed job starts;
+# and every credentialed matrix job repeats the head-repository comparison.
+# Dependabot pull requests are excluded by the same secret-withholding,
+# secretless-eligibility, and credentialed-job checks.
+#
+# The API key is referenced by name in exactly one step. The integration-test
+# binary is compiled before that step and executed directly afterward, so no
+# build script or procedural macro runs while the key is readable. Tool-side
+# writes remain inside test-created temporary workspaces and throwaway Git
+# repositories. The web family uses injected deterministic read transports;
+# the model exchange is the only network effect, and no external write is ever
+# approved.
+name: Daemon tool evals
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "apps/signalboxd/Cargo.toml"
+      - "crates/application/Cargo.toml"
+      - "crates/domain/**"
+      - "crates/egress-transport/**"
+      - "crates/model-provider-runtime/Cargo.toml"
+      - "crates/persistence/Cargo.toml"
+      - "crates/persistence/src/command_registry.rs"
+      - "crates/tool-contract/**"
+      - "crates/tools-git/**"
+      - "crates/tools-web/**"
+      - "crates/tools-workspace/**"
+      - "apps/signalboxd/src/lib.rs"
+      - "apps/signalboxd/src/process_runtime.rs"
+      - "apps/signalboxd/tests/live_tool_evals.rs"
+      - "crates/application/src/**"
+      - "crates/model-provider-runtime/src/lib.rs"
+      - "crates/model-runtime/**"
+      - "crates/model-runtime-openai/**"
+      - "crates/persistence/src/model_execution.rs"
+      - "crates/persistence/src/model_settings_resolution.rs"
+      - "crates/persistence/src/mapping.rs"
+      - "crates/persistence/src/outbox.rs"
+      - "crates/persistence/migrations/**"
+      - "crates/persistence/src/create_session.rs"
+      - "crates/persistence/src/lib.rs"
+      - "crates/persistence/src/lock_inventory.rs"
+      - "crates/persistence/src/process_read.rs"
+      - "crates/persistence/src/scheduler.rs"
+      - "crates/persistence/src/session.rs"
+      - "crates/persistence/src/session_credentials.rs"
+      - "crates/persistence/src/session_placement.rs"
+      - "crates/persistence/src/start_eligible_turn.rs"
+      - "crates/persistence/src/submit_input.rs"
+      - "crates/persistence/src/tool_loop.rs"
+      - ".github/workflows/tool-evals.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "apps/signalboxd/Cargo.toml"
+      - "crates/application/Cargo.toml"
+      - "crates/domain/**"
+      - "crates/egress-transport/**"
+      - "crates/model-provider-runtime/Cargo.toml"
+      - "crates/persistence/Cargo.toml"
+      - "crates/persistence/src/command_registry.rs"
+      - "crates/tool-contract/**"
+      - "crates/tools-git/**"
+      - "crates/tools-web/**"
+      - "crates/tools-workspace/**"
+      - "apps/signalboxd/src/lib.rs"
+      - "apps/signalboxd/src/process_runtime.rs"
+      - "apps/signalboxd/tests/live_tool_evals.rs"
+      - "crates/application/src/**"
+      - "crates/model-provider-runtime/src/lib.rs"
+      - "crates/model-runtime/**"
+      - "crates/model-runtime-openai/**"
+      - "crates/persistence/src/model_execution.rs"
+      - "crates/persistence/src/model_settings_resolution.rs"
+      - "crates/persistence/src/mapping.rs"
+      - "crates/persistence/src/outbox.rs"
+      - "crates/persistence/migrations/**"
+      - "crates/persistence/src/create_session.rs"
+      - "crates/persistence/src/lib.rs"
+      - "crates/persistence/src/lock_inventory.rs"
+      - "crates/persistence/src/process_read.rs"
+      - "crates/persistence/src/scheduler.rs"
+      - "crates/persistence/src/session.rs"
+      - "crates/persistence/src/session_credentials.rs"
+      - "crates/persistence/src/session_placement.rs"
+      - "crates/persistence/src/start_eligible_turn.rs"
+      - "crates/persistence/src/submit_input.rs"
+      - "crates/persistence/src/tool_loop.rs"
+      - ".github/workflows/tool-evals.yml"
+  # One daily provider/model drift sample. GitHub schedules only the copy on
+  # the default branch, so this starts after owner merge.
+  schedule:
+    - cron: "23 10 * * *"
+
+concurrency:
+  group: >-
+    daemon-tool-evals-${{ github.event_name == 'pull_request'
+    && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  eligibility:
+    name: Tool eval eligibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      allowed: ${{ steps.eligibility.outputs.allowed }}
+    steps:
+      - name: Exclude untrusted fork code
+        id: eligibility
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "pull_request" \
+            && "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "allowed=false" >> "${GITHUB_OUTPUT}"
+            echo "Fork pull requests cannot enter the credentialed tool eval."
+            exit 0
+          fi
+          if [[ "${EVENT_NAME}" == "pull_request" \
+            && "${ACTOR}" == "dependabot[bot]" ]]; then
+            echo "allowed=false" >> "${GITHUB_OUTPUT}"
+            echo "Dependabot pull requests cannot enter the credentialed tool eval."
+            exit 0
+          fi
+          echo "allowed=true" >> "${GITHUB_OUTPUT}"
+
+  eval:
+    name: ${{ matrix.family }} tool eval (report only)
+    needs: eligibility
+    if: ${{ needs.eligibility.outputs.allowed == 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) }}
+    permissions:
+      contents: read
+    environment: openai-smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [git, workspace, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          key: daemon-tool-eval-${{ matrix.family }}
+      - name: Build the tool-eval binary without credentials
+        id: build
+        run: |
+          set -euo pipefail
+          executable=$(cargo test --no-fail-fast -p signalboxd \
+            --test live_tool_evals --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' \
+            | tail -n1)
+          test -n "${executable}" || { echo "::error::no test executable produced"; exit 1; }
+          echo "executable=${executable}" >> "${GITHUB_OUTPUT}"
+      - name: Run and summarize the live family eval
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SIGNALBOX_TOOL_EVAL_FAMILY: ${{ matrix.family }}
+          SIGNALBOX_TOOL_EVAL_SUMMARY: ${{ runner.temp }}/tool-eval-summary.md
+          TOOL_EVAL_EXECUTABLE: ${{ steps.build.outputs.executable }}
+        run: |
+          set -euo pipefail
+          test -n "${OPENAI_API_KEY}" \
+            || { echo "the openai-smoke environment provides no API key"; exit 1; }
+          result="${RUNNER_TEMP}/tool-eval-test-output"
+          set +e
+          "${TOOL_EVAL_EXECUTABLE}" \
+            --ignored --exact live_model_in_the_loop_evaluates_one_daemon_tool_family \
+            --nocapture 2>&1 | tee "${result}"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ -f "${SIGNALBOX_TOOL_EVAL_SUMMARY}" ]]; then
+            cat "${SIGNALBOX_TOOL_EVAL_SUMMARY}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            {
+              echo "## ${SIGNALBOX_TOOL_EVAL_FAMILY} daemon tool eval"
+              echo
+              echo "Harness failure: no model-behavior report was produced."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            status=1
+          fi
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${status}" -eq 0 && "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one ignored tool eval to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi
+          exit "${status}"

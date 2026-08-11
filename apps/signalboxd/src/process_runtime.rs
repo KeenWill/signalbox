@@ -104,6 +104,7 @@ use signalbox_persistence::{
     },
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
+    model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
@@ -6192,6 +6193,7 @@ where
 #[derive(Debug)]
 pub(crate) enum AutomaticContextCompactionError {
     Read(ProcessReadError),
+    Credential(ModelCallRepositoryError),
     Repository(ContextCompactionRepositoryError),
     Model,
     Configuration,
@@ -6211,6 +6213,7 @@ impl Error for AutomaticContextCompactionError {}
 impl ClassifyOperatorFailure for AutomaticContextCompactionError {
     fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass {
         match self {
+            Self::Credential(error) => error.operator_failure_class(),
             Self::Repository(error) => error.operator_failure_class(),
             Self::Read(ProcessReadError::Database(_)) | Self::Model => {
                 signalbox_application::OperatorFailureClass::Infrastructure {
@@ -6228,6 +6231,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
 
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
+            Self::Credential(error) => error.operator_failure_cause_code(),
             Self::Read(ProcessReadError::Database(_)) => "context_compaction_read_database",
             Self::Read(ProcessReadError::Corruption(_)) => "context_compaction_read_corruption",
             Self::Repository(ContextCompactionRepositoryError::Database(_)) => {
@@ -6252,14 +6256,13 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
 }
 
 pub(crate) async fn compact_automatically(
-    pool: &PgPool,
+    model_calls: &PostgresModelCallRepository,
     model_configuration: &HubModelConfiguration,
     model: &Arc<dyn ContextCompactionModel>,
-    credential_reference: &str,
     session: SessionId,
     turn: TurnId,
 ) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
-    let defaults = match ProcessReadRepository::new(pool.clone())
+    let defaults = match ProcessReadRepository::new(model_calls.pool().clone())
         .read_session_defaults(session, None)
         .await
     {
@@ -6282,7 +6285,11 @@ pub(crate) async fn compact_automatically(
         .resolve(FrozenModelSelection::Direct(selection))
         .map_err(|_| AutomaticContextCompactionError::Configuration)?
         .target();
-    let repository = ContextCompactionRepository::new(pool.clone());
+    let credential_reference = model_calls
+        .resolve_session_credential_reference(session, target)
+        .await
+        .map_err(AutomaticContextCompactionError::Credential)?;
+    let repository = ContextCompactionRepository::new(model_calls.pool().clone());
     let prepared = loop {
         let request = PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
@@ -6292,7 +6299,7 @@ pub(crate) async fn compact_automatically(
             defaults_version: defaults.version(),
             selection,
             target,
-            credential_reference: credential_reference.to_owned(),
+            credential_reference: credential_reference.as_str().to_owned(),
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
             summary_entry: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
@@ -6320,7 +6327,7 @@ pub(crate) async fn compact_automatically(
         }
     };
     let rendered_range = match retry_context_compaction_range_database_reads(|| {
-        load_context_compaction_range(pool, &prepared)
+        load_context_compaction_range(model_calls.pool(), &prepared)
     })
     .await
     {
@@ -6680,6 +6687,7 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             entry_index,
             request,
             attempt,
+            disposition: _,
             content,
             ..
         } => serde_json::json!({
@@ -11101,6 +11109,7 @@ where
             entry,
             request,
             attempt,
+            disposition: _,
             content,
         } => {
             write_message(

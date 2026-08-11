@@ -40,9 +40,9 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSignal,
-    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration,
-    PostgresProviderModelExecution, PostgresScriptedModelExecution,
+    ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
+    HubModelConfiguration, ModelAdapter, PostgresProviderModelExecution,
+    PostgresScriptedModelExecution,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::{
@@ -54,7 +54,6 @@ use uuid::Uuid;
 
 const DATABASE_URL_ENVIRONMENT: &str = "SIGNALBOX_DEBUG_DATABASE_URL";
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
-const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const TRANSCRIPT_WAIT: Duration = Duration::from_secs(120);
 const SCHEDULER_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
@@ -75,7 +74,7 @@ impl fmt::Display for DebugDriverError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Usage => {
-                "set SIGNALBOX_DEBUG_DATABASE_URL and pass INPUT_TEXT SCRIPTED_REPLY, or pass --anthropic SELECTION_UUID INPUT_TEXT with SIGNALBOX_CONFIG_FILE and ANTHROPIC_API_KEY_FILE"
+                "set SIGNALBOX_DEBUG_DATABASE_URL and pass INPUT_TEXT SCRIPTED_REPLY, or pass --anthropic SELECTION_UUID INPUT_TEXT with SIGNALBOX_CONFIG_FILE"
             }
             Self::Configuration => "debug provider configuration is invalid",
             Self::Database => "debug database operation failed",
@@ -104,7 +103,6 @@ enum DebugProvider {
     Anthropic {
         selection: DirectModelSelection,
         model_configuration_file: PathBuf,
-        api_key_file: PathBuf,
     },
 }
 
@@ -247,7 +245,6 @@ impl DebugArguments {
                     model_configuration_file: required_environment_path(
                         MODEL_CONFIGURATION_FILE_ENVIRONMENT,
                     )?,
-                    api_key_file: required_environment_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT)?,
                 },
             })
         } else {
@@ -397,59 +394,74 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         provider,
     } = arguments;
     let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
-    let (selection, targets, credential_reference, credential_pin, provider) = match provider {
-        DebugProvider::Scripted { reply } => {
-            let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
-            let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+    let (selection, targets, credential_reference, credential_pin, credential_families, provider) =
+        match provider {
+            DebugProvider::Scripted { reply } => {
+                let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
+                let targets =
+                    ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+                        selection,
+                        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                            Uuid::now_v7(),
+                        )),
+                    )])
+                    .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
+                (
+                    selection,
+                    targets,
+                    ModelCallCredentialReference::new("scripted-test"),
+                    SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                        "scripted-debug",
+                        "scripted-test",
+                    )])
+                    .map_err(|_| DebugDriverError::Configuration)?,
+                    // The scripted provider routes no real family. It carries no
+                    // catalog at all rather than an empty one: an empty catalog
+                    // resolves no family and fails the call as corruption, while
+                    // `None` is what selects the fallback reference.
+                    None,
+                    DebugProviderRuntime::Scripted(
+                        AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
+                    ),
+                )
+            }
+            DebugProvider::Anthropic {
                 selection,
-                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7())),
-            )])
-            .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
-            (
-                selection,
-                targets,
-                ModelCallCredentialReference::new("scripted-test"),
-                SessionCredentialPin::try_new(vec![SessionModelCredential::new(
-                    "scripted-debug",
-                    "scripted-test",
-                )])
-                .map_err(|_| DebugDriverError::Configuration)?,
-                DebugProviderRuntime::Scripted(
-                    AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
-                ),
-            )
-        }
-        DebugProvider::Anthropic {
-            selection,
-            model_configuration_file,
-            api_key_file,
-        } => {
-            let configuration = HubModelConfiguration::read(&model_configuration_file)
-                .map_err(|_| DebugDriverError::Configuration)?;
-            require_anthropic_selection(&configuration, selection)?;
-            let credential_access = FileCredentialAccess::new(
-                api_key_file,
-                CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
-            );
-            let credential_reference = ModelCallCredentialReference::new(
-                credential_access.credential_reference().as_str(),
-            );
-            let mut adapter_configuration = AnthropicConfig::new();
-            adapter_configuration.model_capabilities =
-                configuration.runtime_model_capability_catalog();
-            let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
-                .map_err(|_| DebugDriverError::Configuration)?;
-            let provider =
-                RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
-            (
-                selection,
-                configuration.target_catalog(),
-                credential_reference,
-                configuration.session_credential_pin(),
-                DebugProviderRuntime::Anthropic(provider),
-            )
-        }
-    };
+                model_configuration_file,
+            } => {
+                let configuration = HubModelConfiguration::read(&model_configuration_file)
+                    .map_err(|_| DebugDriverError::Configuration)?;
+                require_anthropic_selection(&configuration, selection)?;
+                let credential_profile = configuration
+                    .resolve_direct_model(selection)
+                    .ok_or(DebugDriverError::Configuration)?
+                    .credential_profile()
+                    .to_owned();
+                let credential_access = FileCredentialAccess::from_files(
+                    configuration
+                        .file_credential_profiles(ModelAdapter::Anthropic)
+                        .map(|(reference, path)| {
+                            (CredentialReference::new(reference), path.to_path_buf())
+                        }),
+                );
+                let credential_reference = ModelCallCredentialReference::new(credential_profile);
+                let mut adapter_configuration = AnthropicConfig::new();
+                adapter_configuration.model_capabilities =
+                    configuration.runtime_model_capability_catalog();
+                let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
+                    .map_err(|_| DebugDriverError::Configuration)?;
+                let provider =
+                    RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
+                (
+                    selection,
+                    configuration.target_catalog(),
+                    credential_reference,
+                    configuration.session_credential_pin(),
+                    Some(configuration.credential_family_catalog()),
+                    DebugProviderRuntime::Anthropic(provider),
+                )
+            }
+        };
     let connection_options =
         local_test_connection_options(&database_url).map_err(|_| DebugDriverError::Database)?;
     let pool = PgPoolOptions::new()
@@ -511,7 +523,16 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
     let turn = origin.turn();
     let work_source = DebugSessionWorkSource::new(session);
 
+    // The diagnostic composes the same session-credential catalog production
+    // does. Without it a model whose enabled fast mode routes to an alternate
+    // serving target resolves the base family's profile while the runtime
+    // switches families, so the call would authenticate — and bill — against
+    // an account the route did not select.
     let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference);
+    let repository = match credential_families {
+        Some(families) => repository.with_session_credentials(families),
+        None => repository,
+    };
     let activation = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
@@ -646,12 +667,21 @@ version = 1
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "codex-subscription-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "/bin/true"
