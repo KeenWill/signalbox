@@ -2798,7 +2798,7 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         Ok(())
     })
     .await;
-    pool.close().await;
+    drop(pool);
     serialization
         .expect("registration replacement serialization must finish within its test deadline")
 }
