@@ -309,7 +309,10 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
@@ -353,7 +356,10 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession
                     | CommandKind::Goal
-                    | CommandKind::UpdateSessionPlacement,
+                    | CommandKind::UpdateSessionPlacement
+                    | CommandKind::RegisterWorkspace
+                    | CommandKind::MintGitRemote
+                    | CommandKind::WithdrawGitRemote,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -461,7 +467,10 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }

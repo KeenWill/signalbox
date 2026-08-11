@@ -1,3 +1,10 @@
+//! Unit tests for the conversation-read tool catalog defined in `lib.rs`.
+//!
+//! Covers own/selected/imported transcript reads, definition encoding and
+//! permission defaults, pagination and truncation signaling, transcript-bound
+//! validation, and that the redaction projection has no bypass for hidden
+//! content.
+
 use std::{
     error::Error,
     fmt,

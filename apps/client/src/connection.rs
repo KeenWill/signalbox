@@ -1,3 +1,7 @@
+//! `ProcessClient`: the framed Unix-socket connection to the local
+//! `signalboxd` process, tracking request IDs and read-only, mutation, and
+//! setup request delivery.
+
 use std::path::{Path, PathBuf};
 
 use signalbox_process_protocol::{

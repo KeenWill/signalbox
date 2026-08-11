@@ -122,7 +122,10 @@ impl SessionPlacementRepository {
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
-                | CommandKind::Goal,
+                | CommandKind::Goal
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => {
                 transaction.rollback().await?;
                 return Ok(SessionPlacementRepositoryOutcome::ConflictingReuse { command_id });
@@ -166,7 +169,10 @@ impl SessionPlacementRepository {
                     | CommandKind::ReviewWorkflow
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession
-                    | CommandKind::Goal,
+                    | CommandKind::Goal
+                    | CommandKind::RegisterWorkspace
+                    | CommandKind::MintGitRemote
+                    | CommandKind::WithdrawGitRemote,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(SessionPlacementRepositoryError::Corruption(

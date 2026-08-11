@@ -1,0 +1,71 @@
+# Codecov configuration for the two coverage measurements this repository
+# produces: the Rust workspace, uploaded by .github/workflows/coverage.yml
+# under the `rust` flag, and the Swift native client, uploaded by
+# .github/workflows/swift.yml under `swift`.
+#
+# Report-only, which is the standing decision every coverage job here already
+# encodes and this file must not quietly reverse. Both workflows carry
+# `continue-on-error`, so no upload can fail a job; the statuses below are all
+# `informational: true`, so no percentage Codecov computes can fail a check or
+# gate a merge either. Nothing in this file has a threshold that means
+# anything. Making coverage a gate is a deliberate later edit here — removing
+# an `informational` line — and never a side effect of a change to a number.
+
+codecov:
+  # The coverage jobs are report-only and deliberately independent of whether
+  # the gating checks passed: a run whose tests failed still measured
+  # something, and the smaller number that results is worth seeing rather than
+  # withholding. Left at its default, Codecov would suppress its own reporting
+  # behind the result of CI it does not own.
+  require_ci_to_pass: false
+
+coverage:
+  status:
+    # Two statuses, both informational, and deliberately not one per flag.
+    # Per-flag statuses would put four more checks on every pull request to
+    # say four things no merge waits on, and the flag breakdown is already
+    # visible in the comment's flags table and on the Codecov dashboard.
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# Flags keep the two languages separate. They are measured by different
+# toolchains over disjoint trees, and a single percentage merged across both
+# would be a number describing nothing in particular.
+#
+# `carryforward` is what makes that separation survive the path filters both
+# workflows use. coverage.yml runs only when Rust sources changed and
+# swift.yml's native job only when `clients/native/**` changed, so most pull
+# requests upload exactly one of these two flags. Without carryforward the
+# absent flag would read as zero coverage rather than as unchanged, and every
+# Rust-only change would appear to delete the native client's coverage.
+flags:
+  rust:
+    paths:
+      - apps/
+      - crates/
+    carryforward: true
+  swift:
+    paths:
+      - clients/native/
+    carryforward: true
+
+# One comment, rewritten in place, and only when the numbers moved.
+#
+# `require_changes: true` is the deliberate setting: a pull request that does
+# not move coverage gets no comment at all, which is what keeps this from
+# becoming another fixture every conversation has to scroll past. The dials
+# from least to most quiet are `false` (always comment), `true` (any change),
+# `"coverage_drop"` (only when coverage falls), and `comment: false`, which
+# turns the comment off entirely and leaves the checks and the dashboard as
+# the whole report. The last is a one-line edit here if even this is too much.
+#
+# `behavior: default` updates the existing comment rather than appending a new
+# one per push, matching how both in-repo coverage comments already behave.
+comment:
+  layout: "condensed_header, flags, condensed_files, condensed_footer"
+  behavior: default
+  require_changes: true

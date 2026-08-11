@@ -37,7 +37,7 @@ use signalbox_model_runtime::{
     ConversationMessage, CredentialReference, DeliveryMode, ExchangeFacts, LossCause,
     ModelOperation, ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure,
     PreparationOutcome, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    TerminalEvidence, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime,
@@ -104,6 +104,7 @@ enable_fanout                        removed            false
 enable_mcp_apps                      under development  false
 enable_request_compression           stable             true
 exec_permission_approvals            under development  false
+executed_tool_call_metadata          under development  false
 executor_capability_discovery        under development  false
 experimental_windows_sandbox         removed            false
 external_agent_memory_import         under development  false
@@ -115,6 +116,7 @@ guardianv2                           under development  false
 hooks                                stable             true
 image_detail_original                removed            false
 image_generation                     stable             true
+image_resize_notice                  under development  false
 in_app_browser                       stable             true
 in_app_updates                       stable             true
 item_ids                             removed            true
@@ -135,6 +137,7 @@ plugin_sharing                       stable             true
 plugins                              stable             true
 prevent_idle_sleep                   experimental       false
 realtime_conversation                under development  false
+recommended_plugins                  stable             false
 remote_compaction_v2                 stable             true
 remote_control                       removed            false
 remote_models                        removed            false
@@ -173,6 +176,7 @@ unified_exec_zsh_fork                under development  false
 use_agent_identity                   under development  false
 use_legacy_landlock                  deprecated         false
 use_linux_sandbox_bwrap              removed            false
+view_image                           stable             true
 web_search_cached                    deprecated         false
 web_search_request                   deprecated         false
 workspace_dependencies               stable             true
@@ -193,10 +197,12 @@ const NON_CAPABILITY_CODEX_FEATURES: &[&str] = &[
     "elevated_windows_sandbox",
     "enable_fanout",
     "enable_request_compression",
+    "executed_tool_call_metadata",
     "experimental_windows_sandbox",
     "external_migration",
     "fast_mode",
     "image_detail_original",
+    "image_resize_notice",
     "item_ids",
     "js_repl",
     "js_repl_tools_only",
@@ -1503,6 +1509,7 @@ fn decoded_response_rejects_an_unexpected_terminal_variant() {
         },
         reported_model: None,
         finish_reported: None,
+        tool_calls: ToolCallsAtLoss::Unobserved,
         usage: TokenUsage {
             input_tokens: Some(FIXTURE_INPUT_TOKENS),
             output_tokens: Some(FIXTURE_OUTPUT_TOKENS),

@@ -20,7 +20,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
     SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
     ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
-    ValidatedModelSettings,
+    ValidatedModelSettings, WorkspaceOrigin,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -531,6 +531,12 @@ pub(crate) enum DurableCommandKind {
     Goal,
     /// Session placement update.
     UpdateSessionPlacement,
+    /// Workspace registration.
+    RegisterWorkspace,
+    /// Git remote mint.
+    MintGitRemote,
+    /// Git remote withdrawal.
+    WithdrawGitRemote,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -549,6 +555,9 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::CompactSession => "compact_session",
         DurableCommandKind::Goal => "goal",
         DurableCommandKind::UpdateSessionPlacement => "update_session_placement",
+        DurableCommandKind::RegisterWorkspace => "register_workspace",
+        DurableCommandKind::MintGitRemote => "mint_git_remote",
+        DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
     }
 }
 
@@ -568,6 +577,39 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "compact_session" => Some(DurableCommandKind::CompactSession),
         "goal" => Some(DurableCommandKind::Goal),
         "update_session_placement" => Some(DurableCommandKind::UpdateSessionPlacement),
+        "register_workspace" => Some(DurableCommandKind::RegisterWorkspace),
+        "mint_git_remote" => Some(DurableCommandKind::MintGitRemote),
+        "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
+        _ => None,
+    }
+}
+
+/// Encodes one durable `workspace.origin` spelling.
+///
+/// The column is authority-bearing: it says whether a workspace is a scope a
+/// person registered or one the daemon's derivation produced. This module owns
+/// the spelling so the store that lands next cannot restate it independently
+/// and drift from the `CHECK` that admits exactly these two values.
+#[allow(
+    dead_code,
+    reason = "the workspace store lands with the operator verbs; this mapping is the spelling those writers must use"
+)]
+pub(crate) const fn workspace_origin_to_str(value: WorkspaceOrigin) -> &'static str {
+    match value {
+        WorkspaceOrigin::OperatorRegistered => "operator_registered",
+        WorkspaceOrigin::DaemonDerived => "daemon_derived",
+    }
+}
+
+/// Decodes one durable `workspace.origin` spelling.
+#[allow(
+    dead_code,
+    reason = "the workspace store lands with the operator verbs; this mapping is the spelling those readers must use"
+)]
+pub(crate) fn workspace_origin_from_str(value: &str) -> Option<WorkspaceOrigin> {
+    match value {
+        "operator_registered" => Some(WorkspaceOrigin::OperatorRegistered),
+        "daemon_derived" => Some(WorkspaceOrigin::DaemonDerived),
         _ => None,
     }
 }

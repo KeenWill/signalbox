@@ -410,7 +410,21 @@ impl GoalRepository {
             Some(CommandKind::Goal) => {
                 load_command_from_connection(&mut connection, command_id).await
             }
-            Some(_) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::ReplaceSessionMetadata
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
+                | CommandKind::CompactSession
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
+            ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
     }
 
@@ -942,10 +956,25 @@ async fn existing_or_conflicting(
     command: &GoalUserCommand,
     kind: CommandKind,
 ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError> {
-    if kind != CommandKind::Goal {
-        return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
-            command_id: command.command_id(),
-        });
+    match kind {
+        CommandKind::Goal => {}
+        CommandKind::CreateSession
+        | CommandKind::CreateSessionFromImportedFrontier
+        | CommandKind::ReplaceSessionDefaults
+        | CommandKind::ReplaceSessionMetadata
+        | CommandKind::SubmitInput
+        | CommandKind::DecideToolRequest
+        | CommandKind::ReviewWorkflow
+        | CommandKind::ReviewOrchestration
+        | CommandKind::CompactSession
+        | CommandKind::UpdateSessionPlacement
+        | CommandKind::RegisterWorkspace
+        | CommandKind::MintGitRemote
+        | CommandKind::WithdrawGitRemote => {
+            return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
+                command_id: command.command_id(),
+            });
+        }
     }
     let recorded = load_command_from_connection(connection, command.command_id())
         .await?

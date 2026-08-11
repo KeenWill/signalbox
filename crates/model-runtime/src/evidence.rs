@@ -347,8 +347,56 @@ pub struct BoundaryLossEvidence {
     /// so the completed-exchange precondition for `Refused` in
     /// docs/spec/model-call-execution.md is unmet.
     pub finish_reported: Option<FinishReason>,
+    /// Whether a tool call had opened in the material decoded before the loss.
+    pub tool_calls: ToolCallsAtLoss,
     /// Usage reported before the loss.
     pub usage: TokenUsage,
+}
+
+/// Whether a tool call had opened in the response material an adapter decoded
+/// before the exchange was lost.
+///
+/// A tool call can open without producing any observation: a provider may
+/// announce a call's identity and name and then be cut off before any argument
+/// fragment, and the proposal observation is emitted only once the call is
+/// finalized. The observation stream therefore cannot answer "had the provider
+/// begun proposing tools when this was lost", and neither can [`LossCause`],
+/// which answers only *how* the exchange was lost. This fact carries it, so a
+/// caller reaches that distinction without reading a rendered
+/// [`LossCause::StreamProtocolViolation`] detail.
+///
+/// Like [`finish_reported`](BoundaryLossEvidence::finish_reported) and
+/// [`reported_model`](BoundaryLossEvidence::reported_model), this reports the
+/// decoded prefix and nothing beyond it: [`NoneOpened`](Self::NoneOpened) says
+/// no tool call opened in what the adapter decoded, never that the provider
+/// sent none.
+///
+/// The variants are payload-free by design. An opened call's identity and
+/// arguments already have a channel — `ToolCallProposed` and
+/// `ToolArgumentsDelta` — wherever they were emitted at all, and a count adds
+/// no classification power. What no other channel can carry is the bare fact
+/// that a call had opened when nothing was emitted, which is what this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallsAtLoss {
+    /// The adapter decoded the response's content material up to the loss and
+    /// no tool call had opened in it.
+    NoneOpened,
+    /// At least one tool call had opened in the material decoded before the
+    /// loss.
+    Opened,
+    /// The adapter's view of the response's tool material was incomplete when
+    /// the loss occurred, so neither answer above is established.
+    ///
+    /// This is the absence of a *conclusion*, not the absence of decoded
+    /// content: an adapter can reach it having decoded a great deal. It holds
+    /// wherever material that could have opened a tool call went unexamined —
+    /// a body that never parsed, a decode abandoned with content blocks still
+    /// unread, a record or event whose payload failed to decode, material the
+    /// runner read off the transport but never delivered to a decoder, and a
+    /// loss raised by a layer that reads no response material at all. Never a
+    /// claim that no tool call opened; `NoneOpened` is that claim, and it is
+    /// made only where the adapter examined enough to support it.
+    Unobserved,
 }
 
 /// How an exchange was lost after the request may have crossed the
