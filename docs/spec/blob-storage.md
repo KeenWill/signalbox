@@ -137,6 +137,30 @@ path — ingest, verification, replica copy, read — streams and none materiali
 a whole blob in memory. Bounded in-memory materialization exists only at
 explicitly bounded consumers, and each such consumer names its bound.
 
+The configured staging directory is a daemon-owned private directory. The daemon
+creates one `uploads-v1` child with owner-only access and holds the
+installation's exclusive daemon lock while using it; upload spools are
+create-new owner-only regular files directly beneath that child. Before socket
+admission, startup removes every regular spool in that child. A symlink,
+subdirectory, wrong-owner entry, or otherwise unprovable occupant fails startup
+rather than being followed or removed. Clean shutdown cancels active uploads and
+performs the same sweep. This reclaims crash leftovers without treating
+unrelated paths as Signalbox-owned.
+
+Every S3 logical operation has a 10-second connect timeout, a 60-second
+no-progress read/write timeout, and a 24-hour whole-operation deadline. The
+caller's cancellation signal aborts transport work and best-effort aborts an
+open multipart upload; a model-call attachment check binds that signal to the
+call's authoritative cancellation, while upload work binds it to connection loss
+and daemon shutdown. A timeout after a publication that might have been accepted
+is not success. When cancellation has not won, the adapter gets one fresh
+24-hour reconciliation deadline, with the same connect and idle bounds, to
+perform a complete read-back and registers only exact verified bytes. A
+read-back timeout or cancellation returns unavailable when nonacceptance is
+proved and ambiguous publication otherwise, releases the bulk-ingest permit, and
+leaves at most an unregistered orphan; retry live-verifies the deterministic key
+before completing registration.
+
 ## Ingest and the transaction boundary
 
 Ingest streams caller bytes to a staging file while hashing and counting,
@@ -243,6 +267,14 @@ row plus ordinal, disagreement aborts the migration, and new code reconstructs
 and compares only the satellites. Command-side and accepted-side parts remain
 separate mirrored records rather than shared mutable authority.
 
+The terminal client renders one accepted user entry as exactly one line:
+`user_content source_session=<uuid> entry=<uuid> accepted_input=<uuid> turn=<uuid> parts=<json>`.
+Here `<json>` is the canonical compact ordered parts array from the wire
+contract, including its fixed object-member order and ordinary JSON escaping.
+Text cannot forge another terminal line, attachment metadata and interleaving
+remain visible, and transcript, follow, and chat never render blob bytes.
+`--raw-output` does not decode or otherwise alter this structural JSON.
+
 ## Attachment visibility and model reads
 
 Transcript presence is distinct from model-context inclusion. When a frontier
@@ -299,11 +331,18 @@ every distinct attachment whose stub enters the rendered request. The accepted
 input's distinct attachment lengths were already bounded in aggregate by
 `blob_storage.max_blob_bytes`; repeated occurrences of one digest do not
 multiply this verification work. Preparation holds no database transaction
-during store I/O and retains no attachment bytes. A digest with no readable
-matching replica closes the unsent call through a typed
-missing-or-corrupt-attachment preparation failure; no provider interaction or
-tool authorization occurs. Successful verification seeds the turn-scoped bounded
-verification inventory used by later blob reads.
+during store I/O and retains no attachment bytes. A digest with no recorded
+matching replica closes the unsent call through the typed missing-attachment
+preparation failure. When every recorded candidate can be read but all fail
+length or digest verification, preparation closes it through the typed
+corrupt-attachment failure. Neither path permits provider interaction or tool
+authorization. When no candidate verifies and at least one candidate remains
+temporarily unavailable, preparation releases its store and preparation
+resources, leaves the call `Prepared`, records no turn outcome, and returns the
+sanitized typed unavailable operator failure so a later pass can retry the same
+unsent call. Authoritative cancellation aborts store I/O without relabeling
+cancellation as an attachment failure. Successful verification seeds the
+turn-scoped bounded verification inventory used by later blob reads.
 
 Model capability records gain an input-modality axis (`text`, `image`,
 `document`) on the same closed-set shape as the existing capability axes,

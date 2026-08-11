@@ -35,15 +35,12 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Accepted-input content
 
-- **Content extensions and rendering.**
-  [sessions-and-transcript](spec/sessions-and-transcript.md) fixes the initial
-  text-only `UserContent` value, exact equality, and PostgreSQL mapping. Decided
-  and specified: ordered multipart content with content-addressed attachment
-  parts, their replay equality, persistence, and model-visible stubs, by
-  [blob storage](spec/blob-storage.md#multipart-user-content). Client rendering
-  of attachment parts and any non-text variant beyond the attachment part remain
-  open. Blocks those remaining extensions, not the first `SubmitInput` slice.
-  (S01, S03, S08)
+- **Further content variants and rendering.** Ordered multipart content with
+  content-addressed attachment parts, its replay equality, persistence, terminal
+  rendering, and model-visible stubs are decided and specified by
+  [blob storage](spec/blob-storage.md#multipart-user-content). Any non-text
+  content variant beyond attachment parts and provider-native media rendering
+  remain open. Blocks only those further extensions. (S01, S03, S08)
 
 ## Model-input projection
 

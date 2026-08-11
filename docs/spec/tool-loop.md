@@ -290,6 +290,8 @@ The workstation-facing registry is daemon-local and process-lifetime immutable.
 The daemon composes it from these implemented families:
 
 - basic tools (`current_time`, `echo`, and `session_status_update`);
+- blob-read tools (`blob_metadata` and `blob_read`) when blob storage is
+  configured;
 - web fetch and search;
 - code-host and mapped GitHub pull-request tools;
 - mapped workspace read and mutation tools;

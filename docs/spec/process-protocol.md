@@ -2270,9 +2270,12 @@ is content order. Supplying any part flag makes standard input unavailable for
 that mutation; omitting all part flags preserves the existing single text part
 read from standard input. This gives uploaded attachment digests a first-party
 authoring path without adding another equivalent wire spelling. Chat accepts the
-same `:part <json>` line command for the next submission, preserves its
-encounter order with typed text lines, and clears the pending parts after
-submission or parse failure.
+same `:part JSON` object by appending it to a pending sequence without
+submitting it; `:send` submits the nonempty pending sequence and clears it, and
+`:clear` discards it locally. A malformed part clears the sequence and reports a
+local parse error. An ordinary input line keeps its immediate one-text-part
+meaning only while no part is pending; otherwise the client refuses it and
+requires `:send` or `:clear`.
 
 The terminal client provides these delegation commands for exact already-issued
 tool requests:
@@ -2306,13 +2309,15 @@ when there is none, the first acceptance-ordered queued turn; queued work is not
 presented as an idle loop.
 
 A line without the `:` prefix submits exact nonempty line content only while the
-loop awaits neither a queued nor active reply. Line termination removes LF or
-CRLF only, retaining a bare trailing carriage return at standard-input EOF. The
-returned `input_submitted` receipt marks that turn queued; only its durable
-`turn_activated` event enables active-turn controls and changes the displayed
-state to streaming. The closed in-loop command set is `:stop TEXT`,
+loop awaits neither a queued nor active reply and no multipart sequence is
+pending. Line termination removes LF or CRLF only, retaining a bare trailing
+carriage return at standard-input EOF. The returned `input_submitted` receipt
+marks that turn queued; only its durable `turn_activated` event enables
+active-turn controls and changes the displayed state to streaming. The closed
+in-loop command set is `:part JSON`, `:send`, `:clear`, `:stop TEXT`,
 `:steer TEXT`, `:approve ID`, `:deny ID REASON`, `:transcript`,
-`:model ALIAS-UUID`, and `:quit`. These map to the existing `stop_turn`,
+`:model ALIAS-UUID`, and `:quit`. Multipart commands map to one start-when-idle
+`submit_input`; the remaining commands map to the existing `stop_turn`,
 configuration-free steering `submit_input`, `decide_tool_request`,
 `read_transcript`, and `replace_session_defaults` requests, or local exit;
 ordinary input maps to start-when-idle `submit_input`. `:stop` requires
@@ -2713,22 +2718,24 @@ fails its closed shape is named as a malformed-known protocol violation.
 subsequent typed durable updates until interrupted. Each delta is flushed as one
 line:
 `provider_text_delta session=<session> turn=<turn> call=<call> part=<index> content=<text>`.
-By default its trailing text field escapes line feed and every other C0 code
-point, DEL, and C1 code point, so provider output cannot forge another event
-line or execute terminal controls; `--raw-output` remains the explicit opt-in to
-unchanged text. Snapshots render a model boundary as `model_identity_changed`
-with its turn, defaults version, selected model, source session, and entry
-identity. By default every process-derived text field written to a terminal
-preserves line feed but renders every other C0 code point, DEL, and C1 code
-points as visible `\u{...}` escapes, preventing ESC/OSC execution. A metadata
-title or tag shares its output line with named neighbors, so `search` escapes
-line feed in those two fields as well, and a tag additionally escapes its own
-delimiters and escape introducer, using the same `\u{...}` vocabulary; no
-metadata value can forge another result row, field, or tag. `--raw-output` is
-the explicit opt-in that writes those fields unchanged; the same safe-rendering
-choice covers assistant text, typed diagnostics, and durable updates. Each
-complete raw text value is flushed before the client awaits another frame,
-without adding a delimiter.
+Accepted `transcript_user_entry` members use the terminal line shape owned by
+[blob storage](blob-storage.md#multipart-user-content), preserving their ordered
+part JSON without rendering attachment bytes. By default its trailing text field
+escapes line feed and every other C0 code point, DEL, and C1 code point, so
+provider output cannot forge another event line or execute terminal controls;
+`--raw-output` remains the explicit opt-in to unchanged text. Snapshots render a
+model boundary as `model_identity_changed` with its turn, defaults version,
+selected model, source session, and entry identity. By default every
+process-derived text field written to a terminal preserves line feed but renders
+every other C0 code point, DEL, and C1 code points as visible `\u{...}` escapes,
+preventing ESC/OSC execution. A metadata title or tag shares its output line
+with named neighbors, so `search` escapes line feed in those two fields as well,
+and a tag additionally escapes its own delimiters and escape introducer, using
+the same `\u{...}` vocabulary; no metadata value can forge another result row,
+field, or tag. `--raw-output` is the explicit opt-in that writes those fields
+unchanged; the same safe-rendering choice covers assistant text, typed
+diagnostics, and durable updates. Each complete raw text value is flushed before
+the client awaits another frame, without adding a delimiter.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
