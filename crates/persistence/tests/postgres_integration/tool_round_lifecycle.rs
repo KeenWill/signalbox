@@ -1478,6 +1478,51 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     Ok(())
 }
 
+/// Every session an eligibility sweep reports, following its continuations.
+///
+/// Paging the sweep is plumbing rather than the behavior under test, so the
+/// iteration lives here (`docs/agents/testing-style.md` rules 2 and 3).
+async fn swept_sessions(pool: &PgPool) -> Result<Vec<SessionId>, Box<dyn Error>> {
+    let mut sweep = PostgresEligibilitySweep::new(pool.clone());
+    let mut sessions = Vec::new();
+    loop {
+        let (page, continuation) = sweep.find_sessions().await?.into_parts();
+        sessions.extend(page);
+        if !continuation {
+            break;
+        }
+    }
+    Ok(sessions)
+}
+
+/// Moves one frontier-delta member to `position`.
+///
+/// The reordering cases differ only in which entry moves where, so the
+/// statement lives here and each case states its two knobs at the call site
+/// (`docs/agents/testing-style.md` rules 2 and 4).
+async fn move_delta_member(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: Uuid,
+    frontier: Uuid,
+    entry: Uuid,
+    position: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE context_frontier_delta
+                SET member_position = $1
+              WHERE owning_session_id = $2
+                AND context_frontier_id = $3
+                AND semantic_entry_id = $4",
+    )
+    .bind(position)
+    .bind(session)
+    .bind(frontier)
+    .bind(entry)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// S05 / S10 / S11 / INV-006 / INV-019 / INV-027: denial never dispatches,
 /// schema failure is durable result evidence, external-effect crash loss parks
 /// on exact recovery authority, and effect-free loss closes every request
@@ -1727,15 +1772,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         StartupScanSessionOutcome::ResumableToolBatch { turn }
             if turn == schema_fixture.turn
     ));
-    let mut recovery_sweep = PostgresEligibilitySweep::new(pool.clone());
-    let mut recovery_sessions = Vec::new();
-    loop {
-        let (page, continuation) = recovery_sweep.find_sessions().await?.into_parts();
-        recovery_sessions.extend(page);
-        if !continuation {
-            break;
-        }
-    }
+    let recovery_sessions = swept_sessions(&pool).await?;
     assert!(
         recovery_sessions.contains(&schema_fixture.session),
         "the durable sweep must reschedule a resumable active tool batch"
@@ -1998,25 +2035,32 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     )
     .execute(&mut *reordered_terminal)
     .await?;
-    for (entry, position) in [
-        (Uuid::from_u128(effect_free_seed + 31), 99_i64),
-        (Uuid::from_u128(effect_free_seed + 26), 3_i64),
-        (Uuid::from_u128(effect_free_seed + 31), 4_i64),
-    ] {
-        sqlx::query(
-            "UPDATE context_frontier_delta
-                SET member_position = $1
-              WHERE owning_session_id = $2
-                AND context_frontier_id = $3
-                AND semantic_entry_id = $4",
-        )
-        .bind(position)
-        .bind(effect_free_fixture.session.into_uuid())
-        .bind(Uuid::from_u128(effect_free_seed + 27))
-        .bind(entry)
-        .execute(&mut *reordered_terminal)
-        .await?;
-    }
+    let reordered_frontier = Uuid::from_u128(effect_free_seed + 27);
+    let reordered_session = effect_free_fixture.session.into_uuid();
+    move_delta_member(
+        &mut reordered_terminal,
+        reordered_session,
+        reordered_frontier,
+        Uuid::from_u128(effect_free_seed + 31),
+        99,
+    )
+    .await?;
+    move_delta_member(
+        &mut reordered_terminal,
+        reordered_session,
+        reordered_frontier,
+        Uuid::from_u128(effect_free_seed + 26),
+        3,
+    )
+    .await?;
+    move_delta_member(
+        &mut reordered_terminal,
+        reordered_session,
+        reordered_frontier,
+        Uuid::from_u128(effect_free_seed + 31),
+        4,
+    )
+    .await?;
     let reordered_terminal_error = sqlx::query("SELECT assert_tool_loop_turn_final_state($1)")
         .bind(effect_free_fixture.turn.into_uuid())
         .execute(&mut *reordered_terminal)
@@ -2041,19 +2085,13 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
             ..
         } if *request == effect_free_request && *attempt == effect_free_attempt
     )));
-    let mut failure_dispatched = false;
+    let mut effect_free_dispatched = Vec::new();
     drain_outbox(&pool, |event| {
-        if matches!(
-            event.kind(),
-            DispatchedOutboxEventKind::TurnFailed { turn, .. }
-                if *turn == effect_free_fixture.turn
-        ) {
-            failure_dispatched = true;
-        }
+        effect_free_dispatched.push(event.kind().clone());
     })
     .await?;
     assert!(
-        failure_dispatched,
+        announced_failed_turns(&effect_free_dispatched).contains(&effect_free_fixture.turn),
         "known tool-crash failure must not be rejected for earlier call history"
     );
 

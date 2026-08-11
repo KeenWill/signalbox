@@ -3765,6 +3765,21 @@ fn announced_batch_states(
         .collect()
 }
 
+/// The turns a dispatched batch announced as failed.
+///
+/// Matching over dispatched events is logic that `docs/agents/testing-style.md`
+/// rule 2 keeps out of a test body, and reporting the turns rather than a bare
+/// boolean lets a caller assert against the turn its fixture states (rule 6).
+fn announced_failed_turns(dispatched: &[DispatchedOutboxEventKind]) -> Vec<TurnId> {
+    dispatched
+        .iter()
+        .filter_map(|kind| match kind {
+            DispatchedOutboxEventKind::TurnFailed { turn, .. } => Some(*turn),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether anything announced `turn` as definitively resolved.
 fn announces_a_definitive_turn_outcome(
     dispatched: &[DispatchedOutboxEventKind],
