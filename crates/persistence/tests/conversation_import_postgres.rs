@@ -427,11 +427,8 @@ async fn insert_imported_session_scaffolding_with_creation_cause(
 async fn insert_imported_resume_seed_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<ImportedSeedFacts, sqlx::Error> {
-    insert_imported_resume_seed_scaffolding_with_creation_cause(
-        transaction,
-        CURRENT_CREATION_CAUSE,
-    )
-    .await
+    insert_imported_resume_seed_scaffolding_with_creation_cause(transaction, CURRENT_CREATION_CAUSE)
+        .await
 }
 
 async fn insert_imported_resume_seed_scaffolding_with_creation_cause(
