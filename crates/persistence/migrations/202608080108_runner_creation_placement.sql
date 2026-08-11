@@ -171,11 +171,6 @@ ALTER TABLE create_session_from_imported_frontier_command
         )
     );
 
-ALTER TABLE create_session_command
-    ALTER COLUMN runner_permission_override_count DROP DEFAULT;
-ALTER TABLE create_session_from_imported_frontier_command
-    ALTER COLUMN runner_permission_override_count DROP DEFAULT;
-
 CREATE TABLE create_session_runner_permission_override (
     command_id uuid NOT NULL,
     tool_name text NOT NULL,
