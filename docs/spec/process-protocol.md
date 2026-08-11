@@ -1,8 +1,9 @@
 # Process protocol
 
-The typed runner-state session event, daemon outbox projection, and
-authoritative session-summary and transcript-snapshot runner projections were
-verified against this PR (`agent/runner-event-outbox-persistence`).
+The typed runner-state session event, daemon outbox projection, authoritative
+session-summary and transcript-snapshot runner projections, and the runner
+request/projection implementation boundary were verified against this PR
+(`agent/runner-event-outbox-persistence`).
 
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
@@ -841,8 +842,9 @@ vocabulary. The closed-enum decoder rejects any unknown request, response,
 event, or nested tagged member rather than interpreting it as an older shape.
 Because every durable representation implemented in this tree is expressible at
 version `1`, selecting a session never requires a feature-specific version gate.
-The proposed runner requests and runner-bearing projections remain outside the
-implemented vocabulary until their implementing stack lands.
+The proposed runner requests remain outside the implemented vocabulary until
+their implementing stack lands. The runner-bearing projections named above are
+implemented at version `1`.
 
 Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
 boundary before application construction or mutation and returns
