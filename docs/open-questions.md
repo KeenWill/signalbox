@@ -462,18 +462,16 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
-- **Per-template thread-resolution policy.** Sessions that respond to review may
-  auto-resolve reviewer threads through
-  [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog),
-  and that single global posture is the accepted ruling. Whether the posture
-  becomes configurable for each session template — so that one template resolves
-  its own threads while another may only reply and leave resolution to the
-  reviewer — is deliberately deferred, not undecided by omission. Deciding it
-  requires the template configuration surface to carry per-template tool posture
-  at all, which is itself open under
+- **Per-template thread-resolution policy.** Whether a session template may
+  choose its own posture toward
+  [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog)
+  — so that one template resolves the reviewer threads it has answered while
+  another may only reply and leave resolution to the reviewer — is undecided.
+  Deciding it requires the template configuration surface to carry per-template
+  tool posture at all, which is itself open under
   [Template storage and authoring](#template-storage-and-authoring). Recorded as
-  a design question rather than a blocker; the global posture remains correct
-  until it is answered.
+  a design question rather than a blocker; it blocks only a per-template choice,
+  never the posture the daemon composition already applies.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
   remain undecided.

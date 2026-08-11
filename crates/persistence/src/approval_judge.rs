@@ -61,7 +61,7 @@ impl SessionAuthorityContext {
         }
     }
 
-    /// Borrows the current generation's commissioned statement.
+    /// Borrows the statement of the generation the judged turn is bound to.
     #[must_use]
     pub const fn goal(&self) -> Option<&GoalStatement> {
         self.goal.as_ref()
@@ -757,11 +757,46 @@ async fn load_session_authority_context(
         .map(SessionSystemPrompt::try_new)
         .transpose()
         .map_err(|_| ApprovalJudgeCorruption::Inconsistent("system prompt admission"))?;
+    let goal = load_judged_turn_goal(&mut *connection, session, turn).await?;
+    Ok(SessionAuthorityContext::new(goal, template, system_prompt))
+}
+
+/// Resolves the goal statement the judged turn was actually produced under.
+///
+/// A pursuing generation may be superseded while its already-active turn is
+/// parked for delegated approval. Reading the session's current generation
+/// would then show the judge a broadened replacement and let it authorize a
+/// request the originating goal never covered, defeating the narrow-only
+/// guarantee. The generation recorded for the turn is the only sound binding,
+/// and a turn that no goal drives carries no goal authority to show.
+async fn load_judged_turn_goal(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Option<GoalStatement>, ApprovalJudgeRepositoryError> {
+    let Some(generation) = sqlx::query_scalar::<_, Decimal>(
+        "SELECT goal_generation
+           FROM goal_turn
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    else {
+        return Ok(None);
+    };
     let goal = load_goal_from_connection(&mut *connection, session)
         .await
         .map_err(map_goal_error)?
-        .map(|goal| goal.current().statement().clone());
-    Ok(SessionAuthorityContext::new(goal, template, system_prompt))
+        .ok_or(ApprovalJudgeCorruption::Missing("judged turn goal"))?;
+    goal.generations()
+        .iter()
+        .find(|snapshot| Decimal::from(snapshot.generation().get()) == generation)
+        .map(|snapshot| snapshot.statement().clone())
+        .ok_or_else(|| ApprovalJudgeCorruption::Inconsistent("judged turn goal generation").into())
+        .map(Some)
 }
 
 fn decode_prepared(
