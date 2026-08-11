@@ -8328,14 +8328,47 @@ pub struct PinnedRunnerPlacement {
     /* public complete pinned facts, including optional grant lineage, sandbox,
        permission overrides, and provisioned-workspace recovery facts */
 }
+pub enum RunnerPlacementLossSource {
+    Connection,
+    Registration,
+}
+pub struct RunnerLostBeforePin { /* private exact runner */ }
+impl RunnerLostBeforePin {
+    pub const fn from_stored(runner: RunnerId) -> Self;
+    // accessor: runner()
+}
+pub struct LostPinnedRunnerPlacement { /* private pinned facts + loss source */ }
+impl LostPinnedRunnerPlacement {
+    pub const fn from_stored(
+        pinned: PinnedRunnerPlacement,
+        source: RunnerPlacementLossSource,
+    ) -> Self;
+    // accessors: pinned(), source()
+}
+pub enum AbandonedRunnerPlacement {
+    BeforePin(RunnerLostBeforePin),
+    Pinned(Box<LostPinnedRunnerPlacement>),
+}
 pub enum SessionRunnerPlacementState {
     Unpinned,
+    RunnerLostBeforePin(RunnerLostBeforePin),
     Pinned(PinnedRunnerPlacement),
-    RunnerLost(PinnedRunnerPlacement),
+    RunnerLost(LostPinnedRunnerPlacement),
+    RunnerAbandoned(AbandonedRunnerPlacement),
 }
 pub struct SessionRunnerPlacement { /* private */ }
+pub enum RunnerPlacementReconstitutionHistory {
+    Initial,
+    PrePinReplacements(Vec<RunnerPrePinReplacementHistory>),
+}
+pub struct RunnerPrePinReplacementHistory {
+    pub prior_revision: RunnerGeneration,
+    pub lost_runner: RunnerId,
+    pub prior_request: SessionRunnerPlacementRequest,
+    pub replacement_request: SessionRunnerPlacementRequest,
+}
 pub struct SessionRunnerPlacementReconstitutionInput {
-    /* public complete typed placement facts */
+    /* public complete typed placement facts + append-only history proof */
 }
 impl SessionRunnerPlacement {
     // placement is the only producer of initial and retry lease offers
@@ -8369,10 +8402,19 @@ impl SessionRunnerPlacement {
         authorization: RunnerToolAttemptAuthorization,
     ) -> Result<RunnerLease, RunnerDomainError>;
     pub fn mark_runner_lost(self) -> Result<Self, RunnerDomainError>;
+    pub fn mark_runner_lost_before_pin(
+        self,
+        runner: RunnerId,
+    ) -> Result<Self, RunnerDomainError>;
     pub fn reconcile_registration(
         self,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError>;
+    pub fn replace_lost_runner_before_pin(
+        self,
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<RunnerPrePinReplacement, RunnerDomainError>;
     pub fn replace_lost_runner(
         self,
         request: SessionRunnerPlacementRequest,
@@ -8381,6 +8423,7 @@ impl SessionRunnerPlacement {
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn abandon_lost_runner(self) -> Result<Self, RunnerDomainError>;
     pub fn replace_credential_profile(
         self,
         grant: CredentialProfileGrant,
@@ -8398,6 +8441,9 @@ impl SessionRunnerPlacement {
 }
 pub struct SessionRunnerPin {
     /* public placement, optional initial grant, and initial lease */
+}
+pub struct RunnerPrePinReplacement {
+    /* public successor placement, exact loss, and before/after requests */
 }
 pub struct RunnerPlacementReplacement {
     /* public placement, change, optional replacement grant, and optional complete grant change */
@@ -9876,8 +9922,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **752 (+10 free fn)** |
+| domain: runner                                     | 70                    |
+| **signalbox-domain total**                         | **759 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

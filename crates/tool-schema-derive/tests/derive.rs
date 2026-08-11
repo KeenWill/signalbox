@@ -1,3 +1,10 @@
+//! End-to-end coverage of `#[derive(ToolSchema)]`'s rendered JSON Schema.
+//!
+//! Exercises scalar, optional, aliased, nested, collection, renamed, and
+//! non-ASCII field shapes, serde attribute interactions (`rename_all`,
+//! `default`, `skip`, `flatten`'s rejection, `with` overrides), and the
+//! schemars bridge's recursive-definition hoisting and collision detection.
+
 use std::collections::BTreeMap;
 
 use expect_test::expect;

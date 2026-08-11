@@ -1,3 +1,9 @@
+//! Unit tests for the session-delegation tool catalog defined in `lib.rs`.
+//!
+//! Covers spawn/await/send-message schema shape and bounds, dispatch
+//! authority and effect-class declarations, and the delegation outcome and
+//! result-delivery projections each tool renders back to the model.
+
 use std::{
     error::Error,
     future::{Future, ready},

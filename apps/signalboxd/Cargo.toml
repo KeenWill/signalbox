@@ -92,6 +92,12 @@ uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] 
 [dev-dependencies]
 expect-test = "1.5.1"
 git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
+# The shared executor-driving harness lives in the application crate so sibling
+# crates do not each grow a copy; it is test-only, and it is what lets the
+# composed daemon executor be driven without a database.
+signalbox-application = { path = "../../crates/application", features = [
+    "test-support",
+] }
 opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
     "testing",
     "trace",

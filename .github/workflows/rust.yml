@@ -96,6 +96,13 @@ jobs:
         run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
+      # Drives the sweep against a fake `docker` it puts first on PATH, so it
+      # neither needs nor touches the runner's daemon: what is under test is the
+      # selection and the failure classification, and a real daemon could not be
+      # asked on demand for the orphan ages, the mid-sweep removal, the refused
+      # inspection, or the daemon that never answers that the cases require.
+      - name: Test the orphaned-container sweep
+        run: python3 tooling/test_sweep_test_containers.py
       # Runs here rather than in coverage.yml or swift.yml because it reads
       # both of them: it extracts the jq programs those workflows embed and
       # checks each against the Python summarizer that reads the same
@@ -123,7 +130,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            569fc5218b71c7f40efe8156f531ed7514f4113b1e17b91ab7a91f39144d1a09
+            aca9960afd1c53f945de449d077c8b42004565185a56a3df98270dc3a8cf9bb8
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -351,7 +358,7 @@ jobs:
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Only persistence is sharded today — 659 of the 909 ignored tests, and
+  # Only persistence is sharded today — 659 of the 964 ignored tests, and
   # 22m22s as a single job against roughly 7m at three ways.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it

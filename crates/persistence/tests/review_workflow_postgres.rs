@@ -50,7 +50,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     review_orchestration::{
         PostgresReviewOrchestrationStore, ReviewOrchestrationCommand,
@@ -101,6 +101,7 @@ async fn migrated_postgres_with_max_connections(
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -124,6 +125,7 @@ async fn migrated_postgres_in_configured_schema()
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -175,6 +177,7 @@ async fn migrated_postgres_counting_statements()
             String::from("-c"),
             String::from("pg_stat_statements.track=all"),
         ])
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
