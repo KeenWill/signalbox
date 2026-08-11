@@ -36,10 +36,10 @@ extension LiveScreenSnapshotTests {
     // MARK: - The four kept screens
 
     func testLegacySessionList() async {
-        await assertLiveScreenSnapshot(of: legacySessionsScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacySessionsScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacySessionsScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacySessionsScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacySessionsScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacySessionsScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacySessionsScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacySessionsScreen(), canvas: .iPadLandscape)
     }
 
     /// The unconfigured state is a different screen, not a dimmed one: with no
@@ -49,52 +49,52 @@ extension LiveScreenSnapshotTests {
     /// navigation chrome and toolbar visible behind it, so each of the four is
     /// a different rendering of the same message and each is recorded.
     func testLegacySessionListWithoutAConfiguredServer() async {
-        await assertLiveScreenSnapshot(of: unconfiguredSessionsScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredSessionsScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: unconfiguredSessionsScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredSessionsScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: unconfiguredSessionsScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: unconfiguredSessionsScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: unconfiguredSessionsScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: unconfiguredSessionsScreen(), canvas: .iPadLandscape)
     }
 
     func testLegacyMonitor() async {
-        await assertLiveScreenSnapshot(of: legacyMonitorScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyMonitorScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyMonitorScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyMonitorScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyMonitorScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyMonitorScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyMonitorScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyMonitorScreen(), canvas: .iPadLandscape)
     }
 
     func testLegacyMonitorWithoutAConfiguredServer() async {
-        await assertLiveScreenSnapshot(of: unconfiguredMonitorScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredMonitorScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: unconfiguredMonitorScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredMonitorScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: unconfiguredMonitorScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: unconfiguredMonitorScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: unconfiguredMonitorScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: unconfiguredMonitorScreen(), canvas: .iPadLandscape)
     }
 
     func testLegacyRunners() async {
-        await assertLiveScreenSnapshot(of: legacyRunnersScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyRunnersScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyRunnersScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyRunnersScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyRunnersScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyRunnersScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyRunnersScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyRunnersScreen(), canvas: .iPadLandscape)
     }
 
     func testLegacyRunnersWithoutAConfiguredServer() async {
-        await assertLiveScreenSnapshot(of: unconfiguredRunnersScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredRunnersScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: unconfiguredRunnersScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredRunnersScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: unconfiguredRunnersScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: unconfiguredRunnersScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: unconfiguredRunnersScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: unconfiguredRunnersScreen(), canvas: .iPadLandscape)
     }
 
     func testLegacyTemplates() async {
-        await assertLiveScreenSnapshot(of: legacyTemplatesScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyTemplatesScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyTemplatesScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyTemplatesScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyTemplatesScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyTemplatesScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyTemplatesScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyTemplatesScreen(), canvas: .iPadLandscape)
     }
 
     func testLegacyTemplatesWithoutAConfiguredServer() async {
-        await assertLiveScreenSnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: unconfiguredTemplatesScreen(), canvas: .iPadLandscape)
     }
 
     // MARK: - The session detail screen, once per fixture session
@@ -107,58 +107,58 @@ extension LiveScreenSnapshotTests {
     /// screen — which is what makes the pair worth having.
     func testLegacySessionDetailForACompletedTurn() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.activeSessionID)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     func testLegacySessionDetailWithAToolRequestAwaitingApproval() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.approvalSessionID)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     func testLegacySessionDetailWithAFailedTool() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.failedSessionID)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     func testLegacySessionDetailRenderingMarkdownHeadingsAndLists() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.markdownBasicsSessionID)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     func testLegacySessionDetailRenderingAMarkdownTable() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.markdownTableSessionID)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     func testLegacySessionDetailRenderingMarkdownCodeAndQuotes() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.markdownCodeSessionID)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     func testLegacySessionDetailRenderingAMarkdownIncidentReport() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.markdownSessionID)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     /// The one fixture session the mock serves no events for, which is the only
@@ -170,10 +170,10 @@ extension LiveScreenSnapshotTests {
             MockSignalboxFixtures.archivedSessionID,
             in: .archived
         )
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: legacyDetailScreen(session), canvas: .iPadLandscape)
     }
 
     /// The artifact preview over the transcript that presents it, which is the
@@ -183,10 +183,10 @@ extension LiveScreenSnapshotTests {
     /// records the same preview standing alone.
     func testLegacySessionDetailPresentingAnArtifactPreview() async throws {
         let session = try await fixtureSession(MockSignalboxFixtures.activeSessionID)
-        await assertLiveScreenSnapshot(of: previewingDetailScreen(session), canvas: .iPhonePortrait)
-        await assertLiveScreenSnapshot(of: previewingDetailScreen(session), canvas: .iPhoneLandscape)
-        await assertLiveScreenSnapshot(of: previewingDetailScreen(session), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: previewingDetailScreen(session), canvas: .iPadLandscape)
+        await assertLegacySnapshot(of: previewingDetailScreen(session), canvas: .iPhonePortrait)
+        await assertLegacySnapshot(of: previewingDetailScreen(session), canvas: .iPhoneLandscape)
+        await assertLegacySnapshot(of: previewingDetailScreen(session), canvas: .iPadPortrait)
+        await assertLegacySnapshot(of: previewingDetailScreen(session), canvas: .iPadLandscape)
     }
 
     // MARK: - The two screens a sheet presents
@@ -198,7 +198,7 @@ extension LiveScreenSnapshotTests {
     /// an artifact this suite made up, and the fixtures belong to the mock.
     func testLegacyArtifactPreviewContent() async throws {
         let artifact = try await fixtureArtifact(MockSignalboxFixtures.activeSessionID)
-        await assertLiveScreenSnapshot(of: ArtifactPreviewScreen(artifact: artifact), canvas: .sheet)
+        await assertLegacySnapshot(of: ArtifactPreviewScreen(artifact: artifact), canvas: .sheet)
     }
 
     /// The legacy creation sheet's content, the counterpart of
@@ -208,7 +208,7 @@ extension LiveScreenSnapshotTests {
     /// are empty until it answers, and an unrefreshed model would record a
     /// form with two empty menus.
     func testLegacySessionCreationSheetContent() async {
-        await assertLiveScreenSnapshot(of: await legacyCreationSheet(), canvas: .sheet)
+        await assertLegacySnapshot(of: await legacyCreationSheet(), canvas: .sheet)
     }
 
     // MARK: - Construction

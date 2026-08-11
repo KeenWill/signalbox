@@ -81,6 +81,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// made of — a claim can no longer be satisfied by a method that exists and
     /// happens to have PNGs, because the rendering itself is what reports.
     private var scenarioRenderings: [(scenario: ScreenshotScenario, canvas: SnapshotCanvas)] = []
+    private var legacyRenderings: Set<SnapshotCanvas> = []
 
     /// What this suite does with one `ScreenshotScenario`.
     ///
@@ -357,7 +358,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
         canvasesByTest(inGoldensNamed: committedGoldenNames)
     }
 
-    /// The canvases each claimed test promises, by test name.
+    /// The canvases each structurally checked test promises, by test name.
     static var declaredCanvasesByTest: [String: Set<String>] {
         var declared: [String: Set<String>] = [:]
         for pair in everyDisposition {
@@ -366,8 +367,42 @@ final class LiveScreenSnapshotTests: XCTestCase {
             else { continue }
             declared[test] = Set(canvases.map(\.rawValue))
         }
+        for (test, canvases) in legacyDeclaredCanvasesByTest {
+            declared[test] = Set(canvases.map(\.rawValue))
+        }
         return declared
     }
+
+    /// The canvases promised by every legacy snapshot test.
+    static let legacyDeclaredCanvasesByTest: [String: Set<SnapshotCanvas>] = {
+        let screenTests = [
+            "testLegacySessionList",
+            "testLegacySessionListWithoutAConfiguredServer",
+            "testLegacyMonitor",
+            "testLegacyMonitorWithoutAConfiguredServer",
+            "testLegacyRunners",
+            "testLegacyRunnersWithoutAConfiguredServer",
+            "testLegacyTemplates",
+            "testLegacyTemplatesWithoutAConfiguredServer",
+            "testLegacySessionDetailForACompletedTurn",
+            "testLegacySessionDetailWithAToolRequestAwaitingApproval",
+            "testLegacySessionDetailWithAFailedTool",
+            "testLegacySessionDetailRenderingMarkdownHeadingsAndLists",
+            "testLegacySessionDetailRenderingAMarkdownTable",
+            "testLegacySessionDetailRenderingMarkdownCodeAndQuotes",
+            "testLegacySessionDetailRenderingAMarkdownIncidentReport",
+            "testLegacySessionDetailForAnArchivedSessionWithNoEvents",
+            "testLegacySessionDetailPresentingAnArtifactPreview",
+        ]
+        var declared = Dictionary(
+            uniqueKeysWithValues: screenTests.map {
+                ($0, Set<SnapshotCanvas>.everyScreenCanvas)
+            }
+        )
+        declared["testLegacyArtifactPreviewContent"] = [.sheet]
+        declared["testLegacySessionCreationSheetContent"] = [.sheet]
+        return declared
+    }()
 
     /// The claimed tests whose committed goldens differ from what they promise.
     ///
@@ -697,7 +732,14 @@ final class LiveScreenSnapshotTests: XCTestCase {
             ["iphone-portrait", "iphone-landscape", "ipad-portrait", "ipad-landscape"]
         )
         XCTAssertNil(Self.declaredCanvasesByTest["testTheDuplicateDetectorReportsADuplicate"])
-        XCTAssertNil(Self.declaredCanvasesByTest["testTemplatesCapabilityGate"])
+        XCTAssertEqual(
+            Self.declaredCanvasesByTest["testLegacySessionList"],
+            ["iphone-portrait", "iphone-landscape", "ipad-portrait", "ipad-landscape"]
+        )
+        XCTAssertEqual(
+            Set(Self.definedTestNames.filter { $0.hasPrefix("testLegacy") }),
+            Set(Self.legacyDeclaredCanvasesByTest.keys)
+        )
     }
 
     /// Every claimed test has a golden for every canvas it promises.
@@ -1091,6 +1133,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// `-only-testing` run checks exactly the tests it selected.
     override func tearDown() {
         verifyThisTestRenderedWhatItClaims()
+        verifyThisLegacyTestRenderedEveryDeclaredCanvas()
         super.tearDown()
     }
 
@@ -1106,6 +1149,33 @@ final class LiveScreenSnapshotTests: XCTestCase {
             canvases that scenario promises. A canvas dropped from the body \
             leaves its committed golden on disk, so nothing else notices.
             """
+        )
+    }
+
+    private func verifyThisLegacyTestRenderedEveryDeclaredCanvas() {
+        let runningTest = Self.methodName(ofTestCaseName: name)
+        guard let declared = Self.legacyDeclaredCanvasesByTest[runningTest] else { return }
+        XCTAssertEqual(
+            legacyRenderings,
+            declared,
+            "\(runningTest) did not render every canvas its declaration promises."
+        )
+    }
+
+    func assertLegacySnapshot(
+        of view: some View,
+        canvas: SnapshotCanvas,
+        testName: String = #function,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        legacyRenderings.insert(canvas)
+        await assertLiveScreenSnapshot(
+            of: view,
+            canvas: canvas,
+            file: file,
+            testName: testName,
+            line: line
         )
     }
 

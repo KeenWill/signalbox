@@ -97,7 +97,7 @@ sheet content is also snapshotted alone on its own canvas.
 `ScreenshotScenario` selects the fixtures, the same seam the golden capture
 scripts below use.
 
-Record and verify through the two scripts below and nothing else:
+The canonical record and verification entry points are the two scripts below:
 `scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
 the simulator from `scripts/lib/snapshots.sh`, which is what CI runs, while a
 bare `scripts/test-xcode.sh` resolves whichever compatible phone is booted.
