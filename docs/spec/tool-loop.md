@@ -836,7 +836,9 @@ tools:
   bytes; checked offset plus length must lie within the blob. It returns text
   containing compact JSON with the `digest`, `offset_bytes`, and canonical
   padded `bytes_base64`. Its permission default is `Auto` and its effect class
-  is `EffectFree`.
+  is conservatively `ExternalEffect`: recorded failover can issue an
+  authenticated S3 GET observable to the object-store operator even when the
+  selected replica for another execution is local.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
   invalid. Before dispatch, its canonical origin must satisfy the

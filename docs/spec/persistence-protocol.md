@@ -3,6 +3,10 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The multipart accepted-input persistence paragraph below is the foundation
+proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
+with its implementing child stack.
+
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
@@ -462,9 +466,11 @@ Representation rules, all enforced in the schema:
   rejection directly against its named turn's recorded `awaiting_tool_approval`
   wait, so a receipt naming a running or terminal turn cannot commit and
   therefore never replays as authoritative.
-- Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
-  `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
-  application admission bound.
+- Accepted user content is stored only in the mirrored ordered command and
+  `accepted_input` part satellites. Their parent completeness, ordinal,
+  structural, text-byte, attachment-metadata, and blob-correlation constraints
+  are owned by [blob storage](blob-storage.md#multipart-user-content); neither
+  parent retains a `content_text` column.
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
