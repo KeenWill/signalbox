@@ -3454,14 +3454,23 @@ async fn append_runner_connection_loss_epoch(
         .bind(enrollment.into_uuid())
         .fetch_optional(&mut *connection)
         .await?;
-    let has_prior = prior.is_some();
-    let loss_epoch = match prior {
-        Some(prior) => RunnerConnectionLossEpoch::try_from_u64(decode_u64(prior)?)
-            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
-            .checked_next()
-            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
-        None => RunnerConnectionLossEpoch::try_from_u64(1)
-            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+    let (loss_epoch, head_statement) = match prior {
+        Some(prior) => (
+            RunnerConnectionLossEpoch::try_from_u64(decode_u64(prior)?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+                .checked_next()
+                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
+            "UPDATE runner_current_connection_loss
+                SET loss_epoch = $2
+              WHERE enrollment_id = $1",
+        ),
+        None => (
+            RunnerConnectionLossEpoch::try_from_u64(1)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+            "INSERT INTO runner_current_connection_loss
+                (enrollment_id, loss_epoch)
+             VALUES ($1, $2)",
+        ),
     };
     sqlx::query(
         "INSERT INTO runner_connection_loss_epoch
@@ -3485,15 +3494,6 @@ async fn append_runner_connection_loss_epoch(
     .bind(Decimal::from(loss_epoch.get()))
     .execute(&mut *connection)
     .await?;
-    let head_statement = if has_prior {
-        "UPDATE runner_current_connection_loss
-                SET loss_epoch = $2
-              WHERE enrollment_id = $1"
-    } else {
-        "INSERT INTO runner_current_connection_loss
-                (enrollment_id, loss_epoch)
-             VALUES ($1, $2)"
-    };
     sqlx::query(head_statement)
         .bind(enrollment.into_uuid())
         .bind(Decimal::from(loss_epoch.get()))
