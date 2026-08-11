@@ -17,12 +17,25 @@ item. The spine is parsed per `## crate: module` section, taking column-0
 4. a per-module count in the Inventory table disagrees with the export
    surface, an aggregate total row disagrees with the per-module sum or
    states a different free-function split from those rows, an exporting
-   module has no Inventory row, or a section declares the same name twice.
+   module has no Inventory row, or a section declares the same name twice, or
 
-Known limitation of this mechanical check: signatures, associated
-items, and enum variant lists inside a declaration are not validated —
-keeping those faithful is a review responsibility (cargo public-api is the
-upgrade path if name/count tripwires prove insufficient).
+5. a listed type's public inherent method surface disagrees with its
+   section. Source truth is every column-0 `impl` block in the crate's
+   source tree (trait impls contribute nothing: Rust rejects `pub` on
+   their items); spine truth is the owning section's impl-block `pub fn`
+   lines plus its `// accessors:` comment lists. A public method with no
+   declaration fails, as does a declared method the source no longer
+   defines. Types whose surface comes from a column-0 macro invocation
+   naming them (`define_identity!`, `goal_text!`, `bounded_text!`,
+   `positive_position!`) are exempt from the stale direction only — their
+   generated methods are invisible to this textual scan — and an impl
+   header the scan cannot parse fails loudly.
+
+Known limitation of this mechanical check: signatures, associated consts
+and types, trait items, and enum variant lists inside a declaration are
+not validated — method names on listed types are, but keeping the rest
+faithful is a review responsibility (cargo public-api is the upgrade path
+if these tripwires prove insufficient).
 
 The spine may say more than declarations (sealed markers, accessor notes); it
 may not disagree with the export surface. Run from the repository root; exits
@@ -50,6 +63,19 @@ ROOT_DECLARATION = re.compile(
     rf"^pub {MODIFIERS}(?:struct|enum|union|trait|fn|static|type|const) ([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
+IMPL_HEADER = re.compile(r"^impl\b|^impl<")
+IMPL_METHOD = re.compile(
+    r"^\s*pub\s+(?:(?:async|const|unsafe)\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+ACCESSOR_COMMENT = re.compile(r"^\s*// accessors?:")
+ACCESSOR_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\(\)")
+SECTION_TYPE = re.compile(r"^pub (?:struct|enum) ([A-Za-z_][A-Za-z0-9_]*)")
+MACRO_INVOCATION = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_:]*)!\s*\(([^;]*?)\)\s*;", re.MULTILINE | re.DOTALL
+)
+DOC_COMMENT_LINE = re.compile(r"///[^\n]*")
+CAPITALIZED_NAME = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
+ANGLE_TOKEN = re.compile(r"->|<|>|\bfor\b")
 
 
 def parse_exports(lib_rs: Path) -> dict[str, set[str]]:
@@ -79,6 +105,264 @@ def parse_identities(lib_rs: Path) -> set[str]:
 def parse_root_declarations(lib_rs: Path) -> set[str]:
     """Public items declared directly at column 0 of lib.rs."""
     return set(ROOT_DECLARATION.findall(lib_rs.read_text()))
+
+
+def blank_comments_and_strings(text: str) -> str:
+    """Blank comment and string-literal contents, preserving offsets.
+
+    An explicit scanner rather than a regex, for the same reason as the one
+    in scripts/check_style_rules.py: raw string literals and the apostrophe's
+    double duty as lifetime and character literal are not a regular language,
+    and getting either wrong moves impl blocks into or out of the scan.
+    Rustdoc examples are comments, so the `impl` blocks they quote vanish
+    here instead of counting as public surface.
+    """
+    code = list(text)
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "/" and text[index + 1 : index + 2] == "/":
+            end = text.find("\n", index)
+            end = length if end == -1 else end
+            for position in range(index, end):
+                code[position] = " "
+            index = end
+            continue
+        if char == "/" and text[index + 1 : index + 2] == "*":
+            end = text.find("*/", index + 2)
+            end = length if end == -1 else end + 2
+            for position in range(index, end):
+                if code[position] != "\n":
+                    code[position] = " "
+            index = end
+            continue
+        if char == "r" and text[index + 1 : index + 2] in ('"', "#"):
+            hashes = 0
+            cursor = index + 1
+            while cursor < length and text[cursor] == "#":
+                hashes += 1
+                cursor += 1
+            if cursor < length and text[cursor] == '"':
+                terminator = '"' + "#" * hashes
+                end = text.find(terminator, cursor + 1)
+                end = length if end == -1 else end + len(terminator)
+                for position in range(cursor + 1, min(end - len(terminator), length)):
+                    if code[position] != "\n":
+                        code[position] = " "
+                index = end
+                continue
+        if char == '"':
+            cursor = index + 1
+            while cursor < length:
+                if text[cursor] == "\\":
+                    cursor += 2
+                    continue
+                if text[cursor] == '"':
+                    break
+                cursor += 1
+            for position in range(index + 1, min(cursor, length)):
+                if code[position] != "\n":
+                    code[position] = " "
+            index = min(cursor + 1, length)
+            continue
+        if char == "'":
+            if text[index + 1 : index + 2] == "\\":
+                end = text.find("'", index + 2)
+                end = length if end == -1 else end + 1
+                for position in range(index + 1, min(end - 1, length)):
+                    code[position] = " "
+                index = end
+                continue
+            if text[index + 2 : index + 3] == "'":
+                code[index + 1] = " "
+                index += 3
+                continue
+        index += 1
+    return "".join(code)
+
+
+def impl_self_type(header: str) -> str | None:
+    """Self-type name of one impl header, None when there is none to take.
+
+    Handles generic parameter lists after `impl`, `Trait for Type` at angle
+    depth zero, trailing where-clauses, and path-qualified self types. The
+    spine's `impl <Identity>`-style placeholders have no self type and map
+    to None; a source header that maps to None is reported by the caller.
+    """
+    flat = " ".join(header.split())
+    rest = flat[len("impl") :].lstrip()
+    if rest.startswith("<"):
+        depth = 0
+        for token in ANGLE_TOKEN.finditer(rest):
+            if token.group() == "<":
+                depth += 1
+            elif token.group() == ">":
+                depth -= 1
+                if depth == 0:
+                    rest = rest[token.end() :].lstrip()
+                    break
+        else:
+            return None
+    rest = re.split(r"\bwhere\b", rest)[0].split("{")[0].strip()
+    if not rest:
+        return None
+    depth = 0
+    for token in ANGLE_TOKEN.finditer(rest):
+        if token.group() == "<":
+            depth += 1
+        elif token.group() == ">":
+            depth -= 1
+        elif token.group() == "for" and depth == 0:
+            rest = rest[token.end() :].lstrip()
+            break
+    segment = re.match(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Za-z_][A-Za-z0-9_]*)", rest)
+    return segment.group(1) if segment else None
+
+
+def parse_source_methods(
+    crate: str, path: Path
+) -> tuple[dict[str, set[str]], list[str]]:
+    """Map self-type name -> public method names from column-0 impl blocks.
+
+    Only `pub fn` items at impl depth are public method surface; trait
+    impls attribute to their self type but can never contribute (`pub` on
+    a trait-impl item is rejected by the compiler). Impls nested inside
+    inline modules are out of scope by the column-0 rule, which is what
+    keeps `#[cfg(test)] mod tests` fixtures out of the surface.
+    """
+    lines = blank_comments_and_strings(path.read_text()).splitlines()
+    methods: dict[str, set[str]] = {}
+    failures: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if IMPL_HEADER.match(line):
+            header_start = index
+            header_lines = [line]
+            while "{" not in header_lines[-1] and index + 1 < len(lines):
+                index += 1
+                header_lines.append(lines[index])
+            header = " ".join(header_lines)
+            target = impl_self_type(header)
+            if target is None:
+                failures.append(
+                    f"{crate} {path.as_posix()}:{header_start + 1} has an impl"
+                    " header this check cannot parse — restate or extend the"
+                    " check"
+                )
+                index += 1
+                continue
+            depth = header.count("{") - header.count("}")
+            while depth > 0 and index + 1 < len(lines):
+                index += 1
+                body_line = lines[index]
+                if depth == 1:
+                    method = IMPL_METHOD.match(body_line)
+                    if method:
+                        methods.setdefault(target, set()).add(method.group(1))
+                depth += body_line.count("{") - body_line.count("}")
+        index += 1
+    return methods, failures
+
+
+def parse_macro_surface_types(text: str) -> set[str]:
+    """Type names handed to column-0 macro invocations.
+
+    A macro that receives a type name is assumed able to add methods to it,
+    so these types keep their declared spine methods without a textual
+    source counterpart (the stale direction skips them). Doc-comment lines
+    inside the invocation are dropped first so their prose contributes no
+    names. Only parenthesized invocations are read; a brace or bracket form
+    that mints public surface would need this parser extended.
+    """
+    names: set[str] = set()
+    for invocation, arguments in MACRO_INVOCATION.findall(text):
+        if invocation.split("::")[-1] == "macro_rules":
+            continue
+        names.update(CAPITALIZED_NAME.findall(DOC_COMMENT_LINE.sub("", arguments)))
+    return names
+
+
+def parse_spine_method_declarations(
+    spine_text: str,
+) -> dict[tuple[str, str], dict[str, set[str]]]:
+    """Map (crate, section label) -> type name -> declared method names.
+
+    A method is declared by a `pub fn` line inside a section's column-0
+    impl block, or by an `// accessors:` comment list — inside an impl
+    block, or at column 0 attached to the nearest preceding `pub
+    struct`/`pub enum` line. An accessor list continues onto following
+    comment lines for as long as each line ends with a comma.
+    """
+    sections: dict[tuple[str, str], dict[str, set[str]]] = {}
+    current: tuple[str, str] | None = None
+    current_type: str | None = None
+    in_impl = False
+    impl_type: str | None = None
+    header_accum: list[str] | None = None
+    accessor_continues = False
+    for line in spine_text.splitlines():
+        if line.startswith("## "):
+            header = re.match(r"^## (domain|application): (.+)$", line)
+            current = (header.group(1), header.group(2).strip()) if header else None
+            if current:
+                sections.setdefault(current, {})
+            current_type = None
+            in_impl = False
+            impl_type = None
+            header_accum = None
+            accessor_continues = False
+            continue
+        if current is None:
+            continue
+        if header_accum is not None:
+            header_accum.append(line)
+            if "{" in line:
+                impl_type = impl_self_type(" ".join(header_accum))
+                in_impl = "}" not in line.split("{", 1)[1]
+                header_accum = None
+            continue
+        if not in_impl and IMPL_HEADER.match(line):
+            accessor_continues = False
+            if "{" in line:
+                impl_type = impl_self_type(line)
+                in_impl = "}" not in line.split("{", 1)[1]
+            else:
+                header_accum = [line]
+            continue
+        if in_impl:
+            if ACCESSOR_COMMENT.match(line) or (
+                accessor_continues and line.lstrip().startswith("//")
+            ):
+                if impl_type:
+                    sections[current].setdefault(impl_type, set()).update(
+                        ACCESSOR_NAME.findall(line)
+                    )
+                accessor_continues = line.rstrip().endswith(",")
+                continue
+            accessor_continues = False
+            method = IMPL_METHOD.match(line)
+            if method and impl_type:
+                sections[current].setdefault(impl_type, set()).add(method.group(1))
+            if line.startswith("}"):
+                in_impl = False
+                impl_type = None
+            continue
+        if ACCESSOR_COMMENT.match(line) or (
+            accessor_continues and line.startswith("//")
+        ):
+            if current_type:
+                sections[current].setdefault(current_type, set()).update(
+                    ACCESSOR_NAME.findall(line)
+                )
+            accessor_continues = line.rstrip().endswith(",")
+            continue
+        accessor_continues = False
+        declared_type = SECTION_TYPE.match(line)
+        if declared_type:
+            current_type = declared_type.group(1)
+    return sections
 
 
 def validate_lib_forms(crate: str, lib_rs: Path) -> list[str]:
@@ -251,6 +535,56 @@ def main() -> int:
             failures.append(
                 f"spine section '{crate}: {label}' matches no exporting module"
             )
+
+    # Method-surface comparison per listed type, both directions.
+    spine_methods = parse_spine_method_declarations(spine_text)
+    for crate, lib_path in CRATES.items():
+        home_section: dict[str, str] = {}
+        for module, names in all_exports[crate].items():
+            for name in names:
+                if name in home_section:
+                    failures.append(
+                        f"{crate} exports {name} from both"
+                        f" {home_section[name]} and {module}; method"
+                        " attribution needs one home — extend the check"
+                    )
+                home_section[name] = module
+        if crate == "domain":
+            for name in identities:
+                home_section.setdefault(name, IDENTITY_SECTION)
+        source_methods: dict[str, set[str]] = {}
+        macro_surface: set[str] = set()
+        for path in sorted(lib_path.parent.rglob("*.rs")):
+            found, unparsed = parse_source_methods(crate, path)
+            for name, methods in found.items():
+                source_methods.setdefault(name, set()).update(methods)
+            failures.extend(unparsed)
+            macro_surface.update(parse_macro_surface_types(path.read_text()))
+        for name, section in sorted(home_section.items()):
+            declared = spine_methods.get((crate, section), {}).get(name, set())
+            found = source_methods.get(name, set())
+            for method in sorted(found - declared):
+                failures.append(
+                    f"{crate}::{section}::{name} has public method {method}()"
+                    f" with no declaration in the '{crate}: {section}' section"
+                )
+            for method in sorted(declared - found):
+                if name in macro_surface:
+                    continue
+                failures.append(
+                    f"'{crate}: {section}' section declares {name}::{method}(),"
+                    " which source no longer defines as a public method"
+                )
+        for (section_crate, label), by_type in spine_methods.items():
+            if section_crate != crate:
+                continue
+            for name in sorted(by_type):
+                if home_section.get(name) != label:
+                    failures.append(
+                        f"'{crate}: {label}' section declares methods for"
+                        f" {name}, which is not part of that module's export"
+                        " surface"
+                    )
 
     expected, free_functions, duplicate_rows = parse_inventory(spine_text)
     failures.extend(duplicate_rows)
