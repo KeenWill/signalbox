@@ -9,14 +9,16 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     ActiveTurnPhase, DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
-    FrozenModelSelection, ModelCallId, ModelTargetCatalog, ProviderModelIdentity,
-    ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId, ToolApprovalPosture,
-    ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
+    FrozenModelSelection, GoalStatement, ModelCallId, ModelTargetCatalog, ProviderModelIdentity,
+    ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId, SessionSystemPrompt,
+    SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale, ToolRequest, ToolRequestId,
+    TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     ModelCredentialFamilyCatalog, commit_failure_is_ambiguous,
+    goal::{GoalRepositoryError, load_goal_from_connection},
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
@@ -30,6 +32,54 @@ use crate::{
     tool_loop::{ToolLoopRepositoryError, load_active_batch_from_connection},
 };
 
+/// The session-scoped authority a delegated request was produced under.
+///
+/// Delegation may only narrow authority, so a judge cannot decide scope
+/// without seeing what authority the session was granted. Every field is
+/// session-supplied text that untrusted sources may have influenced, so each
+/// one is carried as its exact admitted domain value and is never treated as
+/// instruction by its consumers.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SessionAuthorityContext {
+    goal: Option<GoalStatement>,
+    template: Option<SessionTemplateName>,
+    system_prompt: Option<SessionSystemPrompt>,
+}
+
+impl SessionAuthorityContext {
+    /// Composes one context from exactly the values a session recorded.
+    #[must_use]
+    pub const fn new(
+        goal: Option<GoalStatement>,
+        template: Option<SessionTemplateName>,
+        system_prompt: Option<SessionSystemPrompt>,
+    ) -> Self {
+        Self {
+            goal,
+            template,
+            system_prompt,
+        }
+    }
+
+    /// Borrows the current generation's commissioned statement.
+    #[must_use]
+    pub const fn goal(&self) -> Option<&GoalStatement> {
+        self.goal.as_ref()
+    }
+
+    /// Borrows the template name creation copied into this session.
+    #[must_use]
+    pub const fn template(&self) -> Option<&SessionTemplateName> {
+        self.template.as_ref()
+    }
+
+    /// Borrows the system prompt frozen for the judged request's turn.
+    #[must_use]
+    pub const fn system_prompt(&self) -> Option<&SessionSystemPrompt> {
+        self.system_prompt.as_ref()
+    }
+}
+
 /// Exact durable facts committed before approval-judge provider preparation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedApprovalJudge {
@@ -39,6 +89,7 @@ pub struct PreparedApprovalJudge {
     target: ResolvedProviderTarget,
     credential_reference: String,
     input_includes_cache_tokens: bool,
+    session_context: SessionAuthorityContext,
 }
 
 impl PreparedApprovalJudge {
@@ -70,6 +121,15 @@ impl PreparedApprovalJudge {
     /// Reports whether the provider's input total includes cache axes.
     pub const fn input_includes_cache_tokens(&self) -> bool {
         self.input_includes_cache_tokens
+    }
+
+    /// Borrows the session authority this request was produced under.
+    ///
+    /// The context is read fresh on every preparation and is deliberately
+    /// absent from the durable judge binding, so it never participates in the
+    /// exact-call recheck that guards authorization and completion.
+    pub const fn session_context(&self) -> &SessionAuthorityContext {
+        &self.session_context
     }
 }
 
@@ -208,9 +268,11 @@ impl PostgresApprovalJudgeRepository {
             transaction.rollback().await?;
             return Ok(PrepareApprovalJudgeOutcome::NoWork);
         }
+        let session_context =
+            load_session_authority_context(&mut transaction, session, turn).await?;
         if let Some(row) = load_judge(&mut transaction, request.id()).await? {
             let state = decode_state(required(&row, "state_kind")?)?;
-            let prepared = decode_prepared(row, request.clone())?;
+            let prepared = decode_prepared(row, request.clone(), session_context)?;
             transaction.rollback().await?;
             return match state {
                 ApprovalJudgeStateStorageKind::Prepared => {
@@ -284,6 +346,7 @@ impl PostgresApprovalJudgeRepository {
             target,
             credential_reference: credential.as_str().to_owned(),
             input_includes_cache_tokens,
+            session_context,
         };
         transaction
             .commit()
@@ -652,12 +715,63 @@ async fn load_judge(
     .map_err(Into::into)
 }
 
+/// Reads the session authority in force for one judged request's turn.
+///
+/// The system prompt is the epoch the turn froze rather than the session's
+/// current epoch, so a defaults replacement racing the judge cannot present an
+/// authority the request was never produced under. The shared configuration
+/// resolver supplies that epoch for every origin kind, including a
+/// delegation-origin turn that owns no `queued_input_origin` row. A turn that
+/// produced a model call always resolves one epoch, so absence is corruption.
+async fn load_session_authority_context(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<SessionAuthorityContext, ApprovalJudgeRepositoryError> {
+    let row = sqlx::query(
+        "SELECT s.template_name, frozen.system_prompt
+           FROM session AS s
+           JOIN session_defaults_version AS frozen
+             ON frozen.session_id = s.session_id
+            AND frozen.version = (
+                 SELECT configuration.defaults_version
+                   FROM turn_origin_exact_model_configuration($2, $1)
+                        AS configuration
+                )
+          WHERE s.session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ApprovalJudgeCorruption::Missing(
+        "judged turn defaults epoch",
+    ))?;
+    let template = row
+        .try_get::<Option<String>, _>("template_name")?
+        .map(SessionTemplateName::try_new)
+        .transpose()
+        .map_err(|_| ApprovalJudgeCorruption::Inconsistent("session template admission"))?;
+    let system_prompt = row
+        .try_get::<Option<String>, _>("system_prompt")?
+        .map(SessionSystemPrompt::try_new)
+        .transpose()
+        .map_err(|_| ApprovalJudgeCorruption::Inconsistent("system prompt admission"))?;
+    let goal = load_goal_from_connection(&mut *connection, session)
+        .await
+        .map_err(map_goal_error)?
+        .map(|goal| goal.current().statement().clone());
+    Ok(SessionAuthorityContext::new(goal, template, system_prompt))
+}
+
 fn decode_prepared(
     row: sqlx::postgres::PgRow,
     request: ToolRequest,
+    session_context: SessionAuthorityContext,
 ) -> Result<PreparedApprovalJudge, ApprovalJudgeRepositoryError> {
     Ok(PreparedApprovalJudge {
         request,
+        session_context,
         call: ModelCallId::from_uuid(required(&row, "model_call_id")?),
         selection: DirectModelSelection::from_uuid(required(&row, "direct_model_selection_id")?),
         target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(required(
@@ -895,6 +1009,22 @@ fn map_model_error(
         | crate::model_execution::ModelCallRepositoryError::NoLiveExecution
         | crate::model_execution::ModelCallRepositoryError::InvalidTransition(_) => {
             ApprovalJudgeCorruption::Inconsistent("model execution dependency").into()
+        }
+    }
+}
+
+fn map_goal_error(error: GoalRepositoryError) -> ApprovalJudgeRepositoryError {
+    match error {
+        GoalRepositoryError::Database(source) => ApprovalJudgeRepositoryError::Database {
+            source,
+            commit_ambiguous: false,
+        },
+        GoalRepositoryError::CommitAmbiguous(source) => ApprovalJudgeRepositoryError::Database {
+            source,
+            commit_ambiguous: true,
+        },
+        GoalRepositoryError::Corruption(_) | GoalRepositoryError::DifferentCommandKind { .. } => {
+            ApprovalJudgeCorruption::Inconsistent("goal dependency").into()
         }
     }
 }

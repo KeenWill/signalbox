@@ -1159,7 +1159,7 @@ impl<'a> EncodedEvent<'a> {
     }
 }
 
-async fn load_goal_from_connection(
+pub(crate) async fn load_goal_from_connection(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<Option<Goal>, GoalRepositoryError> {
