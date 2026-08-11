@@ -808,6 +808,32 @@ impl ToolDenialReason {
     pub fn into_string(self) -> String {
         self.0
     }
+
+    /// Derives the deterministic denial reason carried by a delegate denial.
+    ///
+    /// A rationale admits control characters and up to
+    /// [`ToolDecisionRationale::MAX_UTF8_BYTES`] bytes, so this conversion is
+    /// lossy where the two bounds disagree: control characters become spaces,
+    /// surrounding whitespace is trimmed, and the text is cut to
+    /// [`Self::MAX_UTF8_BYTES`] on a character boundary. A rationale that is
+    /// entirely whitespace derives no reason.
+    pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self> {
+        let mut sanitized = rationale
+            .as_str()
+            .chars()
+            .map(|character| if character.is_control() { ' ' } else { character })
+            .collect::<String>();
+        sanitized.truncate(sanitized.trim_end().len());
+        let mut trimmed = sanitized.trim_start();
+        while trimmed.len() > Self::MAX_UTF8_BYTES {
+            let mut cut = Self::MAX_UTF8_BYTES;
+            while !trimmed.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            trimmed = trimmed[..cut].trim_end();
+        }
+        (!trimmed.is_empty()).then(|| Self(String::from(trimmed)))
+    }
 }
 
 /// Why a denial reason is unsafe or outside its bound.
@@ -921,7 +947,9 @@ impl ToolApprovalResolution {
     pub(crate) fn delegate(approval: &DelegateToolApproval) -> Option<Self> {
         let decision = match approval.recommendation {
             DelegateApprovalRecommendation::Approve => ToolApprovalDecision::Approve,
-            DelegateApprovalRecommendation::Deny => ToolApprovalDecision::Deny { reason: None },
+            DelegateApprovalRecommendation::Deny => ToolApprovalDecision::Deny {
+                reason: ToolDenialReason::from_rationale(&approval.rationale),
+            },
             DelegateApprovalRecommendation::EscalateToHuman => return None,
         };
         Some(Self {
@@ -1727,8 +1755,46 @@ mod tests {
         assert_eq!(resolution.rationale(), Some(&rationale));
         assert_eq!(
             resolution.decision(),
-            &ToolApprovalDecision::Deny { reason: None }
+            &ToolApprovalDecision::Deny {
+                reason: Some(
+                    ToolDenialReason::try_new(String::from(JUDGE_RATIONALE))
+                        .expect("fixture rationale is an admitted reason")
+                )
+            }
         );
+    }
+
+    #[test]
+    fn delegate_denial_reason_derivation_is_lossy_only_where_bounds_disagree() {
+        let verbatim = ToolDecisionRationale::try_new(String::from("scope exceeded"))
+            .expect("fixture rationale is admitted");
+        assert_eq!(
+            ToolDenialReason::from_rationale(&verbatim).map(ToolDenialReason::into_string),
+            Some(String::from("scope exceeded"))
+        );
+
+        let control_and_padding =
+            ToolDecisionRationale::try_new(String::from("  first\nsecond\tthird  "))
+                .expect("fixture rationale is admitted");
+        assert_eq!(
+            ToolDenialReason::from_rationale(&control_and_padding)
+                .map(ToolDenialReason::into_string),
+            Some(String::from("first second third"))
+        );
+
+        let whitespace_only = ToolDecisionRationale::try_new(String::from(" \n \t "))
+            .expect("fixture rationale is admitted");
+        assert_eq!(ToolDenialReason::from_rationale(&whitespace_only), None);
+
+        let oversized = ToolDecisionRationale::try_new(format!("{}é", "a".repeat(1023)))
+            .expect("fixture rationale is admitted");
+        let truncated = ToolDenialReason::from_rationale(&oversized)
+            .expect("nonempty text derives a reason");
+        assert_eq!(truncated.as_str(), "a".repeat(1023));
+
+        let derived = ToolDenialReason::from_rationale(&control_and_padding)
+            .expect("nonempty text derives a reason");
+        assert!(ToolDenialReason::try_new(derived.into_string()).is_ok());
     }
 
     /// S10 / INV-020: a restored session-blanket approval requires the

@@ -483,7 +483,10 @@ async fn approval_judge_repository_atomically_applies_a_delegate_denial()
     assert_eq!(stored.recommendation, APPROVAL_DENIAL);
     assert_eq!(stored.decision_kind, APPROVAL_DENIAL);
     assert_eq!(stored.decision_source, APPROVAL_DELEGATE_SOURCE);
-    assert_eq!(stored.denial_reason, None);
+    assert_eq!(
+        stored.denial_reason.as_deref(),
+        Some(APPROVAL_JUDGE_RATIONALE)
+    );
     assert_eq!(stored.rationale, APPROVAL_JUDGE_RATIONALE);
     assert_eq!(stored.active_phase, "running");
     let (event_turn, approval) = dispatched_tool_approval_decision(&pool, request)
@@ -492,7 +495,12 @@ async fn approval_judge_repository_atomically_applies_a_delegate_denial()
     assert_eq!(event_turn, fixture.turn);
     assert_eq!(
         approval.decision(),
-        &ToolApprovalDecision::Deny { reason: None }
+        &ToolApprovalDecision::Deny {
+            reason: Some(
+                ToolDenialReason::try_new(String::from(APPROVAL_JUDGE_RATIONALE))
+                    .expect("fixture rationale is an admitted reason")
+            )
+        }
     );
 
     pool.close().await;

@@ -2059,17 +2059,20 @@ async fn decode_approval(
                 .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
             let recommendation = match decision {
                 ToolApprovalDecision::Approve => DelegateApprovalRecommendation::Approve,
-                ToolApprovalDecision::Deny { ref reason } if reason.is_none() => {
-                    DelegateApprovalRecommendation::Deny
-                }
-                ToolApprovalDecision::Deny { .. } => {
-                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
-                }
+                ToolApprovalDecision::Deny { .. } => DelegateApprovalRecommendation::Deny,
             };
             let rationale = signalbox_domain::ToolDecisionRationale::try_new(
                 rationale.ok_or(ToolLoopCorruption::Missing("delegate rationale"))?,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
+            // A delegate denial's stored reason is derived from its rationale;
+            // rows written before that derivation existed carry none.
+            if let ToolApprovalDecision::Deny { ref reason } = decision {
+                let derived = ToolDenialReason::from_rationale(&rationale);
+                if reason.is_some() && *reason != derived {
+                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
+                }
+            }
             let approval = DelegateToolApproval::try_new(
                 request_record,
                 DirectModelSelection::from_uuid(
