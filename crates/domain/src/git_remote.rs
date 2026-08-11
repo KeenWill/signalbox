@@ -129,6 +129,14 @@ fn authority_names_a_host(authority: &str) -> bool {
         && port.is_none_or(port_is_numeric)
 }
 
+/// Longest admitted port, in digits.
+///
+/// The bound exists so this rule and the SQL predicate admit the same strings.
+/// A zero-padded port such as `000001` parses to a legal `u16` while the
+/// predicate's five-digit grammar refuses it, which would let an operator mint
+/// a destination the durable `CHECK` then rejects.
+const MAX_PORT_DIGITS: usize = 5;
+
 /// Returns whether one port is a run of digits inside the TCP range.
 ///
 /// A port above 65535 names no TCP endpoint, so a destination carrying one
@@ -137,6 +145,7 @@ fn authority_names_a_host(authority: &str) -> bool {
 /// would otherwise accept.
 fn port_is_numeric(port: &str) -> bool {
     !port.is_empty()
+        && port.len() <= MAX_PORT_DIGITS
         && port.bytes().all(|byte| byte.is_ascii_digit())
         && port.parse::<u16>().is_ok()
 }
@@ -480,6 +489,15 @@ mod tests {
     #[test]
     fn a_destination_naming_the_highest_port_is_admitted() {
         assert_destination_is_admitted("https://example.test:65535/project.git");
+        assert_destination_is_admitted("https://example.test:00001/project.git");
+    }
+
+    /// A zero-padded port beyond five digits parses to a legal `u16`, so only
+    /// the digit bound keeps this rule and the SQL predicate in agreement.
+    #[test]
+    fn a_destination_naming_a_port_beyond_the_digit_bound_is_refused() {
+        assert_destination_is_refused("https://example.test:000001/project.git");
+        assert_destination_is_refused("https://example.test:0000000001/project.git");
     }
 
     #[test]
