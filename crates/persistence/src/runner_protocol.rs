@@ -47,7 +47,8 @@ use crate::lock_inventory::{
     RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY,
     RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_CONNECTION_AUTHORITY,
     RUNNER_PLACEMENT_CURRENT_LOSS, RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
-    RUNNER_REGISTRATION_HEAD, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
+    RUNNER_REGISTRATION_HEAD, RUNNER_REGISTRATION_RECONCILIATION,
+    RUNNER_REGISTRATION_RECONCILIATION_STATE, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
     runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
@@ -3582,17 +3583,12 @@ async fn lock_registration_reconciliation(
     transaction: &mut Transaction<'_, Postgres>,
     reconciliation: RunnerRegistrationReconciliationSnapshot,
 ) -> Result<LockedRunnerRegistrationReconciliation, RunnerProtocolStoreError> {
-    let row = sqlx::query(
-        "SELECT propagated_through_session_id, state_kind
-           FROM runner_registration_reconciliation
-          WHERE enrollment_id = $1 AND registration_revision = $2
-          FOR UPDATE",
-    )
-    .bind(reconciliation.enrollment().into_uuid())
-    .bind(Decimal::from(reconciliation.registration_revision().get()))
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let row = sqlx::query(RUNNER_REGISTRATION_RECONCILIATION)
+        .bind(reconciliation.enrollment().into_uuid())
+        .bind(Decimal::from(reconciliation.registration_revision().get()))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     let state: String = row.decode_column("state_kind")?;
     let complete = match state.as_str() {
         "pending" => false,
@@ -4703,17 +4699,12 @@ async fn require_completed_registration_reconciliation(
     if revision == RunnerRegistrationRevision::first() {
         return Ok(());
     }
-    let state = sqlx::query_scalar::<_, String>(
-        "SELECT state_kind
-           FROM runner_registration_reconciliation
-          WHERE enrollment_id = $1 AND registration_revision = $2
-          FOR UPDATE",
-    )
-    .bind(enrollment.into_uuid())
-    .bind(Decimal::from(revision.get()))
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let state = sqlx::query_scalar::<_, String>(RUNNER_REGISTRATION_RECONCILIATION_STATE)
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(revision.get()))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     match state.as_str() {
         "completed" => return Ok(()),
         "pending" => {}

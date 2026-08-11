@@ -5786,18 +5786,18 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         )
         .await
     });
-    let replacement_blocked =
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
-            .await
-            .expect("registration replacement lock observation must remain bounded")?;
+    let replacement_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
     let lease_store = tokio::spawn(async move {
         tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
     });
-    let lease_blocked =
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2))
-            .await
-            .expect("lease admission lock observation must remain bounded")?;
+    let lease_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
     blocker.commit().await?;
+    let replacement_blocked = replacement_observation
+        .expect("registration replacement lock observation must remain bounded")?;
+    let lease_blocked =
+        lease_observation.expect("lease admission lock observation must remain bounded")?;
     replacement
         .await
         .expect("registration replacement task must remain joinable")
@@ -5817,7 +5817,7 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         "lease admission must wait behind registration replacement"
     );
     assert_store_check_violation(rejected);
-    drop(pool);
+    pool.close().await;
     Ok(())
 }
 
