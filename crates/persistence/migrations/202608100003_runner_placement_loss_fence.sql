@@ -132,7 +132,9 @@ BEGIN
     IF NEW.event_kind IN (
         'runner_lost_before_pin', 'runner_lost', 'abandoned'
     ) THEN
-        IF prior.loss_fence_enrollment_id IS DISTINCT FROM selected_enrollment
+        IF prior.loss_fence_enrollment_id IS NOT NULL
+           AND prior.loss_fence_enrollment_id IS DISTINCT FROM
+                selected_enrollment
         THEN
             RAISE EXCEPTION
                 'runner placement loss changed its enrollment baseline'

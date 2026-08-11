@@ -486,10 +486,9 @@ BEGIN
             ON authority.enrollment_id =
                 generation.registration_enrollment_id
          WHERE lease_event.state_kind = 'offered'
-           AND authority.latest_loss_epoch IS NOT NULL
     ) THEN
         RAISE EXCEPTION
-            'offered runner lease predates reconstructible loss authority';
+            'outstanding runner lease lacks reconstructible offer authority';
     END IF;
 END;
 $migration$;
