@@ -46,6 +46,7 @@ pub use session_credentials::{
 };
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use sqlx::{
     Error, PgPool,
@@ -238,6 +239,75 @@ pub fn local_test_connection_options(database_url: &str) -> Result<PgConnectOpti
     PgConnectOptions::from_str(database_url).map(|options| options.ssl_mode(PgSslMode::Disable))
 }
 
+/// The label key marking a container that exists only for one test of this
+/// repository and that the test harness is itself responsible for removing.
+///
+/// `tooling/sweep-test-containers.sh` reclaims exactly the containers carrying
+/// this label past an age bound, so this constant is the single spelling of
+/// that selector; `tooling/test_sweep_test_containers.py` fails when the script
+/// and this constant disagree.
+pub const DISPOSABLE_TEST_CONTAINER_LABEL_KEY: &str = "org.signalbox.disposable";
+
+/// The label value paired with [`DISPOSABLE_TEST_CONTAINER_LABEL_KEY`].
+pub const DISPOSABLE_TEST_CONTAINER_LABEL_VALUE: &str = "test-container";
+
+/// The longest a container may carry the disposable mark and still be safe.
+///
+/// `tooling/sweep-test-containers.sh` removes marked containers older than this
+/// by default, which is what makes the mark safe to apply: a container serving a
+/// test is minutes old. Anything that can be configured to hold a marked
+/// container longer would be force-removed while still in use, so it checks
+/// itself against this bound first — see
+/// [`outlives_the_disposable_container_sweep`].
+pub const DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS: u64 = 2;
+
+/// Reports whether holding a marked container for `lifetime` would outlive the
+/// sweep's default age bound, and so risk removal while it is still in use.
+pub fn outlives_the_disposable_container_sweep(lifetime: Duration) -> bool {
+    lifetime >= Duration::from_secs(DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS * 60 * 60)
+}
+
+/// The environment variable the testcontainers client reads to decide whether a
+/// container is removed when its handle drops.
+const TESTCONTAINERS_COMMAND_VARIABLE: &str = "TESTCONTAINERS_COMMAND";
+
+/// The one `TESTCONTAINERS_COMMAND` value that stops the client removing a
+/// container it started.
+const TESTCONTAINERS_KEEP_COMMAND: &str = "keep";
+
+/// The labels every PostgreSQL container this repository's tests start carries.
+///
+/// The mark is what the orphan sweep selects on, and identifying disposable
+/// containers positively is the point of it. A sweep keyed on the
+/// testcontainers `managed-by` label, or on the image name, would also select
+/// containers on a shared daemon that belong to nobody here — another project's
+/// suite, a hand-run database, a long-lived instance on the same image — and no
+/// list of names to skip can enumerate those in advance.
+///
+/// A container the operator asked the client to keep
+/// (`TESTCONTAINERS_COMMAND=keep`) is not disposable: keeping it is the whole
+/// request, and nothing else would remove it afterwards. Such a container is
+/// left unmarked, so the sweep never selects it.
+pub fn disposable_test_container_labels() -> Vec<(&'static str, &'static str)> {
+    let command = std::env::var(TESTCONTAINERS_COMMAND_VARIABLE).ok();
+    disposable_test_container_labels_for_command(command.as_deref())
+}
+
+/// [`disposable_test_container_labels`] with the `TESTCONTAINERS_COMMAND` value
+/// supplied directly, so the keep case is decidable without a process-wide
+/// environment mutation.
+pub fn disposable_test_container_labels_for_command(
+    command: Option<&str>,
+) -> Vec<(&'static str, &'static str)> {
+    if command == Some(TESTCONTAINERS_KEEP_COMMAND) {
+        return Vec::new();
+    }
+    vec![(
+        DISPOSABLE_TEST_CONTAINER_LABEL_KEY,
+        DISPOSABLE_TEST_CONTAINER_LABEL_VALUE,
+    )]
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -247,11 +317,18 @@ mod tests {
     use sqlx::postgres::PgSslMode;
 
     use super::{
-        commit_failure_is_ambiguous, local_test_connection_options, production_connection_options,
-        production_connection_options_with_environment,
+        DISPOSABLE_TEST_CONTAINER_LABEL_KEY, DISPOSABLE_TEST_CONTAINER_LABEL_VALUE,
+        DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS, Duration, TESTCONTAINERS_KEEP_COMMAND,
+        commit_failure_is_ambiguous, disposable_test_container_labels_for_command,
+        local_test_connection_options, outlives_the_disposable_container_sweep,
+        production_connection_options, production_connection_options_with_environment,
     };
 
     const DATABASE_URL: &str = "postgres://signalbox:secret@database.example/signalbox";
+
+    /// The `TESTCONTAINERS_COMMAND` value asking the client for its own default:
+    /// remove the container when its handle drops.
+    const TESTCONTAINERS_REMOVE_COMMAND: &str = "remove";
 
     /// An environment carrying none of the ambient `PG*` variables.
     fn no_ambient_variables(_: &'static str) -> bool {
@@ -460,5 +537,57 @@ mod tests {
         ));
 
         assert!(commit_failure_is_ambiguous(&error));
+    }
+
+    #[test]
+    fn a_test_container_is_marked_disposable_for_the_sweep() {
+        let labels = disposable_test_container_labels_for_command(None);
+
+        assert_eq!(
+            labels,
+            vec![(
+                DISPOSABLE_TEST_CONTAINER_LABEL_KEY,
+                DISPOSABLE_TEST_CONTAINER_LABEL_VALUE
+            )]
+        );
+    }
+
+    #[test]
+    fn a_container_the_client_will_remove_itself_is_marked_disposable() {
+        let labels =
+            disposable_test_container_labels_for_command(Some(TESTCONTAINERS_REMOVE_COMMAND));
+
+        assert_eq!(
+            labels,
+            vec![(
+                DISPOSABLE_TEST_CONTAINER_LABEL_KEY,
+                DISPOSABLE_TEST_CONTAINER_LABEL_VALUE
+            )]
+        );
+    }
+
+    #[test]
+    fn a_container_the_client_was_asked_to_keep_is_not_marked_disposable() {
+        let labels =
+            disposable_test_container_labels_for_command(Some(TESTCONTAINERS_KEEP_COMMAND));
+
+        assert!(
+            labels.is_empty(),
+            "a kept container is nothing's to remove, so the sweep must not see a mark: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_container_held_no_longer_than_a_test_is_safe_to_mark_disposable() {
+        let held = Duration::from_secs(DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS * 60 * 60 - 1);
+
+        assert!(!outlives_the_disposable_container_sweep(held));
+    }
+
+    #[test]
+    fn a_container_held_to_the_sweep_bound_would_be_removed_while_in_use() {
+        let held = Duration::from_secs(DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS * 60 * 60);
+
+        assert!(outlives_the_disposable_container_sweep(held));
     }
 }

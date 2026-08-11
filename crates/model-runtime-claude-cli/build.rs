@@ -1,3 +1,7 @@
+//! Reads the exact pinned `@anthropic-ai/claude-code` version from
+//! `package.json` and exports it as the `SIGNALBOX_CLAUDE_CLI_VERSION` build
+//! environment variable the adapter and its `tests/pin.rs` compare against.
+
 use std::path::PathBuf;
 
 const PIN_MANIFEST: &str = "package.json";

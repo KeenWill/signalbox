@@ -73,17 +73,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Trees the rules below scan. `src` alone means production and its inline test
-# modules; a rule that decides how a test body reads would be restating
-# `docs/agents/testing-style.md`, which owns that.
+# modules; a rule that decides how a test body reads would be restating the
+# testing style guide, which owns that.
 RUST_SOURCE_GLOBS = ("crates/*/src/*.rs", "apps/*/src/*.rs")
 # Scanned by the rules the guide states without qualification, and only those.
 # A rule reads test targets when its own text does: SR-1 says "every Rust
 # module" and SR-3 says "a name has one spelling per file", and the guide opens
 # by binding its two disciplines to "production and test code alike". SR-6 and
-# SR-8 say "production", and the description holds their test-target scope for
-# an owner ruling, so they stay on `src`. SR-4, SR-5, and SR-10 decide public
-# API, which a test target does not have, and a rule about how long a test body
-# runs would be `docs/agents/testing-style.md` restated.
+# SR-8 say "production", and their test-target scope is still open, so they
+# stay on `src`. SR-4, SR-5, and SR-10 decide public API, which a test target
+# does not have, and a rule about how long a test body runs would be the
+# testing style guide restated.
 RUST_TEST_TARGET_GLOBS = ("crates/*/tests/*.rs", "apps/*/tests/*.rs")
 # The rest of the tracked Rust outside `src`. A build script and a benchmark
 # are modules the rule's "every Rust module" covers, and a build script is the

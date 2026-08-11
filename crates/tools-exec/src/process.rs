@@ -1,3 +1,12 @@
+//! `SandboxedExecTool` and `UnsandboxedExecTool`, and the
+//! `SandboxedCommandRunner` / `UnsandboxedCommandRunner` process runners that
+//! back them.
+//!
+//! On Linux the sandboxed runner shells out to bubblewrap and the compiled
+//! `signalbox-exec-supervisor` binary, decoding its `supervisor_protocol`
+//! status for exit code, timeout, cancellation, and stdout/stderr capture
+//! completeness.
+
 #[cfg(target_os = "linux")]
 use std::os::{fd::AsFd, unix::fs::MetadataExt};
 use std::{

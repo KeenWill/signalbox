@@ -58,7 +58,7 @@ use signalbox_persistence::{
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     scheduler::PostgresEligibilitySweep,
     session_metadata::SessionMetadataRepository,
@@ -131,12 +131,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -271,6 +281,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -1434,7 +1445,8 @@ async fn execute_guarded_turn(
         runtime.pool.clone(),
         model_configuration.target_catalog(),
         ModelCallCredentialReference::new("guarded-recording-fixture"),
-    );
+    )
+    .with_session_credentials(model_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
@@ -1455,7 +1467,6 @@ async fn execute_guarded_turn(
         runtime_models,
         model_configuration,
         compaction_model,
-        "guarded-summary-fixture",
         execution,
     );
     let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
@@ -7036,7 +7047,8 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         runtime.pool.clone(),
         guarded_configuration.target_catalog(),
         ModelCallCredentialReference::new("retry-guard-recording-fixture"),
-    );
+    )
+    .with_session_credentials(guarded_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
@@ -7049,6 +7061,16 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
             summary_runtime,
             runtime_models.clone(),
         ));
+    // The parsed fixture, not an independent literal, is the authority on the
+    // reference automatic compaction must reuse; it pins exactly one family.
+    let pinned_references: Vec<String> = guarded_configuration
+        .session_credential_pin()
+        .credentials()
+        .map(|credential| credential.credential_reference().to_owned())
+        .collect();
+    let [expected_compaction_credential] = pinned_references.as_slice() else {
+        panic!("the fixture pins exactly one credential family")
+    };
     let mut pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(runtime.pool.clone()),
         guarded_repository,
@@ -7057,7 +7079,6 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         runtime_models,
         guarded_configuration,
         compaction_model,
-        "retry-guard-summary-fixture",
         execution,
     );
     let session = SessionId::from_uuid(session_id.into_uuid());
@@ -7069,6 +7090,12 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     assert_eq!(ordinary_probe.counted_operations().len(), 3);
     assert_eq!(ordinary_probe.prepared_operations().len(), 0);
     assert_eq!(summary_probe.received_operations().len(), 1);
+    assert_eq!(
+        summary_probe.received_operations()[0]
+            .credential_reference
+            .as_str(),
+        expected_compaction_credential.as_str()
+    );
     let compaction_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")
             .bind(session_id.into_uuid())
@@ -7181,7 +7208,6 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         runtime_models,
         model_configuration,
         compaction_model,
-        "ambiguous-guard-summary-fixture",
         execution,
     );
     let session = SessionId::from_uuid(session_id.into_uuid());

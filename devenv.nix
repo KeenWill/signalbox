@@ -414,10 +414,70 @@ in
       if [ ! -f ${shellArg daemonConfigFile} ]; then
         echo "dev instance: seeding" ${shellArg daemonConfigFile} \
              "from config/signalboxd.example.toml"
+        seeded_daemon_config=${shellArg daemonConfigFile}.seed-staging
         cp "$DEVENV_ROOT/config/signalboxd.example.toml" \
-           ${shellArg daemonConfigFile}
-        chmod 644 ${shellArg daemonConfigFile}
+           "$seeded_daemon_config"
+        # The example names deployment secret paths that do not exist here, and
+        # a credential profile now carries its own path rather than reading one
+        # from the process environment. Point the seeded copy at this
+        # developer's key file once; the copy is theirs to edit afterwards.
+        seed_key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
+        ${tomlPython}/bin/python3 -c ${shellArg ''
+          import sys
+          from pathlib import Path
+
+          import tomlkit
+
+          config_path = Path(sys.argv[1])
+          credential_path = str(Path(sys.argv[2]).absolute())
+          document = tomlkit.parse(config_path.read_text())
+          profiles = document.get("credential_profiles", [])
+          profile = next(
+              (entry for entry in profiles if entry.get("name") == "anthropic-primary"),
+              None,
+          )
+          if profile is None:
+              raise SystemExit("example config has no anthropic-primary profile")
+          profile["file"] = credential_path
+          config_path.write_text(tomlkit.dumps(document))
+        ''} "$seeded_daemon_config" "$seed_key_file"
+        chmod 644 "$seeded_daemon_config"
+        mv -f "$seeded_daemon_config" ${shellArg daemonConfigFile}
       fi
+
+      # Existing dev instances predate credential pools and are intentionally
+      # user-editable, so do not rewrite them in place. Refuse the retired
+      # shape with an exact recovery path instead of starting a daemon that can
+      # only reject the retained catalog later.
+      ${tomlPython}/bin/python3 -c ${shellArg ''
+        import sys
+        from collections.abc import Mapping
+        from pathlib import Path
+
+        import tomlkit
+
+        config_path = Path(sys.argv[1])
+        document = tomlkit.parse(config_path.read_text())
+        profiles = document.get("credential_profiles", [])
+        mappings = document.get("adapter_mappings", [])
+        legacy_profile = any(
+            isinstance(entry, Mapping)
+            and "adapter" not in entry
+            and "delivery" not in entry
+            for entry in profiles
+        )
+        legacy_mapping = any(
+            isinstance(entry, Mapping) and "credential_profile" in entry
+            for entry in mappings
+        )
+        if legacy_profile or legacy_mapping:
+            raise SystemExit(
+                f"dev instance: {config_path} uses the retired pre-pool "
+                "credential grammar; update credential_profiles and "
+                "adapter_mappings to match config/signalboxd.example.toml, "
+                "or move the file aside so the dev instance can reseed it"
+            )
+      ''} ${shellArg daemonConfigFile}
 
       if [ ! -f ${shellArg daemonTemplateConfigFile} ]; then
         echo "dev instance: seeding" ${shellArg daemonTemplateConfigFile} \
@@ -506,15 +566,16 @@ in
       chmod 600 ${shellArg daemonRuntimeConfigFile}
 
       # Deployment-owned credential channels: one file per secret. The launcher
-      # always passes all three channels; naming a
-      # path that does not exist is deliberate and safe here, because no file
-      # is read at startup. The read timing, what the file's bytes mean,
-      # and the effect of an absent file are stated in the credential
-      # lifecycle section of docs/spec/configuration-and-credentials.md.
-      # Anthropic and GitHub defaults resolve against the developer's own home
-      # directory, not the process-scoped HOME the exec below sets. Brave uses
-      # a devenv-state placeholder unless the developer supplies an override.
-      key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
+      # passes the two integration channels; the Anthropic key path lives in the
+      # seeded model catalog instead, because a credential profile now carries
+      # its own file. Naming a path that does not exist is deliberate and safe
+      # here, because no file is read at startup. The read timing, what the
+      # file's bytes mean, and the effect of an absent file are stated in the
+      # credential lifecycle section of
+      # docs/spec/configuration-and-credentials.md. The GitHub default resolves
+      # against the developer's own home directory, not the process-scoped HOME
+      # the exec below sets. Brave uses a devenv-state placeholder unless the
+      # developer supplies an override.
       search_key_file_default=${shellArg daemonBraveApiKeyFile}
       search_key_file="''${SIGNALBOX_DEV_BRAVE_API_KEY_FILE:-$search_key_file_default}"
       token_file="''${SIGNALBOX_DEV_GITHUB_TOKEN_FILE:-$HOME/.config/signalbox/github-token}"
@@ -525,7 +586,6 @@ in
         DATABASE_URL=${shellArg databaseUrl} \
         SIGNALBOX_CONFIG_FILE=${shellArg daemonRuntimeConfigFile} \
         SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \
-        ANTHROPIC_API_KEY_FILE="$key_file" \
         BRAVE_API_KEY_FILE="$search_key_file" \
         GITHUB_TOKEN_FILE="$token_file" \
         SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \
