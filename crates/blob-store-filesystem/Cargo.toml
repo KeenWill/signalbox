@@ -1,0 +1,29 @@
+[package]
+name = "signalbox-blob-store-filesystem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2 = { version = "0.11.0", default-features = false }
+signalbox-blob-store = { path = "../blob-store" }
+signalbox-domain = { path = "../domain" }
+tempfile = "3.27.0"
+tokio = { version = "1.53.0", default-features = false, features = [
+    "fs",
+    "io-util",
+    "rt",
+] }
+
+[dev-dependencies]
+signalbox-blob-store = { path = "../blob-store", features = ["test-support"] }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt-multi-thread",
+] }
+
+[lints]
+workspace = true

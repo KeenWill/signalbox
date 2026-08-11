@@ -100,6 +100,28 @@ pub enum Actor {
 }
 ```
 
+## domain: blob
+
+```rust
+pub struct BlobDigest(/* private [u8; 32] */);
+impl BlobDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+    pub fn digest(bytes: &[u8]) -> Self;
+}
+
+pub enum BlobDigestParseFailure {
+    MissingSha256Prefix,
+    InvalidLength,
+    InvalidHex,
+}
+
+pub struct BlobDigestParseError { /* private */ }
+impl BlobDigestParseError {
+    // accessors: rejected, failure
+}
+```
+
 ## domain: imported_conversation
 
 ```rust
@@ -9843,6 +9865,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | -------------------------------------------------- | --------------------- |
 | domain: lib.rs identities                          | 24                    |
 | domain: actor                                      | 1                     |
+| domain: blob                                       | 3                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
@@ -9877,7 +9900,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **752 (+10 free fn)** |
+| **signalbox-domain total**                         | **755 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

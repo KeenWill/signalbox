@@ -7,6 +7,11 @@ paragraphs current behavior before the stack merges; a section that names itself
 unimplemented at merge time is committed unimplemented functionality and carries
 only its stated compatibility constraint.
 
+The blob digest and external spelling, deterministic object-key producer,
+streaming store contract, filesystem publication and verification behavior, and
+shared store conformance suite are verified against this implementing change
+(`agent/blob-storage-substrate`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire
