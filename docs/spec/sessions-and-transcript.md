@@ -3,6 +3,10 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The multipart user-content aggregate below is the foundation proposal from PR
+#553 (`agent/blob-storage-foundation`) and becomes verified with its
+implementing child stack.
+
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
@@ -891,21 +895,16 @@ cause it carries. This inventory is closed at four.
 
 ## User content
 
-Accepted-input content is the closed one-variant algebra `UserContent`; its only
-variant is `Text { value: NonEmptyUnicodeText }`
-(`crates/domain/src/user_content.rs`). Construction rejects empty text and any
-text containing U+0000 (which PostgreSQL text cannot store); whitespace-only
-text is content. The domain applies no trimming, Unicode normalization, case
-folding, or any other rewriting, and equality is the exact ordered scalar
-sequence — normalization-distinct spellings are unequal. That exact value
-participates in `SubmitInput` replay equality (INV-012).
-
-Multipart `UserContent` is committed unimplemented functionality: no present
-surface provides it. The compatibility constraint is that the current text value
-becomes the single text part of an ordered nonempty content sequence without
-changing its exact scalar equality, while content-addressed attachment parts
-join the same replay and transcript authority. The cross-crate part contract is
-owned by [blob storage](blob-storage.md#multipart-user-content).
+Accepted-input content is `UserContent`, one ordered nonempty sequence of closed
+text or attachment parts under the cross-crate contract owned by
+[blob storage](blob-storage.md#multipart-user-content). A text part carries
+`NonEmptyUnicodeText`; construction rejects empty text and any text containing
+U+0000 (which PostgreSQL text cannot store), while whitespace-only text remains
+content. The domain applies no trimming, Unicode normalization, case folding, or
+other rewriting. Equality is exact part order plus each part's complete value
+and metadata, so normalization-distinct text spellings are unequal and any
+attachment difference changes replay equality. That exact value participates in
+`SubmitInput` replay equality (INV-012).
 
 Why (exact, unnormalized): replay equality must not depend on a normalization
 policy; search or display projections may normalize without changing accepted

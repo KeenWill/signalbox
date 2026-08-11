@@ -187,13 +187,16 @@ proved and ambiguous publication otherwise, releases the bulk-ingest permit, and
 leaves at most an unregistered orphan; retry live-verifies the deterministic key
 before completing registration.
 
-An S3 store is admitted only when its bucket lifecycle configuration contains an
-enabled rule covering the complete `sha256/` object-key prefix (or the whole
-bucket) that aborts incomplete multipart uploads after one day. Startup reads a
-bounded 65,536-byte lifecycle response with the configured static credential and
-fails closed when the rule cannot be proved; the credential therefore needs that
-read permission. This external bucket rule is the crash and credential-loss
-bound for uploaded parts that never became a final object.
+An S3 store currently named by at least one route is admitted for publication
+only when its bucket lifecycle configuration contains an enabled rule covering
+the complete `sha256/` object-key prefix (or the whole bucket) that aborts
+incomplete multipart uploads after one day. Startup reads a bounded 65,536-byte
+lifecycle response with the configured static credential and fails closed when
+the rule cannot be proved; the credential therefore needs that read permission.
+An unrouted historical S3 binding remains configured but is not
+lifecycle-queried at startup; its read failures use the ordinary runtime
+`unavailable` candidate outcome. The external bucket rule is the crash and
+credential-loss bound for uploaded parts that never became a final object.
 
 ## Ingest and the transaction boundary
 
@@ -289,27 +292,32 @@ Attachment metadata is caller-supplied semantic input, so part order, digests,
 kinds, media types, and filenames all participate in command replay equality.
 Acceptance requires every referenced digest to be catalogued with at least one
 verified replica. The sum of catalogued byte lengths for distinct referenced
-digests must not exceed `blob_storage.max_blob_bytes`; this names the aggregate
-full-verification work bound for one accepted input even when it contains 256
-parts. Catalog existence and the aggregate are current-state validation, so an
-unseen command identifier is claimed first under the registry-first protocol; an
-unknown digest or oversized aggregate then commits the typed payload and
-terminal rejection with no accepted-input effect. Equal replay returns that
-rejection and corrected content uses a new command identity. Command and
-accepted-input rows carry mirrored ordered content-part satellites under the
-existing command/effect correlation discipline, and the wire `submit_input`,
-`reconcile_turn`, and `stop_turn` content fields all become the same ordered
-parts array. The process protocol's version-one in-place editing window is why
-this lands as the canonical shape rather than a compatibility variant beside the
-string form.
+digests in one input must not exceed `blob_storage.max_blob_bytes`; this names
+the aggregate full-verification work bound even when that input contains 256
+parts. Before recording any accepted-input effect, the same checked sum is
+applied to the distinct attachment digests in the complete prospective rendered
+frontier after the new content and its delivery transition. Either oversized sum
+uses the same typed terminal rejection, so acknowledged content cannot make the
+next prepared call exceed its attachment bound. Catalog existence and both sums
+are current-state validation, so an unseen command identifier is claimed first
+under the registry-first protocol; an unknown digest or oversized aggregate then
+commits the typed payload and terminal rejection with no accepted-input effect.
+Equal replay returns that rejection and corrected content uses a new command
+identity. Command and accepted-input rows carry mirrored ordered content-part
+satellites under the existing command/effect correlation discipline, and the
+wire `submit_input`, `reconcile_turn`, and `stop_turn` content fields all become
+the same ordered parts array. The process protocol's version-one in-place
+editing window is why this lands as the canonical shape rather than a
+compatibility variant beside the string form.
 
-The satellite migration raises the owning storage versions, inserts exactly one
-ordinal-zero text part for every legacy command and accepted-input row, verifies
-one complete ordered sequence per parent row, and only then removes the legacy
-`content_text` columns from read authority. Its inserts are idempotent on parent
-row plus ordinal, disagreement aborts the migration, and new code reconstructs
-and compares only the satellites. Command-side and accepted-side parts remain
-separate mirrored records rather than shared mutable authority.
+The one-time satellite migration inserts exactly one ordinal-zero text part for
+every pre-migration command and accepted-input row, verifies one complete
+ordered sequence per parent row, updates every `SubmitInput` record to storage
+version 3, and removes the `content_text` columns. Its inserts are idempotent on
+parent row plus ordinal, disagreement aborts the migration, and runtime code
+accepts only version 3 and reconstructs only the satellites. Command-side and
+accepted-side parts remain separate mirrored records rather than shared mutable
+authority.
 
 The terminal client renders one accepted user entry as exactly one line:
 `user_content source_session=<uuid> entry=<uuid> accepted_input=<uuid> turn=<uuid> parts=<json>`.

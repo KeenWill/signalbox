@@ -188,6 +188,15 @@ existing assembly available for append, commit, or explicit abort. A peer that
 stops reading a terminal response therefore cannot retain rejected input or
 completed import content.
 
+An admitted chunked conversation import or blob upload has a five-minute
+monotonic inactivity deadline while awaiting its next append, commit, or abort
+frame. The deadline starts after the begin receipt and resets after each
+successfully accepted append; time spent executing an accepted lifecycle request
+is not idle time. Expiry cancels pending receipt output, unlinks the partial
+assembly, releases the bulk-ingest permit, and closes the connection without
+accepting another request. A retry therefore starts on a fresh connection and
+uses the operation's ordinary idempotency contract.
+
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
 exist.
