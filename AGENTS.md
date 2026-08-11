@@ -210,11 +210,16 @@ shape. Machinery protecting an old deployed version — compatibility shims,
 dual-read or dual-write paths, version-tolerant decoding, legacy-value aliases,
 data-upgrade scaffolding — protects deployments that do not exist and is a
 defect, not prudence: neither add it nor request it in review (owner ruling
-2026-08-11). The only compatibility work owed is a one-time migration carrying
-the owner's live database across a change that invalidates its stored data. This
-rule is rescinded at the first production deployment; the freeze condition in
-[process-protocol](docs/spec/process-protocol.md) is its wire-protocol
-counterpart.
+2026-08-11). The only compatibility work owed is a one-time migration carrying a
+live database across a change that invalidates its stored data. Earlier
+storage-version readers an owning implemented contract retains — the
+durable-command `storage_version` decoding in
+[persistence-protocol](docs/spec/persistence-protocol.md) — stand until a
+migration retires them, and that surface only narrows: a change migrates stored
+rows to the current shape rather than adding another tolerated version. This
+rule is rescinded at the first durable deployment — the freeze condition
+[process-protocol](docs/spec/process-protocol.md) defines — after which
+compatibility policy is decided explicitly.
 
 Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or
