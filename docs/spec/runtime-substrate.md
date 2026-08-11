@@ -1018,9 +1018,18 @@ receive exactly one matching user `tool_result` whose sole text block is the
 fixed acknowledgement. Only a terminal `result` event can establish success or
 refusal. The selected alias in `system/init` remains the provider-reported
 model; the first assistant event may name the provider-resolved model, but every
-later assistant event must repeat that same value. An error `result` and a
-nonzero process exit produce typed provider-error evidence. Exit zero without it
-is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
+later assistant event must repeat that same value. That resolved model is
+retained only for this comparison and reaches no record, so before the event's
+content blocks it seeds a redaction lookbehind of its own — a credential prefix
+ending it would otherwise escape the shape redactor through the same message's
+first text block continuing it, which under ambient delivery no exact-value
+redaction downstream can catch (INV-035). Each discarded source holds an
+independent lookbehind: the emitted identifier's adjacency to its record, the
+chronological dropped provider text, and this discarded field are judged
+separately, so bytes from one never sit between another's credential marker and
+the continuation completing it. An error `result` and a nonzero process exit
+produce typed provider-error evidence. Exit zero without it is
+`BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
 JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose alone never becomes
 terminal evidence. A success must satisfy the operation's any/named tool choice,
 with a structured-output contract represented as the required named MCP tool.

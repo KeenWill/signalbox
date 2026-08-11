@@ -147,6 +147,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        "resolved_model_prefix_redaction" => {
+            // The init model is the clean selected alias, so nothing seeds the
+            // lookbehind before the assistant event. The resolved model this
+            // event newly accepts — stored only for the contradiction check and
+            // otherwise discarded — ends in the credential marker its own first
+            // text block then continues.
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
+                fixtures::MODEL_CREDENTIAL_CONTINUATION,
+            )?;
+            success("end_turn", Some(fixtures::MODEL_CREDENTIAL_CONTINUATION))?;
+        }
         "conflicting_assistant_model" => {
             assistant_text_with_identity(
                 fixtures::MESSAGE_ID,

@@ -354,6 +354,15 @@ impl<C: Clone> EventDecoder<C> {
             ));
         }
         if self.native_assistant_model.is_none() {
+            // The provider-resolved model is accepted here and then discarded:
+            // it is retained only to detect a later contradiction and leaves
+            // the adapter in no record, so an ambient delivery has no exact
+            // value to redact downstream. A marker prefix ending it (`api_`)
+            // beside a first text block opening `key=value` still reconstructs
+            // the credential, so register it as a lookbehind chain of its own —
+            // the emitted chain belongs to the message id above, and the
+            // dropped chain to provider content this field does not sit in.
+            sink.add_discarded_field_identifier(&event.message.model);
             self.native_assistant_model = Some(event.message.model.clone());
         }
         if let Some(usage) = event.message.usage {

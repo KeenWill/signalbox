@@ -142,6 +142,26 @@ async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: the provider-resolved model an assistant event newly accepts is
+/// stored for the contradiction check and then discarded, so it reaches no
+/// record and this ambient-delivery runtime holds no exact value to redact
+/// downstream. A marker prefix ending that model must still seed the redaction
+/// lookbehind, or its own first text block completes the credential across the
+/// two fields and is emitted verbatim.
+///
+/// The init model here is the clean selected alias, so the resolved model is
+/// the only source of the marker — no other chain can account for the
+/// suppression.
+#[tokio::test]
+async fn inv_035_resolved_model_prefix_is_held_into_the_first_text_block() {
+    let result = execute_scenario("resolved_model_prefix_redaction", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn assistant_model_must_remain_stable_after_its_first_event() {
     let result = execute_scenario("conflicting_assistant_model", OperationShape::Text).await;

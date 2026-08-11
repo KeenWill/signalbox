@@ -1565,6 +1565,18 @@ pub struct RedactingSink<'a, C> {
     /// require a full reclassification. Between geometric checkpoints the
     /// complete suffix remains match-only state and cannot reach an output.
     dropped_context_next_rescan_len: usize,
+    /// The unsafe trailing suffix of a provider-controlled field the adapter
+    /// accepts and then discards — the first assistant event's resolved model,
+    /// kept only to detect a later contradiction. Like dropped provider text it
+    /// reaches no record, so no exact-value redaction downstream can catch it;
+    /// unlike dropped provider text it is not part of the content chronology.
+    /// It therefore holds a chain of its own rather than extending either
+    /// neighbour: appending it to `dropped_context` would splice a non-content
+    /// field between that chain's live prefix and the content continuing it,
+    /// and folding it into `emitted_context` would spend that chain's single
+    /// slot and fail closed over ordinary output. Match-state only, never
+    /// emitted.
+    discarded_field_context: String,
     #[cfg(test)]
     pending_rescan_work: PendingRescanWork,
     #[cfg(test)]
@@ -1587,6 +1599,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             dropped_context_rescan_bytes: 0,
             dropped_context_continues_candidate: false,
             dropped_context_next_rescan_len: 0,
+            discarded_field_context: String::new(),
             #[cfg(test)]
             pending_rescan_work: PendingRescanWork {
                 reclassifications: 0,
@@ -1629,6 +1642,46 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             return;
         }
         self.suppress_remaining();
+    }
+
+    /// Registers a provider-controlled field value the adapter accepted, stored
+    /// for its own bookkeeping, and then discarded (the first assistant event's
+    /// resolved model). The value reaches no record, so an ambient delivery has
+    /// no exact value to redact downstream — yet a credential marker ending it
+    /// still marks whatever follows it in the stream as that credential's
+    /// continuation, exactly as a marker in dropped provider text does.
+    ///
+    /// The value seeds a lookbehind chain of its own, so protecting it neither
+    /// breaks the chronological adjacency of the dropped provider-text chain
+    /// nor contends for the emitted chain's single identifier slot. One slot
+    /// still cannot represent two independent live discarded fields, so a
+    /// second registration carrying its own candidate fails closed.
+    pub fn add_discarded_field_identifier(&mut self, discarded: &str) {
+        if self.suppressing {
+            return;
+        }
+        let carried = trailing_credential_context(discarded).to_string();
+        if carried.is_empty() {
+            return;
+        }
+        if self.discarded_field_context.is_empty() {
+            self.discarded_field_context = carried;
+            return;
+        }
+        self.suppress_remaining();
+    }
+
+    /// Every lookbehind chain the sink judges, in evaluation order: the emitted
+    /// field's adjacency chain, the dropped provider-text chronology, and the
+    /// discarded field's chain. Each is independent — bytes belonging to one
+    /// source are never spliced into another, so clean bytes from one chain
+    /// cannot break a candidate live in another.
+    fn lookbehind_chains(&self) -> [&str; 3] {
+        [
+            self.emitted_context.as_str(),
+            self.dropped_context.as_str(),
+            self.discarded_field_context.as_str(),
+        ]
     }
 
     /// Extends the match-only lookbehind with provider text the adapter is
@@ -1825,6 +1878,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.pending = None;
         self.dropped_context = String::new();
         self.emitted_context = String::new();
+        self.discarded_field_context = String::new();
         self.context_rescan_bytes = 0;
         self.context_continues_candidate = false;
         self.dropped_context_rescan_bytes = 0;
@@ -1866,14 +1920,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             return REDACTED.to_string();
         }
         // Each context is its own adjacency chain (the emitted id's record,
-        // the dropped reasoning's marker) and is judged separately: joining
-        // both at once would insert one chain's bytes between the other's
-        // marker and its continuation and miss the match.
-        for context in [&self.emitted_context, &self.dropped_context] {
+        // the dropped reasoning's marker, the discarded field's value) and is
+        // judged separately: joining them at once would insert one chain's
+        // bytes between another's marker and its continuation and miss the
+        // match.
+        for context in self.lookbehind_chains() {
             if context.is_empty() && self.pending.is_none() {
                 continue;
             }
-            let mut joined = context.clone();
+            let mut joined = context.to_string();
             if let Some(pending) = &self.pending {
                 joined.push_str(&pending.text);
             }
@@ -1898,8 +1953,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     pub fn redact_wrapped_provider_detail(&self, detail: &str) -> String {
         if self.suppressing
             || self.pending.is_some()
-            || !self.emitted_context.is_empty()
-            || !self.dropped_context.is_empty()
+            || self
+                .lookbehind_chains()
+                .iter()
+                .any(|context| !context.is_empty())
         {
             return REDACTED.to_string();
         }
@@ -1926,6 +1983,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emitted_context = self.resolve_context_through(emitted, text);
             let dropped = std::mem::take(&mut self.dropped_context);
             self.dropped_context = self.resolve_context_through(dropped, text);
+            // The discarded field's chain resolves through the same text on its
+            // own terms: its marker either completed inside the text or was
+            // broken by it, and neither outcome is shared with the chains above.
+            let discarded_field = std::mem::take(&mut self.discarded_field_context);
+            self.discarded_field_context = self.resolve_context_through(discarded_field, text);
             self.refresh_dropped_context_rescan_threshold();
             self.reset_context_budget_if_spent();
         }
@@ -1970,7 +2032,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             .map_or("", |pending| pending.text.as_str());
         // Each context is its own adjacency chain, judged separately (see
         // `redact_terminal_failure_text`).
-        for context in [&self.emitted_context, &self.dropped_context] {
+        for context in self.lookbehind_chains() {
             if context.is_empty() && held.is_empty() && preceding.is_empty() {
                 continue;
             }
@@ -2048,6 +2110,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             let candidate = pending.candidate_starts_at_stored_origin();
             self.emitted_context.clear();
             self.dropped_context.clear();
+            self.discarded_field_context.clear();
             self.context_rescan_bytes = 0;
             self.context_continues_candidate = false;
             self.dropped_context_rescan_bytes = 0;
@@ -2098,7 +2161,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if !standalone.is_empty() {
             live.push(standalone.to_string());
         }
-        for context in [&self.emitted_context, &self.dropped_context] {
+        for context in self.lookbehind_chains() {
             if context.is_empty() {
                 continue;
             }
@@ -2122,7 +2185,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// into the held bytes, so the held text may be a credential
     /// continuation.
     fn pending_extends_a_chain(&self, pending_text: &str) -> bool {
-        for context in [&self.emitted_context, &self.dropped_context] {
+        for context in self.lookbehind_chains() {
             if context.is_empty() {
                 continue;
             }
@@ -2157,18 +2220,14 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             let candidate = pending.candidate_starts_at_stored_origin();
             let unfinished_url_password =
                 unfinished_url_userinfo_contains_password(&pending.text[pending.candidate_start..]);
-            let dirty = [
-                "",
-                self.emitted_context.as_str(),
-                self.dropped_context.as_str(),
-            ]
-            .iter()
-            .any(|context| {
-                let mut joined = String::with_capacity(context.len() + pending.text.len());
-                joined.push_str(context);
-                joined.push_str(&pending.text);
-                redact_text(&joined) != joined
-            });
+            let dirty = std::iter::once("")
+                .chain(self.lookbehind_chains())
+                .any(|context| {
+                    let mut joined = String::with_capacity(context.len() + pending.text.len());
+                    joined.push_str(context);
+                    joined.push_str(&pending.text);
+                    redact_text(&joined) != joined
+                });
             if chained || (dirty && !candidate) {
                 self.emit_redacted(pending.fragments);
             } else if candidate && (dirty || unfinished_url_password) {
@@ -2178,6 +2237,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             }
             self.emitted_context.clear();
             self.dropped_context.clear();
+            self.discarded_field_context.clear();
             self.context_rescan_bytes = 0;
             self.context_continues_candidate = false;
             self.dropped_context_rescan_bytes = 0;
@@ -2307,6 +2367,28 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.dropped_context = live;
             self.refresh_dropped_context_rescan_threshold();
             self.reset_context_budget_if_spent();
+            if consumed {
+                return;
+            }
+        }
+        let discarded_field = std::mem::take(&mut self.discarded_field_context);
+        if !discarded_field.is_empty() {
+            let (consumed, live) = self.delta_against_context(
+                discarded_field,
+                // The discarded field is installed whole and cleared at every
+                // barrier, so it never carries a checkpoint: it continues no
+                // earlier candidate, and the reclassifications it triggers are
+                // charged onto the shared pending budget like any other chain's.
+                ContextRescanState {
+                    continues_candidate: false,
+                    bytes: 0,
+                },
+                field,
+                index,
+                correlation.clone(),
+                &text,
+            );
+            self.discarded_field_context = live;
             if consumed {
                 return;
             }
@@ -5326,6 +5408,165 @@ safe-line"
             sink.redact_provider_id("", " opaque-continuation"),
             REDACTED
         );
+    }
+
+    /// Credential redaction: a provider-controlled field the adapter accepts,
+    /// stores and discards (an assistant event's resolved model) governs the
+    /// streamed text that follows it. Its bytes reach no record, so an ambient
+    /// delivery holds no exact value to redact downstream — only this chain
+    /// stops the marker's continuation being emitted verbatim.
+    #[test]
+    fn credential_discarded_field_suppresses_a_streamed_continuation() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "key=opaque-discarded-value done".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert!(
+            !emitted
+                .iter()
+                .any(|text| text.contains("opaque-discarded-value"))
+        );
+        assert!(emitted.iter().any(|text| text.contains(REDACTED)));
+    }
+
+    /// Credential redaction: the discarded field's chain also governs terminal
+    /// evidence, so a failure message continuing the field's marker suffix is
+    /// suppressed rather than carried across the adapter boundary.
+    #[test]
+    fn credential_discarded_field_suppresses_a_failure_continuation() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+
+        assert_eq!(
+            sink.redact_terminal_failure_text("key=opaque-discarded-value refused"),
+            REDACTED
+        );
+    }
+
+    /// Credential redaction: registering a discarded field must not splice its
+    /// bytes into the dropped provider-text chronology. A clean model value
+    /// arriving between a dropped marker and the text completing it would
+    /// break that adjacency if the two shared one chain.
+    #[test]
+    fn credential_discarded_field_does_not_break_the_dropped_chain() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.extend_dropped_context("api_");
+        sink.add_discarded_field_identifier("model-synthetic-resolved");
+
+        assert_eq!(
+            sink.redact_terminal_failure_text("key=opaque-context-value done"),
+            REDACTED
+        );
+    }
+
+    /// Credential redaction: registering a discarded field must not splice its
+    /// bytes into the emitted field's adjacency chain either, so an emitted
+    /// id's marker still matches the text that follows the model.
+    #[test]
+    fn credential_discarded_field_does_not_break_the_emitted_chain() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.seed_emitted_context("api_");
+        sink.add_discarded_field_identifier("model-synthetic-resolved");
+
+        assert_eq!(
+            sink.redact_terminal_failure_text("key=opaque-context-value done"),
+            REDACTED
+        );
+    }
+
+    /// Credential redaction: the discarded field holds a chain of its own, so
+    /// registering it beside a live emitted identifier neither contends for
+    /// that chain's single slot nor fails the exchange closed. Ordinary output
+    /// stays byte-exact while both chains remain live.
+    #[test]
+    fn credential_discarded_field_does_not_contend_for_the_emitted_slot() {
+        let mut observed = Vec::new();
+        let suppressed;
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.add_emitted_identifier("message-synthetic-api_");
+            sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+            suppressed = sink.is_suppressing();
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "ordinary completion text.".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert!(!suppressed);
+        assert_eq!(emitted, vec!["ordinary completion text.".to_string()]);
+    }
+
+    /// Credential redaction: one slot cannot represent two independent live
+    /// discarded fields, so a second registration carrying its own candidate
+    /// fails closed rather than dropping either chain.
+    #[test]
+    fn credential_second_live_discarded_field_fails_closed() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+        assert!(!sink.is_suppressing());
+
+        sink.add_discarded_field_identifier("model-synthetic-other-Authorization:");
+
+        assert!(sink.is_suppressing());
+    }
+
+    /// Credential redaction: a discarded field with a credential-clean trailing
+    /// suffix seeds no chain, and the stream that follows stays byte-exact.
+    #[test]
+    fn clean_discarded_field_leaves_the_stream_byte_exact() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.add_discarded_field_identifier("model-synthetic-resolved");
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "key=ordinary value.".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert_eq!(emitted, vec!["key=ordinary value.".to_string()]);
+    }
+
+    /// Credential redaction: a discarded-field chain a clean final text breaks
+    /// is consumed by that text, so a later clean provider id is not rejoined
+    /// to the model's marker across the intervening bytes.
+    #[test]
+    fn discarded_field_chain_broken_by_final_text_releases_later_ids() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+
+        assert_eq!(
+            sink.redact_final_envelope_text("hello there."),
+            "hello there."
+        );
+        assert_eq!(sink.redact_provider_id("", "key=call-7"), "key=call-7");
     }
 
     /// Credential redaction: a dropped-marker candidate completing inside the final text
