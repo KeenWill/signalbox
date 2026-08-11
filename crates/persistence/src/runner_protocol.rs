@@ -1706,6 +1706,45 @@ impl RunnerProtocolStore {
         }
         let mut transaction = self.pool.begin().await?;
         lock_runner_session_scheduler(&mut transaction, pin.placement.session()).await?;
+        let enrollment = registration.registration().enrollment();
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        let enrollment_state: String = sqlx::query_scalar(
+            "SELECT state_kind
+               FROM runner_enrollment
+              WHERE enrollment_id = $1",
+        )
+        .bind(enrollment.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if enrollment_state != "active" {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::EnrollmentRevoked,
+            ));
+        }
+        match load_connection_head_in(transaction.as_mut(), enrollment).await? {
+            None
+            | Some(RunnerConnectionSnapshot {
+                state: RunnerConnectionState::Connected,
+                ..
+            }) => {}
+            Some(RunnerConnectionSnapshot {
+                state:
+                    RunnerConnectionState::Suspect
+                    | RunnerConnectionState::Shutdown
+                    | RunnerConnectionState::Lost,
+                ..
+            }) => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::InvalidState,
+                ));
+            }
+        }
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(pin.placement.session().into_uuid())
             .fetch_optional(&mut *transaction)
