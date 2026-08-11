@@ -518,12 +518,18 @@ INV-tagged test names and attached doc comments.
 - **Transient updates:** Search progress or partial presentation that is not
   conversation truth.
 - **Owning component:** Daemon owns policy and history; a daemon-local adapter
-  executes under central credentials.
+  executes under central credentials. A workspace-root-bound adapter executes
+  against the root the requesting session bound: its own derived root where the
+  deployment provisioned one, so two such sessions share no tree, and otherwise
+  the configured root that every session shares.
 - **Failure behavior:** Adapter loss is classified with the same known/ambiguous
-  distinction; central placement does not imply safe automatic retry.
+  distinction; central placement does not imply safe automatic retry. A session
+  whose derived workspace cannot be composed receives a known tool failure and
+  is never redirected to another session's root.
 - **Required invariants:** INV-019, INV-024–INV-027, INV-035.
-- **Remaining questions:** Credential scoping, daemon executor isolation, and
-  whether centrally hosted MCP is one adapter type.
+- **Remaining questions:** Credential scoping, isolation between a daemon-local
+  adapter and the credentials it holds, and whether centrally hosted MCP is one
+  adapter type.
 
 ## S16 — Execute a runner-local tool
 

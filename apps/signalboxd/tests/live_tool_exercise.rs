@@ -34,8 +34,9 @@ use signalbox_model_runtime::{
     ToolCallId, ToolCallProposal, ToolName,
 };
 use signalbox_persistence::{
-    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
-    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+    disposable_test_container_labels, local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
@@ -438,12 +439,21 @@ fn smoke_configuration(workspace: &Path) -> SmokeResult<HubModelConfiguration> {
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "codex-subscription-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "{}"
@@ -1211,6 +1221,7 @@ async fn migrated_postgres() -> SmokeResult<(ContainerAsync<Postgres>, PgPool)> 
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
