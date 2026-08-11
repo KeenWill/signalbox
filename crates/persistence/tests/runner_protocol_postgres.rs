@@ -96,9 +96,9 @@ const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const SERIALIZATION_TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
-const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080103;
-const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608100002;
-const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608100003;
+const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608100002;
+const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608100003;
+const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608100004;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -17392,6 +17392,115 @@ async fn s32_inv032_inv044_initial_connection_cannot_publish_recovery() -> Resul
     .expect_err("an initial established connection is not a recovery boundary");
 
     assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: an established recovery source starts a successor epoch;
+/// a cause-valid established event in the suspect epoch is not a reconnect.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_same_epoch_established_event_cannot_publish_recovery()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, $2, 3, 'connected', 'established')",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(connection.epoch().get()))
+    .execute(&pool)
+    .await?;
+    let rejected = append_runner_state_transition_for_test(
+        &pool,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Connected,
+            RunnerStateTransitionOutboxTestSource::connection(
+                placement_event_ordinal,
+                expected_enrollment.enrollment(),
+                connection.epoch(),
+                NonZeroU64::new(3).expect("the fixture event ordinal is positive"),
+            ),
+        ),
+    )
+    .await
+    .expect_err("same-epoch established evidence is not a reconnect recovery");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: dispatch rechecks the immutable predecessor chain so
+/// post-admission corruption cannot turn an established epoch into recovery.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_reconnect_dispatch_rejects_corrupted_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
+    let first_connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            first_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    dispatch_next_outbox_event(&pool).await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    sqlx::query("ALTER TABLE runner_connection_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_connection_event
+            SET state_kind = 'connected',
+                cause_kind = 'heartbeat_recovered'
+          WHERE enrollment_id = $1
+            AND connection_epoch = $2
+            AND event_ordinal = 2",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(first_connection.epoch().get()))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_connection_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await
+        .expect_err("corrupted predecessor state cannot publish reconnect recovery");
+
+    assert!(matches!(
+        rejected,
+        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
+    ));
     drop(pool);
     Ok(())
 }
