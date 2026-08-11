@@ -174,15 +174,19 @@ commit without allowing queued sources to escape the aggregate raw-frame bound.
 Once admitted, each append moves its decoded chunk from the inbound frame into
 the disk-backed blob spool or per-connection import assembly and releases the
 frame slot. The configured total bounds limit the active assembly, so retained
-bulk-ingest storage is at most the larger of `max_blob_bytes` and
-`conversation_import.max_source_bytes`, plus one bounded inbound chunk. Import
-commit runs the existing whole-source conversion on the blocking pool so
-synchronous conversion does not occupy an asynchronous runtime worker. Commit,
-abort, terminal size or conversion rejection, or disconnect drops the assembly
-and releases the permit before response output. An `already_in_progress` refusal
-is nonterminal and leaves the existing assembly available for append, commit, or
-explicit abort. A peer that stops reading a terminal response therefore cannot
-retain rejected input or completed import content.
+bulk-ingest assembly storage is at most the larger of `max_blob_bytes` and
+`conversation_import.max_source_bytes`, plus one bounded inbound chunk. During
+filesystem publication, its store-local temporary file may coexist with the
+completed staging spool, so the maximum transient blob disk footprint is twice
+`max_blob_bytes` plus one bounded inbound chunk; each file is independently
+limited to `max_blob_bytes`. Import commit runs the existing whole-source
+conversion on the blocking pool so synchronous conversion does not occupy an
+asynchronous runtime worker. Commit, abort, terminal size or conversion
+rejection, or disconnect drops the assembly and releases the permit before
+response output. An `already_in_progress` refusal is nonterminal and leaves the
+existing assembly available for append, commit, or explicit abort. A peer that
+stops reading a terminal response therefore cannot retain rejected input or
+completed import content.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -911,8 +915,12 @@ terminal upload refusal discards staging.
 length. The response is exact rather than truncating at end-of-blob. Upload and
 read state, length, digest, and range failures use the exhaustive content-silent
 `invalid_request` details below; an absent digest is `not_found`, storage
-availability is `unavailable`, and an ambiguous catalog commit is
-`commit_ambiguous`.
+availability is `unavailable`, an all-missing recorded replica set is
+`blob_missing`, a definitively corrupt set with no unavailable candidate is
+`blob_corrupt`, and an ambiguous catalog commit is `commit_ambiguous`. When no
+replica succeeds, `unavailable` takes precedence over `blob_corrupt`, which
+takes precedence over `blob_missing`, because an unavailable candidate prevents
+a definitive integrity conclusion.
 
 ## Server messages
 
@@ -1533,6 +1541,8 @@ The protocol error-code set is:
 | `unsupported_version` | The frame version is unsupported.                                                                                                      |
 | `invalid_request`     | A boundary value cannot construct the requested application input.                                                                     |
 | `not_found`           | The selected session, named defaults epoch, imported conversation or frontier, review aggregate, or blob does not exist.               |
+| `blob_missing`        | The blob exists in the catalog, but every recorded replica is definitively absent.                                                     |
+| `blob_corrupt`        | The blob exists in the catalog, no candidate is unavailable, and at least one recorded replica fails length or digest verification.    |
 | `conflicting_reuse`   | A durable command identity already names different intent.                                                                             |
 | `rejected`            | The canonical command was durably rejected by current typed state, or a request-specific precondition refused it before recording one. |
 | `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                                                        |

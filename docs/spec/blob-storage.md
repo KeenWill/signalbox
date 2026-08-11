@@ -1,10 +1,10 @@
 # Blob storage
 
-This page is the foundation contract introduced and verified through PR #553
-(`agent/blob-storage-foundation`). Its implemented-behavior statements take
-effect with the full implementing stack. A paragraph that names itself
-unimplemented is committed unimplemented functionality and carries only its
-stated compatibility constraint.
+This page is the foundation proposal verified through PR #553
+(`agent/blob-storage-foundation`). Its implemented-behavior statements become
+verified with its implementing child stack and take effect with the full stack.
+A paragraph that names itself unimplemented is committed unimplemented
+functionality and carries only its stated compatibility constraint.
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
@@ -127,21 +127,24 @@ rotation does not require daemon restart. No environment, provider profile,
 metadata service, or other ambient source is consulted.
 
 Version one ships two store kinds. `filesystem` is a production-supported store
-— including over network mounts that honor same-directory atomic rename and file
-and directory synchronization — writing through a same-filesystem temporary
-file. Publication syncs the complete temporary file, atomically renames it to
-the final content-addressed path, syncs affected directory metadata, and then
-completely verifies the final bytes before catalog registration; a failed
-durability or verification operation makes the store unavailable and records no
-replica. `s3` speaks the S3-compatible API against an explicit endpoint with
-explicit file-delivered static credentials; ambient credential discovery
-(process environment, provider configuration files, instance metadata) is
-rejected by construction, and an object store's own integrity metadata is never
-treated as content identity. Multiple stores are enabled simultaneously and
-routed by class; routing by media type or filename is inexpressible. Why: class
-is a classification Signalbox itself made, while media type and filename are
-caller-supplied strings, and a caller-supplied string must not select which
-infrastructure gains authority over bytes.
+only on a filesystem the host can positively classify as local, non-network, and
+non-userspace storage. Startup rejects network, userspace, and unclassified
+mounts rather than admitting an uninterruptible remote operation into the
+daemon. Native network-filesystem support therefore remains outside this version
+until it has an isolatable, bounded-operation contract. Publication writes
+through a same-filesystem temporary file, syncs the complete temporary file,
+atomically renames it to the final content-addressed path, syncs affected
+directory metadata, and then completely verifies the final bytes before catalog
+registration; a failed durability or verification operation makes the store
+unavailable and records no replica. `s3` speaks the S3-compatible API against an
+explicit endpoint with explicit file-delivered static credentials; ambient
+credential discovery (process environment, provider configuration files,
+instance metadata) is rejected by construction, and an object store's own
+integrity metadata is never treated as content identity. Multiple stores are
+enabled simultaneously and routed by class; routing by media type or filename is
+inexpressible. Why: class is a classification Signalbox itself made, while media
+type and filename are caller-supplied strings, and a caller-supplied string must
+not select which infrastructure gains authority over bytes.
 
 Blobs are large: the substrate supports multi-gigabyte objects, so every daemon
 path — ingest, verification, replica copy, read — streams and none materializes
@@ -222,8 +225,12 @@ live-verifies each candidate by streaming its full length and SHA-256 before
 returning that digest's first range, retaining only the requested range in
 memory. Missing, corrupt, or unavailable candidates fall through to the next
 recorded replica; typed failure with no bytes is returned only when none can
-satisfy the read. The scope may reuse verification for later ranges only while
-the adapter pins the exact verified object instance: a retained open handle, an
+satisfy the read. After all candidates fail, any unavailable candidate makes the
+result `unavailable` because the daemon cannot prove the blob unusable;
+otherwise any digest or length mismatch makes it `blob_corrupt`, and an
+all-missing set makes it `blob_missing`. An absent catalog identity remains
+`not_found`. The scope may reuse verification for later ranges only while the
+adapter pins the exact verified object instance: a retained open handle, an
 opaque version with conditional range reads, or an equivalent stable-instance
 proof. An adapter that cannot prove the same instance re-verifies before each
 range. Its least-recently-used verification inventory holds at most eight
