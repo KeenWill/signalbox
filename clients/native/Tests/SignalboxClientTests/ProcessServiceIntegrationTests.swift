@@ -11662,6 +11662,24 @@ extension ProcessServiceIntegrationTests {
     )
   }
 
+  func testRunnerTransitionStatusPresentsRelocationTarget() throws {
+    let transition = try ProcessProjectionFixture.runnerRelocationTransition()
+
+    XCTAssertEqual(
+      transition.statusLabel,
+      ProcessProjectionFixture.runnerRelocationStatusLabel
+    )
+  }
+
+  func testRunnerTransitionStatusPresentsRunnerDefaultDirectory() throws {
+    let transition = try ProcessProjectionFixture.runnerDefaultDirectoryTransition()
+
+    XCTAssertEqual(
+      transition.statusLabel,
+      ProcessProjectionFixture.runnerDefaultDirectoryStatusLabel
+    )
+  }
+
   @MainActor
   func testToolApprovalDecisionPresentsDelegateProvenanceAndRationale() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
@@ -12108,7 +12126,14 @@ extension ProcessProjectionFixture {
     "Denied by delegate; model selection \(delegateModelSelection); call \(delegateModelCall)"
   static let runnerID = "44444444-4444-4444-8444-444444444444"
   static let runnerSnapshotStatusLabel = "Runner \(runnerID) · pinned · revision 3"
-  static let runnerLossStatusLabel = "Runner \(runnerID) · runner_lost · revision 4"
+  static let runnerLossStatusLabel =
+    "Runner \(runnerID) · runner_lost · revision 4 · sandbox workspace-restricted"
+    + " · selected directory \"workspace/project\""
+  static let runnerRelocationStatusLabel =
+    "Runner \(runnerID) · working_directory_changed · revision 5"
+    + " · sandbox workspace-restricted · selected directory \"workspace/new\\nproject\""
+  static let runnerDefaultDirectoryStatusLabel =
+    "Runner \(runnerID) · replaced · revision 6 · sandbox ambient · runner-default directory"
   static let futureSessionEventKind = "fixture_future_session_event"
 
   static func runnerProjection() throws -> SignalboxRunnerProjection {
@@ -12158,6 +12183,28 @@ extension ProcessProjectionFixture {
         "state":"runner_lost"
       }
       """
+    )
+  }
+
+  static func runnerRelocationTransition() throws -> ProcessRunnerTransition {
+    ProcessRunnerTransition(
+      runnerID: try SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 5),
+      sandboxProfile: .workspaceRestricted,
+      workingDirectory: try SignalboxRunnerWorkingDirectory(
+        validating: "workspace/new\nproject"
+      ),
+      state: .workingDirectoryChanged
+    )
+  }
+
+  static func runnerDefaultDirectoryTransition() throws -> ProcessRunnerTransition {
+    ProcessRunnerTransition(
+      runnerID: try SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 6),
+      sandboxProfile: .ambient,
+      workingDirectory: nil,
+      state: .replaced
     )
   }
   static let formerUsageCollisionEntryIndex = UInt64(7)
