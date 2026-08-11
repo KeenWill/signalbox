@@ -31,9 +31,11 @@ use signalbox_domain::{
     TurnId, UserContent,
 };
 use signalbox_persistence::{
+    DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS,
     create_session::{CreateSessionHandlingOutcome, CreateSessionRepository},
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    outlives_the_disposable_container_sweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
     tool_loop::PostgresToolLoopRepository,
@@ -232,6 +234,26 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
     if duration_seconds == 0 {
         return Err(error("--duration-seconds must be positive"));
     }
+    // One point holds one disposable container from before the warmup until
+    // after the offered load, and the orphan sweep removes marked containers
+    // past this age. Refusing here fails the run before it starts a container
+    // rather than partway through; it cannot be the whole guard, because how
+    // long the container takes to become ready is not knowable yet, so the
+    // point re-checks against its measured setup once it has one.
+    let point_lifetime = Duration::from_secs(duration_seconds)
+        .saturating_add(WARMUP_DURATION)
+        .saturating_add(OPERATION_TIMEOUT);
+    if outlives_the_disposable_container_sweep(point_lifetime) {
+        return Err(error(format!(
+            "--duration-seconds must leave the whole point under {}h, counting the {}s \
+             warmup and the {}s an operation in flight may still take: one disposable \
+             container serves the point, and tooling/sweep-test-containers.sh removes \
+             marked containers past that age",
+            DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS,
+            WARMUP_DURATION.as_secs(),
+            OPERATION_TIMEOUT.as_secs()
+        )));
+    }
     let highest_concurrency = concurrencies
         .iter()
         .copied()
@@ -326,6 +348,7 @@ impl PostgresEnvironment {
         let container = image
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_cmd(command)
+            .with_labels(disposable_test_container_labels())
             .start()
             .await?;
         let host = container.get_host().await?.to_string();
@@ -1112,6 +1135,7 @@ async fn main() -> HarnessResult<()> {
                     fsync.label(),
                     config.server_max_connections
                 );
+                let container_started = Instant::now();
                 let environment =
                     PostgresEnvironment::start(fsync, config.server_max_connections).await?;
                 eprintln!(
@@ -1126,6 +1150,38 @@ async fn main() -> HarnessResult<()> {
                 let pool = environment
                     .migrated_pool(database_sequence, config.pool_size)
                     .await?;
+                // The parse-time check had to assume how long setup takes; this
+                // one measures it, and measures it here because the database
+                // creation and the migrations above are part of what it has to
+                // account for. What remains has to cover the warmup, the
+                // offered load, and one `OPERATION_TIMEOUT`, since an operation
+                // started an instant before the load window closes is awaited
+                // past it. Short of that, the sweep would remove this point's
+                // database while the point is still using it.
+                let point_remaining = Duration::from_secs(
+                    DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS
+                        .saturating_mul(60)
+                        .saturating_mul(60),
+                )
+                .saturating_sub(container_started.elapsed());
+                let point_needs = WARMUP_DURATION
+                    .saturating_add(config.duration)
+                    .saturating_add(OPERATION_TIMEOUT);
+                if point_needs >= point_remaining {
+                    return Err(error(format!(
+                        "this point took {}s to become ready, leaving {}s before \
+                         tooling/sweep-test-containers.sh would remove its database, \
+                         short of the {}s this point still needs ({}s warmup, {}s offered \
+                         load, {}s for an operation in flight when the window closes); \
+                         lower --duration-seconds",
+                        container_started.elapsed().as_secs(),
+                        point_remaining.as_secs(),
+                        point_needs.as_secs(),
+                        WARMUP_DURATION.as_secs(),
+                        config.duration.as_secs(),
+                        OPERATION_TIMEOUT.as_secs()
+                    )));
+                }
                 let point = run_point(
                     PointConfig {
                         scenario,

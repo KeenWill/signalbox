@@ -246,6 +246,7 @@ impl PostgresApprovalJudgeRepository {
                 &mut transaction,
                 session,
                 target,
+                signalbox_domain::FastMode::Disabled,
                 &self.fallback_credential,
                 self.credential_families.as_ref(),
             )

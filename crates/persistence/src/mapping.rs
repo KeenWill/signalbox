@@ -59,6 +59,38 @@ pub fn delegation_policy_kind_from_str(value: &str) -> Option<DelegationPolicySt
     }
 }
 
+/// Closed terminal dispositions stored for a tool attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolAttemptDispositionStorageKind {
+    Completed,
+    KnownFailed,
+    AwaitingChild,
+    Ambiguous,
+}
+
+pub(crate) const fn tool_attempt_disposition_to_str(
+    value: ToolAttemptDispositionStorageKind,
+) -> &'static str {
+    match value {
+        ToolAttemptDispositionStorageKind::Completed => "completed",
+        ToolAttemptDispositionStorageKind::KnownFailed => "known_failed",
+        ToolAttemptDispositionStorageKind::AwaitingChild => "awaiting_child",
+        ToolAttemptDispositionStorageKind::Ambiguous => "ambiguous",
+    }
+}
+
+pub(crate) fn tool_attempt_disposition_from_str(
+    value: &str,
+) -> Option<ToolAttemptDispositionStorageKind> {
+    match value {
+        "completed" => Some(ToolAttemptDispositionStorageKind::Completed),
+        "known_failed" => Some(ToolAttemptDispositionStorageKind::KnownFailed),
+        "awaiting_child" => Some(ToolAttemptDispositionStorageKind::AwaitingChild),
+        "ambiguous" => Some(ToolAttemptDispositionStorageKind::Ambiguous),
+        _ => None,
+    }
+}
+
 /// Closed delegated-session update discriminators in PostgreSQL.
 ///
 /// Public because the outbox decode tripwire drives these spellings with the
@@ -1833,19 +1865,20 @@ mod tests {
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-        StoredModelSettingsError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
-        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
-        approval_judge_state_from_str, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        bound_child_action_from_str, bound_child_action_to_str, defaults_version_from_numeric,
-        defaults_version_to_numeric, delegation_message_direction_from_str,
-        delegation_message_direction_to_str, delegation_outcome_kind_from_str,
-        delegation_outcome_kind_to_str, delegation_outcome_reason_from_str,
-        delegation_outcome_reason_to_str, delegation_policy_kind_from_str,
-        delegation_policy_kind_to_str, delegation_rejection_kind_from_str,
-        delegation_rejection_kind_to_str, delegation_transition_failure_from_str,
-        delegation_transition_failure_to_str, delegation_update_kind_from_str,
-        delegation_update_kind_to_str, delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        StoredModelSettingsError, ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
+        approval_judge_recommendation_to_str, approval_judge_state_from_str,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
+        approval_judge_terminal_disposition_to_str, bound_child_action_from_str,
+        bound_child_action_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        delegation_message_direction_from_str, delegation_message_direction_to_str,
+        delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
+        delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
+        delegation_policy_kind_from_str, delegation_policy_kind_to_str,
+        delegation_rejection_kind_from_str, delegation_rejection_kind_to_str,
+        delegation_transition_failure_from_str, delegation_transition_failure_to_str,
+        delegation_update_kind_from_str, delegation_update_kind_to_str,
+        delegation_wait_mode_from_str, delegation_wait_mode_to_str,
         delegation_wake_subject_from_str, delegation_wake_subject_to_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
@@ -1867,9 +1900,50 @@ mod tests {
         session_placement_event_kind_to_str, session_placement_rejection_from_str,
         session_placement_result_kind_from_str, session_placement_result_kind_to_str,
         tool_approval_posture_from_str, tool_approval_posture_to_str,
+        tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
+
+    #[test]
+    fn tool_attempt_dispositions_pin_each_storage_spelling() {
+        assert_eq!(
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
+            "completed"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("completed"),
+            Some(ToolAttemptDispositionStorageKind::Completed)
+        );
+        assert_eq!(
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::KnownFailed),
+            "known_failed"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("known_failed"),
+            Some(ToolAttemptDispositionStorageKind::KnownFailed)
+        );
+        assert_eq!(
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::AwaitingChild),
+            "awaiting_child"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("awaiting_child"),
+            Some(ToolAttemptDispositionStorageKind::AwaitingChild)
+        );
+        assert_eq!(
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Ambiguous),
+            "ambiguous"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("ambiguous"),
+            Some(ToolAttemptDispositionStorageKind::Ambiguous)
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
     use crate::approval_judge::FailedApprovalJudgeDisposition;
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";

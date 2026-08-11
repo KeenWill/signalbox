@@ -31,7 +31,7 @@ fn read_file_schema_carries_path_character_and_content_byte_bounds() {
     assert_eq!(schema["properties"]["path"]["minLength"], json!(1));
     assert_eq!(
         schema["properties"]["max_bytes"]["maximum"],
-        json!(MAX_READ_BYTES)
+        json!(MAX_WORKSPACE_READ_BYTES)
     );
     assert_eq!(schema["properties"]["max_bytes"]["minimum"], json!(1));
 }
@@ -366,7 +366,7 @@ fn valid_utf8_scalar_crossing_the_byte_boundary_is_trimmed() {
 fn escaped_read_content_is_truncated_to_result_text_admission() {
     const FILE_PATH: &str = "control.txt";
 
-    let content = "\0".repeat(MAX_READ_BYTES);
+    let content = "\0".repeat(MAX_WORKSPACE_READ_BYTES);
     let content_bytes = content.len();
     let result = ReadResult::ReadFile(ReadFileResult {
         path: String::from(FILE_PATH),

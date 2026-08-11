@@ -38,7 +38,8 @@ pub const WORKSPACE_READ_TOOL_NAMES: [&str; 4] = [
 ];
 
 const DEFAULT_READ_MAX_BYTES: usize = 64 * 1024;
-const MAX_READ_BYTES: usize = 256 * 1024;
+/// Maximum byte prefix accepted by `read_file`.
+pub const MAX_WORKSPACE_READ_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 100;
 const MAX_RESULTS: usize = 256;
 const MAX_PATTERN_CHARACTERS: usize = 4096;
@@ -74,7 +75,7 @@ pub struct ReadFileArguments {
     pub path: String,
     /// Maximum UTF-8 content bytes retained, from 1 through 262144.
     #[serde(default = "default_read_max_bytes")]
-    #[schemars(range(min = 1, max = MAX_READ_BYTES))]
+    #[schemars(range(min = 1, max = MAX_WORKSPACE_READ_BYTES))]
     pub max_bytes: usize,
 }
 
@@ -416,7 +417,7 @@ fn decode_arguments(
 }
 
 fn check_read_max(max_bytes: usize) -> Result<(), InvalidReadArguments> {
-    if max_bytes == 0 || max_bytes > MAX_READ_BYTES {
+    if max_bytes == 0 || max_bytes > MAX_WORKSPACE_READ_BYTES {
         return Err(InvalidReadArguments::Shape);
     }
     Ok(())

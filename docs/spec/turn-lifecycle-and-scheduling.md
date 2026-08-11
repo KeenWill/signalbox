@@ -856,17 +856,15 @@ values—`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
 naming provider targets, selections, and aliases),
 `SIGNALBOX_TEMPLATE_CONFIG_FILE`, `BRAVE_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
 `SIGNALBOX_SOCKET_PATH`—from the process environment, plus the optional
-`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. The
-present pre-pool composition additionally has a conditional singleton
-model-provider credential channel. The committed credential-pool child replaces
-that channel: model-provider paths then come only from each `file` profile in
-the static catalog, and composition builds `FileCredentialAccess` from the
-complete profile map. No present composition implements that replacement.
-[Configuration and credentials](configuration-and-credentials.md#process-configuration)
-owns the resulting channel inventory. It validates the model catalog, then
-resolves the template catalog and all of its prompt files against that model
-catalog, before connecting. It then acquires the single-daemon guard, fences the
-prior pool incarnation, migrates and resolves the one-time imported
+`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. A
+model-provider credential path is not among them: every `file` profile carries
+its own path, and composition builds `FileCredentialAccess` from the complete
+profile map, as specified by
+[configuration and credentials](configuration-and-credentials.md#process-configuration).
+The configuration page owns these provisional channels. It validates the model
+catalog, then resolves the template catalog and all of its prompt files against
+that model catalog, before connecting. It then acquires the single-daemon guard,
+fences the prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes the generic recovery scan, marks every prior-process nonterminal
