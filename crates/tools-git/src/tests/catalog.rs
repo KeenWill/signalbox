@@ -156,14 +156,27 @@ fn local_write_verbs_are_effecting() {
 /// A composition recording which directories a suite bound reads them from the
 /// suite rather than resolving the pathname a second time, so the pair names
 /// the worktree and the `.git` directory the layout validation accepted.
+///
+/// The administration directory is replaced after construction and before the
+/// pair is read: an implementation that resolved the pathname again would
+/// return the replacement, so this is what distinguishes a captured identity
+/// from a re-resolved one.
 #[test]
 fn pinned_directories_name_the_validated_worktree_and_administration_directory() {
     let fixture = Fixture::new();
-    let suite = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
-        .expect("suite constructs");
     let worktree = fs::symlink_metadata(fixture.root()).expect("the fixture worktree is present");
     let administration = fs::symlink_metadata(fixture.root().join(".git"))
         .expect("the fixture administration directory is present");
+    let suite = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+        .expect("suite constructs");
+    fs::rename(
+        fixture.root().join(".git"),
+        fixture.root().join(".git.displaced"),
+    )
+    .expect("the administration directory moves aside");
+    fs::create_dir(fixture.root().join(".git")).expect("a replacement stands at the pathname");
+    let replacement =
+        fs::symlink_metadata(fixture.root().join(".git")).expect("the replacement is present");
 
     let pinned = suite.pinned_directories();
 
@@ -171,4 +184,5 @@ fn pinned_directories_name_the_validated_worktree_and_administration_directory()
     assert_eq!(pinned.root.inode, worktree.ino());
     assert_eq!(pinned.administration.device, administration.dev());
     assert_eq!(pinned.administration.inode, administration.ino());
+    assert_ne!(pinned.administration.inode, replacement.ino());
 }

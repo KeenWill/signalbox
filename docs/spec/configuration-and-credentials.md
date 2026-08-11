@@ -652,7 +652,9 @@ path is unprovisioned, and such a session binds the configured root exactly as
 every session did before this derivation, so an unprovisioned deployment is
 unchanged. A present non-directory, a symlink, or a path the daemon cannot
 classify at all is a misprovisioned session rather than an unprovisioned one and
-fails closed.
+fails closed. This decides the sessions whose binding is still open; a session
+that already bound the configured root is governed by the recorded-binding rule
+below instead.
 
 The derived parent is classified the same way and before the session's own
 directory, because it is the one intermediate component this derivation
@@ -660,9 +662,16 @@ introduces and every no-follow open after it declines to follow only the
 component it names. A symlink standing at the parent would otherwise be followed
 by all of them, placing every derived root wherever it points — inside the
 configured root, say, where every session still bound to that root can read,
-write, and execute it. An accepted residual: a parent that is a real directory
-whose contents are a bind mount of a tree inside the configured root presents no
-symlink and no shared directory identity, and is admitted.
+write, and execute it. A parent that is itself one of the configured
+composition's directories is refused for the same reason: `<name>.sessions`
+bind-mounted onto the configured root presents a real directory rather than a
+symlink, so the classification admits it while every child beneath it is nested
+inside the configured workspace — which the bound pair cannot show, since
+ancestry is not equality. The pinned and the standing configured pairs are both
+compared, since the configured pathname is never re-resolved. An accepted
+residual: a parent that is a real directory whose contents are a bind mount of a
+tree inside the configured root presents no symlink and no shared directory
+identity, and is admitted.
 
 Classifying the parent is a statement about one instant, so its identity is
 captured with that classification and revalidated wherever the pathname is
@@ -687,16 +696,19 @@ every session to the one shared root this derivation exists to replace.
 Which root a session bound is recorded the first time it invokes a
 workspace-root-bound tool and does not change for the process's lifetime. A
 session that bound the configured root is not moved onto a directory provisioned
-later, and a session that bound a derived root is never returned to the
-configured root by that directory's removal: its next request fails closed
-instead. The first record written wins, so two concurrent first requests for one
-session converge on one root rather than the later one overwriting the earlier.
-Convergence covers the request that observed nothing: a probe taken before the
-state lock can report an absence that a concurrent first request has already
-resolved by binding a derived root, and the resuming request retakes the probe
-under the lock rather than failing on the stale observation. A directory that is
-genuinely absent reads identically, so the retaken probe is what distinguishes
-them, and a removal still fails the next request closed.
+later, and is not failed by a misprovisioned entry appearing there either: it
+never opens that pathname, so nothing arriving at it is reachable by that
+session or can change the tree it already uses. A session that bound a derived
+root is never returned to the configured root by that directory's removal: its
+next request fails closed instead. The first record written wins, so two
+concurrent first requests for one session converge on one root rather than the
+later one overwriting the earlier. Convergence covers the request that observed
+nothing: a probe taken before the state lock can report an absence that a
+concurrent first request has already resolved by binding a derived root, and the
+resuming request retakes the probe under the lock rather than failing on the
+stale observation. A directory that is genuinely absent reads identically, so
+the retaken probe is what distinguishes them, and a removal still fails the next
+request closed.
 
 A derived record names the filesystem identities of the worktree and of the
 `.git` directory inside it, not only the fact that a derived root was bound, so
@@ -712,7 +724,12 @@ root described below, because admission is not a durable answer: the configured
 composition is never re-resolved, so what its pathname names can change after a
 session was admitted, and a retained composition returned on the strength of the
 comparison made at admission would leave both reaching one tree under separate
-serialization domains.
+serialization domains. A request binding the configured root remakes that
+comparison too, against every other session's derived record, since the same
+replacement is reachable from the configured composition and comparing only on
+the derived branch would protect only the requests taking it. A deployment where
+no session was ever provisioned a root of its own has nothing to compare and
+captures nothing.
 
 The record holds one session identity, one discriminant, and those identities,
 so it is kept apart from the descriptor-holding composition and is never

@@ -444,6 +444,16 @@ enum SessionRootDecision {
 
 /// Decides what a session binds from its recorded binding and what the
 /// derivation currently finds.
+///
+/// A recorded configured binding answers for every classification, including a
+/// misprovisioned one. Such a session never opens the derived pathname, so an
+/// entry appearing there — directory, file, or symlink alike — is unreachable
+/// by it and cannot change the tree it already uses. Failing it closed would
+/// deny it for the rest of the process's lifetime over a condition it cannot
+/// act on and that grants it nothing, and would do so only for the botched
+/// spelling of provisioning that arrived too late while a correct one arriving
+/// equally late is ignored. The misprovisioning classification decides the
+/// sessions whose binding is still open, which is where it decides anything.
 const fn decide_session_root(
     recorded: Option<RecordedSessionBinding>,
     derived: &SessionWorkspaceRoot,
@@ -502,6 +512,70 @@ fn another_session_bound(
             && binding
                 .derived_identity()
                 .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(composed))
+    })
+}
+
+/// Whether the directory a derived root is reached through is itself one the
+/// configured composition holds.
+///
+/// `<name>.sessions` bind-mounted onto the configured root is a real directory,
+/// so the parent classification admits it and every identifier child beneath it
+/// is a directory *inside* the configured workspace — readable, writable, and
+/// executable by every session still bound to that root, which is the
+/// containment the sibling derivation exists to establish. The bound pair alone
+/// cannot show it: the child is nested rather than equal, and ancestry is not
+/// equality. This is distinct from the admitted residual where only the
+/// parent's *contents* are a bind mount, which stands as its own directory and
+/// shares no identity with the configured pair.
+///
+/// Both the pinned and the standing configured pairs are compared, for the same
+/// reason [`shares_a_directory_with_the_configured_root`] compares both.
+const fn parent_aliases_the_configured_root(
+    parent: ComposedRootIdentity,
+    pinned: ComposedWorkspaceIdentity,
+    standing: ComposedWorkspaceIdentity,
+) -> bool {
+    parent.is_the_same_directory_as(pinned.root)
+        || parent.is_the_same_directory_as(pinned.administration)
+        || parent.is_the_same_directory_as(standing.root)
+        || parent.is_the_same_directory_as(standing.administration)
+}
+
+/// Whether any session other than `session` holds a derived binding at all.
+///
+/// Asked before the configured pathname is captured, so a deployment where no
+/// session was ever provisioned a root of its own pays no syscall for a
+/// comparison that has nothing to compare against.
+fn a_derived_binding_exists(
+    bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
+    session: SessionId,
+) -> bool {
+    bindings
+        .iter()
+        .any(|(bound, binding)| *bound != session && binding.derived_identity().is_some())
+}
+
+/// Whether any other session's derived binding shares a directory with the
+/// configured composition as its pathname stands now.
+///
+/// The mirror of the comparison a derived dispatch makes against the configured
+/// root. A configured-root request has to make it too: the configured
+/// composition is never re-resolved, so a `.git` bind-mounted from a derived
+/// session's workspace over the configured root's own leaves the configured
+/// executors reaching that workspace while the session that bound it keeps a
+/// separate serialization domain. Checking only on the derived branch would
+/// protect only the sessions that take it.
+fn a_derived_binding_shares_the_configured_root(
+    bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
+    session: SessionId,
+    pinned: ComposedWorkspaceIdentity,
+    standing: ComposedWorkspaceIdentity,
+) -> bool {
+    bindings.iter().any(|(bound, binding)| {
+        *bound != session
+            && binding.derived_identity().is_some_and(|identity| {
+                shares_a_directory_with_the_configured_root(identity, pinned, standing)
+            })
     })
 }
 
@@ -1753,6 +1827,29 @@ where
         // walked through to reach it.
         let (path, parent) = match decide_session_root(recorded, &derived) {
             SessionRootDecision::ConfiguredRoot => {
+                // Admission is not a durable answer for this branch either.
+                // The configured composition is never re-resolved, so what its
+                // pathname names can change after startup — its `.git`
+                // bind-mounted from a derived session's workspace, say — and
+                // returning the configured executors on the strength of the
+                // startup comparison alone would let this session reach that
+                // workspace while the session that bound it dispatches under a
+                // separate serialization domain. The derived branch remakes this
+                // comparison on every dispatch; remaking it only there would
+                // protect only the requests that take that branch.
+                if a_derived_binding_exists(&state.bindings, session) {
+                    let standing_configured =
+                        ComposedWorkspaceIdentity::capture(self.roots.configured())
+                            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+                    if a_derived_binding_shares_the_configured_root(
+                        &state.bindings,
+                        session,
+                        self.configured.workspace_identity,
+                        standing_configured,
+                    ) {
+                        return Err(SessionWorkspaceFailure::SharedRootIdentity);
+                    }
+                }
                 // Reachable only with no record or a recorded configured
                 // binding, so the entry below can only read as configured. The
                 // derived arm returns no retained set: nothing on this path
@@ -1799,6 +1896,18 @@ where
                     if recorded.and_then(RecordedSessionBinding::derived_parent) != Some(*parent) {
                         return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
                     }
+                    // The pair above was captured by walking the pathname
+                    // again, and that walk went through the parent this
+                    // request's probe classified before it. Classification and
+                    // walk are separate instants, so the component is re-read
+                    // after the walk exactly as a new composition re-reads it:
+                    // a parent replaced by a symlink in between is followed by
+                    // the capture, and a child moved under the replacement
+                    // leaves both bound identities standing, so the pair alone
+                    // cannot show it.
+                    if self.roots.standing_parent() != Some(*parent) {
+                        return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
+                    }
                     // Admission is not a durable answer. The configured
                     // composition is never re-resolved, so what its pathname
                     // names can change after this session was admitted — a
@@ -1813,6 +1922,17 @@ where
                             .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
                     if shares_a_directory_with_the_configured_root(
                         bound,
+                        self.configured.workspace_identity,
+                        standing_configured,
+                    ) {
+                        return Err(SessionWorkspaceFailure::SharedRootIdentity);
+                    }
+                    // The pair can be disjoint from the configured pair while
+                    // the directory walked through to reach it is one of them,
+                    // which nests this whole workspace inside the configured
+                    // root.
+                    if parent_aliases_the_configured_root(
+                        *parent,
                         self.configured.workspace_identity,
                         standing_configured,
                     ) {
@@ -1858,6 +1978,17 @@ where
             .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
         if shares_a_directory_with_the_configured_root(
             composed,
+            self.configured.workspace_identity,
+            standing_configured,
+        ) {
+            return Err(SessionWorkspaceFailure::SharedRootIdentity);
+        }
+        // The composed pair can be disjoint from the configured pair while the
+        // directory every family walked through to reach it is one of them —
+        // `<name>.sessions` bind-mounted onto the configured root — which nests
+        // this workspace inside the tree the derivation exists to leave.
+        if parent_aliases_the_configured_root(
+            parent,
             self.configured.workspace_identity,
             standing_configured,
         ) {
@@ -3812,6 +3943,22 @@ mod tests {
         assert_eq!(decision, SessionRootDecision::ConfiguredRoot);
     }
 
+    /// A session already bound to the configured root stays there when a file,
+    /// a symlink, or an unclassifiable entry appears at its derived path too.
+    /// It never opens that pathname, so nothing arriving there is reachable by
+    /// it, and failing it closed would deny it for the process's lifetime over
+    /// a condition it cannot act on — and only for the botched spelling of a
+    /// provisioning that arrived too late, while a correct one is ignored.
+    #[test]
+    fn a_configured_binding_survives_a_misprovisioned_entry_appearing() {
+        let decision = decide_session_root(
+            Some(RecordedSessionBinding::ConfiguredRoot),
+            &SessionWorkspaceRoot::Unresolvable,
+        );
+
+        assert_eq!(decision, SessionRootDecision::ConfiguredRoot);
+    }
+
     /// A session already bound to a derived root is never returned to the
     /// configured root by that directory's removal, including after its
     /// executors were evicted from the bounded retained set.
@@ -3938,6 +4085,130 @@ mod tests {
         let binding = RecordedSessionBinding::ConfiguredRoot;
 
         assert_eq!(binding.derived_identity(), None);
+    }
+
+    /// `<name>.sessions` bind-mounted onto the configured root is a real
+    /// directory, so the parent classification admits it while every child
+    /// beneath it is nested inside the configured workspace. The bound pair
+    /// cannot show that — ancestry is not equality — so the parent is compared
+    /// against the configured pair directly.
+    #[test]
+    fn a_parent_that_is_the_configured_worktree_is_refused() {
+        assert!(parent_aliases_the_configured_root(
+            FIXTURE_BOUND_IDENTITY.root,
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_BOUND_IDENTITY
+        ));
+    }
+
+    /// The administration directory collides the same way as the worktree, so
+    /// a parent standing on it is refused too.
+    #[test]
+    fn a_parent_that_is_the_configured_administration_directory_is_refused() {
+        assert!(parent_aliases_the_configured_root(
+            FIXTURE_BOUND_IDENTITY.administration,
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_BOUND_IDENTITY
+        ));
+    }
+
+    /// The configured pathname is never re-resolved, so a parent aliasing what
+    /// it names *now* is refused even though it shares nothing with the pair
+    /// pinned at startup.
+    #[test]
+    fn a_parent_that_is_the_standing_configured_administration_directory_is_refused() {
+        assert!(parent_aliases_the_configured_root(
+            FIXTURE_CONFIGURED_STANDING_IDENTITY.administration,
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_CONFIGURED_STANDING_IDENTITY
+        ));
+    }
+
+    /// The ordinary case: a parent is walked through rather than bound, and a
+    /// sibling directory shares no identity with the configured pair. This is
+    /// also the admitted residual — a parent whose *contents* are a bind mount
+    /// stands as its own directory and is admitted here.
+    #[test]
+    fn a_parent_beside_the_configured_root_is_admitted() {
+        assert!(!parent_aliases_the_configured_root(
+            FIXTURE_PARENT_IDENTITY,
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_CONFIGURED_STANDING_IDENTITY
+        ));
+    }
+
+    /// A configured-root request remakes the collision comparison the derived
+    /// branch makes, so a derived session's workspace bind-mounted over what
+    /// the configured pathname names now refuses the configured dispatch too
+    /// rather than protecting only requests that take the derived branch.
+    #[test]
+    fn a_configured_request_refuses_a_derived_binding_reaching_the_configured_root() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
+            },
+        )]);
+
+        assert!(a_derived_binding_shares_the_configured_root(
+            &bindings,
+            second,
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_CONFIGURED_STANDING_IDENTITY
+        ));
+    }
+
+    /// A derived session isolated from the configured root leaves a configured
+    /// request alone.
+    #[test]
+    fn a_configured_request_admits_an_isolated_derived_binding() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_OTHER_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
+            },
+        )]);
+
+        assert!(!a_derived_binding_shares_the_configured_root(
+            &bindings,
+            second,
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_CONFIGURED_STANDING_IDENTITY
+        ));
+    }
+
+    /// A deployment that provisioned no session a root of its own has nothing
+    /// to compare a configured request against, so it captures no identity for
+    /// the comparison.
+    #[test]
+    fn a_deployment_with_no_derived_binding_captures_nothing() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(first, RecordedSessionBinding::ConfiguredRoot)]);
+
+        assert!(!a_derived_binding_exists(&bindings, second));
+    }
+
+    /// A session's own derived binding is not something its next configured
+    /// request compares against; only another session's is.
+    #[test]
+    fn a_session_own_derived_binding_is_not_another_binding() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
+            },
+        )]);
+
+        assert!(!a_derived_binding_exists(&bindings, first));
     }
 
     /// Two pathnames naming one directory are one workspace, so a second

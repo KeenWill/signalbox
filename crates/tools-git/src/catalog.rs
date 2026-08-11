@@ -141,11 +141,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
 
     /// Returns the worktree and administration directories this suite pinned.
     ///
-    /// Exposed because a caller composing several suites has to record which
-    /// directories each one bound, and asking the pathname again afterwards
-    /// records whatever stands there then: a `.git` replaced between the
-    /// repository open and that later question would be recorded while this
-    /// executor stays bound to the repository it opened.
+    /// Both were accepted by the layout validation on either side of the
+    /// repository open, so they name the directories this executor is bound to
+    /// rather than whatever the pathname resolves to afterwards: a `.git`
+    /// replaced between the repository open and a later resolution stands there
+    /// while this executor remains bound to the repository it opened. See
+    /// `docs/spec/git-authority-threat-model.md` for directory pinning and
+    /// `docs/spec/tool-loop.md` for how a daemon composition uses the pair.
     pub const fn pinned_directories(&self) -> PinnedRepositoryDirectories {
         PinnedRepositoryDirectories {
             root: WorkspaceRootIdentity {
