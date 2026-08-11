@@ -1,11 +1,10 @@
 # Blob storage
 
-This page was introduced and verified through PR #553
-(`agent/blob-storage-foundation`); it is the foundation proposal at the bottom
-of that implementing stack. The implementing child pull requests make these
-paragraphs current behavior before the stack merges; a section that names itself
-unimplemented at merge time is committed unimplemented functionality and carries
-only its stated compatibility constraint.
+This page is the foundation contract introduced and verified through PR #553
+(`agent/blob-storage-foundation`). Its implemented-behavior statements take
+effect with the full implementing stack. A paragraph that names itself
+unimplemented is committed unimplemented functionality and carries only its
+stated compatibility constraint.
 
 The blob digest and external spelling, deterministic object-key producer,
 streaming store contract, filesystem publication and verification behavior, and
@@ -62,6 +61,12 @@ that store's publication has been verified. Deleting a blob row that a replica
 references is rejected, and no surface in this stack deletes either row: the
 catalog is append-only.
 
+The blob digest is the `blob` primary key. A replica is unique both by digest
+plus store name and by store name plus object key. Concurrent registration
+reloads the winning catalog state: matching length and replica facts are
+idempotent success, while any disagreement is typed catalog corruption rather
+than a raw uniqueness error.
+
 Placement is durable fact, not configuration lookup. Routing configuration
 decides where new writes go; reads resolve through recorded replicas, so a
 configuration change never reinterprets or orphans existing content. Store names
@@ -86,9 +91,13 @@ a store name. It follows the catalog's grammar: versioned, unknown fields
 rejected, named entries as arrays of tables.
 
 Version one ships two store kinds. `filesystem` is a production-supported store
-— including over network mounts — writing through a same-filesystem temporary
-file with an atomic rename so a final content-addressed path is never partially
-visible. `s3` speaks the S3-compatible API against an explicit endpoint with
+— including over network mounts that honor same-directory atomic rename and file
+and directory synchronization — writing through a same-filesystem temporary
+file. Publication syncs the complete temporary file, atomically renames it to
+the final content-addressed path, syncs affected directory metadata, and then
+completely verifies the final bytes before catalog registration; a failed
+durability or verification operation makes the store unavailable and records no
+replica. `s3` speaks the S3-compatible API against an explicit endpoint with
 explicit file-delivered static credentials; ambient credential discovery
 (process environment, provider configuration files, instance metadata) is
 rejected by construction, and an object store's own integrity metadata is never
@@ -110,13 +119,16 @@ enforces the stored-size ceiling, verifies the caller's expected digest and
 length, publishes the object to the routed store, verifies publication, and only
 then records `blob` and `blob_replica` rows in one PostgreSQL transaction. No
 database transaction is ever open across store input/output. A crash between
-publication and registration leaves an unregistered orphan object — harmless,
-rediscovered by re-ingest, never the reverse: an acknowledged reference always
-has verified durable bytes behind it. Because the key is the digest, retrying an
-ambiguous store outcome is idempotent: read back the final key, verify, and
-finish registration. Ingesting a digest the catalog already knows verifies and
-reports the existing identity; if its class routes to a store with no replica,
-ingest publishes the additional replica rather than minting a second identity.
+publication and registration leaves an unregistered orphan object. That failure
+is catalog-safe — it never creates a dangling reference — but it is not
+capacity-free: no surface in this stack inventories or removes the orphan, and
+retention and garbage collection remain outside this contract. Re-ingest
+rediscovers the object; an acknowledged reference always has verified durable
+bytes behind it. Because the key is the digest, retrying an ambiguous store
+outcome is idempotent: read back the final key, verify, and finish registration.
+Ingesting a digest the catalog already knows verifies and reports the existing
+identity; if its class routes to a store with no replica, ingest publishes the
+additional replica rather than minting a second identity.
 
 ## Wire vocabulary
 
@@ -130,8 +142,11 @@ length; `abort_blob_upload` discards the staging state. Reads are
 `read_blob_metadata`, returning length and catalog facts for a digest, and
 `read_blob_chunk`, returning a bounded byte range so clients can render and
 download attachments. Bytes flow only through the daemon: no client receives a
-store credential, bucket name, filesystem path, or presigned URL, and durable
-records carry only the digest spelling.
+store credential, bucket name, filesystem path, or presigned URL. Client-facing
+blob messages and content-part blob references expose only the digest spelling,
+never placement; catalog rows separately retain byte length, creation time,
+store name, and object key, while content parts retain their attachment
+metadata.
 
 ## Multipart user content
 
@@ -184,8 +199,8 @@ rendering, image scaling, structured-format walking) executes inside strong
 process isolation, and its input validation is deliberately best-effort. Why:
 parser hardening is an unending surface — the containment boundary is the
 sandbox, so a malicious payload exploiting a decoder defect is contained by
-isolation rather than prevented by an ever-growing validator, and review of
-these children should reject validator accretion in favor of isolation strength.
+isolation rather than prevented by an ever-growing validator. Validator
+accretion does not substitute for isolation strength.
 
 ## Model-call preparation and modalities
 
