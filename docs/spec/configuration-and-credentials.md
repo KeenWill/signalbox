@@ -904,11 +904,11 @@ separate questions — the deliveries this build refuses despite defining them a
 enumerated below.
 
 Each delivery's section below states only the route its secret takes, never a
-restatement of which adapters admit it — that question has the single owner
-above. Each `[[credential_profiles]]` entry is one flat TOML table: `delivery`
-is a required TOML string discriminant, common fields are exactly `name`,
-`adapter`, `billing_kind`, and `delivery`, and the selected variant admits only
-its fields below. A field owned by another variant is unknown and rejected.
+restatement of which adapters admit it — that question is settled once above.
+Each `[[credential_profiles]]` entry is one flat TOML table: `delivery` is a
+required TOML string discriminant, common fields are exactly `name`, `adapter`,
+`billing_kind`, and `delivery`, and the selected variant admits only its fields
+below. A field owned by another variant is unknown and rejected.
 
 Admitting a pair and supplying a surface for it stay separate questions, and
 this build answers them differently: `ambient` is delivered for both CLI
