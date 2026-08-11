@@ -21,8 +21,8 @@ PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
 workflow-self-change trigger were verified through PR #471
 (`agent/codex-smoke-schedule`). The `signalboxd` names this page states for the
 composition root, its telemetry, and the production `FileCredentialAccess` were
-were verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and
-OpenAI adapter-scoped file catalogs are verified against this PR
+verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
+adapter-scoped file catalogs are verified against this PR
 (`agent/credential-pools-parser`). The Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction

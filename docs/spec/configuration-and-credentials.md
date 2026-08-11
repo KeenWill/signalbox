@@ -75,10 +75,9 @@ unimplemented functionality as labeled below. The credential-profile and
 credential-pool grammar, its fail-closed admission, the deliveries this build
 supplies, the fail-closed rejection of reserved Codex deliveries, the
 operator-chosen model-provider profile names, and the retirement of both
-provider key-file environment channels are verified against this stack's parser
-pull request (`agent/credential-pools-parser`), in
-`apps/signalboxd/src/credential_pools.rs` and
-`apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
+provider key-file environment channels are verified against this PR
+(`agent/credential-pools-parser`), in `apps/signalboxd/src/credential_pools.rs`
+and `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
 Codex `file`, `codex_home`, and `oauth` deliveries, durable quarantine, and the
 availability successor calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
