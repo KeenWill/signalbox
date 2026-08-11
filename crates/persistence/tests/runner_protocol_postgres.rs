@@ -2759,8 +2759,8 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
 #[ignore = "requires Docker"]
 async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
 -> Result<(), Box<dyn Error>> {
-    tokio::time::timeout(CONCURRENCY_TEST_LIMIT, async {
-        let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres().await?;
+    let serialization = tokio::time::timeout(CONCURRENCY_TEST_LIMIT, async {
         let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
         let mut blocker = pool.begin().await?;
         sqlx::query(
@@ -2775,14 +2775,12 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
         let mut replacement =
             Box::pin(replacement_store.register(&expected_enrollment, narrowed_advertisement()));
-        tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
-            .await
-            .expect_err("registration replacement must wait for enrollment authority");
+        let replacement_probe = tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement).await;
         let mut lease_store = Box::pin(store.store_lease(&lease));
-        tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
-            .await
-            .expect_err("lease admission must wait behind registration replacement");
+        let lease_probe = tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store).await;
         blocker.commit().await?;
+        replacement_probe.expect_err("registration replacement must wait for enrollment authority");
+        lease_probe.expect_err("lease admission must wait behind registration replacement");
         let (replacement_result, lease_result) =
             tokio::time::timeout(LOCK_COMPLETION_LIMIT, async {
                 tokio::join!(&mut replacement, &mut lease_store)
@@ -2796,11 +2794,12 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
             .expect_err("withdrawn current availability cannot authorize the later lease");
 
         assert_store_check_violation(rejected);
-        drop(pool);
         Ok(())
     })
-    .await
-    .expect("registration replacement serialization must finish within its test deadline")
+    .await;
+    pool.close().await;
+    serialization
+        .expect("registration replacement serialization must finish within its test deadline")
 }
 
 #[tokio::test]
