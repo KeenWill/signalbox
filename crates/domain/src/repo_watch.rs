@@ -1510,11 +1510,18 @@ impl DispatchSessionAction {
 /// rather than as the quoted untrusted block the approval judge builds. A name
 /// holding a line break would therefore arrive as further instruction lines, so
 /// every character that could end a line is rendered as an escape instead of
-/// emitted. Names holding none render byte-for-byte as before.
+/// emitted.
+///
+/// The backslash is escaped first, which makes the encoding injective: without
+/// it a name spelling the two characters `\` and `n` renders as the bytes a
+/// real newline renders as, so two admitted names would compose one statement
+/// and the statement would no longer say which workflow ran. Names holding
+/// neither a backslash nor a line ender render byte-for-byte as before.
 fn one_line(value: &str) -> String {
     value
         .chars()
         .map(|character| match character {
+            '\\' => String::from("\\\\"),
             '\n' => String::from("\\n"),
             '\r' => String::from("\\r"),
             '\t' => String::from("\\t"),
@@ -2514,6 +2521,53 @@ mod tests {
         .assert_eq(statement.as_str());
         assert!(!statement.as_str().chars().any(super::ends_a_line));
         Ok(())
+    }
+
+    /// The escaping owes the statement two things at once, and the second is
+    /// not implied by the first: no rendered identifier ends a line, and no two
+    /// admitted names render alike. Without the backslash escape a name
+    /// spelling `\` then `n` collides with one holding a real newline, so the
+    /// statement would stop naming which workflow ran even though every
+    /// rendering stayed on one line.
+    #[test]
+    fn escaped_identifiers_stay_single_line_and_distinct() {
+        assert_unambiguous_single_line(&[
+            "ci",
+            "ci\\",
+            "ci\\\\",
+            "ci\nact",
+            "ci\\nact",
+            "ci\\\nact",
+            "ci\ract",
+            "ci\\ract",
+            "ci\tact",
+            "ci\\tact",
+            "ci\u{85}act",
+            "ci\u{2028}act",
+            "ci\\u{2028}act",
+            "ci\u{2029}act",
+        ]);
+    }
+
+    /// Holds the two properties `one_line` exists for over a corpus, naming the
+    /// offending input rather than reporting a bare inequality.
+    #[track_caller]
+    fn assert_unambiguous_single_line(names: &[&str]) {
+        let rendered: Vec<String> = names.iter().map(|name| super::one_line(name)).collect();
+        for (index, name) in names.iter().enumerate() {
+            assert!(
+                !rendered[index].chars().any(super::ends_a_line),
+                "{name:?} rendered {:?}, which still ends a line",
+                rendered[index]
+            );
+            for (later, later_name) in names.iter().enumerate().skip(index + 1) {
+                assert_ne!(
+                    rendered[index], rendered[later],
+                    "{name:?} and {later_name:?} both rendered {:?}",
+                    rendered[index]
+                );
+            }
+        }
     }
 
     #[test]

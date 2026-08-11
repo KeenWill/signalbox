@@ -256,5 +256,8 @@ context feeding an escalation instruction rather than a commit gate.
 
 ## Open edges
 
-**Deferred or undecided work.** No goal-mode open question is recorded by this
-version-one contract.
+**Deferred or undecided work.** One goal-mode open question is recorded by this
+version-one contract: what a consumer does when the generation it read closes
+before it commits the decision it read that generation for. Binding the read to
+the commit is committed unimplemented functionality above; the behaviour that
+binding should then take is [undecided](../open-questions.md#goal-mode).
