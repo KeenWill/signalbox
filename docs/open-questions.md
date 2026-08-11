@@ -35,15 +35,12 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Accepted-input content
 
-- **Content extensions and rendering.**
-  [sessions-and-transcript](spec/sessions-and-transcript.md) fixes the initial
-  text-only `UserContent` value, exact equality, and PostgreSQL mapping. Decided
-  and specified: ordered multipart content with content-addressed attachment
-  parts, their replay equality, persistence, and model-visible stubs, by
-  [blob storage](spec/blob-storage.md#multipart-user-content). Client rendering
-  of attachment parts and any non-text variant beyond the attachment part remain
-  open. Blocks those remaining extensions, not the first `SubmitInput` slice.
-  (S01, S03, S08)
+- **Further content variants and rendering.** Ordered multipart content with
+  content-addressed attachment parts, its replay equality, persistence, terminal
+  rendering, and model-visible stubs are decided and specified by
+  [blob storage](spec/blob-storage.md#multipart-user-content). Any non-text
+  content variant beyond attachment parts and provider-native media rendering
+  remain open. Blocks only those further extensions. (S01, S03, S08)
 
 ## Model-input projection
 
@@ -222,6 +219,21 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   as an enforced pin-bump gate; it does not block the existing mechanical pin or
   live compatibility gates.
 
+## Codex CLI image capability features
+
+- **Whether the pinned CLI's image features return once accepted input carries
+  images.** The adapter hard-disables `image_generation` and `view_image`. Each
+  adds a model-visible tool that the adapter's structured-output envelope does
+  not carry, and `view_image` — which loads a local image file into the
+  conversation context — is enabled by default in the pinned inventory, so
+  classifying it as non-capability would leave it live rather than merely
+  acknowledged. Accepted input is text-only today, so neither feature has
+  anything to act on. When the content extensions recorded under accepted-input
+  content above carry image and file content, decide whether either name is
+  re-enabled and how the bytes reach the spawned CLI. Blocks re-enabling either
+  name; it does not block the present disables, which stand on the capability
+  rule alone.
+
 ## Model fallback and provenance
 
 - **Automatic fallback.** Decided and specified: what a selection attempt can
@@ -339,9 +351,13 @@ The questions below remain open.
   Blocks runner-side tool registry and executor implementation.
 - **Daemon Git push transport.** `git_push_configured` is implemented as a
   declaration and executor over an injected transport, but no production
-  `GitPushTransport` exists. The remote authority, credential and destination
-  policy, and production transport remain undecided; until they are decided the
-  tool stays absent from the daemon registry. Blocks daemon-side Git push.
+  `GitPushTransport` exists. Remote authority and destination policy are decided
+  and stated under
+  [remote destination authority](spec/git-authority-threat-model.md#remote-destination-authority):
+  destinations are durable records an operator mints, scoped by workspace
+  identity, and `https` only. The credential policy for a push and the
+  production transport itself remain undecided; until they are decided the tool
+  stays absent from the daemon registry. Blocks daemon-side Git push.
 - **Workspace portability between runners.** Moving a session that owns a
   workspace to another runner requires that workspace to exist, or to be
   reconstructible, on the destination. Version one never carries a workspace

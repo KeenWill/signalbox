@@ -423,7 +423,8 @@ ALLOWLIST = (
             r"crates/persistence/src/(?:create_session|"
             r"create_session_from_imported_frontier|mapping|model_execution|process_read|session|"
             r"session_metadata|submit_input|tool_loop)[.]rs|"
-            r"crates/persistence/tests/(?:conversation_import_postgres|postgres_integration|"
+            r"crates/persistence/tests/(?:conversation_import_postgres|"
+            r"postgres_integration/[a-z_]+|"
             r"runner_protocol_postgres|session_metadata_postgres)[.]rs|"
             r"docs/spec/identity-and-commands[.]md)$"
         ),
@@ -484,7 +485,7 @@ ALLOWLIST = (
     Allowance(
         "legacy PostgreSQL SQL actor literals",
         re.compile(
-            r"^crates/persistence/tests/(?:postgres_integration|"
+            r"^crates/persistence/tests/(?:postgres_integration/[a-z_]+|"
             r"session_metadata_postgres)[.]rs$"
         ),
         re.compile(r"(?:^|,|=\s*)\s*'owner'(?=\s*[,)]|$)"),
@@ -511,7 +512,8 @@ ALLOWLIST = (
             r"crates/domain/src/(?:context_frontier|imported_session|model_execution|"
             r"replace_session_defaults|review_workflow|runner|session|submit_input|"
             r"tool_execution|turn_eligibility)[.]rs|"
-            r"crates/persistence/tests/(?:postgres_integration|review_workflow_postgres)[.]rs|"
+            r"crates/persistence/tests/(?:postgres_integration/[a-z_]+|"
+            r"review_workflow_postgres)[.]rs|"
             r"docs/spec/(?:conversation-import|model-call-execution|persistence-protocol|"
             r"process-protocol|review-workflows|sessions-and-transcript|"
             r"turn-lifecycle-and-scheduling)[.]md)$"

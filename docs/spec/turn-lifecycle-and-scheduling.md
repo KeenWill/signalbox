@@ -378,10 +378,13 @@ the sweep (INV-007).
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
-- **Sweep (backstop).** `PostgresEligibilitySweep` finds three durable shapes: a
-  queued turn with no active turn (the activation precondition), an active tool
-  round in the running phase, or a current pursuing goal turn that is terminal
-  and therefore still owed its durable continuation-or-blocking disposition. The
+- **Sweep (backstop).** `PostgresEligibilitySweep` finds four durable shapes: a
+  queued turn with no active turn (the activation precondition), an active turn
+  whose current model call remains `Prepared`, an active tool round in the
+  running phase, or a current pursuing goal turn that is terminal and therefore
+  still owed its durable continuation-or-blocking disposition. A `Prepared`
+  model call covers both an ordinary not-yet-driven call and an attachment check
+  retained for retry after temporary store unavailability. The
   `turn_lifecycle_queued_by_session` partial index is created for the queued
   query shape, though planner adoption is not pinned by any test. Results are
   paged 16 sessions per query with a fixed per-cycle bound; continuation pages

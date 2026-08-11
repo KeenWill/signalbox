@@ -160,20 +160,26 @@ pre-admission read-ahead across 128 tasks at 1 MiB and aggregate admitted raw
 frame accumulation at 64 MiB. After decoding, the task consumes the frame into
 one owned request rather than cloning its payload. Submitted text moves into
 application admission: rejection drops it before awaiting response output, and
-acceptance reuses the decoded allocation. Conversation-import source bytes
-likewise move directly into a dedicated import admission path. At most one
-in-progress or single-shot import holds the import permit. One of the eight
-inbound-frame slots is reserved for the connection that owns an active chunked
-import; other connections share the remaining seven. An admitted
-`begin_conversation_import` that must wait for the import permit first enters a
-separate seven-waiter bound, then releases its small decoded frame slot before
-waiting. Further begins retain a general frame slot until a waiter place opens.
-A source-bearing single-shot request retains its frame slot while waiting. The
-reservation therefore preserves frame progress for an active append or commit
-without allowing queued single-shot sources to escape the aggregate raw-frame
-bound. Once admitted, each append moves its decoded chunk from the inbound frame
-into the per-connection assembly and releases the frame slot; the configured
-total-source bound limits that assembly. Commit runs the existing whole-source
+acceptance reuses the decoded allocation. Conversation-import source bytes and
+blob chunks likewise move directly into one bulk-ingest admission path. At most
+one in-progress or single-shot conversation import or blob upload holds the
+process-wide bulk-ingest permit. One of the eight inbound-frame slots is
+reserved for the connection that owns the active chunked operation; other
+connections share the remaining seven. An admitted begin that must wait for the
+permit first enters a shared seven-waiter bound, then releases its small decoded
+frame slot before waiting. Further begins retain a general frame slot until a
+waiter place opens. A source-bearing single-shot import retains its frame slot
+while waiting. The reservation preserves frame progress for the active append or
+commit without allowing queued sources to escape the aggregate raw-frame bound.
+Once admitted, each append moves its decoded chunk from the inbound frame into
+the disk-backed blob spool or per-connection import assembly and releases the
+frame slot. The configured total bounds limit the active assembly, so retained
+bulk-ingest assembly storage is at most the larger of `max_blob_bytes` and
+`conversation_import.max_source_bytes`, plus one bounded inbound chunk. During
+filesystem publication, its store-local temporary file may coexist with the
+completed staging spool, so the maximum transient blob disk footprint is twice
+`max_blob_bytes` plus one bounded inbound chunk; each file is independently
+limited to `max_blob_bytes`. Import commit runs the existing whole-source
 conversion on the blocking pool so synchronous conversion does not occupy an
 asynchronous runtime worker. Commit, abort, terminal size or conversion
 rejection, or disconnect drops the assembly and releases the permit before
@@ -181,6 +187,15 @@ response output. An `already_in_progress` refusal is nonterminal and leaves the
 existing assembly available for append, commit, or explicit abort. A peer that
 stops reading a terminal response therefore cannot retain rejected input or
 completed import content.
+
+An admitted chunked conversation import or blob upload has a five-minute
+monotonic inactivity deadline while awaiting its next append, commit, or abort
+frame. The deadline starts after the begin receipt and resets after each
+successfully accepted append; time spent executing an accepted lifecycle request
+is not idle time. Expiry cancels pending receipt output, unlinks the partial
+assembly, releases the bulk-ingest permit, and closes the connection without
+accepting another request. A retry therefore starts on a fresh connection and
+uses the operation's ordinary idempotency contract.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -264,7 +279,7 @@ that variant.
 | `append_conversation_import`            | `chunk` (nonempty canonical padded base64 string carrying at most 4 MiB decoded bytes)                                                                                                                                                                                                                        | Append exact source bytes to the import in progress on this connection.                                                                                                                                                                                                                                                                                                         |
 | `commit_conversation_import`            | none                                                                                                                                                                                                                                                                                                          | Verify the assembled size, then convert and idempotently resolve or insert the complete source.                                                                                                                                                                                                                                                                                 |
 | `abort_conversation_import`             | none                                                                                                                                                                                                                                                                                                          | Discard the import in progress on this connection.                                                                                                                                                                                                                                                                                                                              |
-| `begin_blob_upload`                     | `expected_digest` (canonical blob-digest string), `expected_length_bytes` (canonical decimal string)                                                                                                                                                                                                          | Begin one per-connection user-attachment upload or report that the routed store already holds verified bytes.                                                                                                                                                                                                                                                                   |
+| `begin_blob_upload`                     | `expected_digest` (canonical blob-digest string), `expected_length_bytes` (positive canonical decimal string)                                                                                                                                                                                                 | Begin one per-connection user-attachment upload or report that the routed store already holds verified bytes.                                                                                                                                                                                                                                                                   |
 | `append_blob_upload`                    | `chunk` (nonempty canonical padded base64 string carrying at most 4 MiB decoded bytes)                                                                                                                                                                                                                        | Append exact bytes to the blob upload in progress on this connection.                                                                                                                                                                                                                                                                                                           |
 | `commit_blob_upload`                    | none                                                                                                                                                                                                                                                                                                          | Verify, publish, and catalog the assembled blob upload.                                                                                                                                                                                                                                                                                                                         |
 | `abort_blob_upload`                     | none                                                                                                                                                                                                                                                                                                          | Discard the blob upload in progress on this connection.                                                                                                                                                                                                                                                                                                                         |
@@ -332,6 +347,12 @@ text bytes and attachment member bounds are owned by
 [blob storage](blob-storage.md#multipart-user-content); the wire applies them
 before application construction. A one-part text array is the sole spelling of
 legacy text content.
+
+The `content` member on transcript `queued` states and `input_accepted` session
+events is that same closed ordered parts array. Together with
+`transcript_user_entry`, snapshots, follow updates, and reconnect recovery
+therefore preserve part order and attachment metadata while never carrying blob
+bytes.
 
 ### Credential-exclusion administration
 
@@ -886,22 +907,29 @@ converter seam. Abort or disconnect discards partial per-connection state. The
 source path remains client-local and never appears in a request.
 
 Blob digest strings are exactly `sha256:` followed by 64 lowercase hexadecimal
-characters. Blob upload admits at most one in-progress upload per connection,
-independently of conversation-import state. Begin validates the declared length
-against `blob_storage.max_blob_bytes` and any catalogued identity before it can
-return `blob_upload_already_present`; otherwise it returns `blob_upload_begun`
-and creates disk-backed staging. Append accepts only a nonempty chunk of at most
-4 MiB decoded bytes and acknowledges the cumulative count. Commit requires that
-count and the streaming digest to match both declarations, then publishes and
-catalogues the blob. Abort, disconnect, or a terminal upload refusal discards
-staging.
+characters. Blob upload admits at most one in-progress upload per connection and
+competes for the process-wide bulk-ingest permit described above. Begin
+validates the declared length from 1 through `blob_storage.max_blob_bytes` and
+live-verifies a recorded replica in the routed store before it can return
+`blob_upload_already_present`; a missing or corrupt replica proceeds through
+staged upload repair. Otherwise begin returns `blob_upload_begun` and creates
+disk-backed staging. Append accepts only a nonempty chunk of at most 4 MiB
+decoded bytes and acknowledges the cumulative count. Commit rejects an empty
+staging file and requires its count and streaming digest to match both
+declarations, then publishes and catalogues the blob. Abort, disconnect, or a
+terminal upload refusal discards staging.
 
 `read_blob_chunk` admits lengths from 1 through 4 MiB. Checked
 `offset_bytes + length_bytes` must not overflow or cross the catalogued byte
 length. The response is exact rather than truncating at end-of-blob. Upload and
-read state, length, digest, and range failures use closed, content-silent
-`invalid_request` detail; an absent digest is `not_found`, storage availability
-is `unavailable`, and an ambiguous catalog commit is `commit_ambiguous`.
+read state, length, digest, and range failures use the exhaustive content-silent
+`invalid_request` details below; an absent digest is `not_found`, storage
+availability is `unavailable`, an all-missing recorded replica set is
+`blob_missing`, a definitively corrupt set with no unavailable candidate is
+`blob_corrupt`, and an ambiguous catalog commit is `commit_ambiguous`. When no
+replica succeeds, `unavailable` takes precedence over `blob_corrupt`, which
+takes precedence over `blob_missing`, because an unavailable candidate prevents
+a definitive integrity conclusion.
 
 ## Server messages
 
@@ -1244,9 +1272,10 @@ client-visible direct selection identity, ordered reasoning-level and
 provider-tagged service-tier sets, fast-mode support Boolean, and the ordered
 nonempty `input_modalities` set. Modalities use exactly `text`, `image`, or
 `document`; `text` is always present, duplicates are invalid, and projection
-uses that closed order regardless of configuration order. The exact settings
-vocabulary and the prohibition on exposing an alternate fast serving identity
-are owned by
+uses that closed order regardless of configuration order, as owned by the
+[static model capability catalog](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
+The exact settings vocabulary and the prohibition on exposing an alternate fast
+serving identity are owned by
 [model/session settings](model-session-settings.md#local-process-representation).
 Reasoning-level and service-tier overlay members admit `inherit`,
 `provider_default`, or `value`; fast-mode overlay members admit only `inherit`
@@ -1355,6 +1384,12 @@ for the refused precondition. A `stop_turn` rejection admits
 `interrupt_already_applied { session_id, active_turn_id, existing_command_id }`,
 and
 `interrupt_unavailable_while_awaiting_approval { session_id, active_turn_id }`.
+The three content-bearing input mutations additionally admit
+`attachment_blob_not_found { digest }` and
+`attachment_byte_budget_exceeded { maximum_bytes }`; the maximum is the
+configured canonical decimal-u64 `max_blob_bytes`. These current-catalog checks
+run only after an unseen command identity is claimed, so either detail is stored
+as the command's terminal typed rejection and equal replay returns it unchanged.
 A `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
@@ -1480,9 +1515,32 @@ closed classes are `empty_source`, `blank_line`, `invalid_utf8`, `invalid_json`,
 `invalid_source_metadata`, `invalid_message_envelope`, `invalid_message_role`,
 `message_role_mismatch`, `invalid_message_content`, `invalid_content_block`,
 `invalid_tool_result_block`, `invalid_reasoning`, `invalid_tool_call`, and
-`invalid_tool_result`. Evidence carries no source bytes, text, paths,
-identifiers taken from source, or parser excerpts. Error codes other than
-`rejected` and this import-specific `invalid_request` mapping have no `detail`.
+`invalid_tool_result`.
+
+Blob refusals use `code = "invalid_request"` with exactly one of these required
+typed details: `blob_upload_already_in_progress {}`;
+`blob_upload_not_in_progress {}`;
+`blob_upload_length_out_of_range { min_length_bytes, max_length_bytes, declared_length_bytes }`;
+`blob_upload_size_exceeded { expected_length_bytes, actual_length_bytes }`;
+`blob_upload_length_mismatch { expected_length_bytes, actual_length_bytes }`;
+`blob_upload_digest_mismatch { expected_digest, actual_digest }`;
+`blob_read_length_out_of_range { min_length_bytes, max_length_bytes, requested_length_bytes }`;
+or
+`blob_read_range_out_of_bounds { blob_length_bytes, offset_bytes, length_bytes }`.
+All byte counts use canonical decimal strings and both digest fields use the
+canonical blob spelling. The range detail also represents checked-add overflow.
+The request type identifies which append, commit, abort, or read operation
+failed, so state details carry no duplicate operation discriminator. Begin
+checks its declared-length range before connection state and routed-store
+lookup. Append checks cumulative size after state; commit checks state, then
+actual length, then digest. Read checks requested length, catalog existence, and
+then checked range. Each request reports only the first applicable failure in
+that order.
+
+Conversation-import evidence carries no source bytes, text, paths, identifiers
+taken from source, or parser excerpts; blob evidence carries no blob bytes,
+object key, store name, or locator. Error codes other than `rejected` and these
+conversation-import and blob `invalid_request` mappings have no `detail`.
 
 The protocol error-code set is:
 
@@ -1491,7 +1549,9 @@ The protocol error-code set is:
 | `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                                                                |
 | `unsupported_version` | The frame version is unsupported.                                                                                                      |
 | `invalid_request`     | A boundary value cannot construct the requested application input.                                                                     |
-| `not_found`           | The selected session, named defaults epoch, imported conversation, imported frontier, or review aggregate does not exist.              |
+| `not_found`           | The selected session, named defaults epoch, imported conversation or frontier, review aggregate, or blob does not exist.               |
+| `blob_missing`        | The blob exists in the catalog, but every recorded replica is definitively absent.                                                     |
+| `blob_corrupt`        | The blob exists in the catalog, no candidate is unavailable, and at least one recorded replica fails length or digest verification.    |
 | `conflicting_reuse`   | A durable command identity already names different intent.                                                                             |
 | `rejected`            | The canonical command was durably rejected by current typed state, or a request-specific precondition refused it before recording one. |
 | `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                                                        |
@@ -1697,18 +1757,21 @@ source-qualified endpoints and call identify the exact recorded provenance. The
 runner proposal additionally admits
 `runner_placement_changed { prior_runner_id, new_runner_id, placement_revision, sandbox_profile }`.
 It is the reference-only semantic boundary injected before work resumes on the
-successor placement. A native text member begins with
-`transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
-`entry` is either `user { accepted_input_id, turn_id }` or
-`assistant { turn_id, model_call_id }`. It is followed by one or more
-`transcript_content` messages carrying the same `entry_index`, a zero-based
-`fragment_index`, `final_fragment`, and `content_fragment`. Fragment indices
-start at zero and are contiguous: each fragment index is exactly its predecessor
-plus one. Exactly the last fragment carries `final_fragment = true`; every
-earlier fragment carries `false`. The content is split only at UTF-8 scalar
-boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
-final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
-limit even when every byte requires worst-case JSON escaping.
+successor placement. A native accepted-input member is the single
+`transcript_user_entry { entry_index, source_session_id, entry_id, accepted_input_id, turn_id, content }`
+message, where `content` is the canonical ordered parts array. It therefore
+retains attachment metadata and interleaving without emitting blob bytes. A
+native assistant text member begins with
+`transcript_text_entry { entry_index, source_session_id, entry_id, entry }`,
+whose `entry` is exactly `assistant { turn_id, model_call_id }`. It is followed
+by one or more `transcript_content` messages carrying the same `entry_index`, a
+zero-based `fragment_index`, `final_fragment`, and `content_fragment`. Fragment
+indices start at zero and are contiguous: each fragment index is exactly its
+predecessor plus one. Exactly the last fragment carries `final_fragment = true`;
+every earlier fragment carries `false`. The content is split only at UTF-8
+scalar boundaries into fragments of at most 1 MiB of UTF-8; even empty content
+has one final empty fragment. The 1 MiB content bound leaves room below the 8
+MiB frame limit even when every byte requires worst-case JSON escaping.
 
 The tool-entry `arguments` and `content` members are JSON strings, never nested
 untyped JSON values. `arguments` contains the exact normalized JSON text or
@@ -2222,9 +2285,9 @@ below. The client accepts a global `--socket <path>` override or reads
 - `goal resume <session-uuid> [--guidance <text> | --guidance-file <path>] [--command-id <uuid>]`;
 - `goal stop <session-uuid> [--descendants] [--command-id <uuid>]`;
 - `goal supersede <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
-- `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
-- `send <session-uuid> --queue [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
-- `steer <session-uuid> [--command-id <uuid> --turn <uuid>]`;
+- `send <session-uuid> [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal>]`;
+- `send <session-uuid> --queue [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
+- `steer <session-uuid> [--parts-file <path>] [--command-id <uuid> --turn <uuid>]`;
 - `model <session-uuid> (--model <selection-uuid> | --alias <alias-uuid>) [--system-prompt-file <path> | --clear-system-prompt] [--command-id <uuid> --defaults-version <decimal> --dangerous-tool-auto-approval <disabled|approve-all>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
@@ -2233,8 +2296,8 @@ below. The client accepts a global `--socket <path>` override or reads
 - `blob upload <file>`;
 - `blob metadata <sha256-digest>`;
 - `blob read <sha256-digest> --offset <decimal> --length <decimal> --output <file>`;
-- `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
-- `stop <session-uuid> [--descendants] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
+- `reconcile <session-uuid> <turn-uuid> [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal>]`;
+- `stop <session-uuid> [--descendants] [--parts-file <path>] [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
 - `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`;
 - `runner status`;
@@ -2243,6 +2306,25 @@ below. The client accepts a global `--socket <path>` override or reads
 - `runner promote --pending-enrollment <request-uuid> [--command-id <uuid>]`;
   and
 - `chat <session-uuid>`.
+
+For the five content-authoring mutations above, `--parts-file` names a file
+whose complete UTF-8 contents are exactly one nonempty JSON array of closed text
+or attachment part objects; array order is content order. The client reads it
+with the same bounded-input and owner-private regular-file checks as other
+content-bearing file options. Supplying the option makes standard input
+unavailable for that mutation; omitting it preserves the existing single text
+part read from standard input. Conversation content therefore never appears in
+process arguments. Chat accepts the same closed object through `:part JSON` by
+appending it to a pending sequence without submitting it; `:send` submits the
+nonempty pending sequence only when the loop awaits neither a queued nor active
+reply. It clears the sequence only after validating the resulting
+`input_submitted` receipt; any rejection, connection loss, cancellation, or
+ambiguous outcome retains the exact sequence. While either reply is pending,
+`:send` reports a local busy error and likewise retains it. `:clear` discards it
+locally. A malformed part clears the sequence and reports a local parse error.
+An ordinary input line keeps its immediate one-text-part meaning only while no
+part is pending; otherwise the client refuses it and requires `:send` or
+`:clear`.
 
 The terminal client provides these delegation commands for exact already-issued
 tool requests:
@@ -2276,13 +2358,15 @@ when there is none, the first acceptance-ordered queued turn; queued work is not
 presented as an idle loop.
 
 A line without the `:` prefix submits exact nonempty line content only while the
-loop awaits neither a queued nor active reply. Line termination removes LF or
-CRLF only, retaining a bare trailing carriage return at standard-input EOF. The
-returned `input_submitted` receipt marks that turn queued; only its durable
-`turn_activated` event enables active-turn controls and changes the displayed
-state to streaming. The closed in-loop command set is `:stop TEXT`,
+loop awaits neither a queued nor active reply and no multipart sequence is
+pending. Line termination removes LF or CRLF only, retaining a bare trailing
+carriage return at standard-input EOF. The returned `input_submitted` receipt
+marks that turn queued; only its durable `turn_activated` event enables
+active-turn controls and changes the displayed state to streaming. The closed
+in-loop command set is `:part JSON`, `:send`, `:clear`, `:stop TEXT`,
 `:steer TEXT`, `:approve ID`, `:deny ID REASON`, `:transcript`,
-`:model ALIAS-UUID`, and `:quit`. These map to the existing `stop_turn`,
+`:model ALIAS-UUID`, and `:quit`. Multipart commands map to one start-when-idle
+`submit_input`; the remaining commands map to the existing `stop_turn`,
 configuration-free steering `submit_input`, `decide_tool_request`,
 `read_transcript`, and `replace_session_defaults` requests, or local exit;
 ordinary input maps to start-when-idle `submit_input`. `:stop` requires
@@ -2683,7 +2767,13 @@ fails its closed shape is named as a malformed-known protocol violation.
 subsequent typed durable updates until interrupted. Each delta is flushed as one
 line:
 `provider_text_delta session=<session> turn=<turn> call=<call> part=<index> content=<text>`.
-By default its trailing text field escapes line feed and every other C0 code
+Accepted `transcript_user_entry` members use the terminal line shape owned by
+[blob storage](blob-storage.md#multipart-user-content), preserving their ordered
+part JSON without rendering attachment bytes. That JSON's default terminal
+serialization additionally renders DEL and C1 characters inside string values as
+lowercase four-hex-digit JSON escapes; `--raw-output` is the explicit opt-in to
+ordinary compact JSON that may carry those characters literally. By default the
+provider-delta trailing text field escapes line feed and every other C0 code
 point, DEL, and C1 code point, so provider output cannot forge another event
 line or execute terminal controls; `--raw-output` remains the explicit opt-in to
 unchanged text. Snapshots render a model boundary as `model_identity_changed`

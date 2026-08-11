@@ -819,7 +819,7 @@ mod tests {
         NativeErrorFacts, Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence,
         ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
         ProviderRequestId, RefusalEvidence, StreamInterruption, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+        ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName, TransportFacts, UnsentCause,
     };
 
     use super::{
@@ -1118,6 +1118,7 @@ mod tests {
             finish_reported: Some(FinishReason::StopSequence {
                 sequence: Some("stop-key_loop".to_string()),
             }),
+            tool_calls: ToolCallsAtLoss::Opened,
             usage: TokenUsage::unreported(),
         });
 
@@ -1144,6 +1145,9 @@ mod tests {
                 detail: "decode-[redacted]".to_string(),
             }
         );
+        // The tool fact carries no provider text, so redaction passes it
+        // through rather than weakening it to `Unobserved`.
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]
@@ -1200,6 +1204,7 @@ mod tests {
             exchange: ExchangeFacts::default(),
             reported_model: None,
             finish_reported: None,
+            tool_calls: ToolCallsAtLoss::NoneOpened,
             usage: TokenUsage::unreported(),
         });
 

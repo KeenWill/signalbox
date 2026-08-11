@@ -52,7 +52,7 @@ use signalbox_model_runtime::{
     CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts, LossCause, ModelOperation,
     ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure, PreparationOutcome,
     ProviderReportedModel, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    TerminalEvidence, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_model_runtime_claude_cli::{
     CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConfig, ClaudeCliPreparedRequest,
@@ -1733,6 +1733,7 @@ fn decoded_response_rejects_an_unexpected_terminal_variant() {
         exchange: fixture_exchange(),
         reported_model: None,
         finish_reported: None,
+        tool_calls: ToolCallsAtLoss::Unobserved,
         usage: fixture_usage(),
     });
 

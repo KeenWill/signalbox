@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderReportedModel,
-    RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    validate_provider_json_nesting,
+    RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss,
+    ToolName, validate_provider_json_nesting,
 };
 
 use crate::{
@@ -122,6 +122,9 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             format!("success response body exceeds the provider JSON bound: {error}"),
             exchange,
             None,
+            // The body never deserialized, so nothing is known about the tool
+            // material it may carry.
+            ToolCallsAtLoss::Unobserved,
             TokenUsage::unreported(),
         );
     }
@@ -132,10 +135,14 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 format!("success response body is not a chat completion: {error}"),
                 exchange,
                 None,
+                ToolCallsAtLoss::Unobserved,
                 TokenUsage::unreported(),
             );
         }
     };
+    // Every loss below this point has the provider's own tool announcements in
+    // hand, whether or not the decode reached the conversion loop.
+    let tool_calls = announced_tool_calls(&completion);
     if completion.object.as_deref() != Some("chat.completion") {
         return unintelligible(
             format!(
@@ -144,6 +151,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             ),
             exchange,
             completion.model.map(ProviderReportedModel::new),
+            tool_calls,
             completion
                 .usage
                 .as_ref()
@@ -156,6 +164,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             "success response carries no completion id".to_string(),
             exchange,
             completion.model.map(ProviderReportedModel::new),
+            tool_calls,
             completion
                 .usage
                 .as_ref()
@@ -168,6 +177,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             "success response carries no model identity".to_string(),
             exchange,
             None,
+            tool_calls,
             completion
                 .usage
                 .as_ref()
@@ -195,6 +205,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             ),
             exchange,
             reported_model,
+            tool_calls,
             usage,
         );
     };
@@ -206,6 +217,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             ),
             exchange,
             reported_model,
+            tool_calls,
             usage,
         );
     }
@@ -214,6 +226,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             "success response choice carries no message".to_string(),
             exchange,
             reported_model,
+            tool_calls,
             usage,
         );
     };
@@ -225,6 +238,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             ),
             exchange,
             reported_model,
+            tool_calls,
             usage,
         );
     }
@@ -243,12 +257,15 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                         format!("response repeats tool-call id {:?}", proposal.id.as_str()),
                         exchange,
                         reported_model,
+                        tool_calls,
                         usage,
                     );
                 }
                 content.push(AssistantPart::ToolCall(proposal));
             }
-            Err(detail) => return unintelligible(detail, exchange, reported_model, usage),
+            Err(detail) => {
+                return unintelligible(detail, exchange, reported_model, tool_calls, usage);
+            }
         }
     }
     if completion.usage.is_some() {
@@ -264,6 +281,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             "success response carries no finish_reason".to_string(),
             exchange,
             reported_model,
+            tool_calls,
             usage,
         );
     };
@@ -274,6 +292,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish,
+            tool_calls,
             usage,
         );
     }
@@ -295,6 +314,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish,
+            tool_calls,
             usage,
         );
     }
@@ -334,10 +354,31 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     }
 }
 
+/// Whether the provider announced any tool call in a deserialized response.
+///
+/// Reads the wire announcement rather than the converted proposals: a call this
+/// adapter cannot convert into a proposal is still a call the provider opened,
+/// and the loss paths below are exactly the ones where conversion did not run
+/// or did not finish.
+fn announced_tool_calls(completion: &ChatCompletion) -> ToolCallsAtLoss {
+    let announced = completion.choices.iter().any(|choice| {
+        choice
+            .message
+            .as_ref()
+            .is_some_and(|message| !message.tool_calls.is_empty())
+    });
+    if announced {
+        ToolCallsAtLoss::Opened
+    } else {
+        ToolCallsAtLoss::NoneOpened
+    }
+}
+
 fn unintelligible(
     detail: String,
     exchange: ExchangeFacts,
     reported_model: Option<ProviderReportedModel>,
+    tool_calls: ToolCallsAtLoss,
     usage: TokenUsage,
 ) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
@@ -345,6 +386,7 @@ fn unintelligible(
         exchange,
         reported_model,
         finish_reported: None,
+        tool_calls,
         usage,
     })
 }
@@ -354,6 +396,7 @@ fn unintelligible_after_finish(
     exchange: ExchangeFacts,
     reported_model: Option<ProviderReportedModel>,
     finish_reported: FinishReason,
+    tool_calls: ToolCallsAtLoss,
     usage: TokenUsage,
 ) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
@@ -361,6 +404,7 @@ fn unintelligible_after_finish(
         exchange,
         reported_model,
         finish_reported: Some(finish_reported),
+        tool_calls,
         usage,
     })
 }

@@ -38,6 +38,9 @@ The blob catalog and input-modality grammar below are the foundation proposal
 from PR #553 (`agent/blob-storage-foundation`) and become verified with its
 implementing child stack.
 
+The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
+verified against this PR (`agent/tool-evals-mcp`).
+
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
 (`agent/credential-reference-total`). This includes signalboxd configuration
@@ -584,28 +587,14 @@ conversion. Begin rejects a declaration above the configured value before
 assembly, append rejects the first observed size above it, and commit rechecks
 the value against the actual appended byte count.
 
-The optional `[blob_storage]` table has exactly `staging_directory`,
-`max_blob_bytes`, `stores`, and `routes`. The directory is absolute and the
-positive size is an integer admitted as an unsigned 64-bit value. There are one
-through 32 `[[blob_storage.stores]]` entries with distinct names. A filesystem
-entry has exactly `name`, `kind = "filesystem"`, and absolute `root_directory`.
-An S3 entry has exactly `name`, `kind = "s3"`, absolute HTTP(S) `endpoint`,
-nonempty ASCII `region` and `bucket` of at most 255 bytes each, and absolute
-`credentials_file`; endpoint user information, query, and fragment are invalid,
-and HTTP requires a literal loopback host. `[blob_storage.routes]` has exactly
-`user_attachment`, `tool_artifact`, `imported_source`, and `generated_artifact`,
-each naming one declared store.
-
-An S3 credentials file passes the ordinary protected-file checks, is at most
-16,384 bytes, and is strict TOML with exactly `version = 1`, nonempty
-`access_key_id` of at most 256 bytes, and nonempty `secret_access_key` of at
-most 4,096 bytes. It is read once per logical operation. No ambient credential
-source is consulted. Unknown root, store, route, or credential members fail
-startup. When blob storage is present, `max_blob_bytes` must be at least the
-effective conversation-import maximum. When it is absent, startup succeeds only
-if the blob catalog and legacy imported-source backlog are both empty; blob and
-import operations are unavailable. Every store name already recorded in the
-replica catalog must resolve to the same configured storage namespace.
+The optional `[blob_storage]` table, its one-through-32 store catalog, distinct
+store-name and namespace-UUID bindings, exact filesystem and S3 fields, static
+credential grammar, routes, bounds, and absent-state compatibility are owned by
+the
+[blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration).
+This configuration loader rejects every disagreement before runtime composition
+and applies the ordinary protected-file checks to the explicit S3 credential
+file; no ambient credential source enters the resulting adapter configuration.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
 contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional
@@ -683,6 +672,24 @@ session still bound to the configured root. One root per session, and derivation
 from the configured root alone, are properties of this version rather than
 permanent limits; several bound roots per session and explicit operator rebinds
 are routed through [tool safety](../open-questions.md#tool-safety).
+
+<a id="durable-workspace-records"></a>
+
+A workspace also has a durable record — an identity and the canonical root it
+was minted for — because authority grants must be scoped to something stabler
+than a path. The record is written *from* this derivation, never read *by* it,
+and the sentence above still holds unchanged, since nothing consults the table
+to decide which root to open. Committed but unimplemented: no present surface
+records a derived root. This PR lands the table and its constraints, and the
+daemon-side write arrives with the slice that owns it, as
+[identity and commands](identity-and-commands.md) states for `WorkspaceId`
+generation. What the identity is for is the other direction — a grant such as a
+minted Git push destination is keyed by it, so two spellings of one directory
+cannot become two scopes. The root is canonicalized once, when the record is
+minted, and stored in canonical form; no later comparison normalizes anything.
+The tiers that mint these records, and the one grant that currently uses them,
+are stated under
+[remote destination authority](git-authority-threat-model.md#remote-destination-authority).
 
 Provisioning that directory is deployment work: creating a direct main worktree
 there is what makes a session use it. Only a reported absence at the derived
@@ -2908,8 +2915,11 @@ Enforcement as implemented:
   errors log phase, failure class, counts, and aggregate ids only. The
   `crates/application` tracing sites emit the same typed fields, plus the closed
   tool error kind and the daemon-authored catalog tool name at the failed
-  tool-attempt site; no call site in the codebase passes accepted-input,
-  assistant content, tool arguments, or tool error detail to `tracing`.
+  tool-attempt site. A runtime-bridge schema rejection additionally emits the
+  daemon-authored tool name and the JSON parser's grammar-and-position
+  diagnostic, never the rejected schema bytes. No call site in the codebase
+  passes accepted-input, assistant content, tool arguments, or tool error detail
+  to `tracing`.
 - Every provider-controlled text that leaves the Anthropic adapter — stream text
   and thinking deltas, tool-argument JSON, tool proposals, native error bodies,
   provider request ids, reported model identity, stop-sequence and finish

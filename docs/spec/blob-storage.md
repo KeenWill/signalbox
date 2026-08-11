@@ -1,10 +1,10 @@
 # Blob storage
 
-This page is the foundation contract introduced and verified through PR #553
-(`agent/blob-storage-foundation`). Its implemented-behavior statements take
-effect with the full implementing stack. A paragraph that names itself
-unimplemented is committed unimplemented functionality and carries only its
-stated compatibility constraint.
+This page is the foundation proposal verified through PR #553
+(`agent/blob-storage-foundation`). Its implemented-behavior statements become
+verified with its implementing child stack and take effect with the full stack.
+A paragraph that names itself unimplemented is committed unimplemented
+functionality and carries only its stated compatibility constraint.
 
 The blob digest and external spelling, deterministic object-key producer,
 streaming whole-object and ranged store contract, filesystem publication,
@@ -62,21 +62,27 @@ that store's publication has been verified. Deleting a blob row that a replica
 references is rejected, and no surface in this stack deletes either row: the
 catalog is append-only.
 
-The blob digest is the `blob` primary key. A replica is unique both by digest
-plus store name and by store name plus object key. Concurrent registration
-reloads the winning catalog state: matching length and replica facts are
-idempotent success, while any disagreement is typed catalog corruption rather
-than a raw uniqueness error.
+The blob digest is the `blob` primary key. A `blob_store_binding` row records
+one store name and its deployment-supplied canonical UUID `namespace_id`; both
+are unique, append-only durable facts. Replica registration first inserts or
+reloads that binding and rejects any disagreement as typed catalog corruption. A
+replica is unique both by digest plus store name and by store name plus object
+key. Concurrent registration reloads the winning catalog state: matching
+namespace, length, and replica facts are idempotent success, while any
+disagreement is typed catalog corruption rather than a raw uniqueness error.
 
 Placement is durable fact, not configuration lookup. Routing configuration
 decides where new writes go; reads resolve through recorded replicas, so a
-configuration change never reinterprets or orphans existing content. Store names
-are durable deployment identities — a name the catalog references must keep
-meaning the same storage namespace. Version one has no replica-retirement state,
-so a configured store cannot be removed or rebound while any `blob_replica` row
-names it, even after another replica has been added elsewhere. Why: the
-alternative — deriving location from current configuration — silently changes
-the meaning of every old durable record on each configuration edit.
+configuration change never reinterprets or orphans existing content. A store
+name plus namespace identity is the durable deployment identity. Startup
+compares every recorded binding with configuration and fails before socket work
+if a name or namespace is absent or disagrees. Moving one namespace to another
+locator preserves its UUID; assigning a locator to another namespace requires a
+fresh store name and UUID. Version one has no replica-retirement state, so a
+configured binding cannot be removed while any `blob_replica` row names it, even
+after another replica has been added elsewhere. Why: the alternative — deriving
+identity from current location configuration — silently changes the meaning of
+every old durable record on each configuration edit.
 
 Object keys are deterministic and content-derived (`sha256/ab/cd/<hex>`), carry
 no filename, extension, or session identity, and are recorded per replica so a
@@ -85,56 +91,118 @@ store's key layout can evolve without reinterpreting history.
 ## Stores, routing, and configuration
 
 The daemon configuration catalog gains an optional `[blob_storage]` table. Its
-absence preserves startup compatibility only while both the blob catalog and the
-legacy imported-raw-source backlog are empty; blob and conversation-import
-operations are then unavailable rather than inventing a storage location. Once
-either durable inventory is nonempty, omission is a startup error because every
-recorded store must remain resolvable and every legacy source must be
-convergeable. When present, the table requires an absolute `staging_directory`,
-a positive decimal-u64 `max_blob_bytes`, one or more `[[blob_storage.stores]]`
-entries with distinct validated `name` values, and a `[blob_storage.routes]`
-table containing exactly `user_attachment`, `tool_artifact`, `imported_source`,
-and `generated_artifact`. Every route names a declared store. When conversation
-import is enabled, `max_blob_bytes` must be at least
-`conversation_import.max_source_bytes`, including that table's default. The
-table follows the version-one catalog grammar and rejects unknown or
-kind-inapplicable fields.
+absence preserves startup compatibility only while the blob catalog is empty;
+blob and conversation-import operations are then unavailable rather than
+inventing a storage location. Once the catalog is nonempty, omission is a
+startup error because every recorded store must remain resolvable. When present,
+the table requires an absolute `staging_directory`, a positive decimal-u64
+`max_blob_bytes`, one through 32 `[[blob_storage.stores]]` entries with distinct
+`name` values matching `[a-z][a-z0-9_-]{0,63}` and distinct canonical UUID
+`namespace_id` values, and a `[blob_storage.routes]` table containing exactly
+`user_attachment`, `tool_artifact`, `imported_source`, and `generated_artifact`.
+Every route names a declared store. When conversation import is enabled,
+`max_blob_bytes` must be at least `conversation_import.max_source_bytes`,
+including that table's default. The table follows the version-one catalog
+grammar and rejects unknown or kind-inapplicable fields. Every catalog query and
+in-memory traversal orders store names by unsigned ASCII bytes; persistence uses
+bytewise `C` collation for that order rather than a deployment locale.
 
-A `filesystem` store entry contains exactly `name`, `kind = "filesystem"`, and
-an absolute `root_directory`. An `s3` entry contains exactly `name`,
-`kind = "s3"`, an absolute HTTP(S) `endpoint`, nonempty `region` and `bucket`
-strings of at most 255 ASCII bytes each, and an absolute `credentials_file`.
-Endpoints reject user information, query, and fragment components; HTTP is
-admitted only for a literal loopback host, and version one always uses
-path-style bucket addressing. The credentials file is at most 16,384 bytes of
-strict TOML containing exactly `version = 1`, a nonempty `access_key_id` of at
-most 256 bytes, and a nonempty `secret_access_key` of at most 4,096 bytes. It
-satisfies the configuration contract's regular-file, ownership, and mode checks
-and is read once per logical store operation so rotation does not require daemon
-restart. No environment, provider profile, metadata service, or other ambient
-source is consulted.
+Configured store entries must also name distinct physical namespaces. After
+initializing filesystem roots, startup resolves each opened directory's
+canonical path and `(st_dev, st_ino)` identity and rejects equality on either,
+so symlink, relative-component, and bind-mount aliases cannot manufacture
+replica diversity; an identity that cannot be proved distinct fails startup. For
+S3, the namespace locator is the parsed endpoint's canonical URL serialization
+with default-port and empty-path variance removed, paired with the exact bucket;
+startup rejects a duplicate locator even when store names, namespace UUIDs,
+regions, or credentials differ. One physical namespace is represented by one
+store binding.
+
+A `filesystem` store entry contains exactly `name`, `namespace_id`,
+`kind = "filesystem"`, and an absolute `root_directory`. An `s3` entry contains
+exactly `name`, `namespace_id`, `kind = "s3"`, an absolute HTTP(S) `endpoint`,
+nonempty `region` and `bucket` strings of at most 255 ASCII bytes each, and an
+absolute `credentials_file`. Endpoints reject user information, query, and
+fragment components; HTTP is admitted only for a literal loopback host, and
+version one always uses path-style bucket addressing. The credentials file is at
+most 16,384 bytes of strict TOML containing exactly `version = 1`, a nonempty
+`access_key_id` of at most 256 bytes, and a nonempty `secret_access_key` of at
+most 4,096 bytes. It satisfies the configuration contract's regular-file,
+ownership, and mode checks and is read once per logical store operation so
+rotation does not require daemon restart. No environment, provider profile,
+metadata service, or other ambient source is consulted.
 
 Version one ships two store kinds. `filesystem` is a production-supported store
-— including over network mounts that honor same-directory atomic rename and file
-and directory synchronization — writing through a same-filesystem temporary
-file. Publication syncs the complete temporary file, atomically renames it to
-the final content-addressed path, syncs affected directory metadata, and then
+only on a filesystem the host can positively classify as local, non-network, and
+non-userspace storage. Startup rejects network, userspace, and unclassified
+mounts rather than admitting an uninterruptible remote operation into the
+daemon. Native network-filesystem support therefore remains outside this version
+until it has an isolatable, bounded-operation contract. Publication writes
+through a create-new file directly beneath a reserved `.publish-v1` child of the
+store root, syncs the complete temporary file, atomically renames it to the
+final content-addressed path, syncs affected directory metadata, and then
 completely verifies the final bytes before catalog registration; a failed
 durability or verification operation makes the store unavailable and records no
-replica. `s3` speaks the S3-compatible API against an explicit endpoint with
-explicit file-delivered static credentials; ambient credential discovery
-(process environment, provider configuration files, instance metadata) is
-rejected by construction, and an object store's own integrity metadata is never
-treated as content identity. Multiple stores are enabled simultaneously and
-routed by class; routing by media type or filename is inexpressible. Why: class
-is a classification Signalbox itself made, while media type and filename are
-caller-supplied strings, and a caller-supplied string must not select which
-infrastructure gains authority over bytes.
+replica. Before socket admission and after acquiring the exclusive daemon lock,
+startup removes every regular file from each `.publish-v1` child. A symlink,
+subdirectory, entry with a different UID, or otherwise unprovable occupant fails
+startup rather than being followed or removed. The configured root,
+`.publish-v1`, and every created directory are owned by the daemon's effective
+UID with exact mode `0700`; a symlink, another UID, or any group or other
+permission fails startup. Store-local temporary and final blob files are
+create-new regular files owned by that UID with exact mode `0600`, are opened
+without following links, and retain that mode across publication. `s3` speaks
+the S3-compatible API against an explicit endpoint with explicit file-delivered
+static credentials; ambient credential discovery (process environment, provider
+configuration files, instance metadata) is rejected by construction, and an
+object store's own integrity metadata is never treated as content identity.
+Multiple stores are enabled simultaneously and routed by class; routing by media
+type or filename is inexpressible. Why: class is a classification Signalbox
+itself made, while media type and filename are caller-supplied strings, and a
+caller-supplied string must not select which infrastructure gains authority over
+bytes.
 
 Blobs are large: the substrate supports multi-gigabyte objects, so every daemon
 path — ingest, verification, replica copy, read — streams and none materializes
 a whole blob in memory. Bounded in-memory materialization exists only at
 explicitly bounded consumers, and each such consumer names its bound.
+
+The configured staging directory is a daemon-owned private directory on storage
+the host positively classifies as local, non-network, and non-userspace by the
+same admission rule as a filesystem-store root; an unclassified staging mount
+fails startup. The daemon creates one `uploads-v1` child with mode `0700` and
+holds the installation's exclusive daemon lock while using it; upload spools are
+create-new mode `0600` regular files directly beneath that child. Before socket
+admission, startup removes every regular spool in that child. A symlink,
+subdirectory, entry whose UID differs from the daemon's effective UID, or
+otherwise unprovable occupant fails startup rather than being followed or
+removed. Clean shutdown cancels active uploads and performs the same sweep. This
+reclaims crash leftovers without treating unrelated paths as Signalbox-owned.
+
+Every S3 logical operation has a 10-second connect timeout, a 60-second
+no-progress read/write timeout, and a 24-hour whole-operation deadline. The
+caller's cancellation signal aborts transport work and best-effort aborts an
+open multipart upload; a model-call attachment check binds that signal to the
+call's authoritative cancellation, while upload work binds it to connection loss
+and daemon shutdown. A timeout after a publication that might have been accepted
+is not success. When cancellation has not won, the adapter gets one fresh
+24-hour reconciliation deadline, with the same connect and idle bounds, to
+perform a complete read-back and registers only exact verified bytes. A
+read-back timeout or cancellation returns unavailable when nonacceptance is
+proved and ambiguous publication otherwise, releases the bulk-ingest permit, and
+leaves at most an unregistered orphan; retry live-verifies the deterministic key
+before completing registration.
+
+An S3 store currently named by at least one route is admitted for publication
+only when its bucket lifecycle configuration contains an enabled rule covering
+the complete `sha256/` object-key prefix (or the whole bucket) that aborts
+incomplete multipart uploads after one day. Startup reads a bounded 65,536-byte
+lifecycle response with the configured static credential and fails closed when
+the rule cannot be proved; the credential therefore needs that read permission.
+An unrouted historical S3 binding remains configured but is not
+lifecycle-queried at startup; its read failures use the ordinary runtime
+`unavailable` candidate outcome. The external bucket rule is the crash and
+credential-loss bound for uploaded parts that never became a final object.
 
 ## Ingest and the transaction boundary
 
@@ -163,15 +231,16 @@ is a future optimization, not a version-one upload path.
 ## Wire vocabulary
 
 Blob upload copies the chunked conversation-import lifecycle over the local
-process protocol: `begin_blob_upload` declares the expected digest, expected
-byte length, and the user-attachment operation from which the daemon derives the
-`user_attachment` storage class. No client-controlled class selects a route.
-After validating any known length, begin short-circuits only for a verified
-replica that a live read verifies in that routed store; a missing or corrupt
-recorded object proceeds to upload for repair. `append_blob_upload` carries
-nonempty padded-base64 chunks with at most 4,194,304 decoded bytes, spooled to
-staging and never assembled in memory; `commit_blob_upload` returns the verified
-digest and length; `abort_blob_upload` discards the staging state.
+process protocol: `begin_blob_upload` declares only the expected digest and
+expected byte length. The request kind is the fixed user-attachment operation,
+from which the daemon derives the `user_attachment` storage class; no operation
+or client-controlled class field selects a route. After validating any known
+length, begin short-circuits only for a verified replica that a live read
+verifies in that routed store; a missing or corrupt recorded object proceeds to
+upload for repair. `append_blob_upload` carries nonempty padded-base64 chunks
+with at most 4,194,304 decoded bytes, spooled to staging and never assembled in
+memory; `commit_blob_upload` returns the verified digest and length;
+`abort_blob_upload` discards the staging state.
 
 Reads are `read_blob_metadata { digest }`, returning the digest, byte length,
 and bounded replica count, and
@@ -181,18 +250,32 @@ addition must not overflow, and the exact half-open range must lie within the
 blob. A request at or beyond end-of-blob, or one crossing it, is a typed range
 rejection rather than a short or empty read. The response echoes digest and
 offset and carries exactly the requested bytes as padded base64. A connection or
-model turn live-verifies a selected replica by streaming its full length and
-SHA-256 before returning that digest's first range, retaining only the requested
-range in memory. That scope may reuse the verification for later ranges from the
-same immutable store object. Its least-recently-used verification inventory
-holds at most eight digests; eviction only makes a later range verify again, and
-the inventory is discarded at scope end or on any store failure. Missing or
-corrupt replicas fail closed with typed evidence and no bytes. Bytes flow only
-through the daemon: no client receives a store credential, bucket name,
-filesystem path, or presigned URL. Client-facing blob messages and content-part
-blob references expose only the digest spelling, never placement; catalog rows
-separately retain byte length, creation time, store name, and object key, while
-content parts retain their attachment metadata.
+model turn considers recorded replicas in canonical store-name order and
+live-verifies each candidate by streaming its full length and SHA-256 before
+returning that digest's first range, retaining only the requested range in
+memory. Missing, corrupt, or unavailable candidates fall through to the next
+recorded replica; typed failure with no bytes is returned only when none can
+satisfy the read. After all candidates fail, any unavailable candidate makes the
+result `unavailable` because the daemon cannot prove the blob unusable;
+otherwise any digest or length mismatch makes it `blob_corrupt`, and an
+all-missing set makes it `blob_missing`. An absent catalog identity remains
+`not_found`. The scope may reuse verification for later ranges only while the
+adapter pins an immutable object generation and makes every range conditional on
+that exact generation. A retained filesystem handle pins an inode but not its
+contents and is never sufficient: filesystem replicas are completely reverified
+before every range. An S3 adapter without a usable immutable version token
+likewise reverifies before every range. The least-recently-used inventory of
+generation-pinned verifications holds at most eight digests; eviction makes a
+later range verify again, and the inventory is discarded at scope end or on any
+candidate failure. An inventory entry is only a bounded immutable-generation
+token of at most 1,024 bytes and never retains a file descriptor, socket,
+request, or store client; conditional reads acquire and release their operation
+resources independently. Bytes flow only through the daemon: no client receives
+a store credential, bucket name, filesystem path, or presigned URL.
+Client-facing blob messages and content-part blob references expose only the
+digest spelling, never placement; catalog rows separately retain byte length,
+creation time, store name, and object key, while content parts retain their
+attachment metadata.
 
 ## Multipart user content
 
@@ -214,24 +297,46 @@ would turn equal resubmission into conflicting reuse.
 Attachment metadata is caller-supplied semantic input, so part order, digests,
 kinds, media types, and filenames all participate in command replay equality.
 Acceptance requires every referenced digest to be catalogued with at least one
-verified replica. Catalog existence is current-state validation, so an unseen
-command identifier is claimed first under the registry-first protocol; an
-unknown digest then commits the typed payload and terminal rejection with no
-accepted-input effect. Equal replay returns that rejection and corrected content
-uses a new command identity. Command and accepted-input rows carry mirrored
-ordered content-part satellites under the existing command/effect correlation
-discipline, and the wire `submit_input`, `reconcile_turn`, and `stop_turn`
-content fields all become the same ordered parts array. The process protocol's
-version-one in-place editing window is why this lands as the canonical shape
-rather than a compatibility variant beside the string form.
+verified replica. The sum of catalogued byte lengths for distinct referenced
+digests in one input must not exceed `blob_storage.max_blob_bytes`; this names
+the aggregate full-verification work bound even when that input contains 256
+parts. Before recording any accepted-input effect, the same checked sum is
+applied to the distinct attachment digests in the complete prospective rendered
+frontier after the new content and its delivery transition. Either oversized sum
+uses the same typed terminal rejection, so acknowledged content cannot make the
+next prepared call exceed its attachment bound. Catalog existence and both sums
+are current-state validation, so an unseen command identifier is claimed first
+under the registry-first protocol; an unknown digest or oversized aggregate then
+commits the typed payload and terminal rejection with no accepted-input effect.
+Equal replay returns that rejection and corrected content uses a new command
+identity. Command and accepted-input rows carry mirrored ordered content-part
+satellites under the existing command/effect correlation discipline, and the
+wire `submit_input`, `reconcile_turn`, and `stop_turn` content fields all become
+the same ordered parts array. The process protocol's version-one in-place
+editing window is why this lands as the canonical shape rather than a
+compatibility variant beside the string form.
 
-The satellite migration raises the owning storage versions, inserts exactly one
-ordinal-zero text part for every legacy command and accepted-input row, verifies
-one complete ordered sequence per parent row, and only then removes the legacy
-`content_text` columns from read authority. Its inserts are idempotent on parent
-row plus ordinal, disagreement aborts the migration, and new code reconstructs
-and compares only the satellites. Command-side and accepted-side parts remain
-separate mirrored records rather than shared mutable authority.
+The one-time satellite migration inserts exactly one ordinal-zero text part for
+every pre-migration command and accepted-input row, verifies one complete
+ordered sequence per parent row, updates every `SubmitInput` record to storage
+version 3, and removes the `content_text` columns. Its inserts are idempotent on
+parent row plus ordinal, disagreement aborts the migration, and runtime code
+accepts only version 3 and reconstructs only the satellites. Command-side and
+accepted-side parts remain separate mirrored records rather than shared mutable
+authority.
+
+The terminal client renders one accepted user entry as exactly one line:
+`user_content source_session=<uuid> entry=<uuid> accepted_input=<uuid> turn=<uuid> parts=<json>`.
+Here `<json>` is the canonical compact ordered parts array from the wire
+contract, including its fixed object-member order. Default terminal
+serialization uses ordinary JSON escaping and additionally emits DEL and every
+C1 code point in string values as the lowercase four-hex-digit escapes `\u007f`
+and `\u0080` through `\u009f`. Parsing the JSON therefore preserves the ordered
+part values while text and filenames cannot forge another terminal line or
+execute controls. Attachment metadata and interleaving remain visible, and
+transcript, follow, and chat never render blob bytes. `--raw-output` uses the
+ordinary compact JSON spelling without the added DEL/C1 escapes and is the
+explicit opt-in to those literal code points; neither mode renders blob bytes.
 
 ## Attachment visibility and model reads
 
@@ -253,18 +358,18 @@ Models reach attachment content the same way they reach every other effect:
 through tools, explicitly, within declared bounds. This stack ships a
 daemon-registered blob-read tool family over the catalog. `blob_metadata`
 accepts exactly `{ digest }` and returns text containing compact JSON with
-`digest`, canonical-decimal-string `byte_length`, and numeric `replica_count`.
-`blob_read` accepts exactly `{ digest, offset_bytes, length_bytes }`, with both
-numeric values expressed as canonical decimal-u64 strings, and returns text
-containing compact JSON with `digest`, `offset_bytes`, and canonical padded
-`bytes_base64`. The stub's stated length is the model's sizing information. Each
-read admits 1 through 524,288 decoded bytes, each turn admits at most 2,097,152
-decoded bytes across admitted read requests, and the existing tool-result and
-target-context caps further limit the encoded result. At preparation the daemon
-derives an allow-set from attachment stubs in the rendered frontier; a
-catalogued digest outside that set is unauthorized. Results use the existing
-text-only tool-result arm and never enter a provider message as image or
-document media.
+`digest`, canonical-decimal-string `byte_length`, and canonical-decimal-string
+`replica_count`. `blob_read` accepts exactly
+`{ digest, offset_bytes, length_bytes }`, with both numeric values expressed as
+canonical decimal-u64 strings, and returns text containing compact JSON with
+`digest`, `offset_bytes`, and canonical padded `bytes_base64`. The stub's stated
+length is the model's sizing information. Each read admits 1 through 524,288
+decoded bytes, each turn admits at most 2,097,152 decoded bytes across admitted
+read requests, and the existing tool-result and target-context caps further
+limit the encoded result. At preparation the daemon derives an allow-set from
+attachment stubs in the rendered frontier; a catalogued digest outside that set
+is unauthorized. Results use the existing text-only tool-result arm and never
+enter a provider message as image or document media.
 
 Content-type-aware readers are committed unimplemented functionality: no present
 surface provides one, and neither its exact inventory nor the formats it
@@ -285,20 +390,35 @@ contained by isolation rather than entrusted to an ever-growing validator.
 
 Before a prepared model call can cross durable send authorization, preparation
 streams and verifies the length and SHA-256 of at least one recorded replica for
-every distinct attachment whose stub enters the rendered request. It holds no
-database transaction during store I/O and retains no attachment bytes. A digest
-with no readable matching replica closes the unsent call through a typed
-missing-or-corrupt-attachment preparation failure; no provider interaction or
-tool authorization occurs. Successful verification seeds the turn-scoped bounded
+every distinct attachment whose stub enters the rendered request. The complete
+rendered request first checked-sums the catalogued lengths of its distinct
+digests. More than `blob_storage.max_blob_bytes` closes the unsent call through
+`AttachmentPreparationFailure::TooLarge { maximum_bytes }` before any store I/O
+or durable send authorization. Repeated occurrences of one digest do not
+multiply the sum or verification work. Preparation holds no database transaction
+during store I/O and retains no attachment bytes. A digest with no recorded
+matching replica closes the unsent call through the typed missing-attachment
+preparation failure. When every recorded candidate can be read but all fail
+length or digest verification, preparation closes it through the typed
+corrupt-attachment failure. Neither path permits provider interaction or tool
+authorization. When no candidate verifies and at least one candidate remains
+temporarily unavailable, preparation releases its store and preparation
+resources, leaves the call `Prepared`, records no turn outcome, and returns the
+sanitized typed unavailable operator failure so a later pass can retry the same
+unsent call. The eligibility sweep includes an active turn whose current model
+call remains `Prepared`, so this retryable durable shape receives another pass;
+the per-session in-flight deduplication prevents concurrent execution.
+Authoritative cancellation aborts store I/O without relabeling cancellation as
+an attachment failure. Successful verification seeds the turn-scoped bounded
 verification inventory used by later blob reads.
 
-Model capability records gain an input-modality axis (`text`, `image`,
-`document`) on the same closed-set shape as the existing capability axes,
-declared per target and projected to clients like the rest of the capability
-record. Omission from an existing configuration means exactly `text`, and the
-projection materializes that default explicitly. Version-one rendered messages
-in this stack carry only text, attachment stubs, and text-only blob-read
-results; no present surface materializes attachment bytes into a prepared call.
+The model and serving-target modality grammar, defaults, effective selection,
+and client projection are owned by
+[configuration and credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
+The attachment-specific compatibility constraint is that version-one rendered
+messages in this stack carry only text, attachment stubs, and text-only
+blob-read results; no present surface materializes attachment bytes into a
+prepared call.
 
 Modality-unsupported preparation failure is committed unimplemented
 functionality: no present surface can trigger it because the current request
@@ -318,21 +438,9 @@ bytes living in a routed store rather than a relational column. Import semantics
 — record identity, conversion digests, snapshot immutability — are unchanged and
 remain owned by [conversation-import](conversation-import.md).
 
-The schema transition first admits exactly one of legacy `raw_bytes` or a blob
-digest on each `imported_raw_source_record`. Before accepting socket work, a
-restart-safe barrier processes one legacy row at a time: it checks the stored
-content hash and configured blob-size bound, publishes and registers the bytes
-under the `imported_source` route without an open database transaction, then
-locks and rechecks the row before atomically recording the digest and clearing
-`raw_bytes`. Publication without registration may leave the ordinary orphan;
-failure before the row transition leaves legacy authority intact. Restart skips
-transitioned rows, re-verifies an existing routed replica, and resumes remaining
-rows. A legacy row larger than `max_blob_bytes` makes startup fail until the
-operator raises that ceiling; changing the current new-import admission bound
-never invalidates acknowledged legacy bytes. Startup fails closed until no
-legacy row remains, after which all reads use the blob reference and the
-nullable legacy column contains no bytes. New imports write only blob
-references.
+The one-time storage-layer SQL migration produces the final blob-reference-only
+`imported_raw_source_record` schema. Runtime code accepts only that shape, and
+new imports write only blob references.
 
 ## Open edges
 
