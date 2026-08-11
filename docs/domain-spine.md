@@ -5213,6 +5213,9 @@ impl ReconstitutedReplaceSessionMetadata {
 ## domain: git_remote
 
 ```rust
+pub const fn max_git_remote_name_bytes() -> usize;
+pub const fn max_git_remote_url_bytes() -> usize;
+
 pub enum GitRemoteTextError {
     Empty,
     ContainsNull,
@@ -9889,7 +9892,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
-| domain: git_remote                                 | 5                     |
+| domain: git_remote                                 | 7                     |
 | domain: session                                    | 22                    |
 | domain: session_delegation                         | 37 (+3 free fn)       |
 | domain: imported_session                           | 18                    |
@@ -9921,7 +9924,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **759 (+10 free fn)** |
+| **signalbox-domain total**                         | **759 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

@@ -7,10 +7,9 @@ use std::{
 use bstr::BStr;
 use git2::ObjectFormat;
 
-use crate::layout::parse_full_object_id;
+use signalbox_domain::{max_git_remote_name_bytes, max_git_remote_url_bytes};
 
-const MAX_REMOTE_NAME_BYTES: usize = 255;
-const MAX_REMOTE_URL_BYTES: usize = 4096;
+use crate::layout::parse_full_object_id;
 
 /// Exact deployment-owned remote configuration.
 #[derive(Clone, Eq, PartialEq)]
@@ -29,11 +28,11 @@ impl ConfiguredGitRemote {
         let url = url.into();
         let probe = format!("refs/remotes/{name}/probe");
         if name.is_empty()
-            || name.len() > MAX_REMOTE_NAME_BYTES
+            || name.len() > max_git_remote_name_bytes()
             || name.contains('/')
             || gix_validate::reference::name(BStr::new(probe.as_bytes())).is_err()
             || url.is_empty()
-            || url.len() > MAX_REMOTE_URL_BYTES
+            || url.len() > max_git_remote_url_bytes()
             || url.chars().any(char::is_control)
         {
             return Err(InvalidConfiguredGitRemote);

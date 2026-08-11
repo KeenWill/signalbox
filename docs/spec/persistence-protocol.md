@@ -6,10 +6,11 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
-through PR #254 (`agent/fix-parked-approval-interrupt`) and was verified again
-in PR #227 (`agent/review-workflow-persistence`); the metadata command issuer
-proof was verified through PR #265 (`agent/tool-batch-tier0`); the
-`apps/signalboxd` migration-invocation home was verified through PR #258
+through PR #254 (`agent/fix-parked-approval-interrupt`), was verified again in
+PR #227 (`agent/review-workflow-persistence`), and was verified again in PR #549
+(`agent/git-remote-authority`); the metadata command issuer proof was verified
+through PR #265 (`agent/tool-batch-tier0`); the `apps/signalboxd`
+migration-invocation home was verified through PR #258
 (`agent/signalboxd-rename`); the model-identity frontier shape was verified
 through PR #272 (`agent/mid-session-model`); the runner lease-admission trigger
 lock was verified against PR #267 (`agent/runner-persistence`); the current

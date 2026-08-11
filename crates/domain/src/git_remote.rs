@@ -4,10 +4,30 @@ use std::error::Error;
 use std::fmt;
 
 /// Longest admitted remote name in bytes.
-const MAX_REMOTE_NAME_BYTES: usize = 255;
+///
+/// The push executor's `ConfiguredGitRemote` bounds the same name, so both
+/// sides read this single definition. A durable mint the executor then refused
+/// would be resolvable and unusable, which is what independent copies of this
+/// literal would eventually produce.
+const MAX_GIT_REMOTE_NAME_BYTES: usize = 255;
 
 /// Longest admitted destination URL in bytes.
-const MAX_REMOTE_URL_BYTES: usize = 4096;
+///
+/// Shared with the push executor for the same reason as
+/// [`MAX_GIT_REMOTE_NAME_BYTES`].
+const MAX_GIT_REMOTE_URL_BYTES: usize = 4096;
+
+/// Longest admitted remote name in bytes, for the push executor that must
+/// accept every name a mint durably holds.
+pub const fn max_git_remote_name_bytes() -> usize {
+    MAX_GIT_REMOTE_NAME_BYTES
+}
+
+/// Longest admitted destination URL in bytes, for the push executor that must
+/// accept every destination a mint durably holds.
+pub const fn max_git_remote_url_bytes() -> usize {
+    MAX_GIT_REMOTE_URL_BYTES
+}
 
 /// Longest admitted workspace root in bytes.
 ///
@@ -133,7 +153,7 @@ impl GitRemoteName {
     /// Admits one bounded alphanumeric, dot, dash, or underscore name that is
     /// also a legal Git reference component.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
-        validate_text(&value, MAX_REMOTE_NAME_BYTES)?;
+        validate_text(&value, MAX_GIT_REMOTE_NAME_BYTES)?;
         if !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -178,7 +198,7 @@ impl GitRemoteUrl {
     /// durable store must never hold a destination this type cannot represent,
     /// so both sides judge the same bytes.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
-        validate_text(&value, MAX_REMOTE_URL_BYTES)?;
+        validate_text(&value, MAX_GIT_REMOTE_URL_BYTES)?;
         let Some(remainder) = value.strip_prefix(REQUIRED_URL_SCHEME) else {
             return Err(GitRemoteTextError::UnsupportedScheme);
         };

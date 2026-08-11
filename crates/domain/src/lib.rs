@@ -72,7 +72,7 @@ pub use context_frontier::{
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use git_remote::{
     ConfiguredGitRemoteRecord, GitRemoteName, GitRemoteTextError, GitRemoteUrl,
-    GitRemoteWorkspaceRoot,
+    GitRemoteWorkspaceRoot, max_git_remote_name_bytes, max_git_remote_url_bytes,
 };
 pub use goal::{
     Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent, GoalEventKind, GoalEventOrdinal,
