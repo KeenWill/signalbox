@@ -6,6 +6,10 @@
 -- written before this migration keep their absent reason; readers treat that
 -- shape as legacy rather than corruption.
 
+-- The deny branch no longer enumerates decision sources: the source-shape
+-- constraint already restricts automatic sources to approvals, so every
+-- admitted denial simply carries an absent or checked reason.
+
 ALTER TABLE tool_approval_decision
     -- Supersedes tool_approval_decision_shape from
     -- 202608020015_llm_delegated_tool_approval.sql.
@@ -15,7 +19,6 @@ ALTER TABLE tool_approval_decision
             (decision_kind = 'approve' AND denial_reason IS NULL)
             OR (
                 decision_kind = 'deny'
-                AND decision_source IN ('owner_command', 'delegate')
                 AND (
                     denial_reason IS NULL
                     OR (
