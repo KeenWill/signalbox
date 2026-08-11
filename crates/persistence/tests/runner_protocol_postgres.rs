@@ -12639,6 +12639,55 @@ async fn s32_inv002_inv045_grant_policy_rejects_cyclic_base_predecessor()
     Ok(())
 }
 
+/// INV-002 / INV-045: the grant policy loader fails closed when a corrupted
+/// successor grant names a revision-one predecessor that does not exist.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv045_grant_policy_rejects_missing_base_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_credential_grant
+            SET grant_revision = 2,
+                prior_runner_id = runner_id,
+                prior_grant_revision = 1,
+                tool_count = 0
+          WHERE session_id = $1 AND grant_revision = 1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET credential_grant_revision = 2
+          WHERE session_id = $1 AND event_kind = 'pinned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("a successor grant must reach its canonical base grant");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result<(), Box<dyn Error>>
