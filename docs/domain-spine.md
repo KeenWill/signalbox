@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-four identities defined in `lib.rs`:
+The twenty-seven identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -81,6 +81,9 @@ pub struct ReviewFindingId(/* private */);
 pub struct ReviewExternalLinkId(/* private */);
 pub struct RepoWatchEventId(/* private */);
 pub struct RepoWatchDispatchId(/* private */);
+pub struct WorkspaceId(/* private */);
+pub struct GitRemoteMintId(/* private */);
+pub struct GitRemoteWithdrawalId(/* private */);
 ```
 
 Six more identities with the same shape are defined in their owning modules and
@@ -5274,6 +5277,83 @@ impl ReconstitutedReplaceSessionMetadata {
 }
 ```
 
+## domain: git_remote
+
+```rust
+pub const fn max_git_remote_name_bytes() -> usize;
+pub const fn max_git_remote_url_bytes() -> usize;
+
+pub enum GitRemoteTextError {
+    Empty,
+    ContainsNull,
+    TooLong { bytes: usize, maximum: usize },
+    Malformed,
+    UnsupportedScheme,
+}
+// impl Display + std::error::Error
+
+pub struct GitRemoteName { /* private */ }
+impl GitRemoteName {
+    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError>;
+    // accessors: as_str(), into_string()
+}
+pub struct GitRemoteUrl { /* private */ }
+impl GitRemoteUrl {
+    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError>;
+    // accessors: as_str(), into_string()
+}
+// impl Debug redacts the destination
+pub struct ConfiguredGitRemoteRecord { /* private */ }
+impl ConfiguredGitRemoteRecord {
+    pub const fn new(
+        mint: GitRemoteMintId,
+        workspace: WorkspaceId,
+        name: GitRemoteName,
+        url: GitRemoteUrl,
+    ) -> Self;
+    // accessors: mint(), workspace(), name(), url()
+}
+```
+
+## domain: workspace
+
+```rust
+pub enum WorkspaceRootPathError {
+    Empty,
+    ContainsNull,
+    TooLong { bytes: usize, maximum: usize },
+    NotAbsolute,
+    ContainsControlByte,
+    NotCanonical,
+    NoFinalComponent,
+}
+// impl Display + std::error::Error
+
+pub struct WorkspaceRootPath { /* private */ }
+impl WorkspaceRootPath {
+    pub fn try_new(value: String) -> Result<Self, WorkspaceRootPathError>;
+    // accessors: as_str(), into_string()
+}
+
+pub enum WorkspaceOrigin {
+    OperatorRegistered,
+    DaemonDerived,
+}
+impl WorkspaceOrigin {
+    pub const fn is_operator_registered(self) -> bool;
+}
+
+pub struct WorkspaceRecord { /* private */ }
+impl WorkspaceRecord {
+    pub const fn new(
+        id: WorkspaceId,
+        root: WorkspaceRootPath,
+        origin: WorkspaceOrigin,
+    ) -> Self;
+    // accessors: id(), root(), origin()
+}
+```
+
 ## application: approval_judge
 
 ```rust
@@ -9956,11 +10036,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types          |
 | -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 24                    |
+| domain: lib.rs identities                          | 27                    |
 | domain: actor                                      | 1                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
+| domain: git_remote                                 | 4 (+2 free fn)        |
 | domain: session                                    | 22                    |
 | domain: session_delegation                         | 37 (+3 free fn)       |
 | domain: imported_session                           | 18                    |
@@ -9992,7 +10073,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
-| **signalbox-domain total**                         | **760 (+10 free fn)** |
+| domain: workspace                                  | 4                     |
+| **signalbox-domain total**                         | **771 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10016,4 +10098,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **250**               |
+| **signalbox-application total**                    | **249 (+1 free fn)**  |

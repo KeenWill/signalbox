@@ -22,9 +22,12 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
-through this PR (`agent/runner-placement-loss-persistence`); the metadata
-command issuer proof was verified through PR #265 (`agent/tool-batch-tier0`);
-the `apps/signalboxd` migration-invocation home was verified through PR #258
+through PR #254 (`agent/fix-parked-approval-interrupt`), was verified again in
+PR #227 (`agent/review-workflow-persistence`), through this PR
+(`agent/runner-placement-loss-persistence`), and again in this PR
+(`agent/git-remote-authority`); the metadata command issuer proof was verified
+through PR #265 (`agent/tool-batch-tier0`); the `apps/signalboxd`
+migration-invocation home was verified through PR #258
 (`agent/signalboxd-rename`); the model-identity frontier shape was verified
 through PR #272 (`agent/mid-session-model`); the runner lease-admission trigger
 lock was verified against PR #267 (`agent/runner-persistence`); the current
@@ -133,7 +136,7 @@ remains at SQLx defaults until an operational slice selects limits.
 
 Schema change is a forward-only, versioned SQL file set in
 `crates/persistence/migrations/` — sixty-four files, `202607180001` through
-`202608080100` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`202608100001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency

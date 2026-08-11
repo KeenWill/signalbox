@@ -103,6 +103,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "plugin_sharing",
     "plugins",
     "realtime_conversation",
+    "recommended_plugins",
     "remote_plugin",
     "request_permissions_tool",
     "shell_snapshot",
@@ -114,6 +115,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "tool_call_mcp_elicitation",
     "tool_suggest",
     "unified_exec",
+    "view_image",
     "workspace_dependencies",
 ];
 

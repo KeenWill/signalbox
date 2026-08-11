@@ -1,3 +1,11 @@
+//! Integration coverage for the real-bubblewrap containment check.
+//!
+//! `real_bwrap_profile_confines_or_proves_typed_host_refusal` runs the actual
+//! `bwrap` binary against the compiled `signalbox-exec-supervisor` and asserts
+//! either genuine filesystem confinement or a typed host-refusal outcome;
+//! `real_bwrap_gate` decides when that check is mandatory (CI) versus skipped
+//! (unsupported local host, unless opted in).
+
 #![cfg(target_os = "linux")]
 
 use signalbox_test_bin::test_bin_path;
