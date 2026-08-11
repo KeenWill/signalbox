@@ -155,10 +155,12 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let route = configuration
         .resolve_direct_model(selection)
         .ok_or_else(|| String::from("approval_judge selection has no configured route"))?;
+    // CLI-family adapters accept exactly the credential reference they were
+    // constructed with, so the binding must carry the route's profile verbatim.
     let binding = ApprovalJudgeEvalBinding {
         selection,
         target: route.target(),
-        credential_reference: format!("eval:{}", route.credential_profile()),
+        credential_reference: String::from(route.credential_profile()),
     };
     let adapters: ConfiguredModelRuntime<
         AnthropicRuntime<FileCredentialAccess>,
