@@ -15,7 +15,7 @@ use signalbox_model_runtime::{
     ModelRuntime, NativeErrorFacts, ObservationFact, ObservationSink, PreparationDefect,
     PreparationFailure, PreparationOutcome, ProviderErrorEvidence, ProviderErrorKind,
     ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming, StreamInterruption,
-    TerminalEvidence, TerminalReport, TokenUsage, UnsentCause,
+    TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
     boundary_loss_evidence as exchange_loss, emit_provider_observation as emit,
     pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
@@ -30,7 +30,7 @@ use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence
 use crate::config::OpenAiConfig;
 use crate::response::{StopSequences, decode_buffered_response};
 use crate::status::{classify_error, classify_error_envelope};
-use crate::stream::{StreamDecoder, StreamStep};
+use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::ErrorEnvelope;
 
@@ -441,6 +441,9 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 exchange,
                 reported_model: None,
                 finish_reported: None,
+                // The body is never read on this path, so no decoder saw the
+                // response's tool material.
+                tool_calls: ToolCallsAtLoss::Unobserved,
                 usage: TokenUsage::unreported(),
             })
         }
@@ -478,7 +481,12 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         let mut streamed_bytes = 0usize;
         loop {
             let chunk = match cancellation.run_until_cancelled(body.next()).await {
-                None => return decoder.cancelled(),
+                None => {
+                    if framing.holds_unframed_bytes() {
+                        decoder.note_discarded_unexamined_bytes();
+                    }
+                    return decoder.cancelled();
+                }
                 Some(chunk) => chunk,
             };
             match chunk {
@@ -490,7 +498,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                             decoder.lost(StreamInterruption::EndOfStream)
                         }
                         signalbox_model_runtime::SseTermination::TruncatedRecord => decoder
-                            .violation_evidence(
+                            .undecoded_violation_evidence(
                                 "transport ended inside an incomplete SSE record".to_string(),
                             ),
                     };
@@ -502,6 +510,9 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                     } else {
                         StreamInterruption::TransportFailure(facts)
                     };
+                    if framing.holds_unframed_bytes() {
+                        decoder.note_discarded_unexamined_bytes();
+                    }
                     return decoder.lost(interruption);
                 }
                 Some(Ok(bytes)) => {
@@ -551,21 +562,47 @@ fn process_streamed_chunk<C: Clone>(
     // framing or aggregate-size failure. A terminal marker in that prefix
     // must not be lost because trailing bytes share its transport chunk.
     let outcome = framing.push(&bytes[..accepted]);
+    // A framing violation in this chunk, or a suffix the aggregate budget cut
+    // off, leaves bytes no record will ever carry into the decoder. Both are
+    // reported only after the apply loop below, but a terminal that one of these
+    // records raises returns straight out of that loop and builds its evidence
+    // inside `apply` — so without recording the fact here, the loss would state
+    // "no tool call opened" while an unexamined suffix that could have carried
+    // one was discarded with it.
+    if outcome.error.is_some() || matches!(budget, PrefixBudget::Overflowed { .. }) {
+        decoder.note_discarded_unexamined_bytes();
+    }
+    let framed_records = outcome.records.len();
     for (index, record) in outcome.records.into_iter().enumerate() {
         if index > 0 && cancellation.is_cancelled() {
+            // The records this chunk framed but the loop has not applied are
+            // dropped here. They are already out of the framer, so
+            // `holds_unframed_bytes` cannot see them: mark them explicitly.
+            decoder.note_discarded_unexamined_bytes();
             return Some(decoder.cancelled());
         }
+        // A terminal raised by this record discards everything behind it, and
+        // `apply` builds that evidence itself, so the fact has to be in place
+        // before the call rather than patched onto its result.
+        decoder.note_later_records(if index + 1 < framed_records {
+            LaterRecords::Unapplied
+        } else {
+            LaterRecords::AllApplied
+        });
         match decoder.apply(&record, correlation, sink) {
             StreamStep::Continue => {}
             StreamStep::Terminal(evidence) => return Some(*evidence),
         }
     }
+    decoder.note_later_records(LaterRecords::AllApplied);
     if let Some(error) = outcome.error {
-        return Some(decoder.violation_evidence(error.to_string()));
+        return Some(decoder.undecoded_violation_evidence(error.to_string()));
     }
     match budget {
         PrefixBudget::Accepted { .. } => None,
-        PrefixBudget::Overflowed { .. } => Some(decoder.violation_evidence(format!(
+        // The suffix past the limit is dropped without ever being framed, so
+        // the tool fact is withheld rather than stated negative.
+        PrefixBudget::Overflowed { .. } => Some(decoder.undecoded_violation_evidence(format!(
             "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
         ))),
     }
@@ -773,7 +810,7 @@ mod tests {
     use signalbox_model_runtime::{
         CancellationSignal, CredentialRedactingSink, CredentialValue, ExchangeFacts, LossCause,
         NativeErrorFacts, Observation, ObservationFact, ObservationSink, PreparationDefect,
-        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage,
+        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
     };
 
     use super::{
@@ -913,6 +950,48 @@ mod tests {
         );
 
         assert!(matches!(evidence, Some(TerminalEvidence::Completed(_))));
+    }
+
+    /// A semantic violation raised by the last in-budget record withholds the
+    /// tool fact, because the suffix the budget cut off is discarded unexamined.
+    ///
+    /// The violating record is the final one this chunk framed, so the
+    /// unapplied-records fact is false and the loss would otherwise state "none
+    /// opened" — while the bytes past the limit, which are never framed at all,
+    /// could have carried the tool call.
+    #[test]
+    fn a_violation_before_an_over_budget_suffix_withholds_the_tool_fact() {
+        let mut bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_2\",\
+            \"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n"
+            .to_vec();
+        let in_budget_len = bytes.len();
+        bytes.extend_from_slice(b"data: coalesced suffix past the adapter limit\n\n");
+        let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - in_budget_len;
+        let mut framing = SseFraming::new(1024);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
+        let mut observations = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = process_streamed_chunk(
+            &bytes,
+            &mut streamed_bytes,
+            &mut framing,
+            &mut decoder,
+            &"call-1".to_string(),
+            &mut observations,
+            &mut cancellation,
+        );
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("conflicting completion ids are a stream protocol violation");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
     }
 
     struct CancelOnModel {

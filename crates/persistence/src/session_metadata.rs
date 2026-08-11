@@ -270,7 +270,21 @@ impl SessionMetadataRepository {
             Some(CommandKind::ReplaceSessionMetadata) => {
                 load_command_from_connection(&mut connection, command_id).await
             }
-            Some(_) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
+                | CommandKind::CompactSession
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
+            ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
     }
 
@@ -608,10 +622,25 @@ async fn existing_or_conflicting(
     command: &ReplaceSessionMetadata,
     kind: CommandKind,
 ) -> Result<ReplaceSessionMetadataHandlingOutcome, SessionMetadataRepositoryError> {
-    if kind != CommandKind::ReplaceSessionMetadata {
-        return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
-            command_id: command.command_id(),
-        });
+    match kind {
+        CommandKind::ReplaceSessionMetadata => {}
+        CommandKind::CreateSession
+        | CommandKind::CreateSessionFromImportedFrontier
+        | CommandKind::ReplaceSessionDefaults
+        | CommandKind::SubmitInput
+        | CommandKind::DecideToolRequest
+        | CommandKind::ReviewWorkflow
+        | CommandKind::ReviewOrchestration
+        | CommandKind::CompactSession
+        | CommandKind::Goal
+        | CommandKind::UpdateSessionPlacement
+        | CommandKind::RegisterWorkspace
+        | CommandKind::MintGitRemote
+        | CommandKind::WithdrawGitRemote => {
+            return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
+                command_id: command.command_id(),
+            });
+        }
     }
     let recorded = load_command_from_connection(connection, command.command_id())
         .await?
