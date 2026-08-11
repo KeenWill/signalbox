@@ -16,6 +16,7 @@ use signalbox_domain::{
     ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
 };
 use signalbox_model_provider_runtime::{ApprovalJudgeModel, ApprovalJudgeModelRequest};
+use signalbox_model_runtime::TokenUsage;
 use signalbox_persistence::approval_judge::SessionAuthorityContext;
 
 use crate::{APPROVAL_JUDGE_SYSTEM_PROMPT, JudgeRequestFields, render_judge_request_payload};
@@ -55,6 +56,9 @@ pub struct ApprovalJudgeEvalVerdict {
     pub recommendation: DelegateApprovalRecommendation,
     /// Exact rationale emitted with the recommendation.
     pub rationale: String,
+    /// Provider-reported usage, so callers can apply the same configured
+    /// usage limits the daemon applies before accepting a verdict.
+    pub usage: TokenUsage,
 }
 
 /// A case carried text one of the admitted domain values rejects.
@@ -138,22 +142,29 @@ pub async fn judge_eval_case(
     Ok(ApprovalJudgeEvalVerdict {
         recommendation: result.recommendation,
         rationale: result.rationale.into_string(),
+        usage: result.usage,
     })
 }
+
+/// Distinguishes the synthetic turn identity from the request identity
+/// derived from the same case name.
+const TURN_IDENTITY_SALT: u128 = 1;
+/// Distinguishes the synthetic producing-call identity from both.
+const PRODUCING_CALL_IDENTITY_SALT: u128 = 2;
 
 fn eval_tool_request(
     case: &ApprovalJudgeEvalCase,
 ) -> Result<ToolRequest, ApprovalJudgeEvalCaseError> {
-    let identity = uuid::Uuid::from_u128(fnv1a_128(case.name.as_bytes()));
+    let identity = fnv1a_128(case.name.as_bytes());
     let name = ToolName::try_new(case.tool.clone())
         .map_err(|_| ApprovalJudgeEvalCaseError { field: "tool" })?;
     let arguments = NormalizedToolArguments::try_from_provider_text(case.arguments.clone())
         .map_err(|_| ApprovalJudgeEvalCaseError { field: "arguments" })?;
     Ok(ToolRequestReconstitutionInput::new(
-        ToolRequestId::from_uuid(identity),
+        ToolRequestId::from_uuid(uuid::Uuid::from_u128(identity)),
         SessionId::from_uuid(uuid::Uuid::from_u128(fnv1a_128(b"approval-judge-eval"))),
-        TurnId::from_uuid(uuid::Uuid::from_u128(fnv1a_128(case.name.as_bytes()) ^ 1)),
-        ModelCallId::from_uuid(uuid::Uuid::from_u128(fnv1a_128(case.name.as_bytes()) ^ 2)),
+        TurnId::from_uuid(uuid::Uuid::from_u128(identity ^ TURN_IDENTITY_SALT)),
+        ModelCallId::from_uuid(uuid::Uuid::from_u128(identity ^ PRODUCING_CALL_IDENTITY_SALT)),
         ToolRequestOrdinal::from_u32(0),
         name,
         arguments,
@@ -249,21 +260,34 @@ mod tests {
     }
 
     #[test]
-    fn rendered_case_is_deterministic_and_quotes_session_context() {
+    fn rendered_case_is_deterministic() {
         let first = render_eval_case(&case()).expect("fixture case renders");
         let second = render_eval_case(&case()).expect("fixture case renders");
         assert_eq!(first, second);
-        assert!(first.contains("session_context"));
-        assert!(first.contains("unsandboxed_exec"));
-        assert!(first.contains("review-response"));
     }
 
     #[test]
-    fn rendered_case_reports_absent_context_fields_explicitly() {
+    fn rendered_case_quotes_session_context_beside_the_request() {
+        let rendered = render_eval_case(&case()).expect("fixture case renders");
+        assert!(rendered.contains("session_context"));
+        assert!(rendered.contains("unsandboxed_exec"));
+        assert!(rendered.contains("review-response"));
+    }
+
+    #[test]
+    fn rendered_case_reports_the_absent_goal_block_explicitly() {
         let mut absent = case();
         absent.goal = None;
         let rendered = render_eval_case(&absent).expect("fixture case renders");
-        assert!(rendered.contains("absent"));
+        let payload: serde_json::Value =
+            serde_json::from_str(&rendered).expect("rendered payload is JSON");
+        let context = payload["session_context"]
+            .as_str()
+            .expect("session_context renders as text");
+        assert!(context.contains(
+            "-----BEGIN UNTRUSTED SESSION CONTEXT: session_goal-----\n(absent)\n"
+        ));
+        assert!(context.contains("| Push only the head branch."));
     }
 
     #[test]

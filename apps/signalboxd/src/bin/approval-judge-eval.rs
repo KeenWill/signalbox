@@ -6,34 +6,41 @@
 //! category, verdict stability across repeats, and escalation calibration.
 //!
 //! This spends real provider quota on every call; it is a user-invoked
-//! measurement harness, never part of daemon or CI execution. Usage:
-//!
-//! ```text
-//! approval-judge-eval --config <config.toml> --cases <cases.jsonl> \
-//!     [--repeats N] [--filter SUBSTRING] [--limit N]
-//! ```
-//!
-//! Each corpus line is one JSON object: `name`, `category`, `tool`,
-//! `arguments` (string), `expected` (`approve` | `deny` |
-//! `escalate_to_human`), and optional `goal`, `template`, `system_prompt`,
-//! `notes`. The judge model comes from the configuration's `approval_judge`
-//! table; the run refuses configurations without one so a scorecard always
-//! names the model it measured.
+//! measurement harness, never part of daemon or CI execution. Run with
+//! `--help` for the option reference.
 
-use std::{collections::BTreeMap, env, fs, path::PathBuf, process::ExitCode};
+use std::{collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode};
 
 use serde::Deserialize;
 use signalbox_domain::DelegateApprovalRecommendation;
 use signalbox_model_provider_runtime::RuntimeApprovalJudgeModel;
-use signalbox_model_runtime_anthropic::AnthropicRuntime;
-use signalbox_model_runtime_openai::OpenAiRuntime;
+use signalbox_model_runtime::CredentialReference;
+use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
+use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use signalboxd::{
-    FileCredentialAccess, HubModelConfiguration,
+    FileCredentialAccess, HubModelConfiguration, ModelAdapter,
     approval_judge_eval::{
         ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalVerdict, judge_eval_case,
+        render_eval_case,
     },
     model_adapter::ConfiguredModelRuntime,
+    usage_limits,
 };
+
+const HELP: &str = "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
+
+Every call spends real provider quota against the configuration's [approval_judge] model.
+
+Usage:
+  approval-judge-eval --config <daemon-config.toml> --cases <cases.jsonl> [options]
+
+Options:
+  --config <path>   Daemon configuration naming the judge selection and adapters. Required.
+  --cases <path>    JSONL corpus; see the corpus README for the case schema. Required.
+  --repeats <n>     Judge calls per case, n >= 1. Default 3; repeats measure verdict stability.
+  --filter <text>   Keep only cases whose name or category contains <text>. Default: all cases.
+  --limit <n>       Stop after selecting n cases, n >= 1. Default: no bound.
+  --help            Print this reference and exit without spending quota.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +68,12 @@ struct RunOptions {
     limit: Option<usize>,
 }
 
-fn parse_arguments() -> Result<RunOptions, String> {
+enum ParsedArguments {
+    Run(RunOptions),
+    Help,
+}
+
+fn parse_arguments() -> Result<ParsedArguments, String> {
     let mut configuration = None;
     let mut cases = None;
     let mut repeats = 3_usize;
@@ -75,31 +87,41 @@ fn parse_arguments() -> Result<RunOptions, String> {
                 .ok_or_else(|| format!("{flag} requires a value"))
         };
         match flag.as_str() {
+            "--help" | "-h" => return Ok(ParsedArguments::Help),
             "--config" => configuration = Some(PathBuf::from(value("--config")?)),
             "--cases" => cases = Some(PathBuf::from(value("--cases")?)),
             "--repeats" => {
                 repeats = value("--repeats")?
                     .parse()
                     .map_err(|_| String::from("--repeats requires an integer"))?;
+                if repeats == 0 {
+                    return Err(String::from(
+                        "--repeats must be at least 1; every repeat is a paid provider call",
+                    ));
+                }
             }
             "--filter" => filter = Some(value("--filter")?),
             "--limit" => {
-                limit = Some(
-                    value("--limit")?
-                        .parse()
-                        .map_err(|_| String::from("--limit requires an integer"))?,
-                );
+                let bound: usize = value("--limit")?
+                    .parse()
+                    .map_err(|_| String::from("--limit requires an integer"))?;
+                if bound == 0 {
+                    return Err(String::from(
+                        "--limit must be at least 1; omit it to run every case",
+                    ));
+                }
+                limit = Some(bound);
             }
             other => return Err(format!("unknown flag: {other}")),
         }
     }
-    Ok(RunOptions {
+    Ok(ParsedArguments::Run(RunOptions {
         configuration: configuration.ok_or_else(|| String::from("--config is required"))?,
         cases: cases.ok_or_else(|| String::from("--cases is required"))?,
-        repeats: repeats.max(1),
+        repeats,
         filter,
         limit,
-    })
+    }))
 }
 
 fn recommendation_label(recommendation: DelegateApprovalRecommendation) -> &'static str {
@@ -115,14 +137,33 @@ struct CategoryScore {
     cases: usize,
     correct_majorities: usize,
     unstable_cases: usize,
+    unmeasured_cases: usize,
     failed_calls: usize,
+}
+
+/// Stable FNV-1a digest of the corpus bytes, so two scorecards are comparable
+/// exactly when they replayed byte-identical corpora.
+fn corpus_digest(bytes: &[u8]) -> String {
+    const OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("fnv1a128:{hash:032x}")
 }
 
 fn main() -> ExitCode {
     let options = match parse_arguments() {
-        Ok(options) => options,
+        Ok(ParsedArguments::Run(options)) => options,
+        Ok(ParsedArguments::Help) => {
+            println!("{HELP}");
+            return ExitCode::SUCCESS;
+        }
         Err(message) => {
             eprintln!("usage error: {message}");
+            eprintln!("run with --help for the option reference");
             return ExitCode::FAILURE;
         }
     };
@@ -162,16 +203,57 @@ async fn run(options: RunOptions) -> Result<(), String> {
         target: route.target(),
         credential_reference: String::from(route.credential_profile()),
     };
-    let adapters: ConfiguredModelRuntime<
-        AnthropicRuntime<FileCredentialAccess>,
-        OpenAiRuntime<FileCredentialAccess>,
-    > = ConfiguredModelRuntime::new(None, None, &configuration)
+    // HTTP adapters are constructed exactly as the daemon constructs them, so
+    // a judge routed to Anthropic or OpenAI reaches a real runtime instead of
+    // an unrouted preparation defect.
+    let anthropic = configuration
+        .uses_anthropic_adapter()
+        .then(|| {
+            let credentials = FileCredentialAccess::from_files(
+                configuration
+                    .file_credential_profiles(ModelAdapter::Anthropic)
+                    .map(|(reference, path)| {
+                        (CredentialReference::new(reference), path.to_path_buf())
+                    }),
+            );
+            let mut adapter_configuration = AnthropicConfig::new();
+            adapter_configuration.model_capabilities =
+                configuration.runtime_model_capability_catalog();
+            AnthropicRuntime::new(adapter_configuration, credentials)
+        })
+        .transpose()
+        .map_err(|error| format!("anthropic adapter construction failed: {error}"))?;
+    let openai = configuration
+        .uses_openai_adapter()
+        .then(|| {
+            let credentials = FileCredentialAccess::from_files(
+                configuration
+                    .file_credential_profiles(ModelAdapter::OpenAi)
+                    .map(|(reference, path)| {
+                        (CredentialReference::new(reference), path.to_path_buf())
+                    }),
+            );
+            let mut adapter_configuration = OpenAiConfig::new();
+            adapter_configuration.model_capabilities =
+                configuration.runtime_model_capability_catalog();
+            OpenAiRuntime::new(adapter_configuration, credentials)
+        })
+        .transpose()
+        .map_err(|error| format!("openai adapter construction failed: {error}"))?;
+    let adapters = ConfiguredModelRuntime::new(anthropic, openai, &configuration)
         .map_err(|error| format!("adapter construction failed: {error}"))?;
     let model = RuntimeApprovalJudgeModel::new(adapters, configuration.runtime_model_catalog());
+    let provider_model = configuration
+        .runtime_model_catalog()
+        .resolve(route.target())
+        .map(|definition| definition.provider_model().to_owned())
+        .ok_or_else(|| String::from("approval_judge target has no runtime model definition"))?;
 
     let corpus = fs::read_to_string(&options.cases)
         .map_err(|error| format!("corpus read failed: {error}"))?;
+    let digest = corpus_digest(corpus.as_bytes());
     let mut cases = Vec::new();
+    let mut seen_names = BTreeSet::new();
     for (index, line) in corpus.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -188,43 +270,80 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 case.expected
             ));
         }
+        if !seen_names.insert(case.name.clone()) {
+            return Err(format!(
+                "corpus line {} repeats case name {}; names seed request identities and must be unique",
+                index + 1,
+                case.name
+            ));
+        }
         if let Some(filter) = &options.filter
             && !case.name.contains(filter.as_str())
             && !case.category.contains(filter.as_str())
         {
             continue;
         }
-        cases.push(case);
-        if options.limit.is_some_and(|limit| cases.len() >= limit) {
+        if options.limit.is_some_and(|bound| cases.len() >= bound) {
             break;
         }
+        cases.push(case);
     }
     if cases.is_empty() {
         return Err(String::from("no corpus cases selected"));
     }
+    // Every selected case must render before the first paid call, so an
+    // inadmissible line late in the corpus cannot masquerade as a provider
+    // failure after quota is already spent.
+    let eval_cases = cases
+        .iter()
+        .map(|case| {
+            let eval_case = ApprovalJudgeEvalCase {
+                name: case.name.clone(),
+                tool: case.tool.clone(),
+                arguments: case.arguments.clone(),
+                goal: case.goal.clone(),
+                template: case.template.clone(),
+                system_prompt: case.system_prompt.clone(),
+            };
+            render_eval_case(&eval_case)
+                .map(|_| eval_case)
+                .map_err(|error| format!("case {} is inadmissible: {error}", case.name))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     eprintln!(
-        "replaying {} cases x{} repeats against judge selection {}",
+        "replaying {} cases x{} repeats against judge selection {} (provider model {})",
         cases.len(),
         options.repeats,
         selection.into_uuid(),
+        provider_model,
     );
 
     let mut scores: BTreeMap<String, CategoryScore> = BTreeMap::new();
     let mut case_reports = Vec::new();
-    for case in &cases {
-        let eval_case = ApprovalJudgeEvalCase {
-            name: case.name.clone(),
-            tool: case.tool.clone(),
-            arguments: case.arguments.clone(),
-            goal: case.goal.clone(),
-            template: case.template.clone(),
-            system_prompt: case.system_prompt.clone(),
-        };
+    for (case, eval_case) in cases.iter().zip(&eval_cases) {
         let mut verdicts: Vec<ApprovalJudgeEvalVerdict> = Vec::new();
         let mut failures = 0_usize;
         for _ in 0..options.repeats {
-            match judge_eval_case(&model, &binding, &eval_case).await {
-                Ok(verdict) => verdicts.push(verdict),
+            match judge_eval_case(&model, &binding, eval_case).await {
+                Ok(verdict) => {
+                    // The daemon rejects verdicts whose reported usage exceeds
+                    // configured limits; a verdict the deployed path would
+                    // fail closed must not score as a success here either.
+                    if usage_limits::approval_judge_usage_exceeds_configured_limits(
+                        &configuration,
+                        binding.target,
+                        verdict.usage,
+                    ) != Some(false)
+                    {
+                        failures += 1;
+                        eprintln!(
+                            "call failed for {}: reported usage exceeds configured limits",
+                            case.name
+                        );
+                    } else {
+                        verdicts.push(verdict);
+                    }
+                }
                 Err(error) => {
                     failures += 1;
                     eprintln!("call failed for {}: {error}", case.name);
@@ -237,27 +356,37 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 .entry(recommendation_label(verdict.recommendation))
                 .or_default() += 1;
         }
+        // A majority exists only when one verdict holds a strict majority of
+        // the successful repeats; ties and empty runs report no majority.
         let majority = counts
             .iter()
-            .max_by_key(|(_, count)| **count)
+            .find(|(_, count)| **count * 2 > verdicts.len())
             .map(|(label, _)| *label);
-        let stable = counts.len() <= 1;
-        let correct = majority == Some(case.expected.as_str());
+        let measured = !verdicts.is_empty();
+        let stable = measured && counts.len() == 1;
+        let tied = measured && majority.is_none();
+        let correct = measured && majority == Some(case.expected.as_str());
         let score = scores.entry(case.category.clone()).or_default();
         score.cases += 1;
         score.correct_majorities += usize::from(correct);
-        score.unstable_cases += usize::from(!stable && !verdicts.is_empty());
+        score.unstable_cases += usize::from(measured && !stable);
+        score.unmeasured_cases += usize::from(!measured);
         score.failed_calls += failures;
         case_reports.push(serde_json::json!({
             "name": case.name,
             "category": case.category,
             "expected": case.expected,
+            "measured": measured,
             "majority": majority,
+            "tied": tied,
             "verdict_counts": counts,
             "stable": stable,
             "correct": correct,
             "failed_calls": failures,
-            "rationales": verdicts.iter().map(|verdict| verdict.rationale.as_str()).collect::<Vec<_>>(),
+            "repeats": verdicts.iter().map(|verdict| serde_json::json!({
+                "recommendation": recommendation_label(verdict.recommendation),
+                "rationale": verdict.rationale,
+            })).collect::<Vec<_>>(),
             "notes": case.notes,
         }));
     }
@@ -270,6 +399,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 "cases": score.cases,
                 "correct_majorities": score.correct_majorities,
                 "unstable_cases": score.unstable_cases,
+                "unmeasured_cases": score.unmeasured_cases,
                 "failed_calls": score.failed_calls,
             })
         })
@@ -277,12 +407,16 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let total_cases: usize = scores.values().map(|score| score.cases).sum();
     let total_correct: usize = scores.values().map(|score| score.correct_majorities).sum();
     let total_unstable: usize = scores.values().map(|score| score.unstable_cases).sum();
+    let total_unmeasured: usize = scores.values().map(|score| score.unmeasured_cases).sum();
     let scorecard = serde_json::json!({
         "judge_selection": selection.into_uuid().to_string(),
+        "provider_model": provider_model,
+        "corpus_digest": digest,
         "repeats": options.repeats,
         "total_cases": total_cases,
         "correct_majorities": total_correct,
         "unstable_cases": total_unstable,
+        "unmeasured_cases": total_unmeasured,
         "categories": categories,
         "cases": case_reports,
     });
