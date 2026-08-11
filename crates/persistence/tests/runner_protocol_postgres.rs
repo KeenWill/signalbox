@@ -96,7 +96,7 @@ const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const SERIALIZATION_TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
-const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
+const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080103;
 const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608100002;
 const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608100003;
 const LEGACY_PLACEMENT_REFUSAL: &str =
@@ -4359,6 +4359,61 @@ async fn s32_inv044_runner_loss_propagation_cursor_rejects_truncate() -> Result<
     Ok(())
 }
 
+/// INV-043 / INV-044: migration refuses an outstanding legacy offer because
+/// its offer-time connection authority cannot be reconstructed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE runner_connection_authority_head (
+            enrollment_id uuid PRIMARY KEY,
+            connection_epoch numeric(20, 0) NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE runner_current_connection_loss (
+            enrollment_id uuid PRIMARY KEY,
+            loss_epoch numeric(20, 0) NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    let (_, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
+    sqlx::query("DROP TABLE runner_current_connection_loss")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DROP TABLE runner_connection_authority_head")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, 1, 1, 'connected', 'established')",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .execute(&pool)
+    .await?;
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
+
+    assert!(
+        refusal
+            .to_string()
+            .contains("outstanding runner lease lacks reconstructible offer authority")
+    );
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
@@ -7278,6 +7333,8 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
     Ok(())
 }
 
+/// INV-044: an exact selection that predates enrollment retains its absent
+/// baseline when that late enrollment is lost before pin.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Result<(), Box<dyn Error>>
@@ -7285,21 +7342,42 @@ async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Resul
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let expected_enrollment = enrollment();
+    let runner = expected_enrollment.runner();
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         exact_runner_request(runner),
     );
     store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
     let lost = placement
         .mark_runner_lost_before_pin(runner)
         .expect("the exact selected runner may be lost before pinning");
     append_runner_lost_before_pin_projection(&pool, lost.session()).await?;
+    let baseline: (Option<Uuid>, Option<Decimal>) = sqlx::query_as(
+        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(lost.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
         .await?
         .expect("the lost-before-pin placement is present");
 
+    assert_eq!(baseline, (None, None));
     assert_eq!(loaded.placement(), &lost);
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
