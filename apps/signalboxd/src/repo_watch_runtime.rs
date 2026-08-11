@@ -47,7 +47,12 @@ use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
 use sqlx::PgPool;
-use tokio::{select, sync::watch, task::JoinSet, time::sleep};
+use tokio::{
+    select,
+    sync::watch,
+    task::JoinSet,
+    time::{Instant, sleep},
+};
 
 use crate::SessionTemplateConfiguration;
 use crate::configuration::{
@@ -272,6 +277,7 @@ impl RepositoryWatchTask {
             if *shutdown.borrow() {
                 return;
             }
+            let cycle_started = Instant::now();
             select! {
                 result = self.run_attempt() => {
                     match result {
@@ -296,7 +302,7 @@ impl RepositoryWatchTask {
                 }
             }
             select! {
-                () = sleep(self.interval) => {}
+                () = sleep(remaining_interval(self.interval, cycle_started.elapsed())) => {}
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         return;
@@ -2012,6 +2018,10 @@ async fn read_bounded(
     Ok(body)
 }
 
+const fn remaining_interval(interval: Duration, elapsed: Duration) -> Duration {
+    interval.saturating_sub(elapsed)
+}
+
 fn reuse_pull_request(
     previous: &RepoWatchPullRequestState,
     reactions: Vec<RepoWatchReactionObservation>,
@@ -2414,7 +2424,7 @@ mod tests {
         RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
         RepositoryWatchRuntimeConstructionError, ResourceKey, ReviewState, Url, WorkflowName,
         WorkflowResponse, dispatch_context_json, normalize_checks_outcome,
-        normalize_pull_request_context, object_id, rule_activation_error,
+        normalize_pull_request_context, object_id, remaining_interval, rule_activation_error,
         supervise_repository_tasks,
     };
     use signalbox_domain::{
@@ -2464,6 +2474,7 @@ mod tests {
     const CONCURRENT_FETCH_PULL_NUMBERS: std::ops::RangeInclusive<u64> = 1..=9;
     const CONCURRENT_FETCH_DELAY: Duration = Duration::from_millis(20);
     const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
+    const POLL_INTERVAL: Duration = Duration::from_secs(300);
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
     const CACHE_RESOURCE_KEY: &str = "fixture/resource";
@@ -3883,6 +3894,26 @@ mod tests {
                 .completion_generation()
                 .as_str(),
             CHECK_RUN_COMPLETED_AT
+        );
+    }
+
+    #[test]
+    fn a_cycle_shorter_than_the_interval_waits_out_the_remainder() {
+        assert_eq!(
+            remaining_interval(POLL_INTERVAL, POLL_INTERVAL / 4),
+            POLL_INTERVAL - POLL_INTERVAL / 4
+        );
+    }
+
+    #[test]
+    fn a_cycle_that_reaches_the_interval_starts_the_next_immediately() {
+        assert_eq!(
+            remaining_interval(POLL_INTERVAL, POLL_INTERVAL),
+            Duration::ZERO
+        );
+        assert_eq!(
+            remaining_interval(POLL_INTERVAL, POLL_INTERVAL * 3),
+            Duration::ZERO
         );
     }
 
