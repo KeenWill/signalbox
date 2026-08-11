@@ -73,7 +73,12 @@ BEGIN
                )
              ORDER BY earlier.connection_epoch DESC, earlier.event_ordinal DESC
              LIMIT 1;
-            IF NOT FOUND OR predecessor.state_kind <> 'suspect' THEN
+            IF NOT FOUND
+               OR connection.event_ordinal <> 1
+               OR predecessor.connection_epoch + 1 <>
+                    connection.connection_epoch
+               OR predecessor.state_kind <> 'suspect'
+            THEN
                 RAISE EXCEPTION 'established runner recovery lacks suspect predecessor'
                     USING ERRCODE = '23514';
             END IF;
@@ -192,3 +197,11 @@ BEGIN
     RETURN NEW;
 END;
 $function$;
+
+CREATE INDEX runner_session_placement_record_enrollment_pin_lookup
+    ON runner_session_placement_record (
+        registration_enrollment_id,
+        session_id,
+        event_ordinal
+    )
+    WHERE state_kind = 'pinned';

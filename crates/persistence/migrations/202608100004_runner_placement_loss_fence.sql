@@ -241,6 +241,10 @@ BEGIN
         RAISE EXCEPTION 'runner connection authority head lacks its event'
             USING ERRCODE = '23514';
     END IF;
+    IF connection.state_kind = 'shutdown' THEN
+        RAISE EXCEPTION 'shutdown runner connection cannot authorize a lease offer'
+            USING ERRCODE = '23514';
+    END IF;
     IF connection.state_kind IS DISTINCT FROM 'lost' THEN
         NEW.offer_connection_epoch := authority.connection_epoch;
         NEW.offer_connection_event_ordinal :=
