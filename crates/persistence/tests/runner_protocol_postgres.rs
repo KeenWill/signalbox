@@ -85,6 +85,7 @@ const LATER_RUNNER: u128 = 0x9202;
 const LATER_AUTHENTICATION: u128 = 0x9302;
 const SESSION: u128 = 0x9400;
 const FOREIGN_SESSION: u128 = 0x9401;
+const SECOND_SESSION: u128 = 0x9402;
 const LEASE: u128 = 0x9500;
 const ATTEMPT: u128 = 0x9600;
 const RETRY_ATTEMPT: u128 = 0x9601;
@@ -96,8 +97,8 @@ const SERIALIZATION_TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
-const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608080103;
-const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608080104;
+const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608100002;
+const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608100003;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -134,6 +135,11 @@ const SECOND_LATER_LEASE_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemp
     attempt: 0x9605,
     request: 0x9703,
     turn: 0x9803,
+};
+const SECOND_SESSION_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
+    attempt: 0x9606,
+    request: 0x9704,
+    turn: 0x9804,
 };
 
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -230,9 +236,16 @@ fn model_definition() -> RunnerToolModelDefinition {
 }
 
 fn approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
+    approved_request_for_session(SessionId::from_uuid(uuid(SESSION)), facts)
+}
+
+fn approved_request_for_session(
+    session: SessionId,
+    facts: PhysicalAttemptFacts,
+) -> ApprovedToolRequest {
     let request = ToolRequestReconstitutionInput::new(
         ToolRequestId::from_uuid(uuid(facts.request)),
-        SessionId::from_uuid(uuid(SESSION)),
+        session,
         TurnId::from_uuid(uuid(facts.turn)),
         ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
         ToolRequestOrdinal::from_u32(0),
@@ -281,11 +294,25 @@ fn authorization_from_approved(
     facts: PhysicalAttemptFacts,
     effect: ToolEffectClass,
 ) -> RunnerToolAttemptAuthorization {
+    authorization_from_approved_for_session(
+        approved,
+        SessionId::from_uuid(uuid(SESSION)),
+        facts,
+        effect,
+    )
+}
+
+fn authorization_from_approved_for_session(
+    approved: ApprovedToolRequest,
+    session: SessionId,
+    facts: PhysicalAttemptFacts,
+    effect: ToolEffectClass,
+) -> RunnerToolAttemptAuthorization {
     let attempt_id = ToolAttemptId::from_uuid(uuid(facts.attempt));
     let attempt = ToolAttemptReconstitutionInput::new(
         attempt_id,
         ToolRequestId::from_uuid(uuid(facts.request)),
-        SessionId::from_uuid(uuid(SESSION)),
+        session,
         TurnId::from_uuid(uuid(facts.turn)),
         TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
         effect,
@@ -295,11 +322,11 @@ fn authorization_from_approved(
     .reconstitute()
     .expect("the fixture in-flight attempt reconstitutes");
     let batch = ToolBatchReconstitutionInput::new(
-        SessionId::from_uuid(uuid(SESSION)),
+        session,
         TurnId::from_uuid(uuid(facts.turn)),
         ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
         ResolvedContextFrontierReconstitutionInput::new(
-            SessionId::from_uuid(uuid(SESSION)),
+            session,
             ContextFrontierId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 3))),
             Vec::new(),
         )
@@ -373,6 +400,18 @@ fn authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
     authorized_with_effect(facts, ToolEffectClass::EffectFree)
 }
 
+fn authorized_for_session(
+    session: SessionId,
+    facts: PhysicalAttemptFacts,
+) -> RunnerToolAttemptAuthorization {
+    authorization_from_approved_for_session(
+        approved_request_for_session(session, facts),
+        session,
+        facts,
+        ToolEffectClass::EffectFree,
+    )
+}
+
 fn external_authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
     authorized_with_effect(facts, ToolEffectClass::ExternalEffect)
 }
@@ -384,6 +423,13 @@ fn idempotent_authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthor
 fn offer_request() -> RunnerLeaseOfferRequest {
     RunnerLeaseOfferRequest {
         lease: RunnerLeaseId::from_uuid(uuid(LEASE)),
+        tool: tool("inspect"),
+    }
+}
+
+fn offer_request_for(lease: u128) -> RunnerLeaseOfferRequest {
+    RunnerLeaseOfferRequest {
+        lease: RunnerLeaseId::from_uuid(uuid(lease)),
         tool: tool("inspect"),
     }
 }
@@ -1019,6 +1065,42 @@ async fn stored_credentialless_pin_fixture(
     Ok((store, expected_enrollment, registration, pin))
 }
 
+async fn store_additional_credentialless_pin_fixture(
+    pool: &PgPool,
+    store: &RunnerProtocolStore,
+    expected_enrollment: &RunnerEnrollment,
+    registration: &StoredValidatedRunnerRegistration,
+) -> Result<SessionRunnerPin, Box<dyn Error>> {
+    let session = SessionId::from_uuid(uuid(SECOND_SESSION));
+    insert_session_for(pool, session.into_uuid()).await?;
+    insert_physical_attempt_for(pool, session, SECOND_SESSION_PHYSICAL_ATTEMPT).await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/second-session".to_owned())
+                .expect("the second fixture working directory is valid"),
+            None,
+            authorized_for_session(session, SECOND_SESSION_PHYSICAL_ATTEMPT),
+            offer_request_for(LEASE + RELATED_IDENTITY_OFFSET),
+        )
+        .expect("the second fixture registration pins the placement");
+    store.store_pin(&pin, registration).await?;
+    Ok(pin)
+}
+
 async fn stored_later_lease_fixture(
     pool: &PgPool,
 ) -> Result<
@@ -1428,6 +1510,14 @@ async fn insert_physical_attempt(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
 ) -> Result<(), sqlx::Error> {
+    insert_physical_attempt_for(pool, SessionId::from_uuid(uuid(SESSION)), facts).await
+}
+
+async fn insert_physical_attempt_for(
+    pool: &PgPool,
+    session: SessionId,
+    facts: PhysicalAttemptFacts,
+) -> Result<(), sqlx::Error> {
     sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
         .execute(pool)
         .await?;
@@ -1439,7 +1529,7 @@ async fn insert_physical_attempt(
          ON CONFLICT (request_id) DO NOTHING",
     )
     .bind(uuid(facts.request))
-    .bind(uuid(SESSION))
+    .bind(session.into_uuid())
     .bind(uuid(facts.turn))
     .bind(uuid(facts.request + RELATED_IDENTITY_OFFSET))
     .execute(pool)
@@ -1465,7 +1555,7 @@ async fn insert_physical_attempt(
     )
     .bind(uuid(facts.attempt))
     .bind(uuid(facts.request))
-    .bind(uuid(SESSION))
+    .bind(session.into_uuid())
     .bind(uuid(facts.turn))
     .bind(uuid(facts.turn + RELATED_IDENTITY_OFFSET))
     .execute(pool)
@@ -15935,6 +16025,62 @@ async fn s31_inv043_inv044_exact_selection_loss_rejects_post_reconnect_pin()
     Ok(())
 }
 
+/// INV-043 / INV-044: an exact identity selected before its enrollment exists
+/// derives its first loss baseline at pin when no intervening loss exists.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_pre_enrollment_exact_selection_pins_without_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the newly enrolled exact selection prepares its initial pin");
+    let expected_state = pin.placement.state().clone();
+    store.store_pin(&pin, &registration).await?;
+    let baseline: (Uuid, Option<Decimal>) = sqlx::query_as(
+        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the first-baseline pin remains current");
+
+    assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
+    assert_eq!(baseline.1, None);
+    assert_eq!(loaded.placement().state(), &expected_state);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-043 / INV-044: an exact selection created after reconnect observes the
 /// prior loss epoch and may pin on the live successor connection.
 #[tokio::test]
@@ -16229,6 +16375,183 @@ async fn s31_inv043_inv044_lease_offer_wins_concurrent_connection_loss()
     Ok(())
 }
 
+/// INV-043 / INV-044: a claim retains the exact connection/loss baseline that
+/// authorized its offer, so neither terminal loss nor a successor connection
+/// can revive the stale execution capability.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_loss_fences_offered_lease_claim_across_reconnect()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, _, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact offered lease correlation prepares its claim");
+    store
+        .transition_connection(
+            enrollment,
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let lost_rejection = store
+        .store_lease(&claimed)
+        .await
+        .expect_err("terminal loss fences the outstanding lease claim");
+    store.open_connection(enrollment).await?;
+    let successor_rejection = store
+        .store_lease(&claimed)
+        .await
+        .expect_err("a successor connection cannot revive the prior offer");
+
+    assert_store_check_violation(lost_rejection);
+    assert_store_check_violation(successor_rejection);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: terminal loss that reaches connection authority first
+/// fences a concurrently queued claim before execution capability is issued.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_connection_loss_wins_concurrent_lease_claim()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, _, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact offered lease correlation prepares its claim");
+    let mut authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_one(&mut *authority)
+    .await?;
+    let loss_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let loss_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            loss_store.transition_connection(
+                enrollment,
+                connection.epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            ),
+        )
+        .await
+    });
+    let loss_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
+    let claim_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let claim_task = tokio::spawn(async move {
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, claim_store.store_lease(&claimed)).await
+    });
+    let claim_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
+    let authority_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, authority.commit()).await;
+    let loss_result = loss_task.await;
+    let claim_result = claim_task.await;
+    let loss_blocked = loss_observation.expect("loss lock observation must remain bounded")?;
+    let claim_blocked = claim_observation.expect("claim lock observation must remain bounded")?;
+    authority_commit.expect("connection-authority blocker commit must remain bounded")?;
+    loss_result
+        .expect("loss task must remain joinable")
+        .expect("loss must finish within its task-owned timeout")?;
+    let rejected = claim_result
+        .expect("claim task must remain joinable")
+        .expect("claim must finish within its task-owned timeout")
+        .expect_err("the claim observes the loss that won authority");
+
+    assert!(loss_blocked, "loss must reach connection authority");
+    assert!(claim_blocked, "claim must queue behind terminal loss");
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: a claim that reaches connection authority first commits
+/// before a racing loss and remains the durable execution-capability boundary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_lease_claim_wins_concurrent_connection_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, _, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact offered lease correlation prepares its claim");
+    let expected_state = claimed.state();
+    let lease_id = claimed.correlation().lease;
+    let generation = claimed.correlation().generation;
+    let mut authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_one(&mut *authority)
+    .await?;
+    let claim_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let claim_task = tokio::spawn(async move {
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, claim_store.store_lease(&claimed)).await
+    });
+    let claim_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
+    let loss_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let loss_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            loss_store.transition_connection(
+                enrollment,
+                connection.epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            ),
+        )
+        .await
+    });
+    let loss_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
+    let authority_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, authority.commit()).await;
+    let claim_result = claim_task.await;
+    let loss_result = loss_task.await;
+    let claim_blocked = claim_observation.expect("claim lock observation must remain bounded")?;
+    let loss_blocked = loss_observation.expect("loss lock observation must remain bounded")?;
+    authority_commit.expect("connection-authority blocker commit must remain bounded")?;
+    claim_result
+        .expect("claim task must remain joinable")
+        .expect("claim must finish within its task-owned timeout")?;
+    loss_result
+        .expect("loss task must remain joinable")
+        .expect("loss must finish within its task-owned timeout")?;
+    let retained = store
+        .load_lease(lease_id, generation)
+        .await?
+        .expect("the winning claim remains current after later loss");
+
+    assert!(claim_blocked, "claim must reach connection authority");
+    assert!(loss_blocked, "loss must queue behind the claim");
+    assert_eq!(retained.state(), expected_state);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: initial pin dispatches from its immutable placement
 /// record with the complete follower-visible runner facts.
 #[tokio::test]
@@ -16323,6 +16646,51 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
     Ok(())
 }
 
+/// INV-032 / INV-044: one connection-health transition publishes one event
+/// for every session pinned to the affected enrollment.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_suspect_outbox_covers_every_pinned_session()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, first_pin) =
+        stored_credentialless_pin_fixture(&pool).await?;
+    let second_pin = store_additional_credentialless_pin_fixture(
+        &pool,
+        &store,
+        &expected_enrollment,
+        &registration,
+    )
+    .await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    let event_sessions: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT session_id
+           FROM runner_state_transition_outbox_event
+          WHERE state_kind = 'suspect'
+          ORDER BY session_id",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(event_sessions.len(), 2);
+    assert_eq!(event_sessions[0], first_pin.placement.session().into_uuid());
+    assert_eq!(
+        event_sessions[1],
+        second_pin.placement.session().into_uuid()
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// INV-044: initial pin rechecks connection health under enrollment authority
 /// and cannot commit after a concurrent first-heartbeat suspicion.
 #[tokio::test]
@@ -16349,6 +16717,7 @@ async fn s32_inv044_initial_pin_rejects_suspect_connection() -> Result<(), Box<d
         },
     );
     store.store_placement(&placement, None, None).await?;
+    let expected_state = placement.state().clone();
     let pin = placement
         .pin_and_offer_lease(
             &expected_enrollment,
@@ -16374,20 +16743,121 @@ async fn s32_inv044_initial_pin_rejects_suspect_connection() -> Result<(), Box<d
         .store_pin(&pin, &registration)
         .await
         .expect_err("a suspect connection cannot authorize initial pin");
-    let state: String = sqlx::query_scalar(
-        "SELECT placement.state_kind
-           FROM runner_current_session_placement AS current_placement
-           JOIN runner_session_placement_record AS placement
-             ON placement.session_id = current_placement.session_id
-            AND placement.event_ordinal = current_placement.event_ordinal
-          WHERE current_placement.session_id = $1",
-    )
-    .bind(pin.placement.session().into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let retained = store
+        .load_placement(pin.placement.session())
+        .await?
+        .expect("the rejected pin retains the unpinned placement");
 
     assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
-    assert_eq!(state, "unpinned");
+    assert_eq!(retained.placement().state(), &expected_state);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: pin and heartbeat publication serialize on enrollment
+/// authority, so neither can observe a split connection/placement state.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_initial_pin_serializes_with_heartbeat_suspicion()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let setup_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    setup_store.insert_enrollment(&expected_enrollment).await?;
+    let registration = setup_store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    setup_store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the validated registration prepares the initial pin");
+    let expected_session = pin.placement.session();
+    let expected_state = pin.placement.state().clone();
+    let connection = setup_store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let mut blocker = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&mut *blocker)
+    .await?;
+    let pin_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let pin_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            pin_store.store_pin(&pin, &registration),
+        )
+        .await
+    });
+    let pin_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
+    let heartbeat_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let enrollment_id = expected_enrollment.enrollment();
+    let heartbeat_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            heartbeat_store.transition_connection(
+                enrollment_id,
+                connection.epoch(),
+                RunnerConnectionTransition::HeartbeatMissed,
+            ),
+        )
+        .await
+    });
+    let heartbeat_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
+    let blocker_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocker.commit()).await;
+    let pin_result = pin_task.await;
+    let heartbeat_result = heartbeat_task.await;
+    let pin_blocked = pin_observation.expect("pin lock observation must remain bounded")?;
+    let heartbeat_blocked =
+        heartbeat_observation.expect("heartbeat lock observation must remain bounded")?;
+    blocker_commit.expect("enrollment blocker commit must remain bounded")?;
+    pin_result
+        .expect("pin task must remain joinable")
+        .expect("pin must finish within its task-owned timeout")?;
+    heartbeat_result
+        .expect("heartbeat task must remain joinable")
+        .expect("heartbeat must finish within its task-owned timeout")?;
+    let retained = setup_store
+        .load_placement(expected_session)
+        .await?
+        .expect("the serialized pin remains current");
+    let runner_event_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_state_transition_outbox_event")
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(pin_blocked, "pin must reach enrollment authority");
+    assert!(heartbeat_blocked, "heartbeat must queue behind the pin");
+    assert_eq!(retained.placement().state(), &expected_state);
+    assert_eq!(runner_event_count, 1);
     drop(pool);
     Ok(())
 }

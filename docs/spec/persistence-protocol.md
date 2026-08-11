@@ -1,8 +1,8 @@
 # Persistence protocol
 
-The runner connection authority head and durable loss epoch were verified
-against the parent slice (`agent/runner-loss-epoch`). Placement-relative
-lease-offer fencing was verified against this PR
+The runner connection authority head, durable loss epoch, and lease offer/claim
+fences were verified against the parent slice (`agent/runner-loss-epoch`).
+Placement-relative lease-offer fencing was verified against the parent slice
 (`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
 and ordered page read were verified against this PR
 (`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
@@ -137,8 +137,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-four files, `202607180001` through
-`202608100001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — seventy files, `202607180001` through
+`202608100004` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -331,7 +331,7 @@ Representation rules, all enforced in the schema:
   replacement and abandonment remain **committed unimplemented functionality**
   for their dedicated orchestration transactions. Direct snapshot storage cannot
   stand in for any of those transactions.
-- Migration `202608080104` records the connection-loss epoch observed when each
+- Migration `202608100003` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
   enrollment, and connection/loss authority in the runner total order; callers
@@ -343,10 +343,10 @@ Representation rules, all enforced in the schema:
   connections until a checked replacement installs a fresh baseline. This is the
   implemented placement fence consumed by the bounded session-propagation
   transaction described below.
-- Migration `202608080105` gives every new durable connection-loss epoch a
+- Migration `202608100004` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction. Migration backfill marks a
   loss completed only when no affected current placement remains: losses already
-  absorbed into `202608080104`'s compatibility baseline complete, while a loss
+  absorbed into `202608100003`'s compatibility baseline complete, while a loss
   committed after that migration with an older placement baseline stays pending.
   A repeatable-read page authenticates the exact loss source and returns at most
   64 current pinned or exact-identity unpinned placements whose baselines
@@ -645,8 +645,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-one explicit lock statements
-live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-three explicit lock
+statements live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -682,10 +682,13 @@ live in the schema instead:
 - the turn-attempt and tool-round before-insert guards in that migration share
   one `FOR UPDATE` helper that serializes new continuation evidence against the
   same session scheduler before either immutable row becomes visible; and
-- the lease-offer connection-loss fence in migration `202608080103` takes
+- the lease-offer connection-loss fence in migration `202608100002` takes
   `FOR SHARE` on the selected enrollment and connection authority head, then on
   the optional current loss head when the connection is terminal; and
-- the placement-loss baseline trigger in migration `202608080104` takes
+- the lease-claim connection-loss fence in that migration takes `FOR SHARE` on
+  the selected enrollment and connection authority head before admitting the
+  claim event; and
+- the placement-loss baseline trigger in migration `202608100003` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
   deriving the immutable baseline and before the placement row becomes visible.
