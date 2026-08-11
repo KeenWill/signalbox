@@ -6249,6 +6249,8 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
     Ok(())
 }
 
+/// INV-044: an exact selection that predates enrollment retains its absent
+/// baseline when that late enrollment is lost before pin.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Result<(), Box<dyn Error>>
@@ -6256,21 +6258,42 @@ async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Resul
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let expected_enrollment = enrollment();
+    let runner = expected_enrollment.runner();
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         exact_runner_request(runner),
     );
     store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
     let lost = placement
         .mark_runner_lost_before_pin(runner)
         .expect("the exact selected runner may be lost before pinning");
     append_runner_lost_before_pin_projection(&pool, lost.session()).await?;
+    let baseline: (Option<Uuid>, Option<Decimal>) = sqlx::query_as(
+        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(lost.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
         .await?
         .expect("the lost-before-pin placement is present");
 
+    assert_eq!(baseline, (None, None));
     assert_eq!(loaded.placement(), &lost);
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
