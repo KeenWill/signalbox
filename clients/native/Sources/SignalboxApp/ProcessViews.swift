@@ -1284,7 +1284,13 @@ struct ProcessRunnerTransition: Equatable {
   let state: SignalboxRunnerStateTransitionState
 
   var statusLabel: String {
-    "Runner \(runnerID.rawValue) · \(state.rawValue) · revision \(placementRevision.rawValue)"
+    let directoryLabel = workingDirectory.map {
+      "selected directory \(String(reflecting: $0.rawValue))"
+    } ?? "runner-default directory"
+    return SignalboxProcessPresentation.retainedLabel(
+      "Runner \(runnerID.rawValue) · \(state.rawValue) · revision \(placementRevision.rawValue)"
+        + " · sandbox \(sandboxProfile.rawValue) · \(directoryLabel)"
+    )
   }
 }
 
