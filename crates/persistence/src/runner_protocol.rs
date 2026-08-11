@@ -749,6 +749,13 @@ impl RunnerProtocolStore {
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
         let prior = load_connection_head_in(transaction.as_mut(), enrollment).await?;
+        let prior_was_suspect = matches!(
+            prior,
+            Some(RunnerConnectionSnapshot {
+                state: RunnerConnectionState::Suspect,
+                ..
+            })
+        );
         let epoch = match prior {
             Some(prior) => prior
                 .epoch()
@@ -781,6 +788,10 @@ impl RunnerProtocolStore {
             None,
         )
         .await?;
+        if prior_was_suspect {
+            append_runner_connection_health_events(transaction.as_mut(), enrollment, snapshot)
+                .await?;
+        }
         match commit_mutation(transaction).await {
             Ok(()) => Ok(snapshot),
             Err(error @ RunnerProtocolStoreError::CommitAmbiguous(_)) => self
@@ -2057,10 +2068,13 @@ impl RunnerProtocolStore {
         .bind(enrollment.into_uuid())
         .fetch_one(&mut *transaction)
         .await?;
-        if enrollment_state != "active" {
-            return Err(RunnerProtocolStoreError::Domain(
-                RunnerDomainError::EnrollmentRevoked,
-            ));
+        match decode_enrollment_state(&enrollment_state)? {
+            RunnerEnrollmentState::Active => {}
+            RunnerEnrollmentState::Revoked => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::EnrollmentRevoked,
+                ));
+            }
         }
         match load_connection_head_in(transaction.as_mut(), enrollment).await? {
             None
@@ -3422,9 +3436,10 @@ async fn append_runner_connection_health_events(
     }
     let state = match snapshot.cause() {
         RunnerConnectionCause::HeartbeatMissed => DispatchedRunnerState::Suspect,
-        RunnerConnectionCause::HeartbeatRecovered => DispatchedRunnerState::Connected,
-        RunnerConnectionCause::Established
-        | RunnerConnectionCause::DaemonShutdown
+        RunnerConnectionCause::Established | RunnerConnectionCause::HeartbeatRecovered => {
+            DispatchedRunnerState::Connected
+        }
+        RunnerConnectionCause::DaemonShutdown
         | RunnerConnectionCause::RunnerShutdown
         | RunnerConnectionCause::HeartbeatTimeout
         | RunnerConnectionCause::TransportClosed

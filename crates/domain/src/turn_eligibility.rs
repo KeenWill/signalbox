@@ -6809,7 +6809,7 @@ fn promote_external_interrupt_chains(
         .union(&external_successors)
         .copied()
         .collect::<BTreeSet<_>>();
-    let Some((start, insertion)) = total_order
+    let Some((crossing_start, insertion)) = total_order
         .iter()
         .enumerate()
         .filter(|(_, turn)| external_successors.contains(turn) && queued_turns.contains(turn))
@@ -6822,10 +6822,15 @@ fn promote_external_interrupt_chains(
     else {
         return total_order;
     };
-    let end = total_order[start + 1..]
+    let start = total_order[insertion..crossing_start]
+        .iter()
+        .position(|turn| external_successors.contains(turn))
+        .map(|offset| insertion + offset)
+        .unwrap_or(crossing_start);
+    let end = total_order[crossing_start + 1..]
         .iter()
         .position(|turn| roots.contains(turn))
-        .map(|offset| start + 1 + offset)
+        .map(|offset| crossing_start + 1 + offset)
         .unwrap_or(total_order.len());
     let mut promoted = Vec::with_capacity(total_order.len());
     promoted.extend_from_slice(&total_order[..insertion]);
@@ -16902,7 +16907,7 @@ mod tests {
 
         assert_eq!(
             promoted,
-            vec![crossing_external, older_queued, historical_external]
+            vec![historical_external, crossing_external, older_queued]
         );
     }
 }
