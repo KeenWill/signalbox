@@ -1624,6 +1624,34 @@ impl GitHubRepositoryPoller {
         Ok(url)
     }
 
+    // Each chunk is charged against the shared per-attempt budget as it
+    // arrives, so concurrent reads account for exactly what they consumed. A
+    // reservation of each read's upper bound would instead understate the
+    // remaining budget by whatever the other in-flight reads never used, and
+    // fail an attempt whose true total fits.
+    async fn read_bounded(
+        &self,
+        mut response: Response,
+    ) -> Result<Vec<u8>, RepositoryWatchAttemptError> {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Request)?
+        {
+            let next = body
+                .len()
+                .checked_add(chunk.len())
+                .ok_or(RepositoryWatchAttemptError::ResponseTooLarge)?;
+            if next > MAX_RESPONSE_BYTES {
+                return Err(RepositoryWatchAttemptError::ResponseTooLarge);
+            }
+            self.cache().record_poll_wire_bytes(chunk.len())?;
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
     async fn conditional_json<T>(
         &self,
         resource_kind: &'static str,
@@ -1718,10 +1746,7 @@ impl GitHubRepositoryPoller {
         self.cache().remove(&key);
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
         let has_next_page = has_next_link(&response)?;
-        let reservation = self.cache().reserve_poll_wire_bytes()?;
-        let bytes = read_bounded(response, reservation).await?;
-        self.cache()
-            .release_poll_wire_bytes(reservation, bytes.len());
+        let bytes = self.read_bounded(response).await?;
         let value = serde_json::from_slice::<T>(&bytes)
             .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
         let accepted = ConditionalJsonResponse {
@@ -1879,12 +1904,6 @@ impl PollCache {
             .sum();
     }
 
-    fn remaining_poll_wire_bytes(&self) -> Result<usize, RepositoryWatchAttemptError> {
-        MAX_POLL_WIRE_BYTES
-            .checked_sub(self.poll_wire_bytes)
-            .ok_or(RepositoryWatchAttemptError::ResourceLimit)
-    }
-
     fn record_poll_wire_bytes(
         &mut self,
         wire_bytes: usize,
@@ -1898,18 +1917,6 @@ impl PollCache {
         }
         self.poll_wire_bytes = projected;
         Ok(())
-    }
-
-    fn reserve_poll_wire_bytes(&mut self) -> Result<usize, RepositoryWatchAttemptError> {
-        let reservation = self.remaining_poll_wire_bytes()?.min(MAX_RESPONSE_BYTES);
-        self.record_poll_wire_bytes(reservation)?;
-        Ok(reservation)
-    }
-
-    fn release_poll_wire_bytes(&mut self, reservation: usize, consumed: usize) {
-        self.poll_wire_bytes = self
-            .poll_wire_bytes
-            .saturating_sub(reservation.saturating_sub(consumed));
     }
 
     fn entity_tag(&self, key: &ResourceKey) -> Option<&EntityTag> {
@@ -2038,28 +2045,6 @@ impl PollCache {
             self.cached_wire_bytes = self.cached_wire_bytes.saturating_sub(resource.wire_bytes);
         }
     }
-}
-
-async fn read_bounded(
-    mut response: Response,
-    remaining_poll_bytes: usize,
-) -> Result<Vec<u8>, RepositoryWatchAttemptError> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| RepositoryWatchAttemptError::Request)?
-    {
-        let next = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or(RepositoryWatchAttemptError::ResponseTooLarge)?;
-        if next > MAX_RESPONSE_BYTES || next > remaining_poll_bytes {
-            return Err(RepositoryWatchAttemptError::ResponseTooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 struct PollCycleTiming {
