@@ -1,6 +1,5 @@
 # Supply-chain policy checked by cargo-deny in CI
 # (.github/workflows/deny.yml) on pull requests and a weekly schedule.
-# Adopted by the 2026-07-20 decision-log entry.
 
 [graph]
 all-features = true

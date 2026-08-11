@@ -30,6 +30,12 @@ pub(crate) const COMPACT_SESSION_KIND: &str =
 pub(crate) const GOAL_KIND: &str = durable_command_kind_to_str(CommandKind::Goal);
 pub(crate) const UPDATE_SESSION_PLACEMENT_KIND: &str =
     durable_command_kind_to_str(CommandKind::UpdateSessionPlacement);
+pub(crate) const REGISTER_WORKSPACE_KIND: &str =
+    durable_command_kind_to_str(CommandKind::RegisterWorkspace);
+pub(crate) const MINT_GIT_REMOTE_KIND: &str =
+    durable_command_kind_to_str(CommandKind::MintGitRemote);
+pub(crate) const WITHDRAW_GIT_REMOTE_KIND: &str =
+    durable_command_kind_to_str(CommandKind::WithdrawGitRemote);
 
 pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
     matches!(version, 1..=4 | 6..=8)
@@ -48,7 +54,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 11] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 14] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -123,6 +129,27 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 11] = [
         kind: CommandKind::UpdateSessionPlacement,
         spelling: UPDATE_SESSION_PLACEMENT_KIND,
         typed_table: "update_session_placement_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::RegisterWorkspace,
+        spelling: REGISTER_WORKSPACE_KIND,
+        typed_table: "workspace",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::MintGitRemote,
+        spelling: MINT_GIT_REMOTE_KIND,
+        typed_table: "configured_git_remote_mint",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::WithdrawGitRemote,
+        spelling: WITHDRAW_GIT_REMOTE_KIND,
+        typed_table: "configured_git_remote_withdrawal",
         minimum_version: 1,
         maximum_version: 1,
     },
