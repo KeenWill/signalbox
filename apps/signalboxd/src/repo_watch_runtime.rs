@@ -309,7 +309,10 @@ impl RepositoryWatchTask {
                 }
             }
             select! {
-                () = sleep(remaining_interval(self.interval, cycle_started.elapsed())) => {}
+                () = sleep(remaining_interval(PollCycleTiming {
+                    interval: self.interval,
+                    elapsed: cycle_started.elapsed(),
+                })) => {}
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         return;
@@ -422,7 +425,10 @@ impl RepositoryWatchTask {
         match outcome {
             RepoWatchCommitOutcome::Committed(_)
             | RepoWatchCommitOutcome::Replayed(_)
-            | RepoWatchCommitOutcome::Unchanged(_) => Ok(()),
+            | RepoWatchCommitOutcome::Unchanged(_) => {
+                self.poller.publish_freshness();
+                Ok(())
+            }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
                 Err(RepositoryWatchAttemptError::Persistence)
             }
@@ -715,13 +721,19 @@ struct GitHubRepositoryPoller {
 
 struct PullRequestFreshness {
     updated_at: String,
-    checks_settled: bool,
+    settled: bool,
     skipped_polls: usize,
+    // A fetch that never reached the durable cursor must not authorize reuse:
+    // the next attempt would compare this updated_at against a stale committed
+    // observation and skip the very changes that failed to commit. Reuse
+    // therefore consults published entries only, so a forgotten publication
+    // costs the optimization rather than an observation.
+    published: bool,
 }
 
 struct FetchedPullRequest {
     state: RepoWatchPullRequestState,
-    checks_settled: bool,
+    settled: bool,
 }
 
 impl GitHubRepositoryPoller {
@@ -924,7 +936,7 @@ impl GitHubRepositoryPoller {
             .await?;
         match listed_updated_at {
             Some(listed_updated_at) => {
-                self.record_fetched_pull_request(number, listed_updated_at, fetched.checks_settled);
+                self.record_fetched_pull_request(number, listed_updated_at, fetched.settled);
             }
             None => self.forget_pull_request(number),
         }
@@ -933,8 +945,9 @@ impl GitHubRepositoryPoller {
 
     fn pull_request_is_unchanged(&self, number: u64, listed_updated_at: &str) -> bool {
         self.freshness().get(&number).is_some_and(|freshness| {
-            freshness.updated_at == listed_updated_at
-                && freshness.checks_settled
+            freshness.published
+                && freshness.updated_at == listed_updated_at
+                && freshness.settled
                 && freshness.skipped_polls < MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS
         })
     }
@@ -945,15 +958,22 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    fn record_fetched_pull_request(&self, number: u64, updated_at: &str, checks_settled: bool) {
+    fn record_fetched_pull_request(&self, number: u64, updated_at: &str, settled: bool) {
         self.freshness().insert(
             number,
             PullRequestFreshness {
                 updated_at: updated_at.to_owned(),
-                checks_settled,
+                settled,
                 skipped_polls: 0,
+                published: false,
             },
         );
+    }
+
+    fn publish_freshness(&self) {
+        for freshness in self.freshness().values_mut() {
+            freshness.published = true;
+        }
     }
 
     fn forget_pull_request(&self, number: u64) {
@@ -997,8 +1017,17 @@ impl GitHubRepositoryPoller {
         let (completed_check_suites, check_suite_ids) = self.fetch_check_suites(&head_sha).await?;
         let (completed_check_runs, every_run_completed) =
             self.fetch_check_runs(&check_suite_ids).await?;
-        let checks_settled =
-            every_run_completed && completed_check_suites.len() == check_suite_ids.len();
+        let mergeable_state = match detail.mergeable {
+            Some(true) => MergeableState::Mergeable,
+            Some(false) => MergeableState::Conflicting,
+            None => MergeableState::Unknown,
+        };
+        // Neither a check completion nor GitHub finishing its background
+        // mergeability calculation moves the listing's updated_at, so a pull
+        // request is only reusable when both have already come to rest.
+        let settled = every_run_completed
+            && completed_check_suites.len() == check_suite_ids.len()
+            && mergeable_state != MergeableState::Unknown;
         let reviews = self
             .fetch_reviews(
                 number,
@@ -1015,11 +1044,7 @@ impl GitHubRepositoryPoller {
         let state = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
             context,
             lifecycle: normalize_lifecycle(&detail)?,
-            mergeable_state: match detail.mergeable {
-                Some(true) => MergeableState::Mergeable,
-                Some(false) => MergeableState::Conflicting,
-                None => MergeableState::Unknown,
-            },
+            mergeable_state,
             completed_check_suites,
             completed_check_runs,
             reviews,
@@ -1027,10 +1052,7 @@ impl GitHubRepositoryPoller {
             reactions,
         })
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(FetchedPullRequest {
-            state,
-            checks_settled,
-        })
+        Ok(FetchedPullRequest { state, settled })
     }
 
     async fn fetch_check_suites(
@@ -2025,8 +2047,13 @@ async fn read_bounded(
     Ok(body)
 }
 
-const fn remaining_interval(interval: Duration, elapsed: Duration) -> Duration {
-    interval.saturating_sub(elapsed)
+struct PollCycleTiming {
+    interval: Duration,
+    elapsed: Duration,
+}
+
+const fn remaining_interval(timing: PollCycleTiming) -> Duration {
+    timing.interval.saturating_sub(timing.elapsed)
 }
 
 fn reuse_pull_request(
@@ -2425,12 +2452,12 @@ mod tests {
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
         MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_POLL_WIRE_BYTES,
-        MergeableState, PAGE_SIZE, PollCache, PullResponse, ReactionContent, RepoWatchAuthorLogin,
-        RepoWatchBranchHead, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-        RepoWatchReactionObservation, RepoWatchReviewObservation, RepoWatchThreadState,
-        RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug,
-        RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError, ResourceKey,
-        ReviewState, Url, WorkflowName, WorkflowResponse, dispatch_context_json,
+        MergeableState, PAGE_SIZE, PollCache, PollCycleTiming, PullResponse, ReactionContent,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
+        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
+        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse, dispatch_context_json,
         normalize_checks_outcome, normalize_pull_request_context, object_id, remaining_interval,
         rule_activation_error, supervise_repository_tasks,
     };
@@ -2482,6 +2509,9 @@ mod tests {
     const CONCURRENT_FETCH_DELAY: Duration = Duration::from_millis(20);
     const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
     const POLL_INTERVAL: Duration = Duration::from_secs(300);
+    const SHORT_CYCLE: Duration = Duration::from_secs(75);
+    const SHORT_CYCLE_REMAINDER: Duration = Duration::from_secs(225);
+    const OVERRUNNING_CYCLE: Duration = Duration::from_secs(900);
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
     const CACHE_RESOURCE_KEY: &str = "fixture/resource";
@@ -2576,6 +2606,13 @@ mod tests {
             "user": { "login": PROVIDER_PULL_AUTHOR }
         })
         .to_string()
+    }
+
+    fn pull_detail_with_pending_mergeability() -> String {
+        let mut detail = serde_json::from_str::<serde_json::Value>(&pull_detail())
+            .expect("fixture pull detail is JSON");
+        detail["mergeable"] = serde_json::Value::Null;
+        detail.to_string()
     }
 
     fn pull_detail_without_head_repository() -> String {
@@ -3433,6 +3470,22 @@ mod tests {
         ]
     }
 
+    fn settled_responses_with_pending_mergeability() -> Vec<ScriptedResponse> {
+        settled_typed_observation_responses()
+            .into_iter()
+            .map(|response| {
+                if response.target == PULL_DETAIL_TARGET {
+                    ScriptedResponse::ok(
+                        PULL_DETAIL_TARGET,
+                        pull_detail_with_pending_mergeability(),
+                    )
+                } else {
+                    response
+                }
+            })
+            .collect()
+    }
+
     fn revalidated(responses: Vec<ScriptedResponse>) -> Vec<ScriptedResponse> {
         responses
             .into_iter()
@@ -3907,19 +3960,32 @@ mod tests {
     #[test]
     fn a_cycle_shorter_than_the_interval_waits_out_the_remainder() {
         assert_eq!(
-            remaining_interval(POLL_INTERVAL, POLL_INTERVAL / 4),
-            POLL_INTERVAL - POLL_INTERVAL / 4
+            remaining_interval(PollCycleTiming {
+                interval: POLL_INTERVAL,
+                elapsed: SHORT_CYCLE,
+            }),
+            SHORT_CYCLE_REMAINDER
         );
     }
 
     #[test]
     fn a_cycle_that_reaches_the_interval_starts_the_next_immediately() {
         assert_eq!(
-            remaining_interval(POLL_INTERVAL, POLL_INTERVAL),
+            remaining_interval(PollCycleTiming {
+                interval: POLL_INTERVAL,
+                elapsed: POLL_INTERVAL,
+            }),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn a_cycle_that_overruns_the_interval_starts_the_next_immediately() {
         assert_eq!(
-            remaining_interval(POLL_INTERVAL, POLL_INTERVAL * 3),
+            remaining_interval(PollCycleTiming {
+                interval: POLL_INTERVAL,
+                elapsed: OVERRUNNING_CYCLE,
+            }),
             Duration::ZERO
         );
     }
@@ -3929,6 +3995,56 @@ mod tests {
         let responses = settled_typed_observation_responses()
             .into_iter()
             .chain(skipped_pull_request_responses())
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture.poller.publish_freshness();
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_with_pending_mergeability_is_refetched() {
+        let responses = settled_responses_with_pending_mergeability()
+            .into_iter()
+            .chain(revalidated(settled_responses_with_pending_mergeability()))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture.poller.publish_freshness();
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_fetch_that_never_committed_is_refetched() {
+        let responses = settled_typed_observation_responses()
+            .into_iter()
+            .chain(revalidated(settled_typed_observation_responses()))
             .collect();
         let server = ConcurrentScriptedServer::start(responses).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3962,6 +4078,7 @@ mod tests {
             .poll(None)
             .await
             .expect("first poll succeeds");
+        fixture.poller.publish_freshness();
         let second = fixture
             .poller
             .poll(Some(&first))
@@ -3972,8 +4089,7 @@ mod tests {
         assert_eq!(second, first);
     }
 
-    #[tokio::test]
-    async fn concurrent_pull_request_fetches_stay_within_their_bound_and_keep_number_order() {
+    async fn concurrently_fetched_pull_requests() -> (Vec<u64>, usize) {
         let numbers: BTreeSet<u64> = CONCURRENT_FETCH_PULL_NUMBERS.collect();
         let responses = numbers
             .iter()
@@ -3981,25 +4097,40 @@ mod tests {
             .collect();
         let server = ConcurrentScriptedServer::start(responses).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-
         let listed: BTreeMap<u64, String> = numbers
             .iter()
             .map(|number| (*number, PULL_UPDATED_AT.to_owned()))
             .collect();
+
         let pull_requests = fixture
             .poller
-            .fetch_pull_requests(numbers.clone(), &listed, None)
+            .fetch_pull_requests(numbers, &listed, None)
             .await
             .expect("every open pull request is fetched");
         let peak_in_flight = server.finish().await;
 
-        let fetched: Vec<u64> = pull_requests
-            .iter()
-            .map(|pull_request| pull_request.context().number().get())
-            .collect();
-        assert_eq!(fetched, numbers.into_iter().collect::<Vec<u64>>());
+        (
+            pull_requests
+                .iter()
+                .map(|pull_request| pull_request.context().number().get())
+                .collect(),
+            peak_in_flight,
+        )
+    }
+
+    #[tokio::test]
+    async fn concurrent_pull_request_fetches_stay_within_their_bound() {
+        let (_, peak_in_flight) = concurrently_fetched_pull_requests().await;
+
         assert!(peak_in_flight > 1);
         assert!(peak_in_flight <= MAX_CONCURRENT_PULL_REQUEST_FETCHES);
+    }
+
+    #[tokio::test]
+    async fn concurrently_fetched_pull_requests_keep_ascending_number_order() {
+        let (fetched, _) = concurrently_fetched_pull_requests().await;
+
+        assert_eq!(fetched, CONCURRENT_FETCH_PULL_NUMBERS.collect::<Vec<u64>>());
     }
 
     #[tokio::test]
