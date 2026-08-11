@@ -47,6 +47,7 @@ use crate::lock_inventory::{
     RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY,
     RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_CONNECTION_AUTHORITY,
     RUNNER_PLACEMENT_CURRENT_LOSS, RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
+    RUNNER_PRISTINE_ACTIVE_ENROLLMENTS, RUNNER_PRISTINE_PENDING_ENROLLMENTS,
     RUNNER_REGISTRATION_HEAD, RUNNER_REGISTRATION_RECONCILIATION,
     RUNNER_REGISTRATION_RECONCILIATION_STATE, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
@@ -4459,27 +4460,15 @@ async fn select_pristine_enrollment_admission(
     transaction: &mut Transaction<'_, Postgres>,
     request: RunnerEnrollmentRequestId,
 ) -> Result<PristineEnrollmentAdmission, RunnerProtocolStoreError> {
-    let active_rows: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT enrollment_id
-           FROM runner_enrollment
-          WHERE state_kind = 'active'
-          ORDER BY enrollment_id
-          FOR UPDATE",
-    )
-    .fetch_all(&mut **transaction)
-    .await?;
+    let active_rows: Vec<Uuid> = sqlx::query_scalar(RUNNER_PRISTINE_ACTIVE_ENROLLMENTS)
+        .fetch_all(&mut **transaction)
+        .await?;
     if active_rows.len() > 1 {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
-    let pending_rows: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT enrollment_id
-           FROM runner_enrollment
-          WHERE state_kind = 'pending'
-          ORDER BY enrollment_id
-          FOR SHARE",
-    )
-    .fetch_all(&mut **transaction)
-    .await?;
+    let pending_rows: Vec<Uuid> = sqlx::query_scalar(RUNNER_PRISTINE_PENDING_ENROLLMENTS)
+        .fetch_all(&mut **transaction)
+        .await?;
     if pending_rows.len() > 1 {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
