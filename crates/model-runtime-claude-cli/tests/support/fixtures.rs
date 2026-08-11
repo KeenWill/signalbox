@@ -12,6 +12,8 @@ pub const MODEL: &str = "claude-synthetic-model";
 pub const RESOLVED_MODEL: &str = "claude-synthetic-model-resolved";
 pub const OTHER_RESOLVED_MODEL: &str = "claude-synthetic-model-other";
 pub const CREDENTIAL_PREFIX_RESOLVED_MODEL: &str = "claude-synthetic-model-resolved-api_";
+pub const MODEL_MARKER_HELD_WORD: &str = "key";
+pub const MODEL_MARKER_RELEASED_TAIL: &str = " is a poor name for it.";
 pub const MODEL_CREDENTIAL_PREFIX: &str = "api_";
 pub const MODEL_CREDENTIAL_CONTINUATION: &str = "key=synthetic-model-continuation";
 pub const MODEL_RECONSTRUCTED_CREDENTIAL: &str = "api_key=synthetic-model-continuation";

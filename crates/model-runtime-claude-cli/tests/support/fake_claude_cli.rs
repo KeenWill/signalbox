@@ -176,6 +176,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             success("end_turn", Some(fixtures::MODEL_CREDENTIAL_CONTINUATION))?;
         }
+        "repeated_model_prefix_release" => {
+            // The first event's text continues the model's marker without
+            // completing a credential, so the lookbehind is still live when the
+            // second event repeats the same model. Reading that repeat as a
+            // second independent field would fail the exchange closed and
+            // destroy output the held marker eventually releases.
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
+                fixtures::MODEL_MARKER_HELD_WORD,
+            )?;
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
+                fixtures::MODEL_MARKER_RELEASED_TAIL,
+            )?;
+            success(
+                "end_turn",
+                Some(&format!(
+                    "{}{}",
+                    fixtures::MODEL_MARKER_HELD_WORD,
+                    fixtures::MODEL_MARKER_RELEASED_TAIL
+                )),
+            )?;
+        }
         "conflicting_assistant_model" => {
             assistant_text_with_identity(
                 fixtures::MESSAGE_ID,

@@ -176,6 +176,20 @@ async fn inv_035_repeated_model_prefix_is_held_into_each_events_text() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a repeat of the discarded resolved model is the same field, not a
+/// second one. Classifying it as new would spend the discarded-field slot and
+/// fail the exchange closed, destroying ordinary output that the held marker
+/// legitimately releases once its candidate resolves clean.
+#[tokio::test]
+async fn repeated_resolved_model_does_not_over_redact_an_ordinary_exchange() {
+    let result = execute_scenario("repeated_model_prefix_release", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(diagnostic.contains(fixtures::MODEL_MARKER_RELEASED_TAIL));
+    assert!(!diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn assistant_model_must_remain_stable_after_its_first_event() {
     let result = execute_scenario("conflicting_assistant_model", OperationShape::Text).await;
