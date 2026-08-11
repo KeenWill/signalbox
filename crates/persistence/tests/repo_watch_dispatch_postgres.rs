@@ -263,6 +263,13 @@ fn assert_applied_goal_transition(outcome: GoalTransitionOutcome) {
 /// the release mechanism itself therefore has to retire them first; leaving the
 /// dispatched work turn alone keeps that turn the one whose completion the test
 /// is exercising.
+///
+/// Call this while the work turn is still queued. The blocking event it appends
+/// fires the terminal-goal release trigger, which runs the release check with no
+/// completed turn; a queued work turn is what makes that check decline, leaving
+/// the release for the caller's own completion to produce. Calling it after the
+/// work turn is terminal would let the trigger insert the release instead, which
+/// silently changes what a test measuring release timing observes.
 async fn terminalize_dispatched_goal(
     pool: &PgPool,
     session: SessionId,
