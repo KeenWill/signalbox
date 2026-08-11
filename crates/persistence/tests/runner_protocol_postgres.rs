@@ -15037,6 +15037,34 @@ async fn s31_inv043_inv044_loss_fences_lease_until_successor_connection()
     Ok(())
 }
 
+/// INV-043 / INV-044: clean shutdown is terminal for its exact connection
+/// epoch and cannot strand a newly offered lease behind unusable authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_shutdown_connection_rejects_later_lease_offer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::DaemonShutdown,
+        )
+        .await?;
+    let rejected = store
+        .store_lease(&lease)
+        .await
+        .expect_err("a cleanly shut down connection cannot authorize a lease offer");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-043 / INV-044: once a terminal transition owns enrollment authority,
 /// a concurrent lease offer observes the committed loss fence and is refused.
 #[tokio::test(flavor = "multi_thread")]
