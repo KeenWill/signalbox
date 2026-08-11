@@ -3564,6 +3564,49 @@ async fn s31_inv042_inv044_registration_reconciliation_migration_backfills_curre
     Ok(())
 }
 
+/// INV-044: a loss committed after placement baselines exist but before the
+/// cursor migration backfills as pending when that loss still affects a session.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    insert_terminal_connection_loss_before_cursor_migration(
+        &pool,
+        expected_enrollment.enrollment(),
+        connection.epoch(),
+    )
+    .await?;
+    migrate(&pool).await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the post-baseline terminal connection retains its loss");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.loss(), loss);
+    assert_eq!(page.propagated_through(), None);
+    assert_eq!(page.sessions(), &[placement.session()]);
+    assert!(!page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
 /// INV-044: a new loss owns a pending cursor whose ordered read page is capped
 /// at 64 sessions and resumes strictly after its durable session identity.
 #[tokio::test]
