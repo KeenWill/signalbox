@@ -83,7 +83,8 @@ async fn mint(
     transaction.commit().await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_minted_remote_commits_through_the_durable_command_registry() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
@@ -104,7 +105,8 @@ async fn a_minted_remote_commits_through_the_durable_command_registry() -> Resul
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_second_live_mint_for_one_workspace_and_name_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     mint(
@@ -132,7 +134,8 @@ async fn a_second_live_mint_for_one_workspace_and_name_is_refused() -> Result<()
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_withdrawal_and_its_replacement_land_in_one_transaction() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     mint(
@@ -199,7 +202,8 @@ async fn a_withdrawal_and_its_replacement_land_in_one_transaction() -> Result<()
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_mint_bound_to_another_command_kind_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
@@ -225,7 +229,8 @@ async fn a_mint_bound_to_another_command_kind_is_refused() -> Result<(), Box<dyn
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_mint_naming_no_durable_command_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
@@ -272,90 +277,110 @@ async fn workspace_predicate(pool: &PgPool, candidate: &str) -> Result<bool, sql
         .await
 }
 
-#[tokio::test]
+/// Asserts the SQL name predicate returns exactly what the newtype decides.
+async fn assert_name_predicate_agrees(
+    pool: &PgPool,
+    candidate: &str,
+) -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        name_predicate(pool, candidate).await?,
+        GitRemoteName::try_new(candidate.to_owned()).is_ok(),
+        "the SQL and Rust name rules disagree about {candidate:?}"
+    );
+    Ok(())
+}
+
+/// Asserts the SQL destination predicate returns exactly what the newtype
+/// decides.
+async fn assert_url_predicate_agrees(pool: &PgPool, candidate: &str) -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        url_predicate(pool, candidate).await?,
+        GitRemoteUrl::try_new(candidate.to_owned()).is_ok(),
+        "the SQL and Rust destination rules disagree about {candidate:?}"
+    );
+    Ok(())
+}
+
+/// Asserts the SQL workspace predicate returns exactly what the newtype
+/// decides.
+async fn assert_workspace_predicate_agrees(
+    pool: &PgPool,
+    candidate: &str,
+) -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        workspace_predicate(pool, candidate).await?,
+        GitRemoteWorkspaceRoot::try_new(candidate.to_owned()).is_ok(),
+        "the SQL and Rust workspace rules disagree about {candidate:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn the_name_predicate_agrees_with_the_domain_newtype() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
-    for candidate in [
-        "origin",
-        "up-stream_2",
-        "v1.0",
-        "origin.lockfile",
-        ".origin",
-        "origin.",
-        "origin..backup",
-        "origin.lock",
-        "namespace/origin",
-        "..",
-        ".",
-        "",
-        "origin ",
-    ] {
-        assert_eq!(
-            name_predicate(&pool, candidate).await?,
-            GitRemoteName::try_new(candidate.to_owned()).is_ok(),
-            "the SQL and Rust name rules disagree about {candidate:?}"
-        );
-    }
+    assert_name_predicate_agrees(&pool, "origin").await?;
+    assert_name_predicate_agrees(&pool, "up-stream_2").await?;
+    assert_name_predicate_agrees(&pool, "v1.0").await?;
+    assert_name_predicate_agrees(&pool, "origin.lockfile").await?;
+    assert_name_predicate_agrees(&pool, ".origin").await?;
+    assert_name_predicate_agrees(&pool, "origin.").await?;
+    assert_name_predicate_agrees(&pool, "origin..backup").await?;
+    assert_name_predicate_agrees(&pool, "origin.lock").await?;
+    assert_name_predicate_agrees(&pool, "namespace/origin").await?;
+    assert_name_predicate_agrees(&pool, "..").await?;
+    assert_name_predicate_agrees(&pool, ".").await?;
+    assert_name_predicate_agrees(&pool, "").await?;
+    assert_name_predicate_agrees(&pool, "origin ").await?;
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn the_destination_predicate_agrees_with_the_domain_newtype() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
-    for candidate in [
-        "https://example.test/namespace/project.git",
-        "https://example.test",
-        "https://a",
-        "https://example.test:8443/project.git",
-        "https://user@example.test/project.git",
-        "https://[2001:db8::1]/project.git",
-        "https://[2001:db8::1]:8443/project.git",
-        "https://?",
-        "https://#fragment",
-        "https:///project.git",
-        "https://user@/project.git",
-        "https://example.test:/project.git",
-        "https://example.test:https/project.git",
-        "https://",
-        "http://example.test/project.git",
-        "git@example.test:namespace/project.git",
-        "https://example.test/a project.git",
-    ] {
-        assert_eq!(
-            url_predicate(&pool, candidate).await?,
-            GitRemoteUrl::try_new(candidate.to_owned()).is_ok(),
-            "the SQL and Rust destination rules disagree about {candidate:?}"
-        );
-    }
+    assert_url_predicate_agrees(&pool, "https://example.test/namespace/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test").await?;
+    assert_url_predicate_agrees(&pool, "https://a").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test:8443/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://user@example.test/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://[2001:db8::1]/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://[....]/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://?").await?;
+    assert_url_predicate_agrees(&pool, "https://#fragment").await?;
+    assert_url_predicate_agrees(&pool, "https:///project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://user@/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test:/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test:https/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://").await?;
+    assert_url_predicate_agrees(&pool, "http://example.test/project.git").await?;
+    assert_url_predicate_agrees(&pool, "git@example.test:namespace/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test/a project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test/a\u{00a0}project.git").await?;
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn the_workspace_predicate_agrees_with_the_domain_newtype() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-
     let longest = format!("/{}", "a".repeat(1023));
     let beyond = format!("/{}", "a".repeat(1024));
-    for candidate in [
-        WORKSPACE,
-        "/",
-        "workspace",
-        "",
-        longest.as_str(),
-        beyond.as_str(),
-    ] {
-        assert_eq!(
-            workspace_predicate(&pool, candidate).await?,
-            GitRemoteWorkspaceRoot::try_new(candidate.to_owned()).is_ok(),
-            "the SQL and Rust workspace rules disagree about {candidate:?}"
-        );
-    }
+
+    assert_workspace_predicate_agrees(&pool, WORKSPACE).await?;
+    assert_workspace_predicate_agrees(&pool, "/").await?;
+    assert_workspace_predicate_agrees(&pool, "workspace").await?;
+    assert_workspace_predicate_agrees(&pool, "").await?;
+    assert_workspace_predicate_agrees(&pool, "/srv/\u{00a0}workspace").await?;
+    assert_workspace_predicate_agrees(&pool, longest.as_str()).await?;
+    assert_workspace_predicate_agrees(&pool, beyond.as_str()).await?;
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn the_longest_admitted_workspace_root_indexes() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let longest = format!("/{}", "a".repeat(1023));

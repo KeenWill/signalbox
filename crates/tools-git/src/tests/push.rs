@@ -208,32 +208,24 @@ fn push_receipts_canonicalize_equivalent_object_identifier_spelling() {
 /// The durable mint vocabulary must stay a subset of the reference grammar the
 /// push executor applies, or a mint could name a destination it can never
 /// resolve. Nothing but this test links the two rule sets.
+#[track_caller]
+fn assert_minted_name_builds_a_configured_remote(candidate: &str) {
+    assert!(
+        signalbox_domain::GitRemoteName::try_new(candidate.to_owned()).is_ok(),
+        "the domain refuses {candidate:?}, so this case no longer covers the subset rule"
+    );
+    assert!(
+        ConfiguredGitRemote::try_new(candidate, "https://example.test/namespace/project.git")
+            .is_ok(),
+        "minted remote name {candidate:?} is refused by the push executor"
+    );
+}
+
 #[test]
 fn every_minted_remote_name_builds_a_configured_remote() {
-    for candidate in [
-        "origin",
-        "up-stream_2",
-        "v1.0",
-        "origin.lockfile",
-        ".origin",
-        "origin.",
-        "origin..backup",
-        "origin.lock",
-        "namespace/origin",
-        "..",
-        ".",
-        "",
-        "origin ",
-        "a",
-    ] {
-        let minted = signalbox_domain::GitRemoteName::try_new(candidate.to_owned());
-        if minted.is_err() {
-            continue;
-        }
-        assert!(
-            ConfiguredGitRemote::try_new(candidate, "https://example.test/namespace/project.git")
-                .is_ok(),
-            "minted remote name {candidate:?} is refused by the push executor"
-        );
-    }
+    assert_minted_name_builds_a_configured_remote("origin");
+    assert_minted_name_builds_a_configured_remote("up-stream_2");
+    assert_minted_name_builds_a_configured_remote("v1.0");
+    assert_minted_name_builds_a_configured_remote("origin.lockfile");
+    assert_minted_name_builds_a_configured_remote("a");
 }

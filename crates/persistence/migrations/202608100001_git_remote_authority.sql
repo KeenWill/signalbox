@@ -27,6 +27,14 @@ $$;
 --
 -- A destination must also carry an authority, because a scheme-only URL such as
 -- `https://?` names no host and no HTTPS transport could dispatch it.
+--
+-- The first predicate admits printable ASCII only. `[:space:]` and `[:cntrl:]`
+-- under the `C` collation classify no non-ASCII byte, so those classes would
+-- admit a destination — `U+00A0` in a path, for one — that `GitRemoteUrl`
+-- refuses, and the append-only store would then hold a row the domain type
+-- cannot represent. A bracketed IP-literal host is refused for the same
+-- reason: a POSIX regular expression cannot express the IPv6 grammar, so the
+-- two sides could not be held in agreement.
 CREATE FUNCTION configured_git_remote_url_is_valid(candidate text)
 RETURNS boolean
 LANGUAGE sql
@@ -35,10 +43,11 @@ STRICT
 PARALLEL SAFE
 AS $$
     SELECT octet_length(candidate) BETWEEN 9 AND 4096
+       AND candidate COLLATE "C" ~ '^[!-~]+$'
        AND candidate COLLATE "C" ~ (
-               '^https://([^@/?#[:cntrl:][:space:]]*@)?'
-            || '(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~-]+)'
-            || '(:[0-9]+)?([/?#][^[:cntrl:][:space:]]*)?$'
+               '^https://([^@/?#]*@)?'
+            || '[A-Za-z0-9._~-]+(:[0-9]+)?'
+            || '([/?#].*)?$'
            )
 $$;
 

@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-four identities defined in `lib.rs`:
+The twenty-six identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);

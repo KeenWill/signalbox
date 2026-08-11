@@ -85,23 +85,20 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), GitRemoteTextError> 
 /// dispatch to.
 ///
 /// The admitted shape mirrors the SQL predicate byte for byte: an optional
-/// `userinfo@`, then either a bracketed IPv6 literal or a host of unreserved
-/// name bytes, then an optional numeric port. A scheme-only destination such as
-/// `https://?` carries an empty authority and is refused here.
+/// `userinfo@`, then a host of unreserved name bytes, then an optional numeric
+/// port. A scheme-only destination such as `https://?` carries an empty
+/// authority and is refused here.
+///
+/// Accepted cost: a bracketed IP-literal host is refused outright rather than
+/// parsed. Admitting one would need a real IPv6 parser on this side and an
+/// equivalent one in the SQL predicate, and a POSIX regular expression cannot
+/// express that grammar — so the two sides would agree only by accident. A
+/// destination is expected to name a host, and this bound is stated rather
+/// than approximated.
 fn authority_names_a_host(authority: &str) -> bool {
     let host_and_port = authority
         .split_once('@')
         .map_or(authority, |(_, remainder)| remainder);
-    if let Some(remainder) = host_and_port.strip_prefix('[') {
-        let Some((literal, trailing)) = remainder.split_once(']') else {
-            return false;
-        };
-        return !literal.is_empty()
-            && literal
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() || matches!(byte, b':' | b'.'))
-            && trailing_port_is_numeric(trailing);
-    }
     let (host, port) = host_and_port
         .split_once(':')
         .map_or((host_and_port, None), |(host, port)| (host, Some(port)));
@@ -110,13 +107,6 @@ fn authority_names_a_host(authority: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'~'))
         && port.is_none_or(port_is_numeric)
-}
-
-/// Returns whether the bytes after a bracketed host are absent or a port.
-fn trailing_port_is_numeric(trailing: &str) -> bool {
-    trailing
-        .strip_prefix(':')
-        .map_or(trailing.is_empty(), port_is_numeric)
 }
 
 /// Returns whether one port is a non-empty run of digits.
@@ -179,17 +169,20 @@ impl GitRemoteName {
 pub struct GitRemoteUrl(String);
 
 impl GitRemoteUrl {
-    /// Admits one bounded https URL naming a host, without control or space
-    /// bytes.
+    /// Admits one bounded https URL naming a host, written in printable ASCII.
+    ///
+    /// The byte test is `is_ascii_graphic` rather than a Unicode whitespace or
+    /// control test, because the SQL predicate that restates this rule
+    /// classifies under the `C` collation and would otherwise admit values —
+    /// `U+00A0` in a path, for one — that this constructor refuses. The
+    /// durable store must never hold a destination this type cannot represent,
+    /// so both sides judge the same bytes.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
         validate_text(&value, MAX_REMOTE_URL_BYTES)?;
         let Some(remainder) = value.strip_prefix(REQUIRED_URL_SCHEME) else {
             return Err(GitRemoteTextError::UnsupportedScheme);
         };
-        if value
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-        {
+        if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(GitRemoteTextError::Malformed);
         }
         let authority = remainder
@@ -229,13 +222,19 @@ impl fmt::Debug for GitRemoteUrl {
 pub struct GitRemoteWorkspaceRoot(String);
 
 impl GitRemoteWorkspaceRoot {
-    /// Admits one bounded absolute path without control bytes.
+    /// Admits one bounded absolute path without ASCII control bytes.
+    ///
+    /// The control test is ASCII-only, matching what the SQL predicate's
+    /// `[:cntrl:]` class means under the `C` collation. A path may legitimately
+    /// carry non-ASCII bytes, so narrowing to ASCII outright is wrong here;
+    /// agreeing on which bytes are control is what keeps the durable store from
+    /// holding a root this type would refuse.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
         validate_text(&value, MAX_WORKSPACE_ROOT_BYTES)?;
         if !value.starts_with('/') {
             return Err(GitRemoteTextError::NotAbsolute);
         }
-        if value.chars().any(char::is_control) {
+        if value.bytes().any(|byte| byte.is_ascii_control()) {
             return Err(GitRemoteTextError::Malformed);
         }
         Ok(Self(value))
@@ -321,34 +320,39 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_name_is_refused(candidate: &str) {
+        assert_eq!(
+            GitRemoteName::try_new(candidate.to_owned()),
+            Err(GitRemoteTextError::Malformed)
+        );
+    }
+
+    #[track_caller]
+    fn assert_name_is_admitted(candidate: &str) {
+        assert_eq!(
+            GitRemoteName::try_new(candidate.to_owned())
+                .as_ref()
+                .map(GitRemoteName::as_str),
+            Ok(candidate)
+        );
+    }
+
     #[test]
     fn a_name_git_would_refuse_as_a_reference_component_is_refused() {
-        for refused in [
-            ".origin",
-            "origin..backup",
-            "origin.",
-            "origin.lock",
-            "..",
-            ".",
-        ] {
-            assert_eq!(
-                GitRemoteName::try_new(refused.to_owned()),
-                Err(GitRemoteTextError::Malformed),
-                "{refused} is not a legal Git reference component"
-            );
-        }
+        assert_name_is_refused(".origin");
+        assert_name_is_refused("origin..backup");
+        assert_name_is_refused("origin.");
+        assert_name_is_refused("origin.lock");
+        assert_name_is_refused("..");
+        assert_name_is_refused(".");
     }
 
     #[test]
     fn a_name_carrying_interior_punctuation_is_admitted() {
-        for admitted in ["up-stream_2", "v1.0", "origin.lockfile"] {
-            assert_eq!(
-                GitRemoteName::try_new(admitted.to_owned())
-                    .as_ref()
-                    .map(GitRemoteName::as_str),
-                Ok(admitted)
-            );
-        }
+        assert_name_is_admitted("up-stream_2");
+        assert_name_is_admitted("v1.0");
+        assert_name_is_admitted("origin.lockfile");
     }
 
     #[test]
@@ -390,40 +394,58 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_destination_is_refused(candidate: &str) {
+        assert_eq!(
+            GitRemoteUrl::try_new(candidate.to_owned()),
+            Err(GitRemoteTextError::Malformed)
+        );
+    }
+
+    #[track_caller]
+    fn assert_destination_is_admitted(candidate: &str) {
+        assert_eq!(
+            GitRemoteUrl::try_new(candidate.to_owned())
+                .as_ref()
+                .map(GitRemoteUrl::as_str),
+            Ok(candidate)
+        );
+    }
+
     #[test]
     fn a_destination_naming_no_host_is_refused() {
-        for refused in [
-            "https://?",
-            "https://#fragment",
-            "https:///namespace/project.git",
-            "https://user@/project.git",
-            "https://example.test:/project.git",
-            "https://example.test:https/project.git",
-        ] {
-            assert_eq!(
-                GitRemoteUrl::try_new(refused.to_owned()),
-                Err(GitRemoteTextError::Malformed),
-                "{refused} names no dispatchable host"
-            );
-        }
+        assert_destination_is_refused("https://?");
+        assert_destination_is_refused("https://#fragment");
+        assert_destination_is_refused("https:///namespace/project.git");
+        assert_destination_is_refused("https://user@/project.git");
+        assert_destination_is_refused("https://example.test:/project.git");
+        assert_destination_is_refused("https://example.test:https/project.git");
+    }
+
+    /// A bracketed IP-literal host is refused rather than parsed, so that the
+    /// SQL predicate can restate this rule exactly. `[....]` is the case that
+    /// showed a character-only bracket check admits a host no transport could
+    /// dispatch.
+    #[test]
+    fn a_destination_naming_a_bracketed_literal_host_is_refused() {
+        assert_destination_is_refused("https://[2001:db8::1]/namespace/project.git");
+        assert_destination_is_refused("https://[2001:db8::1]:8443/namespace/project.git");
+        assert_destination_is_refused("https://[....]/namespace/project.git");
+    }
+
+    /// Unicode whitespace is refused by the same byte test the SQL predicate
+    /// applies, so the store cannot hold a destination this type would refuse.
+    #[test]
+    fn a_destination_carrying_a_non_ascii_byte_is_refused() {
+        assert_destination_is_refused("https://example.test/a\u{00a0}project.git");
+        assert_destination_is_refused("https://éxample.test/project.git");
     }
 
     #[test]
     fn a_destination_naming_a_host_is_admitted() {
-        for admitted in [
-            "https://example.test:8443/namespace/project.git",
-            "https://user@example.test/namespace/project.git",
-            "https://[2001:db8::1]/namespace/project.git",
-            "https://[2001:db8::1]:8443/namespace/project.git",
-            "https://example.test",
-        ] {
-            assert_eq!(
-                GitRemoteUrl::try_new(admitted.to_owned())
-                    .as_ref()
-                    .map(GitRemoteUrl::as_str),
-                Ok(admitted)
-            );
-        }
+        assert_destination_is_admitted("https://example.test:8443/namespace/project.git");
+        assert_destination_is_admitted("https://user@example.test/namespace/project.git");
+        assert_destination_is_admitted("https://example.test");
     }
 
     #[test]
