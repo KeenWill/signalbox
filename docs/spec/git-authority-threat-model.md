@@ -9,8 +9,11 @@ surface, and explicitly approved repair writes. These paragraphs become verified
 only with that stack. Daemon catalog wiring is outside it.
 
 The scope of the authority — how many suites the daemon composes and which root
-each is constructed with — is not part of that stack, and is verified against
-this PR (`agent/per-session-workspaces`).
+each is constructed with — is not part of that stack, and was verified against
+PR #539 (`agent/per-session-workspaces`). The remote destination authority below
+is verified against this PR (`agent/git-remote-authority`), which lands the
+durable workspace record and the destination schema; the push transport that
+resolves against them is later work.
 
 The deployment injects a workspace root into each constructed suite. The daemon
 composes one suite for the configured root, and one further suite for each
@@ -84,8 +87,11 @@ is preserved and the operation fails closed.
 directory, ancestors, environment, home directory, or process-global Git state
 for a repository. The workspace root is construction input, not a per-call
 argument. Local operations cannot select another repository. An external-write
-slice may name a branch, but its remote endpoint is deployment configuration and
-is never model-supplied data.
+slice may name a branch and it may name a minted remote, but never a
+destination: the endpoint it resolves to is durable authority recorded ahead of
+the call, described under
+[remote destination authority](#remote-destination-authority), and is never
+model-supplied data.
 
 **References match the repository object format.** The pinned repository
 configuration selects SHA-1 or SHA-256 once. Direct reference values, detached
@@ -103,6 +109,45 @@ demonstrates their violation remains must-fix regardless of review-wave count. A
 newly identified gap in the mechanisms that enforce one of these invariants is
 in-scope hardening and is fixed in the current pull request's single batched
 disposition commit.
+
+## Remote destination authority
+
+**Minting a destination is a human act; pushing to a minted destination is an
+approval-gated agent act.** A push destination is durable data, not deployment
+configuration and not a tool argument. The push surface accepts a remote *name*
+and resolves it against the durable record; no caller — model, session, or tool
+— can supply a URL. Only `https` destinations are storable, and the transport
+compiles no SSH support, so the two sides refuse the same set.
+
+A destination is scoped to a **workspace**, and a workspace is a durable record
+with its own identity. The root path is canonicalized exactly once, when the
+workspace record is minted, and is stored in canonical form; every scope
+comparison afterwards is between identities. This is what makes "one live
+destination per workspace and name" a rule that holds: keyed by path,
+`/srv/workspace` and `/srv/workspace/.` are one directory under two keys, and
+the rule would have admitted two destinations for it. There is deliberately no
+comparison-time normalization to forget.
+
+Three tiers mint workspace records, and they carry different authority:
+
+1. **Operator-registered.** A person registers a new authority scope through the
+   client. This is the only tier that widens what Signalbox may push from, so
+   the record carries the durable command that registered it and the act stays
+   provable after the fact.
+2. **Daemon-system-minted.** The daemon records the roots its
+   [per-session derivation](configuration-and-credentials.md#derived-session-workspace-roots)
+   materializes from the configured base. Authority still flows from that base
+   and its fixed formula: these rows are bookkeeping of what the formula
+   produced, never an input to which roots the daemon may open, and nothing
+   reads them to decide a binding.
+3. **Session-facing minting is future work.** A session cannot mint a workspace
+   or a destination. If it is ever admitted it will be a posture-gated tool
+   under [tool safety](../open-questions.md#tool-safety), decided separately;
+   nothing in the current schema or surface provides it.
+
+Retiring a destination is a new durable fact rather than an edit, because the
+minting tables are append-only. A withdrawal retires exactly one mint and frees
+its name, so a withdrawal and its replacement may land in one transaction.
 
 ## Explicitly accepted residuals
 
@@ -129,8 +174,17 @@ disposition commit.
   extension surfaces require a separate user-approved contract before support.
 - Remote authentication, transport security, server-side authorization, and
   remote repository behavior are not properties of the local authority. The
-  repair-write slice separately constrains egress to the configured remote and
+  repair-write slice separately constrains egress to a minted remote and
   requires non-overridable explicit approval before push.
+- A minted destination is machine-independent only insofar as its workspace is.
+  Registering a workspace records the canonical root a person resolved at that
+  moment; moving the directory afterwards leaves the record naming a path that
+  no longer exists, and re-registering is the stated remedy. The identity is
+  stable across the move, so the grants scoped to it survive re-registration.
+- Canonical form is judged as *bytes* by the durable store, which cannot see the
+  filesystem. A root whose spelling is canonical but whose components are
+  symbolic links is admitted; resolving those is what the minting boundary does
+  once, and no later reader repeats it.
 
 For this stack's review disposition, a finding that does not violate a stated
 invariant, identify an in-scope enforcement gap, or contradict another

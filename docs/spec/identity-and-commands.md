@@ -117,7 +117,12 @@ UUIDv7 implementation:
 | `UuidV7ToolLoopIdGenerator`                          | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId` |
 
 `ProviderTargetEvidenceId` exists as a domain type but has no production minting
-seam yet; its generator lands with its owning slice.
+seam yet; its generator lands with its owning slice. `WorkspaceId`,
+`GitRemoteMintId`, and `GitRemoteWithdrawalId` are in the same position: the
+durable schema that stores them exists, nothing writes it yet, and their
+generators land with the store and the operator verbs. What each identity scopes
+is stated under
+[remote destination authority](git-authority-threat-model.md#remote-destination-authority).
 
 Orchestration generates each fresh candidate immediately before the domain
 transition that creates the fact. Fixed-cardinality candidates are minted before
