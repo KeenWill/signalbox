@@ -46,10 +46,10 @@ use signalbox_domain::{
     DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection, DurableCommandId,
     ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
     ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SubmitInputAppliedResult, SubmitInputResult, ToolAttemptId, ToolName as DomainToolName,
-    ToolRequestId, TurnAttemptId, TurnId, UserContent,
+    ProviderModelIdentity, ResolvedProviderTarget, RunnerGeneration, RunnerId,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolAttemptId,
+    ToolName as DomainToolName, ToolRequestId, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -8049,6 +8049,7 @@ impl SnapshotTurnDisposition {
             | ProcessTurnState::ActiveAwaitingChild { .. }
             | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
             | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
+            | ProcessTurnState::ActiveAwaitingRunnerRecovery { .. }
             | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::ReconciliationRequired { .. } => Self::Infrastructure,
             ProcessTurnState::Refused { .. } => Self::Refused,
@@ -8281,6 +8282,20 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_infrastructure() {
     let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
         ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
         recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
+    };
+
+    assert_eq!(
+        SnapshotTurnDisposition::from_process_state(&state),
+        SnapshotTurnDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn turn_snapshot_reports_runner_recovery_as_infrastructure() {
+    let state = ProcessTurnState::ActiveAwaitingRunnerRecovery {
+        runner: RunnerId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_SESSION_ID)),
+        placement_revision: RunnerGeneration::one(),
+        interrupted_tool_attempt: None,
     };
 
     assert_eq!(
