@@ -3161,6 +3161,7 @@ mod tests {
     const CARGO_COLOR_OPTION: &str = "--color";
     const CARGO_CHANGE_DIRECTORY_OPTION: &str = "-C";
     const CARGO_UNSTABLE_OPTION: &str = "-Z";
+    const CARGO_VALUE_TAKING_SHORT_OPTIONS: &[u8] = b"FjpZ";
     const SYNTHETIC_CARGO_COLOR_OPTION_VALUE: &str = "always";
     const SYNTHETIC_CARGO_CHANGE_DIRECTORY_OPTION_VALUE: &str = "synthetic-workspace";
     const SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE: &str = "unstable-options";
@@ -3168,6 +3169,7 @@ mod tests {
     const CARGO_RELEASE_OPTION: &str = "--release";
     const CARGO_RELEASE_SHORT_OPTION: &str = "-r";
     const SYNTHETIC_CARGO_RELEASE_OPTION_CLUSTER: &str = "-qr";
+    const SYNTHETIC_CARGO_FEATURES_OPTION_CLUSTER: &str = "-Fbar";
     const CARGO_IGNORE_RUST_VERSION_OPTION: &str = "--ignore-rust-version";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
     const MCP_INVALID_PARAMS_ERROR_CODE: i64 = -32602;
@@ -3542,7 +3544,14 @@ finally:
 
     fn cargo_short_option_cluster_contains(argument: &OsStr, option: u8) -> bool {
         let encoded = argument.as_encoded_bytes();
-        encoded.starts_with(b"-") && !encoded.starts_with(b"--") && encoded[1..].contains(&option)
+        if !encoded.starts_with(b"-") || encoded.starts_with(b"--") {
+            return false;
+        }
+        encoded[1..]
+            .iter()
+            .copied()
+            .take_while(|byte| !CARGO_VALUE_TAKING_SHORT_OPTIONS.contains(byte))
+            .any(|byte| byte == option)
     }
 
     #[track_caller]
@@ -4130,6 +4139,20 @@ finally:
         assert_eq!(
             cargo_test_profile_from_arguments(&arguments),
             Some(OsString::from(CARGO_RELEASE_PROFILE))
+        );
+    }
+
+    #[test]
+    fn cargo_test_invocation_ignores_a_release_byte_in_a_short_option_value() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(SYNTHETIC_CARGO_FEATURES_OPTION_CLUSTER),
+        ];
+
+        assert_eq!(
+            cargo_test_profile_from_arguments(&arguments),
+            Some(OsString::from(CARGO_TEST_PROFILE))
         );
     }
 
@@ -5602,7 +5625,9 @@ finally:
         let invocation = current_cargo_test_invocation();
         let selection = claude_mcp_bridge_artifact_selection(&invocation);
         require_direct_bridge_execution(&selection);
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+        let cargo = std::env::var_os("CARGO").expect(
+            "nested bridge builds require the originating Cargo executable, so run this suite through Cargo rather than launching the test artifact directly",
+        );
         let mut build_command = Command::new(cargo);
         apply_cargo_unstable_flags(&mut build_command, &invocation.unstable_flags);
         build_command
