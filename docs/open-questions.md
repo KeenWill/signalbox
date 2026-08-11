@@ -482,6 +482,25 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   `git` usage sees. Recorded as a design question rather than a blocker; the
   forced configuration and the effective-URL check remain the version-one
   boundary.
+- **Several bound workspaces per session, and explicit session relocation.** A
+  session binds one workspace root, derived from the configured root by the
+  fixed session-UUID formula owned by
+  [configuration and credentials](spec/configuration-and-credentials.md#derived-session-workspace-roots),
+  which is what keeps the set of roots the daemon can open a property of
+  deployment configuration alone. Two operations are anticipated on that
+  mechanism and are inexpressible today: a session bound to several workspaces
+  at once, and an operator moving or pinning a session's workspace deliberately.
+  Both are explicit rebinds of the per-session instance rather than anything
+  derived from placement — they compose with runner placement without being
+  selected by it, and the workspace portability question under
+  [scheduling and runners](#scheduling-and-runners) owns carrying a workspace
+  between runners rather than rebinding one inside a daemon. Deciding them needs
+  what names a further root without letting a session name a path, how the
+  isolation comparisons that today refuse a directory shared between two
+  sessions read across several roots one session holds, and what a rebind owes
+  executors already retained against the previous root. Recorded as a design
+  question rather than a blocker; the one-root-per-session derivation remains
+  correct until it is answered. (S15)
 
 ## Identity, credentials, and resource governance
 

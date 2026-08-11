@@ -12,6 +12,9 @@ and which of them changes its resolved approval, are re-verified against this PR
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
 
+The derivation of each session's workspace root from the configured root is
+verified against this PR (`agent/per-session-workspaces`).
+
 The execution family's permission defaults and the confinement its bubblewrap
 profile does and does not provide are verified against this PR
 (`agent/exec-sandbox-net-fence`).
@@ -173,21 +176,23 @@ catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic,
 OpenAI, or GitHub transport construction fails startup at the `Configuration`
 phase, before any database contact. A present invalid static tool mapping fails
 during that same pre-database configuration pass. After the database connects,
-an invalid workspace root or any failed tool-suite construction also fails at
-the `Configuration` phase. All tool dependencies are supplied by parsed
-configuration, the already-constructed database pool, or explicit credential and
-transport values; no tool family discovers ambient authority. Startup and
-shutdown logs carry the phase, an operator failure class, and small typed fields
-where present (session and turn ids, recovered-turn count, grace-window seconds)
-— never configuration values, paths, or URLs. The typed configuration error does
-not survive to the log: `run_hub` collapses every catalog-parse and
-adapter-construction variant (and likewise connection and migration errors) into
-a generic `Infrastructure` class carrying only its phase, so an operator cannot
-distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The six unconditional deployment paths are accepted
-without I/O at environment parsing time; both catalogs and every template prompt
-file are read during startup. No credential file is read at startup (see
-credential lifecycle below).
+an invalid configured workspace root or any failed tool-suite construction also
+fails at the `Configuration` phase. A derived per-session root is composed on
+first use rather than at startup, so its failures are per-session tool failures
+described under [the mapping registry](#derived-session-workspace-roots). All
+tool dependencies are supplied by parsed configuration, the already-constructed
+database pool, or explicit credential and transport values; no tool family
+discovers ambient authority. Startup and shutdown logs carry the phase, an
+operator failure class, and small typed fields where present (session and turn
+ids, recovered-turn count, grace-window seconds) — never configuration values,
+paths, or URLs. The typed configuration error does not survive to the log:
+`run_hub` collapses every catalog-parse and adapter-construction variant (and
+likewise connection and migration errors) into a generic `Infrastructure` class
+carrying only its phase, so an operator cannot distinguish an unreadable catalog
+from an unknown field, bad version, or invalid limit (see Open edges). The six
+unconditional deployment paths are accepted without I/O at environment parsing
+time; both catalogs and every template prompt file are read during startup. No
+credential file is read at startup (see credential lifecycle below).
 
 The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
 constructs each adapter with its defaults. The
@@ -619,19 +624,192 @@ symlink to its canonical regular-file path and passes that canonical path to the
 execution suite, which pins the program during construction; the daemon never
 derives it from its own executable path.
 
-The root is opened once during tool construction and its pinned authority is
-cloned into both workspace suites. The local Git suite independently binds that
-same root and requires a direct main worktree whose `.git` directory is inside
-the root. The three execution tools bind that root and share the one pinned
-supervisor runner. A nonexistent, non-directory, final-symlink, non-repository,
-linked, or externally administered root therefore fails startup for the complete
-mapped composition. The mapping-free base composition admits no root and
-constructs no Git or execution suite, so existing base-only deployments remain
-valid. The GitHub policy admits exactly `https://api.github.com:443` for
-authenticated requests. The code-host `change_request_ci_job_log` operation
-retains the tool-loop-owned exception for one credential-free download from its
-validated, pinned, bounded public HTTPS redirect destination; the pull-request
-suite has no such exception. Model arguments cannot widen either admission rule.
+The configured root is opened once during tool construction and its pinned
+authority is cloned into both workspace suites. The local Git suite
+independently binds that same root and requires a direct main worktree whose
+`.git` directory is inside the root. The three execution tools bind that root
+and share the one pinned supervisor runner. A nonexistent, non-directory,
+final-symlink, non-repository, linked, or externally administered configured
+root, or one with no lexical final component for the per-session derivation
+below to append its suffix to, therefore fails startup for the complete mapped
+composition. The mapping-free base composition admits no root and constructs no
+Git or execution suite, so existing base-only deployments remain valid.
+
+<a id="derived-session-workspace-roots"></a>
+
+Each session binds its own workspace root, derived from the configured root by a
+fixed formula: the derived root is `<name>.sessions/<session identifier>` beside
+the configured root, where `<name>` is the configured root's own final path
+component and the session identifier is its UUID text. A session names no path
+and no configuration field or durable column supplies one, so the set of roots
+the daemon can open is fixed by the configured root alone. The derived parent is
+a sibling of the configured root rather than a child, because a per-session root
+inside the configured root would be readable, writable, and executable by every
+session still bound to the configured root. One root per session, and derivation
+from the configured root alone, are properties of this version rather than
+permanent limits; several bound roots per session and explicit operator rebinds
+are routed through [tool safety](../open-questions.md#tool-safety).
+
+Provisioning that directory is deployment work: creating a direct main worktree
+there is what makes a session use it. Only a reported absence at the derived
+path is unprovisioned, and such a session binds the configured root exactly as
+every session did before this derivation, so an unprovisioned deployment is
+unchanged. A present non-directory, a symlink, or a path the daemon cannot
+classify at all is a misprovisioned session rather than an unprovisioned one and
+fails closed. This decides the sessions whose binding is still open; a session
+that already bound the configured root is governed by the recorded-binding rule
+below instead.
+
+The derived parent is classified the same way and before the session's own
+directory, because it is the one intermediate component this derivation
+introduces and every no-follow open after it declines to follow only the
+component it names. A symlink standing at the parent would otherwise be followed
+by all of them, placing every derived root wherever it points — inside the
+configured root, say, where every session still bound to that root can read,
+write, and execute it. A parent that is itself one of the configured
+composition's directories is refused for the same reason: `<name>.sessions`
+bind-mounted onto the configured root presents a real directory rather than a
+symlink, so the classification admits it while every child beneath it is nested
+inside the configured workspace — which the bound pair cannot show, since
+ancestry is not equality. The pinned and the standing configured pairs are both
+compared, since the configured pathname is never re-resolved. A composed
+workspace that is the parent itself, rather than a directory inside it, is
+refused on the same comparison: a session's identifier directory bind-mounted
+onto that parent composes to the directory holding every sibling session's root,
+which neither the configured comparison nor another session's bound pair can
+show. Either composed directory standing on the parent is refused, since a
+`.git` there nests the siblings inside this session's administration directory
+just as a root there nests them inside its worktree. An accepted residual: a
+parent that is a real directory whose contents are a bind mount of a tree inside
+the configured root presents no symlink and no shared directory identity, and is
+admitted.
+
+Classifying the parent is a statement about one instant, so its identity is
+captured with that classification and revalidated wherever the pathname is
+walked again: once the composition has built, and on every later request. The
+identity is recorded beside the pair the session bound and compared apart from
+it, because a parent is traversed rather than bound — two sessions legitimately
+share one, so it is never a collision, while a different directory standing
+there means the pathname no longer leads where it led when the session bound. A
+parent renamed away and replaced, with the session's own directory moved under
+the replacement, leaves both bound directories intact at the same pathname and
+is caught by this comparison alone. An accepted residual: a replacement undone
+between two adjacent comparisons is not distinguished, which would require
+holding the parent descriptor and resolving every family's root relative to it.
+
+The configured root must have a lexical parent and final component, since the
+formula appends the suffix to that component. A root without one —
+`/srv/workspace/child/..` is absolute, is accepted by the mapping registry, and
+can name a valid worktree — is rejected at composition rather than treated as a
+deployment where every session is unprovisioned, which would silently return
+every session to the one shared root this derivation exists to replace.
+
+Which root a session bound is recorded the first time it invokes a
+workspace-root-bound tool and does not change for the process's lifetime. A
+session that bound the configured root is not moved onto a directory provisioned
+later, and is not failed by a misprovisioned entry appearing there either: it
+never opens that pathname, so nothing arriving at it is reachable by that
+session or can change the tree it already uses. A session that bound a derived
+root is never returned to the configured root by that directory's removal: its
+next request fails closed instead. The first record written wins, so two
+concurrent first requests for one session converge on one root rather than the
+later one overwriting the earlier. Convergence covers the request that observed
+nothing: a probe taken before the state lock can report an absence that a
+concurrent first request has already resolved by binding a derived root, and the
+resuming request retakes the probe under the lock rather than failing on the
+stale observation. A directory that is genuinely absent reads identically, so
+the retaken probe is what distinguishes them, and a removal still fails the next
+request closed.
+
+A derived record names the filesystem identities of the worktree and of the
+`.git` directory inside it, not only the fact that a derived root was bound, so
+a different directory standing at the same pathname is refused rather than
+resumed as though it were the same workspace. Two identities rather than one
+because a workspace is a worktree and a repository: two roots exposing one
+`.git` are one workspace even where the roots differ. Every request revalidates
+the pathname against that record before dispatching, including a request served
+from a retained composition, so a removed or replaced directory fails the next
+request rather than being reached through a descriptor pinned to the directory
+it replaced. The same request also remakes the comparison against the configured
+root described below, because admission is not a durable answer: the configured
+composition is never re-resolved, so what its pathname names can change after a
+session was admitted, and a retained composition returned on the strength of the
+comparison made at admission would leave both reaching one tree under separate
+serialization domains. A request binding the configured root remakes that
+comparison too, against every other session's derived record, since the same
+replacement is reachable from the configured composition and comparing only on
+the derived branch would protect only the requests taking it. A deployment where
+no session was ever provisioned a root of its own has nothing to compare and
+captures nothing.
+
+The record holds one session identity, one discriminant, and those identities,
+so it is kept apart from the descriptor-holding composition and is never
+evicted. A daemon restart clears it, after which a removed directory again reads
+as unprovisioned.
+
+A derived root is opened, layout-checked, and supervisor-bound the first time
+that session invokes a workspace-root-bound tool, not at startup, because no
+session exists at startup. Every family in one composition resolves the same
+pathname, so the root's filesystem identity is captured on both sides of the
+composition and compared: a pathname that did not resolve to one directory
+throughout rejects the whole composition rather than leaving one family bound to
+a directory and another to its replacement. The pair a composition records is
+the one its Git suite pinned, which that suite accepted on either side of its
+own repository open, rather than a further resolution of the pathname once the
+composition is built: an administration directory replaced between the
+repository open and that later resolution would otherwise be recorded while the
+Git executor stays bound to the repository it opened. The Git suite's worktree
+root is compared against the pathname every other family resolved, so a Git
+suite bound elsewhere rejects the composition. The composed executors are
+retained per session under a bound of eight, the least recently used idle entry
+released first, which is what keeps open descriptors and pinned repositories
+finite. A set a request is still holding is never released to make room, because
+releasing it would let that session's next request compose a second set beside
+the one already mutating its tree. The retained set may therefore exceed eight
+by the number of sessions executing a workspace-bound tool at that moment. That
+excess drains rather than persisting: each retention releases idle entries until
+the set is back under the bound, so one burst of concurrent sessions does not
+leave it permanently above.
+
+Isolation is checked against the directories rather than the pathname, since two
+pathnames can name one workspace: a composed root either of whose directories is
+either directory of the configured root or of one another session already bound
+is refused. Every pairing is compared rather than worktree against worktree and
+administration against administration alone, because one composition's worktree
+root can be the directory another administers — a nested repository exposed by a
+bind mount — and the first composition's mutation and execution tools would
+otherwise write the second's repository administration state. The configured
+composition is compared both as it pinned itself at startup and as its pathname
+resolves now, since it is the one binding no later request re-resolves: its
+worktree descriptor is pinned, but its mutation and execution tools reach `.git`
+through that descriptor by name, so a `.git` renamed and recreated under it is
+reachable from the configured root while the pinned pair still names the
+displaced one. A configured pathname whose pair cannot be captured at all fails
+the request closed rather than falling back to the pinned pair: the configured
+adapter still holds its root descriptor and still reaches whatever stands under
+it, so a failed capture is less than the comparison needs rather than more, and
+comparing against the startup pair alone would admit exactly the sharing the
+comparison exists to refuse. An accepted residual: a filesystem may reuse a
+device and inode pair after the directory that held them is removed, so a
+derived directory removed and recreated while its composition is not retained
+can present the identities the record names. Distinguishing that would require
+holding a descriptor for every session ever bound, which is the descriptor
+growth the retained bound exists to prevent. Failure to compose or bind a
+derived root — an unopenable directory, a rejected repository layout, a root
+replaced during composition or since the session bound it, a root reached
+through a parent that is no longer the classified one, a root shared with
+another session or with the configured root, a configured root whose own
+directories could not be captured to decide that sharing, or a repository whose
+object format disagrees with the one the process-lifetime catalog compiled —
+closes that tool request as a known failure whose sanitized detail names the
+closed reason. No second operator event is emitted for it: the tool loop's
+single failed-attempt admission site owns that telemetry, and the reason travels
+in the durable result. It never falls back to another root. The GitHub policy
+admits exactly `https://api.github.com:443` for authenticated requests. The
+code-host `change_request_ci_job_log` operation retains the tool-loop-owned
+exception for one credential-free download from its validated, pinned, bounded
+public HTTPS redirect destination; the pull-request suite has no such exception.
+Model arguments cannot widen either admission rule.
 
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
@@ -696,12 +874,12 @@ The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
 `/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
 `/nix/store`, `/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and
 `/etc/ssl`, each where it is present. It does not bind `/etc/resolv.conf`. It
-binds the configured workspace root read-write at `/workspace`, read-only binds
-the pinned execution supervisor — a host path that need not lie under that root
-— at `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
-requested directory beneath it. The child environment is cleared and then set to
-`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
-through the supervisor.
+binds the calling session's bound workspace root read-write at `/workspace`,
+read-only binds the pinned execution supervisor — a host path that need not lie
+under that root — at `/signalbox-exec-dispatch`, and changes directory to
+`/workspace` or to the requested directory beneath it. The child environment is
+cleared and then set to `LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every
+command is dispatched through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:

@@ -43,7 +43,7 @@ pub use arguments::{
     GitBranchCreateArguments, GitBranchSwitchArguments, GitCommitArguments, GitDiffArguments,
     GitLogArguments, GitStageArguments, GitStatusArguments, InvalidGitArguments,
 };
-pub use catalog::LocalGitTools;
+pub use catalog::{GitObjectFormat, LocalGitTools, PinnedRepositoryDirectories};
 pub use construction::LocalGitToolsConstructionError;
 pub use executor::{LocalGitExecutor, LocalGitExecutorError};
 pub use identity::{GitIdentity, InvalidGitIdentity};
