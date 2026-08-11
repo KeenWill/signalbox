@@ -45,9 +45,11 @@ use crate::{
     },
     commit_failure_is_ambiguous,
     mapping::{
-        ToolApprovalDecisionSourceStorageKind, dangerous_tool_auto_approval_from_str,
-        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
-        session_id_to_uuid, tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
+        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+        tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
@@ -2382,21 +2384,24 @@ pub(crate) async fn load_attempts_by_id(
 }
 
 fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryError> {
-    match required::<String>(row, "terminal_disposition_kind")?.as_str() {
-        "completed" => match required::<String>(row, "result_content_kind")?.as_str() {
-            "text" => Ok(ToolAttemptEnd::Completed {
-                result: ToolResultContent::Text(
-                    ToolResultText::try_new(required(row, "result_text")?)
-                        .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
-                ),
-            }),
-            value => Err(ToolLoopCorruption::Unsupported {
-                field: "result_content_kind",
-                value: value.to_owned(),
+    let stored_disposition = required::<String>(row, "terminal_disposition_kind")?;
+    match tool_attempt_disposition_from_str(&stored_disposition) {
+        Some(ToolAttemptDispositionStorageKind::Completed) => {
+            match required::<String>(row, "result_content_kind")?.as_str() {
+                "text" => Ok(ToolAttemptEnd::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(required(row, "result_text")?)
+                            .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
+                    ),
+                }),
+                value => Err(ToolLoopCorruption::Unsupported {
+                    field: "result_content_kind",
+                    value: value.to_owned(),
+                }
+                .into()),
             }
-            .into()),
-        },
-        "known_failed" => {
+        }
+        Some(ToolAttemptDispositionStorageKind::KnownFailed) => {
             let kind = decode_error_kind(&required::<String>(row, "error_kind")?)?;
             let detail = row
                 .try_get::<Option<String>, _>("error_detail")?
@@ -2409,14 +2414,19 @@ fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryE
                 error: ToolExecutionError::new(kind, detail),
             })
         }
-        "awaiting_child" => Ok(ToolAttemptEnd::AwaitingChild {
-            spawning_request: tool_request_id_from_uuid(required(row, "wait_spawning_request_id")?),
-            child: session_id_from_uuid(required(row, "wait_child_session_id")?),
-        }),
-        "ambiguous" => Ok(ToolAttemptEnd::Ambiguous),
-        value => Err(ToolLoopCorruption::Unsupported {
+        Some(ToolAttemptDispositionStorageKind::AwaitingChild) => {
+            Ok(ToolAttemptEnd::AwaitingChild {
+                spawning_request: tool_request_id_from_uuid(required(
+                    row,
+                    "wait_spawning_request_id",
+                )?),
+                child: session_id_from_uuid(required(row, "wait_child_session_id")?),
+            })
+        }
+        Some(ToolAttemptDispositionStorageKind::Ambiguous) => Ok(ToolAttemptEnd::Ambiguous),
+        None => Err(ToolLoopCorruption::Unsupported {
             field: "terminal_disposition_kind",
-            value: value.to_owned(),
+            value: stored_disposition,
         }
         .into()),
     }
@@ -2603,7 +2613,7 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
         ToolAttemptEnd::Completed {
             result: ToolResultContent::Text(text),
         } => (
-            "completed",
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
             Some("text"),
             Some(text.as_str()),
             None,
@@ -2612,7 +2622,7 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
             None,
         ),
         ToolAttemptEnd::KnownFailed { error } => (
-            "known_failed",
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::KnownFailed),
             None,
             None,
             Some(encode_error_kind(error.kind())),
@@ -2624,7 +2634,7 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
             spawning_request,
             child,
         } => (
-            "awaiting_child",
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::AwaitingChild),
             None,
             None,
             None,
@@ -2632,7 +2642,15 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
             Some(tool_request_id_to_uuid(*spawning_request)),
             Some(session_id_to_uuid(*child)),
         ),
-        ToolAttemptEnd::Ambiguous => ("ambiguous", None, None, None, None, None, None),
+        ToolAttemptEnd::Ambiguous => (
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Ambiguous),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
     }
 }
 

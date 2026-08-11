@@ -56,7 +56,7 @@ impl GitPushTransport for RecordingPushTransport {
 }
 
 #[test]
-fn push_contract_requires_confirmation() {
+fn push_contract_requires_non_overridable_confirmation() {
     let fixture = Fixture::new();
     let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
         .expect("configured remote is admitted");
@@ -75,7 +75,7 @@ fn push_contract_requires_confirmation() {
 
     assert_eq!(
         definition.permission_default(),
-        ToolPermissionDefault::Confirm
+        ToolPermissionDefault::AlwaysConfirm
     );
     assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
 }

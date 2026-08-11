@@ -50,7 +50,8 @@ pub(super) const MAX_MERGE_HEAD_BYTES: usize = MAX_MERGE_PARENTS * 65;
 
 pub(super) const MAX_WORKTREE_PATH_BYTES: usize = 4 * 1024 * 1024;
 
-pub(super) const MAX_STATUS_ENTRIES: usize = 128;
+/// Maximum number of status entries returned by one tool call.
+pub const MAX_STATUS_ENTRIES: usize = 128;
 
 pub(super) const MAX_STATUS_PATH_BYTES: usize = 1024;
 
@@ -62,7 +63,8 @@ pub(super) const MAX_LOG_IDENTITY_BYTES: usize = 256;
 
 pub(super) const MAX_LOG_MESSAGE_BYTES: usize = 2048;
 
-pub(super) const MAX_DIFF_BYTES: usize = 128 * 1024;
+/// Maximum number of diff bytes returned by one tool call.
+pub const MAX_DIFF_BYTES: usize = 128 * 1024;
 
 pub(super) const GITLINK_MODE: u32 = 0o160000;
 
