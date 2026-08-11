@@ -389,6 +389,10 @@ async fn a_mint_under_repeatable_read_is_admitted() -> Result<(), Box<dyn Error>
 /// past it, so exactly one survives.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+/// Both commits are polled together. The deferred key is rechecked at commit,
+/// so the first committer blocks on the other transaction's uncommitted index
+/// entry until that transaction resolves; awaiting the commits in sequence
+/// leaves the second one unpolled and the test hangs rather than failing.
 async fn only_one_of_two_simultaneous_mints_for_one_name_commits() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
@@ -415,12 +419,16 @@ async fn only_one_of_two_simultaneous_mints_for_one_name_commits() -> Result<(),
     )
     .await?;
 
-    holder.commit().await?;
-    let contended = tokio::time::timeout(Duration::from_secs(10), contender.commit()).await?;
+    let (held, contended) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(10), holder.commit()),
+        tokio::time::timeout(Duration::from_secs(10), contender.commit()),
+    );
+    let held = held?;
+    let contended = contended?;
 
     assert!(
-        contended.is_err(),
-        "both simultaneous mints of one name committed"
+        held.is_ok() != contended.is_ok(),
+        "exactly one of two simultaneous mints of one name must commit"
     );
     assert_counts_agree(
         live_mints(&pool).await?,
@@ -886,12 +894,8 @@ async fn a_workspace_root_aliasing_another_spelling_is_refused() -> Result<(), B
     let (_container, pool) = migrated_postgres().await?;
 
     assert_aliasing_root_is_refused(&pool, workspace_id(1), "/srv/signalbox/workspace/.").await?;
-    assert_aliasing_root_is_refused(
-        &pool,
-        workspace_id(2),
-        "/srv/signalbox/nested/../workspace",
-    )
-    .await?;
+    assert_aliasing_root_is_refused(&pool, workspace_id(2), "/srv/signalbox/nested/../workspace")
+        .await?;
     assert_aliasing_root_is_refused(&pool, workspace_id(3), "/srv//signalbox/workspace").await?;
     assert_aliasing_root_is_refused(&pool, workspace_id(4), "/srv/signalbox/workspace/").await?;
     Ok(())
@@ -990,8 +994,11 @@ async fn the_destination_predicate_agrees_with_the_domain_newtype() -> Result<()
     assert_url_predicate_agrees(&pool, "https://user:token@example.test/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://@example.test/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://user@example.test:8443/project.git").await?;
-    assert_url_predicate_agrees(&pool, "https://example.test/project.git?access_token=secret")
-        .await?;
+    assert_url_predicate_agrees(
+        &pool,
+        "https://example.test/project.git?access_token=secret",
+    )
+    .await?;
     assert_url_predicate_agrees(&pool, "https://example.test/project.git?a=1").await?;
     assert_url_predicate_agrees(&pool, "https://example.test?a=1").await?;
     assert_url_predicate_agrees(&pool, "https://example.test/project.git#fragment").await?;

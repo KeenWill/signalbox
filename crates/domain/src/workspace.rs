@@ -175,8 +175,16 @@ impl WorkspaceOrigin {
     /// Only an operator-registered workspace is a new authority scope, so this
     /// is the test a grant-minting path applies rather than matching the
     /// variant at each site.
+    ///
+    /// Both variants are enumerated rather than matched against one pattern.
+    /// A further minting tier is committed, and an implicit wildcard would
+    /// classify it as carrying no human act by default — the safe-looking
+    /// answer that silently widens what may be minted without review.
     pub const fn is_operator_registered(self) -> bool {
-        matches!(self, Self::OperatorRegistered)
+        match self {
+            Self::OperatorRegistered => true,
+            Self::DaemonDerived => false,
+        }
     }
 }
 
