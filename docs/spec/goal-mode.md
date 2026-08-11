@@ -76,12 +76,11 @@ and a consumer reading the authority a turn ran under reads that generation and
 not the session's current one, so a supersession while the turn is parked cannot
 broaden what that consumer sees. A turn the goal machinery did not schedule
 carries no such record, and a goal session runs those too. Such a turn reads the
-session's goal only when three conditions hold together: the lineage has exactly
-one generation, so no supersession can have broadened it; that generation is
-still open, so a goal already stopped or achieved supplies no statement; and the
-commission was accepted strictly before the turn, so a goal attached after the
-turn existed cannot authorize it retroactively. Any other shape resolves to no
-statement, leaving the consumer to treat the authority as unsettled.
+session's goal only when two conditions hold together: the lineage has exactly
+one generation, so no supersession can have broadened it; and that generation is
+still open, so a goal already stopped or achieved supplies no statement. Any
+other shape resolves to no statement, leaving the consumer to treat the
+authority as unsettled.
 
 **Implemented behavior.** That resolution decides what a consumer reads, not
 what it commits. A consumer that reads the authority, performs work, and commits
@@ -240,6 +239,19 @@ for. A consumer holding a statement across a long operation can commit after the
 generation closed. Future work binding the read to the commit must do so without
 making goal state part of a durable judge binding that deliberately excludes it,
 and must decide whether a generation closing mid-operation escalates or refuses.
+
+**Committed unimplemented functionality.** No present surface binds a turn the
+goal machinery did not schedule to the generation it runs under. A generation
+attached after such a turn already existed is therefore still readable by it,
+and the one-generation and open conditions do not exclude that case. Ordering
+the commission before the turn would, but a turn's acceptance position is also
+its execution order, so commissioning first makes a dispatched session act
+before its triggering event arrives — a worse defect than the one it closes. The
+structural answer is to let the dispatched work turn carry a recorded
+generation, which requires relaxing the constraints that forbid a goal turn on
+an input carrying a command and force a goal turn's input to equal its statement
+verbatim. Until then the exposure is bounded by the statement being prompt
+context feeding an escalation instruction rather than a commit gate.
 
 ## Open edges
 

@@ -11,7 +11,7 @@ use signalbox_domain::{
     ActiveTurnPhase, DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
     FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalStatement, ModelCallId,
     ModelTargetCatalog, ProviderModelIdentity, ProviderReportedTokenUsage, ResolvedProviderTarget,
-    SessionId, SessionInputPosition, SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture,
+    SessionId, SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture,
     ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
@@ -24,9 +24,8 @@ use crate::{
         ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
         approval_judge_recommendation_to_str, approval_judge_state_from_str,
         approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
-        approval_judge_terminal_disposition_to_str, input_position_from_numeric,
-        positive_u64_from_numeric, session_id_to_uuid, tool_approval_decision_source_to_str,
-        tool_request_id_to_uuid, turn_id_to_uuid,
+        approval_judge_terminal_disposition_to_str, positive_u64_from_numeric, session_id_to_uuid,
+        tool_approval_decision_source_to_str, tool_request_id_to_uuid, turn_id_to_uuid,
     },
     model_execution::{lock_session, resolve_session_credential},
     outbox::{self, OutboxEvent},
@@ -778,14 +777,20 @@ async fn load_session_authority_context(
 /// dispatched work is not itself a goal turn. Refusing every such turn would
 /// leave the judge deciding a dispatched session's requests with no statement
 /// of the authority that session was created under, so such a turn resolves
-/// against the lineage under three conditions, all of which must hold.
+/// against the lineage under two conditions, both of which must hold.
 ///
 /// The lineage has exactly one generation, so no supersession can have
-/// broadened what the judge reads. That generation is still open, so a goal
-/// already stopped or achieved supplies no statement. And the commission was
-/// accepted strictly before the judged turn, so a goal attached after the turn
-/// existed cannot retroactively authorize it. Anything else resolves to no
-/// statement and the judge escalates.
+/// broadened what the judge reads. And that generation is still open, so a goal
+/// already stopped or achieved supplies no statement. Anything else resolves to
+/// no statement and the judge escalates.
+///
+/// A goal attached after the judged turn already existed still resolves here.
+/// Ordering the commission before the turn would prove it did not, but under
+/// this schema a turn's acceptance position is also its execution order, so
+/// commissioning first makes a dispatched session act on the statement before
+/// its triggering event arrives. Binding the dispatched work turn to the
+/// generation is the structural answer and is committed unimplemented
+/// functionality.
 ///
 /// This runs while the judge is prepared, and the statement it yields is
 /// carried on the prepared binding rather than re-read at completion. A
@@ -819,99 +824,24 @@ async fn load_judged_turn_goal(
     let goal = load_goal_from_connection(&mut *connection, session)
         .await
         .map_err(map_goal_error)?;
-    let order = UnrecordedTurnOrder {
-        commissioned_at: load_acceptance_position(
-            &mut *connection,
-            "SELECT lifecycle.acceptance_position
-               FROM goal_turn AS commissioning
-               JOIN turn_lifecycle AS lifecycle
-                 ON lifecycle.session_id = commissioning.session_id
-                AND lifecycle.turn_id = commissioning.turn_id
-              WHERE commissioning.session_id = $1
-                AND commissioning.source_event_ordinal IS NOT NULL
-              ORDER BY lifecycle.acceptance_position
-              LIMIT 1",
-            session,
-            None,
-        )
-        .await?,
-        judged_at: load_acceptance_position(
-            &mut *connection,
-            "SELECT lifecycle.acceptance_position
-               FROM turn_lifecycle AS lifecycle
-              WHERE lifecycle.session_id = $1
-                AND lifecycle.turn_id = $2",
-            session,
-            Some(turn),
-        )
-        .await?,
-    };
     match goal {
         None if recorded.is_some() => {
             Err(ApprovalJudgeCorruption::Missing("judged turn goal").into())
         }
         None => Ok(None),
-        Some(goal) => Ok(judged_turn_goal_statement(
-            goal.generations(),
-            recorded,
-            order,
-        )?),
-    }
-}
-
-/// Reads one durable acceptance position, absent when the row does not exist.
-async fn load_acceptance_position(
-    connection: &mut PgConnection,
-    query: &'static str,
-    session: SessionId,
-    turn: Option<TurnId>,
-) -> Result<Option<SessionInputPosition>, ApprovalJudgeRepositoryError> {
-    let mut statement = sqlx::query_scalar::<_, Decimal>(query).bind(session_id_to_uuid(session));
-    if let Some(turn) = turn {
-        statement = statement.bind(turn_id_to_uuid(turn));
-    }
-    statement
-        .fetch_optional(&mut *connection)
-        .await?
-        .map(|value| {
-            input_position_from_numeric(value)
-                .map_err(|_| ApprovalJudgeCorruption::Inconsistent("judged turn acceptance"))
-        })
-        .transpose()
-        .map_err(Into::into)
-}
-
-/// Where the lineage's commission and the judged turn were each accepted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct UnrecordedTurnOrder {
-    commissioned_at: Option<SessionInputPosition>,
-    judged_at: Option<SessionInputPosition>,
-}
-
-impl UnrecordedTurnOrder {
-    /// Whether the commission is durably earlier than the judged turn.
-    ///
-    /// Strictly earlier: a commission accepted at the same position as the
-    /// turn it would authorize is not evidence that the turn ran under it, and
-    /// a missing position on either side is no evidence at all.
-    const fn commission_precedes_judged_turn(self) -> bool {
-        match (self.commissioned_at, self.judged_at) {
-            (Some(commissioned), Some(judged)) => commissioned.as_u64() < judged.as_u64(),
-            _ => false,
-        }
+        Some(goal) => Ok(judged_turn_goal_statement(goal.generations(), recorded)?),
     }
 }
 
 /// Selects which generation's statement states the judged turn's authority.
 ///
 /// A recorded generation binds exactly. Its absence admits a lineage only when
-/// all three conditions hold together: one generation, still open, commissioned
-/// strictly before the judged turn was accepted. Every other shape resolves to
-/// no statement, which the judge renders as absent and escalates on.
+/// both conditions hold together: one generation, and that generation still
+/// open. Every other shape resolves to no statement, which the judge renders as
+/// absent and escalates on.
 fn judged_turn_goal_statement(
     generations: &[GoalGenerationSnapshot],
     recorded: Option<GoalGeneration>,
-    order: UnrecordedTurnOrder,
 ) -> Result<Option<GoalStatement>, ApprovalJudgeCorruption> {
     match recorded {
         Some(generation) => generations
@@ -922,9 +852,7 @@ fn judged_turn_goal_statement(
                 "judged turn goal generation",
             )),
         None => Ok(match generations {
-            [only] if only.state().is_open() && order.commission_precedes_judged_turn() => {
-                Some(only.statement().clone())
-            }
+            [only] if only.state().is_open() => Some(only.statement().clone()),
             _ => None,
         }),
     }
@@ -1354,32 +1282,12 @@ mod tests {
 
     use signalbox_domain::{
         DurableCommandId, Goal, GoalGeneration, GoalStatement, GoalUserProvenance, SessionId,
-        SessionInputPosition,
     };
     use sqlx::types::Uuid;
 
     use super::{
-        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, UnrecordedTurnOrder,
-        judged_turn_goal_statement,
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, judged_turn_goal_statement,
     };
-
-    /// The dispatch ordering: the goal is commissioned at the session's first
-    /// accepted input, and the work turn it authorizes follows at the second.
-    fn commission_precedes() -> UnrecordedTurnOrder {
-        order(1, 2)
-    }
-
-    /// A goal attached only after the judged turn had already been accepted.
-    fn commission_follows() -> UnrecordedTurnOrder {
-        order(2, 1)
-    }
-
-    fn order(commissioned_at: u64, judged_at: u64) -> UnrecordedTurnOrder {
-        UnrecordedTurnOrder {
-            commissioned_at: SessionInputPosition::try_from_u64(commissioned_at),
-            judged_at: SessionInputPosition::try_from_u64(judged_at),
-        }
-    }
 
     /// A goal commissioned with the given statement, as dispatch commissions it.
     fn commissioned(statement: &str) -> Goal {
@@ -1405,7 +1313,7 @@ mod tests {
         let dispatched = "Dispatched by rule watch-forward: template merge-forward";
         let goal = commissioned(dispatched);
 
-        let resolved = judged_turn_goal_statement(goal.generations(), None, commission_precedes());
+        let resolved = judged_turn_goal_statement(goal.generations(), None);
 
         assert_eq!(resolved, Ok(Some(goal_statement(dispatched))));
     }
@@ -1422,8 +1330,7 @@ mod tests {
             )
             .expect("a pursuing generation admits supersession");
 
-        let resolved =
-            judged_turn_goal_statement(superseded.generations(), None, commission_precedes());
+        let resolved = judged_turn_goal_statement(superseded.generations(), None);
 
         assert_eq!(resolved, Ok(None));
     }
@@ -1441,11 +1348,7 @@ mod tests {
             )
             .expect("a pursuing generation admits supersession");
 
-        let resolved = judged_turn_goal_statement(
-            superseded.generations(),
-            Some(generation(1)),
-            commission_precedes(),
-        );
+        let resolved = judged_turn_goal_statement(superseded.generations(), Some(generation(1)));
 
         assert_eq!(resolved, Ok(Some(goal_statement(original))));
     }
@@ -1454,11 +1357,7 @@ mod tests {
     fn a_recorded_generation_absent_from_the_lineage_is_inconsistent() {
         let goal = commissioned("land the reviewer fixes");
 
-        let resolved = judged_turn_goal_statement(
-            goal.generations(),
-            Some(generation(2)),
-            commission_precedes(),
-        );
+        let resolved = judged_turn_goal_statement(goal.generations(), Some(generation(2)));
 
         assert_eq!(
             resolved,
@@ -1480,47 +1379,7 @@ mod tests {
             )))
             .expect("a pursuing generation admits stopping");
 
-        let resolved =
-            judged_turn_goal_statement(stopped.generations(), None, commission_precedes());
-
-        assert_eq!(resolved, Ok(None));
-    }
-
-    /// A goal attached after the turn existed never governed it, so it cannot
-    /// retroactively authorize what that turn is asking to do.
-    #[test]
-    fn an_unrecorded_turn_refuses_a_goal_commissioned_after_it() {
-        let goal = commissioned("land the reviewer fixes");
-
-        let resolved = judged_turn_goal_statement(goal.generations(), None, commission_follows());
-
-        assert_eq!(resolved, Ok(None));
-    }
-
-    /// Equal positions are not evidence that one preceded the other, so the
-    /// comparison is strict rather than merely non-decreasing.
-    #[test]
-    fn an_unrecorded_turn_refuses_a_commission_at_its_own_position() {
-        let goal = commissioned("land the reviewer fixes");
-
-        let resolved = judged_turn_goal_statement(goal.generations(), None, order(1, 1));
-
-        assert_eq!(resolved, Ok(None));
-    }
-
-    /// Neither position known is no evidence of ordering, so nothing resolves.
-    #[test]
-    fn an_unrecorded_turn_refuses_an_unknown_ordering() {
-        let goal = commissioned("land the reviewer fixes");
-
-        let resolved = judged_turn_goal_statement(
-            goal.generations(),
-            None,
-            UnrecordedTurnOrder {
-                commissioned_at: None,
-                judged_at: None,
-            },
-        );
+        let resolved = judged_turn_goal_statement(stopped.generations(), None);
 
         assert_eq!(resolved, Ok(None));
     }

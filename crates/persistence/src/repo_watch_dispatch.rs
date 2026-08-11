@@ -492,21 +492,6 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(template_digest)
                     .execute(&mut *transaction)
                     .await?;
-                    // The goal is commissioned before the work input is accepted, so
-                    // the authority a dispatched session runs under is durably
-                    // earlier than the turn doing the work. A consumer deciding
-                    // what that turn may do can then check the ordering rather
-                    // than trust that one code path happened to build it that way.
-                    let (goal_command, goal_accepted_input, goal_turn) =
-                        (goal.command().clone(), goal.accepted_input(), goal.turn());
-                    crate::goal::insert_fresh_commissioned_goal(
-                        &mut transaction,
-                        goal_command,
-                        crate::goal_turn::GoalTurnCandidates::new(goal_accepted_input, goal_turn),
-                        select_definition,
-                    )
-                    .await
-                    .map_err(RepoWatchDispatchRepositoryError::GoalCommission)?;
                     crate::submit_input::insert_fresh_initial_input(
                         &mut transaction,
                         initial_input,
@@ -547,6 +532,21 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(turn.as_uuid())
                     .execute(&mut *transaction)
                     .await?;
+                    // The tagged context is accepted first, so a dispatched
+                    // session receives its triggering event before it acts. The
+                    // goal turn follows it rather than preceding it: a goal turn
+                    // scheduled first would run the template against the
+                    // statement alone, before the event it is meant to act on.
+                    let (goal_command, goal_accepted_input, goal_turn) =
+                        (goal.command().clone(), goal.accepted_input(), goal.turn());
+                    crate::goal::insert_fresh_commissioned_goal(
+                        &mut transaction,
+                        goal_command,
+                        crate::goal_turn::GoalTurnCandidates::new(goal_accepted_input, goal_turn),
+                        select_definition,
+                    )
+                    .await
+                    .map_err(RepoWatchDispatchRepositoryError::GoalCommission)?;
                     sessions.push(session);
                 }
                 insert_evaluation(
