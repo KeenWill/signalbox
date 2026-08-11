@@ -362,8 +362,11 @@ complete committed batch. A lost post-commit scheduler nudge remains recoverable
 by the ordinary eligibility sweep.
 
 **Implemented behavior.** The same transaction also commissions that session's
-goal, so no dispatched session is durably visible without a statement of the
-authority it was dispatched under. The statement is synthesized from the
+goal, so no session this version dispatches is durably visible without a
+statement of the authority it was dispatched under. A session dispatched by an
+earlier version carries none, and replaying its recorded evaluation returns it
+unchanged, so a consumer reading dispatched authority treats absence as
+unsettled rather than as evidence. The statement is synthesized from the
 dispatching rule, the resolved template, and that action's typed parameters, and
 states only those facts: rule, template, and either the pull request with its
 head and base branches or the branch with its workflow and conclusion, each in
@@ -393,6 +396,26 @@ follow-up will add purpose-specific durable repository-watch provenance linked
 to `RepoWatchDispatchId`; compatibility requires it to preserve dispatch,
 session, context, and input identities rather than recreate or reinterpret them.
 This paragraph constrains only that future adoption.
+
+**Committed unimplemented functionality.** No present surface backfills a goal
+onto a session an earlier version dispatched. Commissioning happens inside the
+dispatch transaction, and a recorded evaluation replays from its committed batch
+without re-entering that transaction, so an upgraded deployment keeps its
+pre-upgrade dispatched sessions exactly as they were committed: durable,
+replayable, and carrying no statement. A backfill must therefore mint a
+commission against a session whose dispatch transaction is already closed, and
+must leave the recorded batch's identities untouched so replay stays equal.
+
+**Committed unimplemented functionality.** No present surface schedules the
+dispatched work as the goal's own turn. Commissioning schedules a pursuit turn
+of its own, so a dispatched session holds two queued turns against one template:
+the tagged-context turn that does the work, and the goal turn that follows it.
+Once the first reaches a terminal state a pursuing goal makes the second
+runtime-relevant, so a template can receive a second model run for one event. A
+committed follow-up will let the dispatched work turn carry the generation
+itself, which requires relaxing the constraints that forbid a goal turn on an
+input carrying a command and force a goal turn's input to equal its statement
+verbatim.
 
 ## Deduplication, concurrency, and audit
 

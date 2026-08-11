@@ -237,8 +237,9 @@ at most one generation is pursuing or blocked.
 a generation's state when a consumer commits a decision it read that generation
 for. A consumer holding a statement across a long operation can commit after the
 generation closed. Future work binding the read to the commit must do so without
-making goal state part of a durable judge binding that deliberately excludes it,
-and must decide whether a generation closing mid-operation escalates or refuses.
+making goal state part of a durable judge binding that deliberately excludes it.
+What such a consumer should then do is an
+[open question](../open-questions.md#goal-mode).
 
 **Committed unimplemented functionality.** No present surface binds a turn the
 goal machinery did not schedule to the generation it runs under. A generation
