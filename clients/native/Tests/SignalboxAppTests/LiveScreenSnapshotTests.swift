@@ -687,6 +687,22 @@ final class LiveScreenSnapshotTests: XCTestCase {
         )
     }
 
+    /// The legacy canvas comparison reports a deliberately missing canvas.
+    func testTheLegacyCanvasComparisonReportsAMissingCanvas() {
+        XCTAssertFalse(
+            Self.legacyRenderingsMatchTheirDeclaration(
+                rendered: [.iPhonePortrait],
+                declared: [.iPhonePortrait, .iPadPortrait]
+            )
+        )
+        XCTAssertTrue(
+            Self.legacyRenderingsMatchTheirDeclaration(
+                rendered: [.iPhonePortrait, .iPadPortrait],
+                declared: [.iPhonePortrait, .iPadPortrait]
+            )
+        )
+    }
+
     /// The test-case name parser reads the method out of `-[Class testFoo]`.
     func testTheTestCaseNameParserReadsTheMethod() {
         XCTAssertEqual(
@@ -1155,11 +1171,24 @@ final class LiveScreenSnapshotTests: XCTestCase {
     private func verifyThisLegacyTestRenderedEveryDeclaredCanvas() {
         let runningTest = Self.methodName(ofTestCaseName: name)
         guard let declared = Self.legacyDeclaredCanvasesByTest[runningTest] else { return }
-        XCTAssertEqual(
-            legacyRenderings,
-            declared,
-            "\(runningTest) did not render every canvas its declaration promises."
+        XCTAssertTrue(
+            Self.legacyRenderingsMatchTheirDeclaration(
+                rendered: legacyRenderings,
+                declared: declared
+            ),
+            """
+            \(runningTest) did not render every canvas its declaration promises. \
+            Rendered: \(legacyRenderings.map(\.rawValue).sorted()). \
+            Declared: \(declared.map(\.rawValue).sorted()).
+            """
         )
+    }
+
+    static func legacyRenderingsMatchTheirDeclaration(
+        rendered: Set<SnapshotCanvas>,
+        declared: Set<SnapshotCanvas>
+    ) -> Bool {
+        rendered == declared
     }
 
     func assertLegacySnapshot(
