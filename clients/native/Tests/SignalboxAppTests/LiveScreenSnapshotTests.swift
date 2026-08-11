@@ -242,7 +242,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// The names in `claimed` that `defined` does not contain.
     ///
     /// Takes both sides rather than reading them, so that
-    /// `testTheCoverageDetectorsAnswerTheirOwnQuestion` can hand it an input
+    /// `testTheMembershipDetectorReportsAMissingName` can hand it an input
     /// with a known answer. Called only on the suite's real lists, its passing
     /// would say nothing: those lists are consistent today, so an
     /// implementation that returned `[]` unconditionally would be green and the
@@ -409,7 +409,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// reader can tell the two apart without checking either.
     ///
     /// What is deliberately *not* named is the empty and whitespace-only
-    /// reasons in `testTheRefusalReasonCheckRejectsAnEmptyReason`: those are
+    /// reasons in `testTheBlankRefusalDetectorReportsABlankReason`: those are
     /// load-bearing, and the same section says to spell a load-bearing literal
     /// at the assertion.
     private enum ArbitraryClaim {
