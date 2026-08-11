@@ -65,7 +65,14 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
-const MAX_AGGREGATE_WIRE_BYTES: usize = 512 * 1024 * 1024;
+// One polling attempt may transfer this many response bytes. The dogfooded
+// repository exceeds 64 MiB in a single attempt, and the bound fails the
+// attempt rather than shedding, so it has to clear real event volume.
+const MAX_POLL_WIRE_BYTES: usize = 512 * 1024 * 1024;
+// What one poller may retain between attempts, which is per watched repository
+// and therefore multiplies by the configured repository count. Deliberately not
+// raised with the per-attempt bound: transfer is transient, retention is not.
+const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -1705,7 +1712,7 @@ impl PollCache {
     }
 
     fn remaining_poll_wire_bytes(&self) -> Result<usize, RepositoryWatchAttemptError> {
-        MAX_AGGREGATE_WIRE_BYTES
+        MAX_POLL_WIRE_BYTES
             .checked_sub(self.poll_wire_bytes)
             .ok_or(RepositoryWatchAttemptError::ResourceLimit)
     }
@@ -1718,7 +1725,7 @@ impl PollCache {
             .poll_wire_bytes
             .checked_add(wire_bytes)
             .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
-        if projected > MAX_AGGREGATE_WIRE_BYTES {
+        if projected > MAX_POLL_WIRE_BYTES {
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
         self.poll_wire_bytes = projected;
@@ -1767,13 +1774,13 @@ impl PollCache {
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
         let mut projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
-        while projected_bytes > MAX_AGGREGATE_WIRE_BYTES {
+        while projected_bytes > MAX_CACHED_WIRE_BYTES {
             if !self.evict_one_untouched() {
                 break;
             }
             projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
         }
-        if projected_bytes > MAX_AGGREGATE_WIRE_BYTES {
+        if projected_bytes > MAX_CACHED_WIRE_BYTES {
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
         self.resources.insert(
@@ -2214,13 +2221,14 @@ mod tests {
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PullResponse,
-        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse, dispatch_context_json,
-        normalize_checks_outcome, normalize_pull_request_context, object_id, rule_activation_error,
+        MAX_CACHED_WIRE_BYTES, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache,
+        PullResponse, ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead,
+        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchReactionObservation,
+        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchRuntimeConstructionError, ResourceKey, ReviewState, Url, WorkflowName,
+        WorkflowResponse, dispatch_context_json, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, rule_activation_error,
         supervise_repository_tasks,
     };
     use signalbox_domain::{
@@ -3701,7 +3709,7 @@ mod tests {
         let result = cache.insert(
             ResourceKey(CACHE_RESOURCE_KEY.to_owned()),
             EntityTag(ENTITY_TAG.to_owned()),
-            MAX_AGGREGATE_WIRE_BYTES + 1,
+            MAX_CACHED_WIRE_BYTES + 1,
             Vec::<u8>::new(),
         );
 
@@ -3761,7 +3769,7 @@ mod tests {
         let mut cache = PollCache::default();
         cache.begin_poll();
         cache
-            .record_poll_wire_bytes(MAX_AGGREGATE_WIRE_BYTES)
+            .record_poll_wire_bytes(MAX_POLL_WIRE_BYTES)
             .expect("exact aggregate wire bound is accepted");
 
         assert_eq!(
