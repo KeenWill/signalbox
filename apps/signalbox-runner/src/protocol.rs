@@ -1002,7 +1002,7 @@ fn unexpected(expected: MessageKind, observed: &Message) -> RunnerConnectionErro
     })
 }
 
-fn rejected_error(rejected: signalbox_runner_wire::Rejected) -> RunnerConnectionError {
+fn rejected_error(rejected: Rejected) -> RunnerConnectionError {
     RunnerConnectionError::PeerRejected {
         code: rejected.code,
         offending_kind: rejected.offending_kind,

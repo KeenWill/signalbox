@@ -1,3 +1,7 @@
+//! Contract tests for the `read_file`, `list_directory`, `glob_files`, and
+//! `search_files` tool definitions: schema-rendered path, pattern, and
+//! result-bound properties.
+
 use std::fs;
 
 use serde_json::json;

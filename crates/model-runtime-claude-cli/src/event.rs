@@ -9,8 +9,9 @@ use signalbox_model_runtime::{
     DiscardedField, ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation,
     ObservationFact, ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
-    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    provider_json_has_duplicate_members, redact_json, redact_text, validate_provider_json_nesting,
+    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_json, redact_text,
+    validate_provider_json_nesting,
 };
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
@@ -46,6 +47,14 @@ pub(crate) struct EventDecoder<C> {
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
+    /// Sticky: the CLI announced at least one `tool_use` block. Set before the
+    /// block is validated, so a call this adapter rejects — an empty or
+    /// duplicate id, a name outside the private MCP namespace, an undeclared
+    /// tool — is still recorded as opened. `proposal_indexes` cannot answer
+    /// for those: the rejection returns before the insert.
+    opened_tool_calls: bool,
+    current_event_examined: bool,
+    undelivered_line: bool,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
     emitted_tool_ids: HashSet<String>,
@@ -93,6 +102,9 @@ impl<C: Clone> EventDecoder<C> {
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
+            opened_tool_calls: false,
+            current_event_examined: false,
+            undelivered_line: false,
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
             emitted_tool_ids: HashSet::new(),
@@ -132,6 +144,9 @@ impl<C: Clone> EventDecoder<C> {
         line: &[u8],
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
+        // Each line is examined on its own merits; nothing carries over except
+        // `opened_tool_calls`, which is sticky by design.
+        self.current_event_examined = false;
         if self.terminal.is_some() {
             return Err(DecodeFailure::stream_protocol(
                 "Claude emitted an event after its terminal result",
@@ -149,6 +164,12 @@ impl<C: Clone> EventDecoder<C> {
         let event_type = value.get("type").and_then(Value::as_str).ok_or_else(|| {
             DecodeFailure::stream_protocol("event has no string `type` discriminator")
         })?;
+        if event_type != "assistant" {
+            // Only an `assistant` event carries content blocks, so for every
+            // other type the discriminator alone settles the tool question: no
+            // tool call can have opened in material of this shape.
+            self.current_event_examined = true;
+        }
         match event_type {
             "system" => self.system(value, sink),
             "assistant" => self.assistant(text, sink),
@@ -313,6 +334,19 @@ impl<C: Clone> EventDecoder<C> {
         self.require_initialized()?;
         let event: AssistantEvent = decode_text(text)?;
         let raw_event: AssistantRawEvent = decode_text(text)?;
+        // Read the tool fact off the decoded content before any check below can
+        // reject the event. The identity, nesting, message-id, and model checks
+        // all return before `assistant_block` runs, so a flag set during the
+        // block walk would miss a call this event plainly announced.
+        self.current_event_examined = true;
+        if event
+            .message
+            .content
+            .iter()
+            .any(|block| matches!(block, AssistantContent::ToolUse { .. }))
+        {
+            self.opened_tool_calls = true;
+        }
         if event.parent_tool_use_id.is_some()
             || event.message.role != "assistant"
             || event.message.id.is_empty()
@@ -440,6 +474,7 @@ impl<C: Clone> EventDecoder<C> {
                 });
             }
             AssistantContent::ToolUse { id, name, input } => {
+                self.opened_tool_calls = true;
                 if id.is_empty() || self.proposal_indexes.contains_key(&id) {
                     return Err(DecodeFailure::stream_protocol(
                         "Claude tool_use carries an empty or duplicate id",
@@ -845,12 +880,65 @@ impl<C: Clone> EventDecoder<C> {
             .collect()
     }
 
-    fn loss(self, cause: LossCause) -> TerminalEvidence {
+    /// Whether a tool call had opened in the events decoded so far.
+    ///
+    /// The adapter classifies every structured CLI event it reads, so the
+    /// negative case is the stated fact rather than an absence.
+    fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else if self.undelivered_line {
+            ToolCallsAtLoss::Unobserved
+        } else {
+            ToolCallsAtLoss::NoneOpened
+        }
+    }
+
+    /// The tool fact for a loss raised by an event that never decoded.
+    ///
+    /// The dividing line is whether *this* event's content was examined, not
+    /// whether it was accepted. A line that failed UTF-8, nesting,
+    /// duplicate-member, JSON, or `type`-discriminator decoding was never
+    /// classified and could itself have been the `tool_use` event, so the
+    /// negative is withheld. An event whose content did decode — every
+    /// non-`assistant` type, whose discriminator alone precludes content
+    /// blocks, and an `assistant` event whose blocks were scanned before the
+    /// semantic checks ran — states the negative, because the adapter read the
+    /// material and no tool call was in it. A tool call an earlier event
+    /// already established outranks both.
+    fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else if self.undelivered_line {
+            ToolCallsAtLoss::Unobserved
+        } else if self.current_event_examined {
+            ToolCallsAtLoss::NoneOpened
+        } else {
+            ToolCallsAtLoss::Unobserved
+        }
+    }
+
+    /// Boundary-loss evidence for a line that never decoded.
+    pub(crate) fn loss_at_decode_failure(self, cause: LossCause) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_decode_failure();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause,
             exchange: self.exchange,
             reported_model: self.reported_model,
             finish_reported: self.finish_reported,
+            tool_calls,
+            usage: self.usage,
+        })
+    }
+
+    fn loss(self, cause: LossCause) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_loss();
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause,
+            exchange: self.exchange,
+            reported_model: self.reported_model,
+            finish_reported: self.finish_reported,
+            tool_calls,
             usage: self.usage,
         })
     }
@@ -973,7 +1061,9 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     }
 
     fn decode_failure(self, _class: CliDecodeFailureClass, detail: String) -> TerminalEvidence {
-        self.boundary_loss(LossCause::StreamProtocolViolation { detail })
+        // Not `boundary_loss`: the failing line was never classified, so the
+        // tool fact is withheld rather than stated negative.
+        EventDecoder::loss_at_decode_failure(self, LossCause::StreamProtocolViolation { detail })
     }
 
     fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
@@ -982,6 +1072,18 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
 
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
         EventDecoder::boundary_loss(self, cause)
+    }
+
+    fn note_undelivered_line(&mut self) {
+        self.undelivered_line = true;
+    }
+
+    fn undelivered_line_loss(mut self, cause: LossCause) -> TerminalEvidence {
+        // The rejected line may itself have been the `assistant` event carrying
+        // a `tool_use` block. Nothing about it was examined, and the previous
+        // event's examination says nothing about this one.
+        self.current_event_examined = false;
+        EventDecoder::loss_at_decode_failure(self, cause)
     }
 
     fn boundary_loss_unless_provider_failure(

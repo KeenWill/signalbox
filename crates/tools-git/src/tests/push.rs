@@ -204,3 +204,32 @@ fn push_receipts_canonicalize_equivalent_object_identifier_spelling() {
 
     assert_eq!(receipt.commit(), fixture.initial.to_string());
 }
+
+/// Guards the subset relation between the durable mint vocabulary and the
+/// reference grammar this executor applies: a name the domain admits but
+/// `gix_validate` refuses would mint a destination that can never resolve.
+///
+/// This test enforces the relation; it does not own it. The owning statement
+/// is `docs/spec/git-authority-threat-model.md`, under "Remote destination
+/// authority", which states the durable vocabulary and how a mint is scoped.
+#[track_caller]
+fn assert_minted_name_builds_a_configured_remote(candidate: &str) {
+    assert!(
+        signalbox_domain::GitRemoteName::try_new(candidate.to_owned()).is_ok(),
+        "the domain refuses {candidate:?}, so this case no longer covers the subset rule"
+    );
+    assert!(
+        ConfiguredGitRemote::try_new(candidate, "https://example.test/namespace/project.git")
+            .is_ok(),
+        "minted remote name {candidate:?} is refused by the push executor"
+    );
+}
+
+#[test]
+fn every_minted_remote_name_builds_a_configured_remote() {
+    assert_minted_name_builds_a_configured_remote("origin");
+    assert_minted_name_builds_a_configured_remote("up-stream_2");
+    assert_minted_name_builds_a_configured_remote("v1.0");
+    assert_minted_name_builds_a_configured_remote("origin.lockfile");
+    assert_minted_name_builds_a_configured_remote("a");
+}
