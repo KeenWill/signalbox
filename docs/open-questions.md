@@ -462,6 +462,18 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
+- **Turn-origin instructions in the approval-judge request.** The delegated
+  request context carries session-scoped authority — the goal generation the
+  judged turn is bound to, the template name, and the system prompt frozen for
+  that turn — but no turn-origin content. A delegation-origin child turn's exact
+  parent-supplied task is therefore not shown, so a child created from a broad
+  template may ask for an effect its delegated task never covered while the
+  judge sees only the wider session authority. Freezing that task alongside the
+  session-level fields is undecided, because each added field is further
+  attacker-influenced text placed inside the judge's own prompt, and the
+  injection posture is what makes any session-derived context admissible at all.
+  Recorded as a design question rather than a blocker; authority the context
+  does not settle escalates rather than approves.
 - **Per-template thread-resolution policy.** Whether a session template may
   choose its own posture toward
   [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog)
