@@ -893,11 +893,16 @@ The read declaration's requested decoded length is charged once by tool-request
 identity to a durable per-turn counter before authorization; replay never
 charges twice, and exceeding 2,097,152 bytes is a typed preparation failure.
 Failed or denied requests do not refund the charge. Store I/O occurs only after
-durable authorization, and a missing or corrupt recorded replica becomes
-content-silent `ExecutionFailed` evidence. The compact result must also fit the
-ordinary 1 MiB text-result bound; admission accounts for JSON and base64
-overhead rather than producing a result that the ordinary result boundary would
-reject.
+durable authorization. A missing or corrupt recorded replica, or a read for
+which no candidate verifies and at least one candidate is unavailable, becomes
+trustworthy content-silent `ExecutionFailed` evidence with the respective exact
+fixed detail `blob_missing`, `blob_corrupt`, or `blob_unavailable`. It resolves
+the logical request and permits the next model round rather than entering the
+effect-free crash-loss path or failing the turn; a later request may retry
+`blob_unavailable` within the remaining per-turn budget. The compact result must
+also fit the ordinary 1 MiB text-result bound; admission accounts for JSON and
+base64 overhead rather than producing a result that the ordinary result boundary
+would reject.
 
 For both web tools, an explicit shipped `Human` posture supersedes the
 declaration's `Confirm` default and the session blanket, so a request parks for

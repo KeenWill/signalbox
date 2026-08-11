@@ -266,7 +266,7 @@ that variant.
 | `append_conversation_import`            | `chunk` (nonempty canonical padded base64 string carrying at most 4 MiB decoded bytes)                                                                                                                                                                                                                        | Append exact source bytes to the import in progress on this connection.                                                                                                                                                                                                                                                                                                         |
 | `commit_conversation_import`            | none                                                                                                                                                                                                                                                                                                          | Verify the assembled size, then convert and idempotently resolve or insert the complete source.                                                                                                                                                                                                                                                                                 |
 | `abort_conversation_import`             | none                                                                                                                                                                                                                                                                                                          | Discard the import in progress on this connection.                                                                                                                                                                                                                                                                                                                              |
-| `begin_blob_upload`                     | `expected_digest` (canonical blob-digest string), `expected_length_bytes` (canonical decimal string)                                                                                                                                                                                                          | Begin one per-connection user-attachment upload or report that the routed store already holds verified bytes.                                                                                                                                                                                                                                                                   |
+| `begin_blob_upload`                     | `expected_digest` (canonical blob-digest string), `expected_length_bytes` (positive canonical decimal string)                                                                                                                                                                                                 | Begin one per-connection user-attachment upload or report that the routed store already holds verified bytes.                                                                                                                                                                                                                                                                   |
 | `append_blob_upload`                    | `chunk` (nonempty canonical padded base64 string carrying at most 4 MiB decoded bytes)                                                                                                                                                                                                                        | Append exact bytes to the blob upload in progress on this connection.                                                                                                                                                                                                                                                                                                           |
 | `commit_blob_upload`                    | none                                                                                                                                                                                                                                                                                                          | Verify, publish, and catalog the assembled blob upload.                                                                                                                                                                                                                                                                                                                         |
 | `abort_blob_upload`                     | none                                                                                                                                                                                                                                                                                                          | Discard the blob upload in progress on this connection.                                                                                                                                                                                                                                                                                                                         |
@@ -896,22 +896,23 @@ source path remains client-local and never appears in a request.
 Blob digest strings are exactly `sha256:` followed by 64 lowercase hexadecimal
 characters. Blob upload admits at most one in-progress upload per connection and
 competes for the process-wide bulk-ingest permit described above. Begin
-validates the declared length against `blob_storage.max_blob_bytes` and
+validates the declared length from 1 through `blob_storage.max_blob_bytes` and
 live-verifies a recorded replica in the routed store before it can return
 `blob_upload_already_present`; a missing or corrupt replica proceeds through
 staged upload repair. Otherwise begin returns `blob_upload_begun` and creates
 disk-backed staging. Append accepts only a nonempty chunk of at most 4 MiB
-decoded bytes and acknowledges the cumulative count. Commit requires that count
-and the streaming digest to match both declarations, then publishes and
-catalogues the blob. Abort, disconnect, or a terminal upload refusal discards
-staging.
+decoded bytes and acknowledges the cumulative count. Commit rejects an empty
+staging file and requires its count and streaming digest to match both
+declarations, then publishes and catalogues the blob. Abort, disconnect, or a
+terminal upload refusal discards staging.
 
 `read_blob_chunk` admits lengths from 1 through 4 MiB. Checked
 `offset_bytes + length_bytes` must not overflow or cross the catalogued byte
 length. The response is exact rather than truncating at end-of-blob. Upload and
-read state, length, digest, and range failures use closed, content-silent
-`invalid_request` detail; an absent digest is `not_found`, storage availability
-is `unavailable`, and an ambiguous catalog commit is `commit_ambiguous`.
+read state, length, digest, and range failures use the exhaustive content-silent
+`invalid_request` details below; an absent digest is `not_found`, storage
+availability is `unavailable`, and an ambiguous catalog commit is
+`commit_ambiguous`.
 
 ## Server messages
 
@@ -1497,9 +1498,32 @@ closed classes are `empty_source`, `blank_line`, `invalid_utf8`, `invalid_json`,
 `invalid_source_metadata`, `invalid_message_envelope`, `invalid_message_role`,
 `message_role_mismatch`, `invalid_message_content`, `invalid_content_block`,
 `invalid_tool_result_block`, `invalid_reasoning`, `invalid_tool_call`, and
-`invalid_tool_result`. Evidence carries no source bytes, text, paths,
-identifiers taken from source, or parser excerpts. Error codes other than
-`rejected` and this import-specific `invalid_request` mapping have no `detail`.
+`invalid_tool_result`.
+
+Blob refusals use `code = "invalid_request"` with exactly one of these required
+typed details: `blob_upload_already_in_progress {}`;
+`blob_upload_not_in_progress {}`;
+`blob_upload_length_out_of_range { min_length_bytes, max_length_bytes, declared_length_bytes }`;
+`blob_upload_size_exceeded { expected_length_bytes, actual_length_bytes }`;
+`blob_upload_length_mismatch { expected_length_bytes, actual_length_bytes }`;
+`blob_upload_digest_mismatch { expected_digest, actual_digest }`;
+`blob_read_length_out_of_range { min_length_bytes, max_length_bytes, requested_length_bytes }`;
+or
+`blob_read_range_out_of_bounds { blob_length_bytes, offset_bytes, length_bytes }`.
+All byte counts use canonical decimal strings and both digest fields use the
+canonical blob spelling. The range detail also represents checked-add overflow.
+The request type identifies which append, commit, abort, or read operation
+failed, so state details carry no duplicate operation discriminator. Begin
+checks its declared-length range before connection state and routed-store
+lookup. Append checks cumulative size after state; commit checks state, then
+actual length, then digest. Read checks requested length, catalog existence, and
+then checked range. Each request reports only the first applicable failure in
+that order.
+
+Conversation-import evidence carries no source bytes, text, paths, identifiers
+taken from source, or parser excerpts; blob evidence carries no blob bytes,
+object key, store name, or locator. Error codes other than `rejected` and these
+conversation-import and blob `invalid_request` mappings have no `detail`.
 
 The protocol error-code set is:
 
@@ -1508,7 +1532,7 @@ The protocol error-code set is:
 | `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                                                                |
 | `unsupported_version` | The frame version is unsupported.                                                                                                      |
 | `invalid_request`     | A boundary value cannot construct the requested application input.                                                                     |
-| `not_found`           | The selected session, named defaults epoch, imported conversation, imported frontier, or review aggregate does not exist.              |
+| `not_found`           | The selected session, named defaults epoch, imported conversation or frontier, review aggregate, or blob does not exist.               |
 | `conflicting_reuse`   | A durable command identity already names different intent.                                                                             |
 | `rejected`            | The canonical command was durably rejected by current typed state, or a request-specific precondition refused it before recording one. |
 | `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                                                        |

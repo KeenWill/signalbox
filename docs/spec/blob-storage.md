@@ -101,6 +101,17 @@ import is enabled, `max_blob_bytes` must be at least
 table follows the version-one catalog grammar and rejects unknown or
 kind-inapplicable fields.
 
+Configured store entries must also name distinct physical namespaces. After
+initializing filesystem roots, startup resolves each opened directory's
+canonical path and `(st_dev, st_ino)` identity and rejects equality on either,
+so symlink, relative-component, and bind-mount aliases cannot manufacture
+replica diversity; an identity that cannot be proved distinct fails startup. For
+S3, the namespace locator is the parsed endpoint's canonical URL serialization
+with default-port and empty-path variance removed, paired with the exact bucket;
+startup rejects a duplicate locator even when store names, namespace UUIDs,
+regions, or credentials differ. One physical namespace is represented by one
+store binding.
+
 A `filesystem` store entry contains exactly `name`, `namespace_id`,
 `kind = "filesystem"`, and an absolute `root_directory`. An `s3` entry contains
 exactly `name`, `namespace_id`, `kind = "s3"`, an absolute HTTP(S) `endpoint`,
