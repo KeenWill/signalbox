@@ -3376,7 +3376,7 @@ async fn s30_inv042_inv044_pending_successor_enrollment_round_trips_and_replays(
         replayed.receipt().authority(),
         RunnerEnrollmentAuthority::ReplacementPending
     );
-    assert_eq!(pending_connection.epoch().get(), 1);
+    assert_eq!(pending_connection.epoch(), active_connection.epoch());
     assert_eq!(resumed.identities(), created.receipt().identities());
     assert_eq!(
         resumed.registration().revision(),
