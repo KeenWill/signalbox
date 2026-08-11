@@ -1,8 +1,8 @@
 # Persistence protocol
 
-The runner connection authority head and durable loss epoch were verified
-against the parent slice (`agent/runner-loss-epoch`). Placement-relative
-lease-offer fencing was verified against this PR
+The runner connection authority head, durable loss epoch, and lease offer/claim
+fences were verified against the parent slice (`agent/runner-loss-epoch`).
+Placement-relative lease-offer fencing was verified against this PR
 (`agent/runner-loss-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
@@ -131,8 +131,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-four files, `202607180001` through
-`202608100001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty-eight files, `202607180001` through
+`202608100002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
