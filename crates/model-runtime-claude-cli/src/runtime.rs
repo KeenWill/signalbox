@@ -1,15 +1,19 @@
 //! One operation, one Claude Code process spawn.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
     AnthropicServiceTier, CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal,
     CliEnvironmentOverride, CliEnvironmentVariable, CliProcessRequest, CodexCliServiceTier,
-    DeliveryMode, FastMode, ModelCapabilityCatalog, ModelOperation, ModelRuntime, ModelSettings,
-    ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationFailure, PreparationOutcome,
-    ProvenUnsentEvidence, ReasoningLevel, ServiceTier, TerminalEvidence, TerminalReport,
-    UnsentCause, execute_cli_process,
+    CredentialAccess, CredentialAccessError, CredentialRedactingSink, CredentialReference,
+    CredentialValue, DeliveryMode, FastMode, ModelCapabilityCatalog, ModelOperation, ModelRuntime,
+    ModelSettings, ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationFailure,
+    PreparationOutcome, ProvenUnsentEvidence, ReasoningLevel, ServiceTier, TerminalEvidence,
+    TerminalReport, UnsentCause, execute_cli_process, redact_evidence,
 };
 use tempfile::TempDir;
 
@@ -19,6 +23,9 @@ use crate::event::EventDecoder;
 use crate::translate::{TranslationError, qualified_tool_name, translate};
 
 const CLAUDE_CONFIG_HOME_VARIABLE: &str = "CLAUDE_CONFIG_DIR";
+/// The sole environment key Claude file-delivery profiles may materialize in
+/// the CLI-owned request settings store.
+pub const CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY: &str = "ANTHROPIC_API_KEY";
 const CLAUDE_ENVIRONMENT: &[CliEnvironmentVariable] = &[
     CliEnvironmentVariable::inherited("ALL_PROXY"),
     CliEnvironmentVariable::credential_home(CLAUDE_CONFIG_HOME_VARIABLE),
@@ -89,12 +96,54 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
 /// literal to update by hand.
 pub const SUPPORTED_CLAUDE_CLI_VERSION: &str = env!("SIGNALBOX_CLAUDE_CLI_VERSION");
 
-/// Stateless subscription-backed Claude Code CLI adapter.
+trait ClaudeCredentialAccess: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        reference: &'a CredentialReference,
+    ) -> Pin<Box<dyn Future<Output = Result<CredentialValue, CredentialAccessError>> + Send + 'a>>;
+}
+
+impl<Credentials> ClaudeCredentialAccess for Credentials
+where
+    Credentials: CredentialAccess,
+{
+    fn resolve<'a>(
+        &'a self,
+        reference: &'a CredentialReference,
+    ) -> Pin<Box<dyn Future<Output = Result<CredentialValue, CredentialAccessError>> + Send + 'a>>
+    {
+        Box::pin(CredentialAccess::resolve(self, reference))
+    }
+}
+
+enum ClaudeCredentialDelivery {
+    Ambient,
+    File {
+        credentials: Arc<dyn ClaudeCredentialAccess>,
+    },
+    Catalog {
+        ambient_reference: Option<CredentialReference>,
+        file_credentials: Arc<dyn ClaudeCredentialAccess>,
+    },
+}
+
+impl std::fmt::Debug for ClaudeCredentialDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Ambient => "Ambient",
+            Self::File { .. } => "File([credential access])",
+            Self::Catalog { .. } => "Catalog([credential access])",
+        })
+    }
+}
+
+/// Stateless Claude Code CLI adapter with ambient or file-delivered authentication.
 pub struct ClaudeCliRuntime {
     executable: PathBuf,
     mcp_bridge_executable: PathBuf,
     working_directory: PathBuf,
-    credential_reference: signalbox_model_runtime::CredentialReference,
+    credential_reference: CredentialReference,
+    credential_delivery: ClaudeCredentialDelivery,
     exchange_timeout: Duration,
     interrupt_grace: Duration,
     event_limit: usize,
@@ -121,6 +170,8 @@ pub struct ClaudeCliPreparedRequest<C> {
     stderr_limit: usize,
     reasoning_effort: Option<&'static str>,
     max_output_tokens: u32,
+    credential: Option<CredentialValue>,
+    credential_home: Option<PathBuf>,
 }
 
 /// Why a [`ClaudeCliRuntime`] could not be constructed.
@@ -146,6 +197,8 @@ pub enum ClaudeCliConstructionError {
     InvalidInterruptGrace,
     /// One of the process-output evidence bounds is zero.
     InvalidOutputLimit,
+    /// File delivery names an environment key other than the adapter contract.
+    InvalidCredentialEnvironmentKey,
 }
 
 impl std::fmt::Display for ClaudeCliConstructionError {
@@ -167,6 +220,9 @@ impl std::fmt::Display for ClaudeCliConstructionError {
             Self::InvalidExchangeTimeout => "exchange timeout must be positive and representable",
             Self::InvalidInterruptGrace => "interrupt grace must be greater than zero",
             Self::InvalidOutputLimit => "event and stderr limits must be greater than zero",
+            Self::InvalidCredentialEnvironmentKey => {
+                "Claude file delivery requires the ANTHROPIC_API_KEY environment key"
+            }
         })
     }
 }
@@ -181,6 +237,7 @@ impl std::fmt::Debug for ClaudeCliRuntime {
             .field("mcp_bridge_executable", &self.mcp_bridge_executable)
             .field("working_directory", &self.working_directory)
             .field("credential_reference", &self.credential_reference)
+            .field("credential_delivery", &self.credential_delivery)
             .field("exchange_timeout", &self.exchange_timeout)
             .field("interrupt_grace", &self.interrupt_grace)
             .field("event_limit", &self.event_limit)
@@ -193,6 +250,58 @@ impl std::fmt::Debug for ClaudeCliRuntime {
 impl ClaudeCliRuntime {
     /// Validates adapter configuration without invoking Claude or inspecting its login store.
     pub fn new(config: ClaudeCliConfig) -> Result<Self, ClaudeCliConstructionError> {
+        Self::new_with_delivery(config, ClaudeCredentialDelivery::Ambient)
+    }
+
+    /// Validates file delivery without reading the credential until request preparation.
+    pub fn new_with_file_delivery<Credentials>(
+        config: ClaudeCliConfig,
+        credentials: Credentials,
+        env_key: &str,
+    ) -> Result<Self, ClaudeCliConstructionError>
+    where
+        Credentials: CredentialAccess + 'static,
+    {
+        if env_key != CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY {
+            return Err(ClaudeCliConstructionError::InvalidCredentialEnvironmentKey);
+        }
+        Self::new_with_delivery(
+            config,
+            ClaudeCredentialDelivery::File {
+                credentials: Arc::new(credentials),
+            },
+        )
+    }
+
+    /// Validates the complete operation-scoped Claude delivery catalog.
+    ///
+    /// The catalog remains complete across preferred-profile changes so a
+    /// historical operation pin resolves its own ambient or file delivery.
+    pub fn new_with_credential_catalog<Credentials>(
+        config: ClaudeCliConfig,
+        file_credentials: Credentials,
+        ambient_reference: Option<CredentialReference>,
+        file_env_key: &str,
+    ) -> Result<Self, ClaudeCliConstructionError>
+    where
+        Credentials: CredentialAccess + 'static,
+    {
+        if file_env_key != CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY {
+            return Err(ClaudeCliConstructionError::InvalidCredentialEnvironmentKey);
+        }
+        Self::new_with_delivery(
+            config,
+            ClaudeCredentialDelivery::Catalog {
+                ambient_reference,
+                file_credentials: Arc::new(file_credentials),
+            },
+        )
+    }
+
+    fn new_with_delivery(
+        config: ClaudeCliConfig,
+        credential_delivery: ClaudeCredentialDelivery,
+    ) -> Result<Self, ClaudeCliConstructionError> {
         if !CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED {
             return Err(ClaudeCliConstructionError::UnsupportedPlatform);
         }
@@ -232,6 +341,7 @@ impl ClaudeCliRuntime {
             mcp_bridge_executable: config.mcp_bridge_executable,
             working_directory: config.working_directory,
             credential_reference: config.credential_reference,
+            credential_delivery,
             exchange_timeout: config.exchange_timeout,
             interrupt_grace: config.interrupt_grace,
             event_limit: config.event_limit,
@@ -240,9 +350,10 @@ impl ClaudeCliRuntime {
         })
     }
 
-    fn prepare_request<C>(
+    async fn prepare_request<C>(
         &self,
         operation: ModelOperation<C>,
+        cancellation: &mut CancellationSignal,
     ) -> PreparationOutcome<C, ClaudeCliPreparedRequest<C>> {
         let correlation = operation.correlation;
         let mut operation = ModelOperation {
@@ -299,17 +410,6 @@ impl ClaudeCliRuntime {
                 };
             }
         };
-        if operation.credential_reference != self.credential_reference {
-            return PreparationOutcome::Failed {
-                correlation,
-                failure: PreparationFailure::CredentialUnavailable {
-                    error: signalbox_model_runtime::CredentialAccessError::new(
-                        operation.credential_reference,
-                        signalbox_model_runtime::CredentialAccessFailure::Unmapped,
-                    ),
-                },
-            };
-        }
         let mut translated = match translate(&operation) {
             Ok(translated) => translated,
             Err(TranslationError::Failure(failure)) => {
@@ -325,17 +425,80 @@ impl ClaudeCliRuntime {
                 };
             }
         };
-        let support =
-            match create_support_files(&self.mcp_bridge_executable, &translated, request_fast_mode)
-            {
-                Ok(support) => support,
-                Err(detail) => {
-                    return PreparationOutcome::Defect {
+        let file_credentials = match &self.credential_delivery {
+            ClaudeCredentialDelivery::Ambient => {
+                if operation.credential_reference != self.credential_reference {
+                    return PreparationOutcome::Failed {
                         correlation,
-                        defect: PreparationDefect::RequestConstructionFailed { detail },
+                        failure: PreparationFailure::CredentialUnavailable {
+                            error: signalbox_model_runtime::CredentialAccessError::new(
+                                operation.credential_reference,
+                                signalbox_model_runtime::CredentialAccessFailure::Unmapped,
+                            ),
+                        },
                     };
                 }
-            };
+                None
+            }
+            ClaudeCredentialDelivery::File { credentials } => Some(credentials),
+            ClaudeCredentialDelivery::Catalog {
+                ambient_reference,
+                file_credentials,
+            } => {
+                if ambient_reference.as_ref() == Some(&operation.credential_reference) {
+                    None
+                } else {
+                    Some(file_credentials)
+                }
+            }
+        };
+        let credential = match file_credentials {
+            None => None,
+            Some(credentials) => {
+                let resolve = credentials.resolve(&operation.credential_reference);
+                match cancellation.run_until_cancelled(resolve).await {
+                    None => return PreparationOutcome::Cancelled { correlation },
+                    Some(Err(error)) => {
+                        return PreparationOutcome::Failed {
+                            correlation,
+                            failure: PreparationFailure::CredentialUnavailable { error },
+                        };
+                    }
+                    Some(Ok(value)) => {
+                        if value.expose_bytes().is_empty()
+                            || std::str::from_utf8(value.expose_bytes()).is_err()
+                            || value.expose_bytes().contains(&0)
+                        {
+                            return PreparationOutcome::Failed {
+                                correlation,
+                                failure: PreparationFailure::CredentialUnusable {
+                                    detail: "Claude file credential must be nonempty, UTF-8, and NUL-free"
+                                        .to_string(),
+                                },
+                            };
+                        }
+                        Some(value)
+                    }
+                }
+            }
+        };
+        let support = match create_support_files(
+            &self.mcp_bridge_executable,
+            &translated,
+            request_fast_mode,
+            credential.as_ref(),
+        ) {
+            Ok(support) => support,
+            Err(detail) => {
+                return PreparationOutcome::Defect {
+                    correlation,
+                    defect: PreparationDefect::RequestConstructionFailed { detail },
+                };
+            }
+        };
+        let credential_home = credential
+            .as_ref()
+            .map(|_| support.directory.path().to_path_buf());
         let prompt = std::mem::take(&mut translated.prompt);
         PreparationOutcome::Prepared(ClaudeCliPreparedRequest {
             executable: self.executable.clone(),
@@ -354,6 +517,8 @@ impl ClaudeCliRuntime {
             stderr_limit: self.stderr_limit,
             reasoning_effort,
             max_output_tokens: operation.settings.max_output_tokens,
+            credential,
+            credential_home,
         })
     }
 }
@@ -419,6 +584,7 @@ fn create_support_files(
     bridge: &Path,
     translated: &crate::translate::TranslatedOperation,
     fast_mode: FastMode,
+    credential: Option<&CredentialValue>,
 ) -> Result<SupportFiles, String> {
     let temporary_directory = std::path::absolute(std::env::temp_dir())
         .map_err(|error| format!("could not absolutize temporary directory: {error}"))?;
@@ -426,10 +592,18 @@ fn create_support_files(
         .prefix("signalbox-claude-")
         .tempdir_in(temporary_directory)
         .map_err(|error| format!("could not create private support directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("could not set private support directory mode: {error}"))?;
+    }
     let catalog = directory.path().join("tools.json");
     let ready = directory.path().join("mcp-ready");
     let mcp_config = directory.path().join("mcp.json");
     let settings = directory.path().join("settings.json");
+    let credential_file = directory.path().join("credential");
+    let credential_helper = directory.path().join("credential-helper");
     let bridge_text = bridge
         .to_str()
         .ok_or_else(|| "MCP bridge path is not valid UTF-8".to_string())?;
@@ -460,22 +634,66 @@ fn create_support_files(
         shell_quote(bridge_text),
         shell_quote(ready_text)
     );
-    let isolated_settings = serde_json::json!({
+    let mut isolated_settings = serde_json::json!({
         "fastMode": fast_mode == FastMode::Enabled,
         "hooks": {"SessionStart": [{"hooks": [{
             "type": "command", "command": hook_command, "timeout": 10
         }]}]}
     });
-    std::fs::write(
+    if let Some(credential) = credential {
+        write_private_file(&credential_file, credential.expose_bytes())?;
+        let credential_text = credential_file
+            .to_str()
+            .ok_or_else(|| "Claude credential-store path is not valid UTF-8".to_string())?;
+        let credential_helper_text = credential_helper
+            .to_str()
+            .ok_or_else(|| "Claude credential-helper path is not valid UTF-8".to_string())?;
+        let helper = format!(
+            "#!/bin/sh\nseparator=\nwhile\n    IFS= read -r line\n    read_status=$?\n    case \"$read_status\" in\n        0) : ;;\n        *)\n            case \"$line\" in\n                '') break ;;\n                *) : ;;\n            esac\n            ;;\n    esac\ndo\n    printf '%s%s' \"$separator\" \"$line\"\n    separator='\n'\ndone < {}\n",
+            shell_quote(credential_text)
+        );
+        write_private_file(&credential_helper, helper.as_bytes())?;
+        isolated_settings["apiKeyHelper"] = serde_json::json!(format!(
+            "exec /bin/sh {}",
+            shell_quote(credential_helper_text)
+        ));
+    }
+    write_private_file(
         &settings,
-        serde_json::to_vec(&isolated_settings).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("could not write isolated settings: {error}"))?;
+        &serde_json::to_vec(&isolated_settings).map_err(|error| error.to_string())?,
+    )?;
     Ok(SupportFiles {
         directory,
         mcp_config,
         settings,
     })
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_private_support_file(path, contents, 0o600)
+}
+
+fn write_private_support_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("could not create private support file: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("could not set private support file mode: {error}"))?;
+    }
+    std::io::Write::write_all(&mut file, contents)
+        .map_err(|error| format!("could not write private support file: {error}"))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -488,9 +706,9 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for ClaudeCliRuntime {
     async fn prepare(
         &self,
         operation: ModelOperation<C>,
-        _cancellation: CancellationSignal,
+        mut cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
-        self.prepare_request(operation)
+        self.prepare_request(operation, &mut cancellation).await
     }
 
     async fn execute(
@@ -564,6 +782,16 @@ async fn execute_process<C: Clone + Send + Sync>(
         prepared.delivery,
         &prepared.translated,
     );
+    let mut environment_overrides = vec![CliEnvironmentOverride::new(
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        prepared.max_output_tokens.to_string(),
+    )];
+    if let Some(credential_home) = prepared.credential_home.as_ref() {
+        environment_overrides.push(CliEnvironmentOverride::replacing_inherited(
+            CLAUDE_CONFIG_HOME_VARIABLE,
+            credential_home.as_os_str(),
+        ));
+    }
     let request = CliProcessRequest {
         command,
         prompt: prepared.prompt,
@@ -573,13 +801,18 @@ async fn execute_process<C: Clone + Send + Sync>(
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
         environment: CLAUDE_ENVIRONMENT,
-        environment_overrides: vec![CliEnvironmentOverride::new(
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-            prepared.max_output_tokens.to_string(),
-        )],
+        environment_overrides,
     };
     let _support_directory = prepared.support_directory;
-    execute_cli_process(request, sink, cancellation).await
+    match prepared.credential.as_ref() {
+        None => execute_cli_process(request, sink, cancellation).await,
+        Some(credential) => {
+            let mut redacting_sink = CredentialRedactingSink::new(sink, credential);
+            let evidence = execute_cli_process(request, &mut redacting_sink, cancellation).await;
+            redacting_sink.flush();
+            redact_evidence(evidence, credential)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -590,7 +823,7 @@ mod tests {
     };
     use signalbox_model_runtime::AnthropicServiceTier;
 
-    const DIRECT_CREDENTIAL_VARIABLE: &str = "ANTHROPIC_API_KEY";
+    use super::CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY;
 
     #[test]
     fn cli_environment_routes_credential_store_without_direct_credential_values() {
@@ -609,7 +842,7 @@ mod tests {
         assert!(
             !CLAUDE_ENVIRONMENT
                 .iter()
-                .any(|variable| variable.name() == DIRECT_CREDENTIAL_VARIABLE),
+                .any(|variable| variable.name() == CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY),
             "direct credential values never reach the child"
         );
     }

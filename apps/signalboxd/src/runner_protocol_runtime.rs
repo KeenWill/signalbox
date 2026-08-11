@@ -2074,7 +2074,7 @@ mod tests {
     };
     use signalbox_persistence::{
         create_session::CreateSessionRepository,
-        local_test_connection_options, migrate,
+        disposable_test_container_labels, local_test_connection_options, migrate,
         runner_protocol::{RunnerConnectionCause, RunnerConnectionState},
         session_credentials::{SessionCredentialPin, SessionModelCredential},
     };
@@ -2320,6 +2320,7 @@ mod tests {
             .with_db_name(DATABASE_NAME)
             .with_fsync_enabled()
             .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
             .start()
             .await
             .expect("the hermetic PostgreSQL container starts");
