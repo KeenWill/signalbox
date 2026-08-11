@@ -227,9 +227,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        // The same semantic rejection, but as the stream's final line. Nothing
+        // follows it, so the reader holds no undelivered suffix when the failure
+        // is raised and the tool fact rests only on the rejected event's own
+        // examination.
+        "conflicting_message_id_at_end_of_stream" => {
+            assistant_text(fixtures::ANSWER)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+        }
+        // An assistant event that both announces a tool call and contradicts
+        // the established message id. The identity check rejects it, so the
+        // tool fact must come from the pre-scan of its decoded content.
+        "tool_use_with_conflicting_message_id" => {
+            assistant_text(fixtures::ANSWER)?;
+            assistant_tool_with_message_id(fixtures::OTHER_MESSAGE_ID)?;
+            success("tool_use", None)?;
+        }
         "success_without_stop_reason" => {
             assistant_text(fixtures::ANSWER)?;
             success_without_stop_reason()?;
+        }
+        // A tool call the request never declared. The decoder rejects it
+        // before it becomes a proposal, so no observation and no proposal
+        // index record that the CLI opened one.
+        "undeclared_tool_use" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            success("tool_use", None)?;
         }
         "tool_round_trip" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
@@ -315,6 +338,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)?;
             tool_result(fixtures::CREDENTIAL_PREFIX_TOOL_ID)?;
             success("tool_use", Some(fixtures::OPAQUE_CREDENTIAL_CONTINUATION))?;
+        }
+        // A complete, fully decodable event and then silence at a line
+        // boundary: the deadline fires with the reader holding nothing.
+        "complete_event_then_hang" => {
+            assistant_text(fixtures::ANSWER)?;
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+        // A prefix of an `assistant` event, then silence. The exchange deadline
+        // fires while `read_bounded_line` holds bytes it will never deliver, so
+        // the suffix that would have said whether a tool call opened is lost.
+        "partial_assistant_then_hang" => {
+            emit(b"{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"message\":{")?;
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+        // An undecodable event and a `tool_use` event delivered as one write, so
+        // both land in a single `fill_buf` batch. The runner delivers the first
+        // line, that line fails to decode, and the reader is still holding the
+        // second — the one that says a tool call opened — when the exchange ends.
+        "undecodable_event_then_buffered_tool_use" => {
+            let tool_use = serde_json::json!({
+                "type": "assistant", "parent_tool_use_id": null,
+                "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID,
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": fixtures::TOOL_ID,
+                        "name": format!("mcp__signalbox_tools__{}", fixtures::TOOL_NAME),
+                        "input": {"subject": "synthetic"}, "caller": {"type": "direct"}}]}
+            });
+            let mut batch = Vec::from(&b"{\"type\":\"synthetic_unrecognized\"}\n"[..]);
+            batch.extend_from_slice(&serde_json::to_vec(&tool_use).map_err(std::io::Error::other)?);
+            batch.push(b'\n');
+            emit(&batch)?;
         }
         "generic_error_then_definitive_stderr_exit" => {
             generic_error_result()?;
@@ -411,6 +465,19 @@ fn assistant_text_with_identity(id: &str, model: &str, text: &str) -> std::io::R
         "message": {"model": model, "id": id, "role": "assistant",
             "content": [{"type": "text", "text": text}],
             "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}}
+    }))
+}
+
+/// The standard tool-call event with the message id as its only knob: the tool
+/// identity is the usual fixture, since what varies here is whose message the
+/// event claims to belong to.
+fn assistant_tool_with_message_id(message_id: &str) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "assistant", "parent_tool_use_id": null,
+        "message": {"model": fixtures::MODEL, "id": message_id, "role": "assistant",
+            "content": [{"type": "tool_use", "id": fixtures::TOOL_ID,
+                "name": format!("mcp__signalbox_tools__{}", fixtures::TOOL_NAME),
+                "input": {"subject": "synthetic"}, "caller": {"type": "direct"}}]}
     }))
 }
 
