@@ -21,7 +21,7 @@ use signalboxd::{
     FileCredentialAccess, HubModelConfiguration, ModelAdapter,
     approval_judge_eval::{
         ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalVerdict, judge_eval_case,
-        render_eval_case,
+        judge_system_prompt, render_eval_case,
     },
     model_adapter::ConfiguredModelRuntime,
     usage_limits,
@@ -137,13 +137,15 @@ struct CategoryScore {
     cases: usize,
     correct_majorities: usize,
     unstable_cases: usize,
+    partial_cases: usize,
     unmeasured_cases: usize,
     failed_calls: usize,
 }
 
-/// Stable FNV-1a digest of the corpus bytes, so two scorecards are comparable
-/// exactly when they replayed byte-identical corpora.
-fn corpus_digest(bytes: &[u8]) -> String {
+/// Stable FNV-1a digest, so two scorecards are comparable exactly when the
+/// digested bytes — corpus, judge prompt, or rendered payloads — are
+/// identical.
+fn stable_digest(bytes: &[u8]) -> String {
     const OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
     const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
     let mut hash = OFFSET_BASIS;
@@ -251,10 +253,13 @@ async fn run(options: RunOptions) -> Result<(), String> {
 
     let corpus = fs::read_to_string(&options.cases)
         .map_err(|error| format!("corpus read failed: {error}"))?;
-    let digest = corpus_digest(corpus.as_bytes());
+    let digest = stable_digest(corpus.as_bytes());
     let mut cases = Vec::new();
     let mut seen_names = BTreeSet::new();
     for (index, line) in corpus.lines().enumerate() {
+        if options.limit.is_some_and(|bound| cases.len() >= bound) {
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -283,9 +288,6 @@ async fn run(options: RunOptions) -> Result<(), String> {
         {
             continue;
         }
-        if options.limit.is_some_and(|bound| cases.len() >= bound) {
-            break;
-        }
         cases.push(case);
     }
     if cases.is_empty() {
@@ -294,6 +296,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
     // Every selected case must render before the first paid call, so an
     // inadmissible line late in the corpus cannot masquerade as a provider
     // failure after quota is already spent.
+    let mut rendered_payloads = String::new();
     let eval_cases = cases
         .iter()
         .map(|case| {
@@ -306,10 +309,16 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 system_prompt: case.system_prompt.clone(),
             };
             render_eval_case(&eval_case)
-                .map(|_| eval_case)
+                .map(|rendered| {
+                    rendered_payloads.push_str(&rendered);
+                    rendered_payloads.push('\n');
+                    eval_case
+                })
                 .map_err(|error| format!("case {} is inadmissible: {error}", case.name))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let prompt_digest = stable_digest(judge_system_prompt().as_bytes());
+    let rendered_digest = stable_digest(rendered_payloads.as_bytes());
     eprintln!(
         "replaying {} cases x{} repeats against judge selection {} (provider model {})",
         cases.len(),
@@ -363,13 +372,15 @@ async fn run(options: RunOptions) -> Result<(), String> {
             .find(|(_, count)| **count * 2 > verdicts.len())
             .map(|(label, _)| *label);
         let measured = !verdicts.is_empty();
-        let stable = measured && counts.len() == 1;
+        let complete = verdicts.len() == options.repeats;
+        let stable = complete && counts.len() == 1;
         let tied = measured && majority.is_none();
         let correct = measured && majority == Some(case.expected.as_str());
         let score = scores.entry(case.category.clone()).or_default();
         score.cases += 1;
         score.correct_majorities += usize::from(correct);
-        score.unstable_cases += usize::from(measured && !stable);
+        score.unstable_cases += usize::from(complete && counts.len() > 1);
+        score.partial_cases += usize::from(measured && !complete);
         score.unmeasured_cases += usize::from(!measured);
         score.failed_calls += failures;
         case_reports.push(serde_json::json!({
@@ -377,6 +388,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "category": case.category,
             "expected": case.expected,
             "measured": measured,
+            "complete": complete,
             "majority": majority,
             "tied": tied,
             "verdict_counts": counts,
@@ -399,6 +411,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 "cases": score.cases,
                 "correct_majorities": score.correct_majorities,
                 "unstable_cases": score.unstable_cases,
+                "partial_cases": score.partial_cases,
                 "unmeasured_cases": score.unmeasured_cases,
                 "failed_calls": score.failed_calls,
             })
@@ -408,14 +421,18 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let total_correct: usize = scores.values().map(|score| score.correct_majorities).sum();
     let total_unstable: usize = scores.values().map(|score| score.unstable_cases).sum();
     let total_unmeasured: usize = scores.values().map(|score| score.unmeasured_cases).sum();
+    let total_partial: usize = scores.values().map(|score| score.partial_cases).sum();
     let scorecard = serde_json::json!({
         "judge_selection": selection.into_uuid().to_string(),
         "provider_model": provider_model,
         "corpus_digest": digest,
+        "prompt_digest": prompt_digest,
+        "rendered_digest": rendered_digest,
         "repeats": options.repeats,
         "total_cases": total_cases,
         "correct_majorities": total_correct,
         "unstable_cases": total_unstable,
+        "partial_cases": total_partial,
         "unmeasured_cases": total_unmeasured,
         "categories": categories,
         "cases": case_reports,
