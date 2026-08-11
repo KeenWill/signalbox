@@ -197,6 +197,14 @@ assembly, releases the bulk-ingest permit, and closes the connection without
 accepting another request. A retry therefore starts on a fresh connection and
 uses the operation's ordinary idempotency contract.
 
+The same operation also has a 24-hour monotonic whole-session deadline beginning
+when its begin acquires the bulk-ingest permit. Appends never reset it, and time
+spent executing lifecycle requests counts toward it. Expiry cancels active work,
+unlinks the partial assembly, releases the permit, and closes the connection
+with the same retry consequence. The inactivity deadline therefore bounds a
+stalled client while the whole-session deadline bounds one making indefinite
+minimal progress.
+
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
 exist.
@@ -1512,10 +1520,10 @@ or `conversation_import_conversion_failed { class, record_ordinal }`, where the
 one-based physical-record ordinal is null only when the converter has none. The
 closed classes are `empty_source`, `blank_line`, `invalid_utf8`, `invalid_json`,
 `json_depth_exceeded`, `top_level_not_object`, `invalid_record_type`,
-`invalid_source_metadata`, `invalid_message_envelope`, `invalid_message_role`,
-`message_role_mismatch`, `invalid_message_content`, `invalid_content_block`,
-`invalid_tool_result_block`, `invalid_reasoning`, `invalid_tool_call`, and
-`invalid_tool_result`.
+`raw_record_count_exceeded`, `invalid_source_metadata`,
+`invalid_message_envelope`, `invalid_message_role`, `message_role_mismatch`,
+`invalid_message_content`, `invalid_content_block`, `invalid_tool_result_block`,
+`invalid_reasoning`, `invalid_tool_call`, and `invalid_tool_result`.
 
 Blob refusals use `code = "invalid_request"` with exactly one of these required
 typed details: `blob_upload_already_in_progress {}`;
@@ -2541,17 +2549,19 @@ registration-triggered loss — the same runner; the three targets are mutually
 exclusive. Promote names only the pending enrollment request and no session.
 Abandon creates no successor input.
 
-`send` reads the exact input text from standard input through EOF and never
-accepts conversation content in process arguments. Empty or oversized input
-fails before socket I/O. Without `--queue` it retains start-when-idle behavior.
-With `--queue`, a fresh invocation reads the authoritative transcript, names the
-active turn, submits `queue`, and follows the returned origin turn through its
-own terminal outcome; it therefore waits while the predecessor finishes and
-while the queued turn runs. Exact queued-send recovery supplies command
-identity, defaults version, and expected turn together. While the returned turn
-is still queued, a model-call or tool recovery wait on the turn currently
-holding the active slot and blocking its activation returns the existing
-recovery-required diagnostic instead of waiting for successor activation.
+`send` without `--parts-file` reads the exact input text from standard input
+through EOF; with `--parts-file` it reads only that file's ordered part array
+and does not read standard input. Neither form accepts conversation content in
+process arguments. Empty or oversized input fails before socket I/O. Without
+`--queue` it retains start-when-idle behavior. With `--queue`, a fresh
+invocation reads the authoritative transcript, names the active turn, submits
+`queue`, and follows the returned origin turn through its own terminal outcome;
+it therefore waits while the predecessor finishes and while the queued turn
+runs. Exact queued-send recovery supplies command identity, defaults version,
+and expected turn together. While the returned turn is still queued, a
+model-call or tool recovery wait on the turn currently holding the active slot
+and blocking its activation returns the existing recovery-required diagnostic
+instead of waiting for successor activation.
 
 `steer` reads content the same way. A fresh invocation observes and prints the
 active turn, submits configuration-free `steer`, validates the typed receipt,

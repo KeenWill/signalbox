@@ -116,7 +116,11 @@ S3, the namespace locator is the parsed endpoint's canonical URL serialization
 with default-port and empty-path variance removed, paired with the exact bucket;
 startup rejects a duplicate locator even when store names, namespace UUIDs,
 regions, or credentials differ. One physical namespace is represented by one
-store binding.
+store binding. The canonical staging-directory path must be disjoint from every
+filesystem-store root: neither path may equal, contain, or be contained by the
+other. This also excludes every store's reserved `.publish-v1` subtree from
+staging ownership and prevents either startup sweep from encountering the
+other's files.
 
 A `filesystem` store entry contains exactly `name`, `namespace_id`,
 `kind = "filesystem"`, and an absolute `root_directory`. An `s3` entry contains
@@ -192,6 +196,14 @@ read-back timeout or cancellation returns unavailable when nonacceptance is
 proved and ambiguous publication otherwise, releases the bulk-ingest permit, and
 leaves at most an unregistered orphan; retry live-verifies the deterministic key
 before completing registration.
+
+One direct read or one model-call attachment-preparation pass also owns one
+24-hour monotonic aggregate deadline across its complete ordered traversal of
+all attachment digests and replica candidates. Every adapter operation receives
+only the remaining allowance; moving to another candidate never restarts it.
+Expiry cancels the active adapter operation, releases traversal resources, and
+uses the ordinary unavailable outcome rather than delaying a later candidate or
+caller beyond the aggregate bound.
 
 An S3 store currently named by at least one route is admitted for publication
 only when its bucket lifecycle configuration contains an enabled rule covering
@@ -365,11 +377,16 @@ canonical decimal-u64 strings, and returns text containing compact JSON with
 `digest`, `offset_bytes`, and canonical padded `bytes_base64`. The stub's stated
 length is the model's sizing information. Each read admits 1 through 524,288
 decoded bytes, each turn admits at most 2,097,152 decoded bytes across admitted
-read requests, and the existing tool-result and target-context caps further
-limit the encoded result. At preparation the daemon derives an allow-set from
-attachment stubs in the rendered frontier; a catalogued digest outside that set
-is unauthorized. Results use the existing text-only tool-result arm and never
-enter a provider message as image or document media.
+read requests, and each turn admits at most 64 distinct `blob_read` logical
+requests. Both durable counters charge once by tool-request identity before
+authorization and replay never charges twice. The request-count cap bounds
+complete replica reverification work even when the model repeatedly requests a
+tiny range from a store without generation-pinned reuse. The existing
+tool-result and target-context caps further limit the encoded result. At
+preparation the daemon derives an allow-set from attachment stubs in the
+rendered frontier; a catalogued digest outside that set is unauthorized. Results
+use the existing text-only tool-result arm and never enter a provider message as
+image or document media.
 
 Content-type-aware readers are committed unimplemented functionality: no present
 surface provides one, and neither its exact inventory nor the formats it
