@@ -4143,7 +4143,7 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         "lease admission must wait behind registration replacement"
     );
     assert_store_check_violation(rejected);
-    pool.close().await;
+    drop(pool);
     Ok(())
 }
 
