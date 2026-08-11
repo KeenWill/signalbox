@@ -6935,16 +6935,7 @@ async fn append_lease_event_in(
     lease: &RunnerLease,
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
-    let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
-        .bind(correlation.dispatch.session().into_uuid())
-        .fetch_optional(&mut **transaction)
-        .await?
-        .is_some();
-    if !scheduler_exists {
-        return Err(RunnerProtocolStoreError::Corruption(
-            RunnerProtocolCorruption::CrossWiredReference,
-        ));
-    }
+    lock_runner_session_scheduler(transaction, correlation.dispatch.session()).await?;
     let current_event = sqlx::query(RUNNER_LEASE_HEAD)
         .bind(correlation.lease.into_uuid())
         .bind(Decimal::from(correlation.generation.get()))
@@ -6991,6 +6982,23 @@ async fn append_lease_event_in(
     .bind(Decimal::from(event_ordinal))
     .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+async fn lock_runner_session_scheduler(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+) -> Result<(), RunnerProtocolStoreError> {
+    let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+        .bind(session.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .is_some();
+    if !scheduler_exists {
+        return Err(RunnerProtocolStoreError::Corruption(
+            RunnerProtocolCorruption::CrossWiredReference,
+        ));
+    }
     Ok(())
 }
 
