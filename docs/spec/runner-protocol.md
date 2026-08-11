@@ -26,7 +26,10 @@ cite [the invariant test index](../invariants.md).
 The connection-loss persistence transaction was verified against this PR
 (`agent/runner-loss-session-transaction`). Daemon paging of its durable cursors
 and startup resumption were verified against this PR
-(`agent/runner-loss-daemon-propagation`).
+(`agent/runner-loss-daemon-propagation`). Registration-triggered placement
+reconciliation, including exact durable cause authentication and restartable
+daemon paging, was verified against this PR
+(`agent/runner-registration-reconciliation`).
 
 The registration-only executable slice is verified through PR #376
 (`agent/runner-daemon`). It adds the dedicated local listener, durable
@@ -733,13 +736,23 @@ grant-bearing placement transition. Omitting a formerly advertised capability
 removes its availability from the new registration, but never changes its
 daemon-side policy. A pinned session never inherits additions from
 re-registration. If a new registration omits a runner-required capability in
-that session's pinned snapshot, no later lease is authorized; an explicit
-registration-reconciliation transition marks the placement `RunnerLost` without
-rewriting its snapshot. Omitting a combined-locus tool disables runner dispatch
-for that tool but retains placement so daemon fallback remains admissible. Why:
-re-registration can narrow current availability without downgrading a
-confirmation requirement, widening authorization, or silently changing
-established affinity (INV-042, INV-044).
+that session's pinned snapshot, no later lease is authorized. Every changed
+registration beyond the first creates a durable bounded reconciliation cursor.
+Before acknowledging the registration, the daemon pages older pinned sessions in
+session-identity order and atomically records either preservation or a
+`RunnerLost` placement whose registration loss source names the exact
+incompatible registration revision. A current offered or claimed lease and its
+active turn move through the same loss and `AwaitingRunnerRecovery` transaction
+as connection loss. Cursor and per-session evidence make a crash restartable;
+startup completes pending registration cursors before classifying prior-process
+connections lost, so an already-recorded registration cause cannot be relabeled
+as connection loss. Another changed registration is refused while the current
+cursor still has an unobserved pinned session. Omitting a combined-locus tool
+records preservation and disables runner dispatch for that tool, while retaining
+placement so daemon fallback remains admissible. Why: re-registration can narrow
+current availability without downgrading a confirmation requirement, widening
+authorization, silently changing established affinity, or losing the recovery
+distinction carried by the exact loss source (INV-009, INV-042, INV-044).
 
 ## Advertised catalogs and daemon authority
 

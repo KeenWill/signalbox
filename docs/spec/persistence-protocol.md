@@ -9,7 +9,9 @@ and ordered page read were verified against this PR
 propagation transaction and cursor completion were verified against this PR
 (`agent/runner-loss-session-transaction`). Daemon paging after terminal loss and
 startup resumption of every pending cursor were verified against this PR
-(`agent/runner-loss-daemon-propagation`).
+(`agent/runner-loss-daemon-propagation`). The registration-reconciliation
+cursor, exact registration-loss cause, and per-session transaction were verified
+against this PR (`agent/runner-registration-reconciliation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -361,6 +363,25 @@ Representation rules, all enforced in the schema:
   connections lost, so a crash after the short loss transaction cannot strand
   session projection. **Committed unimplemented functionality.** No present
   daemon transaction retires an unacknowledged workspace release.
+- Migration `202608080106` gives every changed registration beyond revision one
+  a pending reconciliation cursor in its registration transaction. An ordered
+  page returns at most 64 still-pinned sessions whose pinned registration is
+  older, excluding sessions with an exact immutable observation. The
+  scheduler-first per-session transaction locks enrollment, connection/loss,
+  registration, cursor, placement, and any current lease in runner order. It
+  applies domain availability reconciliation and records `preserved`,
+  `runner_lost`, or `superseded`; registration loss stores an exact foreign key
+  to the incompatible registration and a deferred exact loss observation. A
+  current lease and active turn use the same attempt-loss and
+  `awaiting_runner_recovery` transition as connection loss. SQL independently
+  checks selector, sandbox, runner-required tools, credential profile, and
+  repository/worktree availability against the named cause revision, and loads
+  repeat that authentication instead of trusting a loss-source label. Cursor
+  advancement cannot skip a current candidate or complete while one remains, and
+  a newer registration cannot start while the current cursor retains a
+  candidate. The daemon drains the cursor before acknowledging a changed
+  registration and drains any crash-retained cursor before startup classifies
+  old physical connections lost.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -939,6 +960,17 @@ Locks per transaction, in acquisition order:
   (`promote_pending_runner`) uses that same subsequence, takes no
   `session_scheduler`, placement, grant, or lease lock because it changes none
   of them, and commits its claim, activation, and terminal result together.
+
+- **Runner registration reconciliation**: the registration append locks the
+  enrollment and current registration head, refuses a newer revision while the
+  prior cursor still owns a candidate, and creates the next cursor before
+  advancing the registration head. It does not take a session lock. Each
+  restartable session projection takes `session_scheduler` first, then
+  enrollment, current connection/loss, current registration, the exact cursor,
+  placement, and a current lease when present. It records the exact registration
+  observation and cursor advance in that transaction. Completion takes the same
+  enrollment-through-registration prefix and the cursor but no session lock,
+  after proving that no unobserved candidate remains.
 
 - **Runner dispatch and result**: `session_scheduler` is the first lock,
   followed by enrollment, current runner connection/loss, registration,

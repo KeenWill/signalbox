@@ -6,7 +6,9 @@ and preserved interrupt/stop authority were verified against this PR
 transition into runner recovery was verified against this PR
 (`agent/runner-loss-session-transaction`). Daemon invocation and startup
 resumption of that transition were verified against this PR
-(`agent/runner-loss-daemon-propagation`).
+(`agent/runner-loss-daemon-propagation`). Registration-triggered loss uses the
+same runner-recovery turn boundary and is verified against this PR
+(`agent/runner-registration-reconciliation`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -426,12 +428,14 @@ through the ports owned by [tool-loop](tool-loop.md).
 After configuration and database connection, signalboxd acquires the dedicated
 single-daemon advisory guard specified by
 [process-protocol](process-protocol.md). The registration-only startup order is
-embedded migrations, the generic startup scan to completion, prior-process
-runner connections marked lost and every pending runner-loss cursor completed,
-runner-socket bind, process-socket bind, then concurrent runner enrollment,
-client request admission, outbox dispatch, and scheduling. Runner admission
-cannot begin before the migration that creates durable request receipts, the
-generic scan, connection-loss classification, or session propagation.
+embedded migrations, the generic startup scan to completion, every pending
+registration-reconciliation cursor completed, prior-process runner connections
+marked lost and every pending connection-loss cursor completed, runner-socket
+bind, process-socket bind, then concurrent runner enrollment, client request
+admission, outbox dispatch, and scheduling. Runner admission cannot begin before
+the migration that creates durable request receipts, the generic scan,
+registration reconciliation, connection-loss classification, or session
+propagation.
 
 **Committed unimplemented functionality.** No present surface performs retained
 runner reconnect or replacement recovery. When recovery is implemented, startup
@@ -635,6 +639,13 @@ adapter after an applied terminal connection transition or an exact replay of
 its current lost state, and resumes every pending cursor during startup before
 runner admission. **Committed unimplemented functionality.** No runner execution
 surface yet depends on the projected state.
+
+A changed runner registration uses a separate bounded cursor but the same
+per-session turn transition. The daemon finishes that cursor before returning
+the registration acknowledgement. After restart it finishes every retained
+registration cursor before marking prior-process connections lost; the durable
+registration source therefore remains the cause of any resulting
+`AwaitingRunnerRecovery` wait.
 
 Only two user commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
