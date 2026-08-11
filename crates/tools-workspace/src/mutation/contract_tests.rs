@@ -1,3 +1,7 @@
+//! Contract tests for the `write_file`, `edit_file`, and `apply_patch` tool
+//! definitions: schema-rendered path and content bounds, `replace_all`
+//! defaults, and catalog registration.
+
 use serde_json::json;
 use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
 use signalbox_domain::{NormalizedToolArguments, ToolName};

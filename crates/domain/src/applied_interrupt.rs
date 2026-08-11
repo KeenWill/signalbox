@@ -425,7 +425,7 @@ mod tests {
     }
 
     /// Ordinary work accepted at the given ordinal; its turn seed derives
-    /// from that one knob, decorrelated (`docs/agents/testing-style.md`, rule 4).
+    /// from that one knob, decorrelated (TS-4).
     fn accepted_ordinary(acceptance: u64) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
             session_id(100),
@@ -436,7 +436,7 @@ mod tests {
 
     /// Interrupt work accepted at the given ordinal, immediately after the
     /// exact predecessor fixture; its turn seed derives from that one knob,
-    /// decorrelated (`docs/agents/testing-style.md`, rule 4).
+    /// decorrelated (TS-4).
     fn accepted_interrupt(
         acceptance: u64,
         predecessor: AcceptedInputQueueWork,
@@ -478,7 +478,7 @@ mod tests {
 
     /// The complete facts supplied to interrupt correlation, mirroring
     /// [`AppliedSubmitInputFacts`] field for field so a test perturbs exactly
-    /// the named relationship it exercises (`docs/agents/testing-style.md`, rule 4).
+    /// the named relationship it exercises (TS-4).
     #[derive(Clone)]
     struct AppliedFacts {
         command: DurableCommandId,
