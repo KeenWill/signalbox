@@ -7,10 +7,13 @@
 //! never respawns, and a process that ends without definitive typed Claude
 //! terminal evidence is never completion.
 //!
-//! Claude Code owns subscription authentication. This crate invokes the binary
-//! and neither locates nor reads its credential store. Provider-controlled
-//! output is sanitized for credential-shaped material before it crosses the
-//! adapter boundary.
+//! Ambient delivery leaves subscription authentication inside Claude Code.
+//! File delivery resolves one credential during preparation and materializes it
+//! only in a private request-scoped settings store beneath the child-selected
+//! `CLAUDE_CONFIG_DIR`; the direct key is never part of the adapter-assembled
+//! child environment. Provider-controlled output is sanitized for
+//! credential-shaped material and, for file delivery, the exact request value
+//! before it crosses the adapter boundary.
 
 #[allow(dead_code)]
 mod bridge;
@@ -23,6 +26,7 @@ mod wire;
 
 pub use config::ClaudeCliConfig;
 pub use runtime::{
-    ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
-    DISABLED_CLAUDE_CLI_BUILTIN_TOOLS, SUPPORTED_CLAUDE_CLI_VERSION, validate_model_settings,
+    CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConstructionError, ClaudeCliPreparedRequest,
+    ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS, SUPPORTED_CLAUDE_CLI_VERSION,
+    validate_model_settings,
 };

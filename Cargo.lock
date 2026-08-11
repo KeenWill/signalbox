@@ -3624,6 +3624,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha1 0.11.0",
  "sha2 0.11.0",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",

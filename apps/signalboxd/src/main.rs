@@ -49,18 +49,17 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, BaseDaemonCredentialInputs,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, DaemonToolCatalog,
-    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
-    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
-    HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, OPENAI_CREDENTIAL_REFERENCE, OtlpRuntime,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
-    usage_limits::UsageLimitedModelCallProvider,
+    ActivatedTurnPass, BaseDaemonCredentialInputs, CODE_HOST_CREDENTIAL_REFERENCE,
+    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
+    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
+    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -75,8 +74,6 @@ const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
-const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
-const OPENAI_API_KEY_FILE_ENVIRONMENT: &str = "OPENAI_API_KEY_FILE";
 const BRAVE_API_KEY_FILE_ENVIRONMENT: &str = "BRAVE_API_KEY_FILE";
 const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
@@ -165,8 +162,6 @@ struct HubConfiguration {
     database_url: String,
     model_configuration_file: PathBuf,
     template_configuration_file: PathBuf,
-    anthropic_api_key_file: Option<PathBuf>,
-    openai_api_key_file: Option<PathBuf>,
     brave_api_key_file: PathBuf,
     github_token_file: PathBuf,
     process_socket_path: PathBuf,
@@ -177,8 +172,6 @@ struct HubConfigurationValues {
     database_url: Option<OsString>,
     model_configuration_file: Option<OsString>,
     template_configuration_file: Option<OsString>,
-    anthropic_api_key_file: Option<OsString>,
-    openai_api_key_file: Option<OsString>,
     brave_api_key_file: Option<OsString>,
     github_token_file: Option<OsString>,
     process_socket_path: Option<OsString>,
@@ -191,8 +184,6 @@ impl HubConfiguration {
             database_url: env::var_os(DATABASE_URL_ENVIRONMENT),
             model_configuration_file: env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
             template_configuration_file: env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
-            anthropic_api_key_file: env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
-            openai_api_key_file: env::var_os(OPENAI_API_KEY_FILE_ENVIRONMENT),
             brave_api_key_file: env::var_os(BRAVE_API_KEY_FILE_ENVIRONMENT),
             github_token_file: env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
             process_socket_path: env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
@@ -205,8 +196,6 @@ impl HubConfiguration {
             database_url,
             model_configuration_file,
             template_configuration_file,
-            anthropic_api_key_file,
-            openai_api_key_file,
             brave_api_key_file,
             github_token_file,
             process_socket_path,
@@ -240,10 +229,6 @@ impl HubConfiguration {
             TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
             template_configuration_file,
         )?;
-        let anthropic_api_key_file =
-            optional_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT, anthropic_api_key_file)?;
-        let openai_api_key_file =
-            optional_path(OPENAI_API_KEY_FILE_ENVIRONMENT, openai_api_key_file)?;
         let brave_api_key_file = required_path(BRAVE_API_KEY_FILE_ENVIRONMENT, brave_api_key_file)?;
         let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
         let process_socket_path =
@@ -263,8 +248,6 @@ impl HubConfiguration {
             database_url,
             model_configuration_file,
             template_configuration_file,
-            anthropic_api_key_file,
-            openai_api_key_file,
             brave_api_key_file,
             github_token_file,
             process_socket_path,
@@ -282,32 +265,6 @@ impl HubConfiguration {
 
     fn template_configuration_file(&self) -> &Path {
         &self.template_configuration_file
-    }
-
-    fn anthropic_api_key_file(
-        &self,
-        required: bool,
-    ) -> Result<Option<PathBuf>, HubConfigurationError> {
-        if required && self.anthropic_api_key_file.is_none() {
-            return Err(HubConfigurationError::new(
-                ANTHROPIC_API_KEY_FILE_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
-            ));
-        }
-        Ok(self.anthropic_api_key_file.clone())
-    }
-
-    fn openai_api_key_file(
-        &self,
-        required: bool,
-    ) -> Result<Option<PathBuf>, HubConfigurationError> {
-        if required && self.openai_api_key_file.is_none() {
-            return Err(HubConfigurationError::new(
-                OPENAI_API_KEY_FILE_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
-            ));
-        }
-        Ok(self.openai_api_key_file.clone())
     }
 
     fn github_token_file(&self) -> PathBuf {
@@ -455,15 +412,6 @@ fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
     let mut identity = public.as_os_str().to_owned();
     identity.push(".identity");
     Some([public, PathBuf::from(lock), PathBuf::from(identity)])
-}
-
-fn optional_path(
-    setting: &'static str,
-    value: Option<OsString>,
-) -> Result<Option<PathBuf>, HubConfigurationError> {
-    value
-        .map(|value| required_path(setting, Some(value)))
-        .transpose()
 }
 
 /// Closed startup causes admitted to operator telemetry.
@@ -1119,32 +1067,24 @@ async fn run_hub(
                 )
             })?;
     }
-    let anthropic_api_key_file = configuration
-        .anthropic_api_key_file(model_configuration.uses_anthropic_adapter())
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Configuration(&error),
-            )
-        })?;
-    let credential_access = anthropic_api_key_file.map(|path| {
-        FileCredentialAccess::new(
-            path,
-            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
-        )
-    });
-    let openai_api_key_file = configuration
-        .openai_api_key_file(model_configuration.uses_openai_adapter())
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Configuration(&error),
-            )
-        })?;
-    let openai_credential_access = openai_api_key_file.map(|path| {
-        FileCredentialAccess::new(path, CredentialReference::new(OPENAI_CREDENTIAL_REFERENCE))
-    });
-    let credential_reference = ModelCallCredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE);
+    let anthropic_model_credentials = FileCredentialAccess::from_files(
+        model_configuration
+            .file_credential_profiles(ModelAdapter::Anthropic)
+            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
+    );
+    let openai_model_credentials = FileCredentialAccess::from_files(
+        model_configuration
+            .file_credential_profiles(ModelAdapter::OpenAi)
+            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
+    );
+    let anthropic_credential_access = model_configuration
+        .uses_anthropic_adapter()
+        .then(|| anthropic_model_credentials.clone());
+    let openai_credential_access = model_configuration
+        .uses_openai_adapter()
+        .then(|| openai_model_credentials.clone());
+    let credential_reference =
+        ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
     let code_host_credentials = FileCredentialAccess::new(
         configuration.github_token_file(),
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
@@ -1153,7 +1093,7 @@ async fn run_hub(
         configuration.brave_api_key_file(),
         CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
     );
-    let compaction_anthropic = credential_access
+    let compaction_anthropic = anthropic_credential_access
         .clone()
         .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
         .transpose()
@@ -1175,7 +1115,9 @@ async fn run_hub(
         })?;
     let anthropic_model_capabilities = model_configuration.runtime_model_capability_catalog();
     let openai_model_capabilities = model_configuration.runtime_model_capability_catalog();
-    let anthropic = credential_access
+    let anthropic = model_configuration
+        .uses_anthropic_adapter()
+        .then(|| anthropic_model_credentials.clone())
         .map(|credential_access| {
             let mut adapter_configuration = AnthropicConfig::new();
             adapter_configuration.model_capabilities = anthropic_model_capabilities;
@@ -1940,10 +1882,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ANTHROPIC_API_KEY_FILE_ENVIRONMENT, AnthropicConstructionError,
-        BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
-        HubConfiguration, HubConfigurationError, HubConfigurationValues, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OPENAI_API_KEY_FILE_ENVIRONMENT,
+        AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
+        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
+        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
         OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
         ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RepositoryWatchRuntimeError,
         RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
@@ -1964,8 +1905,6 @@ mod tests {
             database_url: Some(OsString::from("postgres://secret")),
             model_configuration_file: Some(OsString::from("models.toml")),
             template_configuration_file: Some(OsString::from("templates.toml")),
-            anthropic_api_key_file: Some(OsString::from("key")),
-            openai_api_key_file: Some(OsString::from("openai-key")),
             brave_api_key_file: Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             github_token_file: Some(OsString::from("github-token")),
             process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
@@ -2315,10 +2254,6 @@ mod tests {
             std::path::Path::new("templates.toml")
         );
         assert_eq!(
-            configuration.anthropic_api_key_file(true),
-            Ok(Some(std::path::PathBuf::from("key")))
-        );
-        assert_eq!(
             configuration.brave_api_key_file(),
             std::path::PathBuf::from(BRAVE_KEY_FILE_FIXTURE)
         );
@@ -2480,45 +2415,6 @@ mod tests {
                 RUNNER_SOCKET_PATH_ENVIRONMENT,
                 RequiredSettingFailure::Conflicts,
             )
-        );
-    }
-
-    #[test]
-    fn anthropic_credentials_are_required_only_for_an_anthropic_route() {
-        let codex_only = HubConfiguration::from_values(HubConfigurationValues {
-            anthropic_api_key_file: None,
-            runner_socket_path: None,
-            ..hub_configuration_values()
-        })
-        .expect("Anthropic credentials are optional before routes are loaded");
-        assert_eq!(codex_only.anthropic_api_key_file(false), Ok(None));
-        assert_eq!(
-            codex_only.anthropic_api_key_file(true),
-            Err(HubConfigurationError::new(
-                ANTHROPIC_API_KEY_FILE_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
-            ))
-        );
-    }
-
-    /// The OpenAI key path follows the Anthropic channel exactly: optional at
-    /// environment parsing, required only once a route selects that adapter.
-    #[test]
-    fn openai_credentials_are_required_only_for_an_openai_route() {
-        let without_openai = HubConfiguration::from_values(HubConfigurationValues {
-            openai_api_key_file: None,
-            runner_socket_path: None,
-            ..hub_configuration_values()
-        })
-        .expect("OpenAI credentials are optional before routes are loaded");
-
-        assert_eq!(without_openai.openai_api_key_file(false), Ok(None));
-        assert_eq!(
-            without_openai.openai_api_key_file(true),
-            Err(HubConfigurationError::new(
-                OPENAI_API_KEY_FILE_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
-            ))
         );
     }
 
