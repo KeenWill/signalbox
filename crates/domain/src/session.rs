@@ -1929,7 +1929,7 @@ mod tests {
     /// The complete stored facts backing one current-session projection,
     /// mirroring [`SessionReconstitutionInput::new`] field for field so a
     /// test perturbs exactly the named facts it cares about
-    /// (`docs/agents/testing-style.md`, rules 4 and 5).
+    /// (TS-4, TS-5).
     #[derive(Clone)]
     struct CurrentSessionFacts {
         requested_session: crate::SessionId,
@@ -2587,7 +2587,7 @@ mod tests {
     /// The complete stored facts backing one applied creation, mirroring
     /// [`CreateSessionReconstitutionInput::new`] field for field so a test
     /// perturbs exactly the named facts it cares about
-    /// (`docs/agents/testing-style.md`, rules 4 and 5).
+    /// (TS-4, TS-5).
     #[derive(Clone)]
     struct CreationFacts {
         command: CreateSession,

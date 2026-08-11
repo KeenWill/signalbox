@@ -1,3 +1,8 @@
+//! Reads the exact pinned `@openai/codex` version from
+//! `../../tooling/codex-cli/package.json` and exports it as the
+//! `SIGNALBOX_CODEX_CLI_VERSION` build environment variable the adapter and
+//! its pin test compare against.
+
 use std::path::PathBuf;
 
 const PIN_MANIFEST: &str = "../../tooling/codex-cli/package.json";

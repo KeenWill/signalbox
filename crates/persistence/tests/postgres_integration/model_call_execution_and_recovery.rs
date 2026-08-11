@@ -1,0 +1,2465 @@
+//! Model call execution transactions, startup scan classification, and steering reclassification after restart.
+
+use crate::*;
+
+/// S01 / S20 / S21 / INV-014 / INV-015 / INV-032 / INV-035: the production
+/// persistence chain checkpoints Prepared with its credential and input-token
+/// semantics pins, reloads them instead of changed deployment values,
+/// separately authorizes send, and atomically commits exact assistant content,
+/// completion, terminal frontier, lifecycle, call, attempt, and typed outbox
+/// records.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complete_first_reply()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e1));
+    let direct_selection =
+        signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce1));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(_) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e1)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct_selection)),
+        )?)
+        .await?
+    else {
+        panic!("the model-call fixture session must be created");
+    };
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xae1));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new([accepted_input], [turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e2)),
+            session,
+            UserContent::try_text("exact user request".to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?
+    else {
+        panic!("the model-call fixture input must be accepted");
+    };
+    assert_eq!(origin.accepted_input(), accepted_input);
+    assert_eq!(origin.turn(), turn);
+
+    let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee1));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe1));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde1))],
+            [starting_frontier],
+            [attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        activation_service.execute(session).await?
+    else {
+        panic!("the model-call fixture turn must activate");
+    };
+    assert_eq!(activated.turn(), turn);
+
+    let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe1));
+    let resolved_target = ResolvedProviderTarget::naming(provider_identity);
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        direct_selection,
+        resolved_target,
+    )])
+    .expect("one immutable direct target forms a catalog");
+    let pinned_credential_reference = model_credential_reference();
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        pinned_credential_reference.clone(),
+    )
+    .with_cache_inclusive_input_targets(HashSet::from([resolved_target]));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xce2));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed_call) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde8)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee8)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe8)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf8)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdf9)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("a fresh call must stop at its Prepared checkpoint");
+    };
+    assert_eq!(checkpointed_call, call);
+
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("replacement-provider-reference"),
+    );
+    let unused_call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xce3));
+    let PrepareInitialModelCallOutcome::Ready {
+        request: prepared,
+        credential_reference,
+        ..
+    } = repository
+        .prepare_initial_call(
+            session,
+            unused_call_candidate,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde9)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee9)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe9)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf9)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdfa)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("a later invocation must reload the committed Prepared call");
+    };
+    assert_eq!(credential_reference, pinned_credential_reference);
+    assert_eq!(prepared.session(), session);
+    assert_eq!(prepared.turn(), turn);
+    assert_eq!(prepared.attempt(), attempt);
+    assert_eq!(prepared.call().id(), call);
+    assert_eq!(prepared.call().target().identity(), provider_identity);
+    let input_includes_cache_tokens: bool = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(input_includes_cache_tokens);
+
+    assert_eq!(prepared.frontier_entries().len(), 1);
+    assert_eq!(
+        prepared
+            .origin_content(accepted_input)
+            .expect("the frontier origin must carry its checked receipt content")
+            .text()
+            .as_str(),
+        "exact user request"
+    );
+    assert_eq!(
+        repository
+            .reread_ambiguous_authorization(session, &prepared)
+            .await?,
+        ModelCallAuthorizationReread::Prepared
+    );
+
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the exact Prepared call must authorize")
+    };
+    let authorized = *authorized;
+    assert_eq!(
+        repository.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    );
+    assert_eq!(
+        repository
+            .reread_ambiguous_authorization(session, &prepared)
+            .await?,
+        ModelCallAuthorizationReread::InFlight(Box::new(authorized.clone()))
+    );
+    let observation_correlation = authorized.observation_correlation();
+    assert_eq!(authorized.call().id(), call);
+    assert_eq!(
+        authorized.call().state(),
+        signalbox_domain::CurrentModelCallState::InFlight
+    );
+    assert_eq!(
+        authorized.attempt().state(),
+        &CurrentTurnAttemptState::Running
+    );
+    assert_eq!(
+        repository
+            .reread_ambiguous_authorization(session, &prepared)
+            .await?,
+        ModelCallAuthorizationReread::InFlight(Box::new(authorized.clone()))
+    );
+    assert_eq!(
+        repository
+            .prepare_initial_call(
+                session,
+                ModelCallId::from_uuid(Uuid::from_u128(0xce4)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdea)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0xeea)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xfea)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdfa)),
+                        TurnId::from_uuid(Uuid::from_u128(0xdfb)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::NoWork
+    );
+
+    let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
+    let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee2));
+    let assistant_text = AssistantText::try_new("exact assistant reply".to_owned())
+        .expect("fixture assistant content is admitted");
+    let observation = observation_correlation.bind_terminal_observation(
+        ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant_text.clone()],
+        },
+    );
+    assert_eq!(
+        repository
+            .reread_terminal_observation(session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::Pending
+    );
+    let outcome = repository
+        .apply_terminal_observation(
+            session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![assistant_entry],
+                completion_entry,
+                terminal_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .reread_terminal_observation(session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+        panic!("the definitive response must complete the turn");
+    };
+    assert_eq!(completed.turn(), turn);
+    assert_eq!(completed.assistant_entries().len(), 1);
+    assert_eq!(
+        completed.assistant_entries()[0].payload(),
+        &signalbox_domain::SemanticTranscriptEntryPayload::AssistantText {
+            producing_call: call,
+            value: assistant_text.clone(),
+        }
+    );
+
+    let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id = $1
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'),
+            (SELECT count(*) FROM turn_attempt
+              WHERE turn_attempt_id = $2
+                AND state_kind = 'ended'
+                AND end_disposition = 'turn_completed'),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $3
+                AND payload_kind = 'assistant_text'
+                AND assistant_text_value = $8
+                AND producing_model_call_id = $1),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $4
+                AND payload_kind = 'turn_completed'
+                AND completed_turn_id = $5),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE turn_id = $5
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'
+                AND terminal_frontier_id = $6
+                AND terminal_attempt_id = $2
+                AND terminal_model_call_id = $1),
+            (SELECT count(*) FROM model_call_transition_outbox_event
+              WHERE model_call_id = $1),
+            (SELECT count(*) FROM turn_completed_outbox_event
+              WHERE turn_id = $5
+                AND model_call_id = $1
+                AND completion_entry_id = $4
+                AND terminal_frontier_id = $6),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE turn_id = $5
+                AND pinned_provider_model_identity_id = $7),
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id = $1
+                AND credential_reference = $9)",
+    )
+    .bind(call.into_uuid())
+    .bind(attempt.into_uuid())
+    .bind(assistant_entry.into_uuid())
+    .bind(completion_entry.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .bind(provider_identity.into_uuid())
+    .bind(assistant_text.as_str())
+    .bind(pinned_credential_reference.as_str())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1, 1));
+
+    let completion_sequence: Decimal = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_completed_outbox_event
+          WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+            DROP CONSTRAINT turn_lifecycle_terminal_attempt_fk,
+            DROP CONSTRAINT turn_lifecycle_terminal_call_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_attempt_id = $1,
+                terminal_model_call_id = $2
+          WHERE turn_id = $3",
+    )
+    .bind(Uuid::from_u128(0xbad1))
+    .bind(Uuid::from_u128(0xbad2))
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         DISABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1 - 1,
+                last_delivery_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .bind(completion_sequence)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         ENABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|_| panic!("cross-wired terminal ownership must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_attempt_id = $1,
+                terminal_model_call_id = $2
+          WHERE turn_id = $3",
+    )
+    .bind(attempt.into_uuid())
+    .bind(call.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    sqlx::query("ALTER TABLE turn_completed_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_completed_outbox_event WHERE turn_id = $1")
+        .bind(turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_completed_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        repository
+            .reread_terminal_observation(session, &observation)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained observation terminal closure changed"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-032 / INV-036: the scripted
+/// application path consumes multiple steering inputs at preparation, renders
+/// them immediately in the process projection and to the provider in acceptance
+/// order, rejects noncontiguous stored snapshot ordinals before resume,
+/// preserves the staged terminal commits, and replays each immutable
+/// pending-steering receipt after consumption.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_inv014_inv015_application_service_completes_scripted_reply()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x18e1));
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0x1ce1));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            0x14e1,
+            0x18e1,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0x1ae1));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x14e2,
+                0x18e1,
+                "service user request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(turn),
+        )
+        .await?;
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0x1be1));
+    let mut activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                0x1de1,
+            ))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee1))],
+            [attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+    let steering_inputs = [
+        AcceptedInputId::from_uuid(Uuid::from_u128(0x19e2)),
+        AcceptedInputId::from_uuid(Uuid::from_u128(0x19e3)),
+    ];
+    let submit_repository = SubmitInputRepository::new(pool.clone());
+    let first_steering_command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x14e3)),
+        session,
+        UserContent::try_text(String::from("first steering"))
+            .expect("fixture steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let first_steering = submit_repository
+        .handle(first_steering_command.clone(), steering_inputs[0], None)
+        .await?;
+    assert!(matches!(
+        &first_steering,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    let second_steering_command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x14e4)),
+        session,
+        UserContent::try_text(String::from("second steering"))
+            .expect("fixture steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let second_steering = submit_repository
+        .handle(second_steering_command.clone(), steering_inputs[1], None)
+        .await?;
+    assert!(matches!(
+        &second_steering,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x1fe1));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider_identity),
+    )])
+    .expect("one immutable direct target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce2));
+    let corrupt_snapshot_unused_call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce4));
+    let unused_call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce3));
+    let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de4));
+    let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de5));
+    let steering_entries = [
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de6)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de7)),
+    ];
+    let steering_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee2));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee4));
+    let assistant_text = AssistantText::try_new(String::from("service assistant reply"))
+        .expect("fixture assistant content is admitted");
+    let mut reused_frontier_entries = [
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df8)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df9)),
+    ]
+    .into_iter();
+    let mut reused_frontier_turns = [
+        TurnId::from_uuid(Uuid::from_u128(0x1af8)),
+        TurnId::from_uuid(Uuid::from_u128(0x1af9)),
+    ]
+    .into_iter();
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1dfa)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef8)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee1)),
+            |_| {
+                (
+                    reused_frontier_entries
+                        .next()
+                        .expect("one entry candidate per pending steering input"),
+                    reused_frontier_turns
+                        .next()
+                        .expect("one turn candidate per pending steering input"),
+                )
+            },
+        )
+        .await
+        .expect_err("a reused steering-frontier identity must be retryable");
+    assert!(
+        matches!(
+            collision,
+            ModelCallRepositoryError::IdentityCollision(
+                ModelCallIdentityCollision::TerminalFrontier
+            )
+        ),
+        "unexpected reused-frontier result: {collision:?}"
+    );
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df0)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef0)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef1)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de1)),
+                    TurnId::from_uuid(Uuid::from_u128(0x1af0)),
+                )
+            },
+        )
+        .await
+        .expect_err("a steering identity already in the frontier must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry)
+    ));
+    let duplicate_candidate = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df1));
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef2)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef3)),
+            |_| {
+                (
+                    duplicate_candidate,
+                    TurnId::from_uuid(Uuid::from_u128(0x1af1)),
+                )
+            },
+        )
+        .await
+        .expect_err("duplicate generated steering identities must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry)
+    ));
+    let mut service = ModelCallExecutionService::new(
+        FixedModelCallExecutionIds::new(
+            [call, corrupt_snapshot_unused_call, unused_call],
+            [
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de2)),
+                steering_entries[0],
+                steering_entries[1],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1daa)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de3)),
+                assistant_entry,
+                completion_entry,
+            ],
+            [
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee5)),
+                steering_frontier,
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1eaa)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1eab)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee3)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee6)),
+                terminal_frontier,
+            ],
+            [
+                TurnId::from_uuid(Uuid::from_u128(0x1ae2)),
+                TurnId::from_uuid(Uuid::from_u128(0x1ae3)),
+            ],
+            [signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(
+                0x1ce1,
+            ))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0x1ae4))],
+        ),
+        repository.clone(),
+        repository.clone(),
+        repository.clone(),
+        repository,
+        ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![assistant_text.clone()],
+            },
+        )]),
+        InProcessAttemptDispatchGate::default(),
+    );
+
+    assert_eq!(
+        service.execute(session).await?,
+        ModelCallExecutionOutcome::Checkpointed(call)
+    );
+    let prepared_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the prepared call has a transcript projection");
+    assert_eq!(prepared_snapshot.entries().len(), 3);
+    assert_projected_steering_entry(
+        &prepared_snapshot.entries()[1],
+        steering_inputs[0],
+        turn,
+        "first steering",
+    );
+    assert_projected_steering_entry(
+        &prepared_snapshot.entries()[2],
+        steering_inputs[1],
+        turn,
+        "second steering",
+    );
+    sqlx::query("ALTER TABLE context_frontier_delta DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE context_frontier_delta
+            SET member_position = 4
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+            AND member_position = 3",
+    )
+    .bind(session.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE context_frontier_delta ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let corrupt_snapshot = service
+        .execute(session)
+        .await
+        .expect_err("the noncontiguous call snapshot must fail closed");
+    assert!(
+        matches!(
+            corrupt_snapshot,
+            ModelCallExecutionError::Prepare(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Scheduling(SubmitInputCorruption::Inconsistent(
+                    "context frontier contiguous membership"
+                ))
+            ))
+        ),
+        "unexpected noncontiguous-snapshot result: {corrupt_snapshot:?}"
+    );
+    sqlx::query("ALTER TABLE context_frontier_delta DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE context_frontier_delta
+            SET member_position = 3
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+            AND member_position = 4",
+    )
+    .bind(session.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE context_frontier_delta ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let ModelCallExecutionOutcome::ObservationCommitted(outcome) = service.execute(session).await?
+    else {
+        panic!("the resumed prepared call must commit its scripted observation")
+    };
+    let ModelCallTerminalOutcome::Completed(completed) = *outcome else {
+        panic!("the scripted completion must complete the turn")
+    };
+    assert_eq!(completed.turn(), turn);
+    assert_eq!(completed.assistant_entries()[0].identity(), assistant_entry);
+    assert_eq!(
+        completed.assistant_entries()[0].payload(),
+        &signalbox_domain::SemanticTranscriptEntryPayload::AssistantText {
+            producing_call: call,
+            value: assistant_text,
+        }
+    );
+    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+    assert_eq!(provider.capability_preparation_count(), 1);
+    assert_eq!(provider.interaction_count(), 1);
+    let messages = provider
+        .last_prepared_messages()
+        .expect("the scripted provider observed the prepared messages");
+    assert_eq!(messages.len(), 3);
+    assert!(matches!(
+        &messages[0],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == accepted_input
+            && content.text().as_str() == "service user request"
+    ));
+    assert!(matches!(
+        &messages[1],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == steering_inputs[0]
+            && content.text().as_str() == "first steering"
+    ));
+    assert!(matches!(
+        &messages[2],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == steering_inputs[1]
+            && content.text().as_str() == "second steering"
+    ));
+
+    let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id = $1
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'
+                AND context_frontier_id = $4),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE turn_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_frontier_id = $3),
+            (SELECT count(*) FROM accepted_input
+              WHERE accepted_input_id = ANY($5)
+                AND disposition_kind = 'consumed_as_steering'
+                AND consuming_model_call_id = $1),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = ANY($6)
+                AND payload_kind = 'steering_accepted_input'
+                AND steering_source_turn_id = $2)",
+    )
+    .bind(call.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .bind(steering_inputs.map(AcceptedInputId::into_uuid).to_vec())
+    .bind(
+        steering_entries
+            .map(SemanticTranscriptEntryId::into_uuid)
+            .to_vec(),
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_terminal, (1, 1, 2, 2));
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the completed session has a transcript projection");
+    assert_projected_steering_entry(
+        &transcript.entries()[1],
+        steering_inputs[0],
+        turn,
+        "first steering",
+    );
+    assert_projected_steering_entry(
+        &transcript.entries()[2],
+        steering_inputs[1],
+        turn,
+        "second steering",
+    );
+    let successor_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e4));
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x1ae4));
+    let successor = submit_repository
+        .handle(
+            start_input(
+                0x14e5,
+                0x18e1,
+                "request after consumed-steering restart",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            successor_input,
+            Some(successor_turn),
+        )
+        .await?;
+    assert!(matches!(
+        successor,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    assert_eq!(
+        submit_repository
+            .handle(
+                first_steering_command,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x19f2)),
+                None,
+            )
+            .await?,
+        first_steering
+    );
+    assert_eq!(
+        submit_repository
+            .handle(
+                second_steering_command,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x19f3)),
+                None,
+            )
+            .await?,
+        second_steering
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S03 / S04 / S07 / INV-006 / INV-016 / INV-029 / INV-034: a restart-parked
+/// ambiguous model call wedges the session — the scan classifies nothing, the
+/// wait stays visible across a second restart, and ordinary input is refused —
+/// and the user reconciliation decision then terminalizes the exact ambiguity
+/// without inventing an outcome, releases the slot, and lets the session
+/// activate the accepted successor.
+///
+/// This is one restart-and-recovery contract, so it stays one test
+/// (testing-style rule 17): CONTRIBUTING's restart category conjoins the final
+/// state, the absence of forbidden effects, and scan idempotency, and each step
+/// below runs against the durable state the previous step committed. Every
+/// assertion names the leg it guards (rule 20) so a failure identifies which
+/// guarantee broke rather than only that the timeline broke.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguous_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let parked = checkpoint_restart_model_call(&pool, 0xB100, true).await?;
+
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut scan = StartupScanService::new(
+        FixedStartupScanIds::new(
+            [
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xB201)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xB203)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xB205)),
+            ],
+            [
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xB202)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xB204)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xB206)),
+            ],
+        ),
+        PostgresStartupScanRepository::new(restarted_pool.clone()),
+    );
+
+    let first_restart = scan.execute().await?;
+    assert_eq!(
+        first_restart.recovered_turn_count(),
+        0,
+        "an unobserved issued call parks its turn instead of terminalizing it"
+    );
+    assert_eq!(
+        first_restart.awaiting_recovery_decision_sessions(),
+        &[parked.session],
+        "the restart that parks the turn reports the wait it just created"
+    );
+
+    let parked_shape: (String, String, String, String, String, Uuid) = sqlx::query_as(
+        "SELECT call.state_kind,
+                call.terminal_disposition_kind,
+                attempt.state_kind,
+                attempt.end_disposition,
+                turn.active_phase_kind,
+                turn.recovery_model_call_id
+           FROM model_call AS call
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = call.turn_attempt_id
+           JOIN turn_lifecycle AS turn
+             ON turn.turn_id = call.turn_id
+          WHERE call.model_call_id = $1",
+    )
+    .bind(parked.call.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        parked_shape,
+        (
+            "terminal".into(),
+            "ambiguous".into(),
+            "ended".into(),
+            "lost".into(),
+            "awaiting_model_call_recovery".into(),
+            parked.call.into_uuid(),
+        ),
+        "the restart boundary leaves the exact durable ambiguity it observed"
+    );
+    assert_eq!(
+        ProcessReadRepository::new(restarted_pool.clone())
+            .model_call_recovery_precondition(parked.session)
+            .await?,
+        ProcessModelCallRecoveryPrecondition::Parked { turn: parked.turn },
+        "the operator surface can see the wait it is expected to decide"
+    );
+
+    let wedged = SubmitInputRepository::new(restarted_pool.clone())
+        .handle(
+            start_input(
+                0xB210,
+                0xB101,
+                "work refused while the ambiguity is unreconciled",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xB211)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xB212))),
+        )
+        .await?;
+    assert_eq!(
+        wedged,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::ActiveTurnPresent {
+                session: parked.session,
+                active_turn: parked.turn,
+            }
+        )),
+        "the slot is never released without a user decision"
+    );
+
+    let second_restart = scan.execute().await?;
+    assert_eq!(
+        second_restart.recovered_turn_count(),
+        0,
+        "a re-run scan reclassifies nothing it already parked"
+    );
+    assert_eq!(
+        second_restart.awaiting_recovery_decision_sessions(),
+        &[parked.session],
+        "the wait stays reported until a decision resolves it"
+    );
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xB222));
+    let reconciled = SubmitInputRepository::new(restarted_pool.clone())
+        .handle(
+            input_with_delivery(
+                0xB220,
+                0xB101,
+                "continue after the user reconciliation decision",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: parked.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xB221)),
+            Some(successor),
+        )
+        .await?;
+    assert!(
+        matches!(
+            reconciled,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the user decision is accepted as the successor origin"
+    );
+
+    let reconciled_shape: (String, String, Uuid, Uuid, i64) = sqlx::query_as(
+        "SELECT turn.state_kind,
+                turn.terminal_disposition_kind,
+                turn.terminal_attempt_id,
+                turn.terminal_model_call_id,
+                (SELECT count(*)
+                   FROM turn_reconciliation_required_outbox_event
+                  WHERE turn_id = $1
+                    AND model_call_id = $2)
+           FROM turn_lifecycle AS turn
+          WHERE turn.turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .bind(parked.call.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        reconciled_shape,
+        (
+            "terminal".into(),
+            "reconciliation_required".into(),
+            parked.attempt.into_uuid(),
+            parked.call.into_uuid(),
+            1,
+        ),
+        "reconciliation records the exact durable ambiguity instead of a fabricated outcome"
+    );
+    let ambiguous_call_unchanged: (String, String) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(parked.call.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        ambiguous_call_unchanged,
+        ("terminal".into(), "ambiguous".into()),
+        "reconciliation never rewrites the ambiguous call it reports"
+    );
+    assert_eq!(
+        ProcessReadRepository::new(restarted_pool.clone())
+            .model_call_recovery_precondition(parked.session)
+            .await?,
+        ProcessModelCallRecoveryPrecondition::NoParkedTurn,
+        "the decided wait no longer offers itself to the operator surface"
+    );
+
+    let healed_restart = scan.execute().await?;
+    assert_eq!(
+        healed_restart.recovered_turn_count(),
+        0,
+        "a re-run scan after the decision changes nothing"
+    );
+    assert_eq!(
+        healed_restart.awaiting_recovery_decision_sessions(),
+        &[] as &[SessionId],
+        "a decided session is no longer reported as awaiting one"
+    );
+
+    let snapshot = ProcessReadRepository::new(restarted_pool.clone())
+        .read_transcript(parked.session)
+        .await?
+        .expect("the reconciled session remains process-readable");
+    let ProcessTurnState::ReconciliationRequired {
+        terminal_attempt,
+        operation,
+        ..
+    } = snapshot.turns()[0].state()
+    else {
+        panic!("the reconciled turn stays readable as reconciliation-required");
+    };
+    assert_eq!(
+        *terminal_attempt, parked.attempt,
+        "the readable turn retains its exact terminal attempt"
+    );
+    assert_eq!(
+        *operation,
+        ProcessReconciliationOperation::ModelCall(parked.call),
+        "the readable turn retains its exact ambiguous call"
+    );
+
+    let activated = activate_earliest_queued_turn(
+        &restarted_pool,
+        EarliestQueuedTurnActivation {
+            session: parked.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xB230),
+            starting_frontier: Uuid::from_u128(0xB231),
+            initial_attempt: Uuid::from_u128(0xB232),
+        },
+    )
+    .await?;
+    assert_eq!(
+        activated.turn(),
+        successor,
+        "the session activates the successor accepted by the reconciliation decision"
+    );
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S03 / S04 / S08 / INV-006 / INV-014 / INV-016 / INV-034: the production
+/// startup repository applies call-aware recovery under its session lock:
+/// Prepared is known-failed with exact terminal execution provenance while
+/// reclassifying newly observed steering, an issued call becomes an exact
+/// ambiguity wait, a stopped call terminalizes as reconciliation while
+/// reclassifying its steering, that successor remains a valid replay origin,
+/// and replay changes neither.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issued_model_calls()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
+    let issued = checkpoint_restart_model_call(&pool, 0x3000, true).await?;
+    let stopped = checkpoint_restart_model_call(&pool, 0x3500, true).await?;
+    let prepared_steering = AcceptedInputId::from_uuid(Uuid::from_u128(0x6100));
+    let issued_steering = AcceptedInputId::from_uuid(Uuid::from_u128(0x6101));
+    let stopped_steering = AcceptedInputId::from_uuid(Uuid::from_u128(0x6102));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x4100)),
+                    prepared.session,
+                    UserContent::try_text(String::from("steering accepted before restart"))
+                        .expect("fixture steering content is admitted"),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: prepared.turn,
+                    },
+                ),
+                prepared_steering,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x4300)),
+                    stopped.session,
+                    UserContent::try_text(String::from("steering accepted before stopped restart"))
+                        .expect("fixture steering content is admitted"),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: stopped.turn,
+                    },
+                ),
+                stopped_steering,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                input_with_delivery(
+                    0x4301,
+                    0x3501,
+                    "stop before restart",
+                    DeliveryRequest::Interrupt {
+                        expected_active_turn: stopped.turn,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault,),
+                    },
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x6103)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0x6203))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x4200)),
+                    issued.session,
+                    UserContent::try_text(String::from("steering accepted before restart"))
+                        .expect("fixture steering content is admitted"),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: issued.turn,
+                    },
+                ),
+                issued_steering,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut scan = StartupScanService::new(
+        FixedStartupScanIds::new(
+            [
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4001)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4002)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4003)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4004)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x4005)),
+            ],
+            [
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5001)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5002)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5003)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5004)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5005)),
+            ],
+        )
+        .with_reclassified_turns([
+            prepared.turn,
+            TurnId::from_uuid(Uuid::from_u128(0x6201)),
+            TurnId::from_uuid(Uuid::from_u128(0x6202)),
+        ]),
+        PostgresStartupScanRepository::new(restarted_pool.clone()),
+    );
+
+    let first = scan.execute().await?;
+    assert_eq!(first.recovered_turn_count(), 2);
+
+    let prepared_state: (String, String, String, String, String, Uuid, Uuid) = sqlx::query_as(
+        "SELECT call.state_kind,
+                call.terminal_disposition_kind,
+                attempt.state_kind,
+                attempt.end_disposition,
+                turn.state_kind,
+                turn.terminal_attempt_id,
+                turn.terminal_model_call_id
+           FROM model_call AS call
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = call.turn_attempt_id
+           JOIN turn_lifecycle AS turn
+             ON turn.turn_id = call.turn_id
+          WHERE call.model_call_id = $1",
+    )
+    .bind(prepared.call.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        prepared_state,
+        (
+            "terminal".into(),
+            "known_failed".into(),
+            "ended".into(),
+            "lost".into(),
+            "terminal".into(),
+            prepared.attempt.into_uuid(),
+            prepared.call.into_uuid(),
+        )
+    );
+
+    let issued_state: (String, String, String, String, String, Uuid) = sqlx::query_as(
+        "SELECT call.state_kind,
+                call.terminal_disposition_kind,
+                attempt.state_kind,
+                attempt.end_disposition,
+                turn.active_phase_kind,
+                turn.recovery_model_call_id
+           FROM model_call AS call
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = call.turn_attempt_id
+           JOIN turn_lifecycle AS turn
+             ON turn.turn_id = call.turn_id
+          WHERE call.model_call_id = $1",
+    )
+    .bind(issued.call.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        issued_state,
+        (
+            "terminal".into(),
+            "ambiguous".into(),
+            "ended".into(),
+            "lost".into(),
+            "awaiting_model_call_recovery".into(),
+            issued.call.into_uuid(),
+        )
+    );
+    let stopped_state: (String, String, String, String, String) = sqlx::query_as(
+        "SELECT call.state_kind,
+                call.terminal_disposition_kind,
+                attempt.end_variant,
+                attempt.end_disposition,
+                turn.terminal_disposition_kind
+           FROM model_call AS call
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = call.turn_attempt_id
+           JOIN turn_lifecycle AS turn
+             ON turn.turn_id = call.turn_id
+          WHERE call.model_call_id = $1",
+    )
+    .bind(stopped.call.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        stopped_state,
+        (
+            "terminal".into(),
+            "ambiguous".into(),
+            "after_cancellation".into(),
+            "lost".into(),
+            "reconciliation_required".into(),
+        )
+    );
+    let steering_state: (String, Option<Uuid>, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT prepared.disposition_kind,
+                prepared.origin_turn_id,
+                issued.disposition_kind,
+                issued.origin_turn_id
+           FROM accepted_input AS prepared
+           CROSS JOIN accepted_input AS issued
+          WHERE prepared.accepted_input_id = $1
+            AND issued.accepted_input_id = $2",
+    )
+    .bind(prepared_steering.into_uuid())
+    .bind(issued_steering.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        steering_state,
+        (
+            "reclassified_as_turn_origin".into(),
+            Some(Uuid::from_u128(0x6201)),
+            "pending_steering".into(),
+            None,
+        )
+    );
+    let stopped_steering_state: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT disposition_kind, origin_turn_id
+           FROM accepted_input
+          WHERE accepted_input_id = $1",
+    )
+    .bind(stopped_steering.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        stopped_steering_state,
+        (
+            "reclassified_as_turn_origin".into(),
+            Some(Uuid::from_u128(0x6202)),
+        )
+    );
+    assert!(matches!(
+        SubmitInputRepository::new(restarted_pool.clone())
+            .handle(
+                start_input(
+                    0x4302,
+                    0x3501,
+                    "work after reconciled restart",
+                    1,
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x6104)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0x6204))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    let mut stale_recovery_ids = FixedStartupScanIds::new([], []);
+    assert_eq!(
+        PostgresStartupScanRepository::new(restarted_pool.clone())
+            .recover(
+                prepared.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x6301)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0x6302)),
+                ),
+                &mut stale_recovery_ids,
+            )
+            .await?,
+        StartupScanSessionOutcome::NoActiveTurn
+    );
+
+    let replay = scan.execute().await?;
+    assert_eq!(replay.recovered_turn_count(), 0);
+    let unchanged: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id IN ($1, $2) AND state_kind = 'terminal'),
+            (SELECT count(*) FROM turn_attempt
+              WHERE turn_attempt_id IN ($3, $4) AND state_kind = 'ended'),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE failed_turn_id = $5),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE failed_turn_id = $6)",
+    )
+    .bind(prepared.call.into_uuid())
+    .bind(issued.call.into_uuid())
+    .bind(prepared.attempt.into_uuid())
+    .bind(issued.attempt.into_uuid())
+    .bind(prepared.turn.into_uuid())
+    .bind(issued.turn.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(unchanged, (2, 2, 1, 0));
+    assert_ne!(prepared.session, issued.session);
+
+    let activated_interrupt = activate_earliest_queued_turn(
+        &restarted_pool,
+        EarliestQueuedTurnActivation {
+            session: stopped.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0x6400),
+            starting_frontier: Uuid::from_u128(0x6401),
+            initial_attempt: Uuid::from_u128(0x6402),
+        },
+    )
+    .await?;
+    assert_eq!(
+        activated_interrupt.turn(),
+        TurnId::from_uuid(Uuid::from_u128(0x6203))
+    );
+    let empty_targets =
+        ModelTargetCatalog::try_from_definitions([]).expect("an empty target catalog is valid");
+    let target_miss = PostgresModelCallRepository::new(
+        restarted_pool.clone(),
+        empty_targets,
+        model_credential_reference(),
+    );
+    let PrepareInitialModelCallOutcome::TargetUnavailable(failed_interrupt) = target_miss
+        .prepare_initial_call(
+            stopped.session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x6403)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x6404)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x6405)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x6406)),
+            |_| panic!("the interrupt successor has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the unavailable target must release the interrupt successor");
+    };
+    assert_eq!(
+        failed_interrupt.turn(),
+        TurnId::from_uuid(Uuid::from_u128(0x6203))
+    );
+
+    let activated_reclassified = activate_earliest_queued_turn(
+        &restarted_pool,
+        EarliestQueuedTurnActivation {
+            session: stopped.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0x6410),
+            starting_frontier: Uuid::from_u128(0x6411),
+            initial_attempt: Uuid::from_u128(0x6412),
+        },
+    )
+    .await?;
+    let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(0x6202));
+    assert_eq!(activated_reclassified.turn(), reclassified_turn);
+
+    let descendant_command = DurableCommandId::from_uuid(Uuid::from_u128(0x4303));
+    let descendant = SubmitInputRepository::new(restarted_pool.clone())
+        .handle(
+            input_with_delivery(
+                0x4303,
+                0x3501,
+                "work after reconciliation-origin steering",
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: reclassified_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x6105)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0x6205))),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(descendant_result) = &descendant else {
+        panic!("the descendant command was newly recorded");
+    };
+    assert!(matches!(
+        descendant_result,
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(_))
+    ));
+    assert_eq!(
+        SubmitInputRepository::new(restarted_pool.clone())
+            .load(descendant_command)
+            .await?
+            .expect("the descendant command must replay")
+            .result(),
+        descendant_result
+    );
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / INV-014 / INV-034: restart recovery reconstructs a committed call
+/// from its durable provider target even after deployment configuration remaps
+/// the selected model.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_inv014_inv034_restart_recovery_preserves_durable_target_after_catalog_remap()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7000;
+    let fixture = checkpoint_restart_model_call(&pool, seed, false).await?;
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let durable_provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let remapped_provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 20));
+    let remapped_targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(remapped_provider),
+    )])
+    .expect("one remapped target forms a catalog");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        remapped_targets,
+        model_credential_reference(),
+    );
+
+    let outcome = repository
+        .recover_after_restart(
+            fixture.session,
+            fixture.call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 30)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 31)),
+            ),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Failed(failed) = outcome else {
+        panic!("the durable Prepared call must recover as known failure");
+    };
+    assert_eq!(
+        failed
+            .call()
+            .expect("restart recovery retains the physical call")
+            .target()
+            .identity(),
+        durable_provider
+    );
+    assert_ne!(durable_provider, remapped_provider);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / S08 / S09 / INV-016 / INV-053: steering accepted after send
+/// authorization is atomically reclassified when the source completes. Its
+/// immutable command still replays PendingSteering, while the inherited
+/// successor enters the ordinary scheduler with the source's exact settings
+/// evidence and activates after the terminal source.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pending_steering()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e4));
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce4));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_low_reasoning(0x4e4, 0x8e4, selection))
+        .await?;
+
+    let source_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e4));
+    let source_turn = TurnId::from_uuid(Uuid::from_u128(0xae4));
+    let capabilities =
+        ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
+            selection,
+            ModelCapabilities::new(
+                BTreeSet::from([ReasoningLevel::Low]),
+                FastModeSupport::Unsupported,
+                BTreeSet::new(),
+            ),
+        )])
+        .expect("one settings capability forms a catalog");
+    let inputs = SubmitInputRepository::with_model_capabilities(pool.clone(), capabilities);
+    let source_per_call = ModelSettingsOverlay::new(
+        SettingOverlay::ProviderDefault,
+        FastModeOverlay::Inherit,
+        SettingOverlay::Inherit,
+    );
+    inputs
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x4e5)),
+                session,
+                UserContent::try_text(String::from("source request"))
+                    .expect("fixture source content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::with_model_settings(
+                        SessionConfigurationDefaultsVersion::try_from_u64(1)
+                            .expect("the fixture version is positive"),
+                        ModelSelectionOverride::UseSessionDefault,
+                        source_per_call,
+                    ),
+                },
+            ),
+            source_input,
+            Some(source_turn),
+        )
+        .await?;
+    let source_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe4));
+    let mut source_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde4))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xee4))],
+            [source_attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        source_activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe4));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one target is a valid catalog");
+    let mut calls =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xce5));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = calls
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf4)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xef4)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xff4)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                    TurnId::from_uuid(Uuid::from_u128(0xcf5)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the exact Prepared fixture checkpoints")
+    };
+    assert_eq!(checkpointed, call);
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        calls.authorize_send(session, call).await?
+    else {
+        panic!("the exact Prepared call must authorize")
+    };
+    let authorized = *authorized;
+
+    let steering_command = DurableCommandId::from_uuid(Uuid::from_u128(0x4e6));
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e5));
+    let recorded = inputs
+        .handle(
+            SubmitInput::new(
+                steering_command,
+                session,
+                UserContent::try_text("follow-up steering".to_owned())
+                    .expect("fixture content is valid"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: source_turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        recorded,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xae5));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee5));
+    let outcome = calls
+        .commit_observation(
+            session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new("source reply".to_owned())
+                            .expect("fixture assistant content is valid"),
+                    ],
+                }),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Exact(
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde5))],
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde6)),
+                    terminal_frontier,
+                )),
+            ),
+            |accepted| {
+                assert_eq!(accepted, steering_input);
+                successor
+            },
+        )
+        .await?;
+    let Some(ModelCallTerminalOutcome::Completed(completed)) = outcome else {
+        panic!("the source call must complete");
+    };
+    assert_eq!(completed.reclassified_pending_steering().len(), 1);
+    assert_eq!(
+        completed.reclassified_pending_steering()[0].turn(),
+        successor
+    );
+
+    let durable: (String, Uuid, Uuid, String, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT accepted.disposition_kind,
+                accepted.expected_active_turn_id,
+                accepted.origin_turn_id,
+                successor.state_kind,
+                (SELECT count(*)
+                   FROM queued_input_origin AS queued
+                  WHERE queued.turn_id = $3
+                    AND queued.accepted_input_id = $1
+                    AND queued.source_configuration_turn_id = $4
+                    AND queued.defaults_version IS NULL
+                    AND queued.requested_model_kind IS NULL
+                    AND queued.frozen_model_kind IS NULL
+                    AND queued.model_parameters IS NULL
+                    AND queued.known_provider_failure_retry IS NULL
+                    AND queued.model_fallback IS NULL),
+                (SELECT count(*)
+                   FROM input_accepted_outbox_event AS event
+                  WHERE event.accepted_input_id = $1
+                    AND event.session_id = $2
+                    AND event.turn_id = $3
+                    AND event.acceptance_position = accepted.acceptance_position),
+                (SELECT count(*)
+                   FROM turn_model_settings_resolved AS successor_settings
+                   JOIN turn_model_settings_resolved AS source_settings
+                     ON source_settings.turn_id = $4
+                    AND source_settings.session_id = $2
+                    AND successor_settings.defaults_version =
+                        source_settings.defaults_version
+                    AND successor_settings.selected_direct_model_id =
+                        source_settings.selected_direct_model_id
+                    AND successor_settings.per_call_model_settings =
+                        source_settings.per_call_model_settings
+                    AND successor_settings.resolved_model_settings =
+                        source_settings.resolved_model_settings
+                    AND successor_settings.adjusted_from_selection_id
+                        IS NOT DISTINCT FROM
+                        source_settings.adjusted_from_selection_id
+                    AND successor_settings.adjustments = source_settings.adjustments
+                  WHERE successor_settings.accepted_input_id = $1
+                    AND successor_settings.turn_id = $3
+                    AND successor_settings.session_id = $2),
+                (SELECT count(*)
+                   FROM turn_model_settings_resolved_outbox_event AS event
+                  WHERE event.accepted_input_id = $1
+                    AND event.session_id = $2)
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS successor
+             ON successor.turn_id = accepted.origin_turn_id
+          WHERE accepted.accepted_input_id = $1
+            AND accepted.session_id = $2",
+    )
+    .bind(steering_input.into_uuid())
+    .bind(session.into_uuid())
+    .bind(successor.into_uuid())
+    .bind(source_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            "reclassified_as_turn_origin".into(),
+            source_turn.into_uuid(),
+            successor.into_uuid(),
+            "queued".into(),
+            1,
+            1,
+            1,
+            1,
+        )
+    );
+
+    let successor_settings_sequence: Decimal = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_model_settings_resolved_outbox_event
+          WHERE accepted_input_id = $1",
+    )
+    .bind(steering_input.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    rewind_outbox_delivery_before(&pool, successor_settings_sequence).await?;
+    assert_eq!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|event| {
+                let DispatchedOutboxEventKind::TurnModelSettingsResolved(settings) = event.kind()
+                else {
+                    panic!("the selected sequence carries turn settings evidence")
+                };
+                assert_eq!(settings.accepted_input(), steering_input);
+                assert_eq!(settings.per_call_override(), source_per_call);
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered {
+            sequence: u64::try_from(successor_settings_sequence).expect("sequence fits u64")
+        }
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the reclassified transcript remains readable");
+    let successor_settings = snapshot.turns()[1]
+        .model_settings()
+        .expect("the successor copied source settings evidence");
+    assert_eq!(successor_settings.per_call_override(), source_per_call);
+
+    let replay = inputs
+        .load(steering_command)
+        .await?
+        .expect("the immutable command receipt must remain readable");
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(pending)) =
+        replay.result()
+    else {
+        panic!("the immutable command receipt retains PendingSteering")
+    };
+    assert_eq!(pending.accepted_input(), steering_input);
+    assert_eq!(pending.binding().source_turn(), source_turn);
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(!continuation);
+    assert_eq!(eligible, vec![session]);
+
+    let mut successor_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde7))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xee6))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xbe5))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        successor_activation.execute(session).await?
+    else {
+        panic!("the reclassified successor must activate");
+    };
+    assert_eq!(activated.turn(), successor);
+    assert_eq!(
+        activated.start().lineage(),
+        AcceptedInputStartingLineage::After {
+            immediate_predecessor: source_turn,
+        }
+    );
+    assert_eq!(
+        activated.configuration_provenance(),
+        TurnConfigurationProvenance::InheritedForReclassifiedSteering(
+            signalbox_domain::SteeringBinding::new(source_turn),
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / S08 / INV-016 / INV-053: reclassification rejects missing settings
+/// for a post-cutover source, while a genuine pre-evidence source can still
+/// reclassify pending steering and leave the successor legacy-null.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_settings()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x38b0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 30));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 31)),
+                fixture.session,
+                UserContent::try_text(String::from("legacy source steering"))
+                    .expect("fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+
+    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM turn_model_settings_resolved_outbox_event
+          WHERE accepted_input_id IN (
+                SELECT accepted_input_id
+                  FROM turn_model_settings_resolved
+                 WHERE turn_id = $1
+          )",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_model_settings_resolved DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let deleted = sqlx::query("DELETE FROM turn_model_settings_resolved WHERE turn_id = $1")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    assert_eq!(deleted.rows_affected(), 1);
+    sqlx::query("ALTER TABLE turn_model_settings_resolved ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let missing_settings = repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
+            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+            )),
+            |_| successor,
+        )
+        .await;
+    assert!(
+        matches!(
+            &missing_settings,
+            Err(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Scheduling(SubmitInputCorruption::Missing(
+                    "turn model settings evidence"
+                ))
+            ))
+        ),
+        "unexpected missing-settings outcome: {missing_settings:?}"
+    );
+
+    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE queued_input_origin DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let registry_downgrade = sqlx::query(
+        "UPDATE durable_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 8))
+    .execute(&pool)
+    .await?;
+    let command_downgrade = sqlx::query(
+        "UPDATE submit_input_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 8))
+    .execute(&pool)
+    .await?;
+    let legacy_root = sqlx::query(
+        "UPDATE queued_input_origin
+            SET model_settings_evidence_required = FALSE
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(registry_downgrade.rows_affected(), 1);
+    assert_eq!(command_downgrade.rows_affected(), 1);
+    assert_eq!(legacy_root.rows_affected(), 1);
+    sqlx::query("ALTER TABLE queued_input_origin ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE durable_command ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let outcome = repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
+            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+            )),
+            |accepted| {
+                assert_eq!(accepted, steering_input);
+                successor
+            },
+        )
+        .await?;
+    assert_refused_reclassified_successor(&outcome, successor);
+
+    let evidence_cutover: Vec<(Uuid, bool)> = sqlx::query_as(
+        "SELECT turn.turn_id, configuration_origin.model_settings_evidence_required
+           FROM turn_lifecycle AS turn
+           JOIN LATERAL (
+                WITH RECURSIVE configuration_chain AS (
+                    SELECT queued.*
+                      FROM queued_input_origin AS queued
+                     WHERE queued.turn_id = turn.turn_id
+                       AND queued.session_id = turn.session_id
+                    UNION
+                    SELECT source.*
+                      FROM configuration_chain AS current
+                      JOIN queued_input_origin AS source
+                        ON source.turn_id = current.source_configuration_turn_id
+                       AND source.session_id = current.session_id
+                )
+                SELECT *
+                  FROM configuration_chain
+                 WHERE source_configuration_turn_id IS NULL
+           ) AS configuration_origin ON TRUE
+          WHERE turn.turn_id IN ($1, $2)
+          ORDER BY turn.acceptance_position",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(successor.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        evidence_cutover,
+        vec![
+            (fixture.turn.into_uuid(), false),
+            (successor.into_uuid(), false),
+        ]
+    );
+
+    let successor_evidence: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM turn_model_settings_resolved
+              WHERE accepted_input_id = $1 AND turn_id = $2),
+            (SELECT count(*) FROM turn_model_settings_resolved_outbox_event
+              WHERE accepted_input_id = $1)",
+    )
+    .bind(steering_input.into_uuid())
+    .bind(successor.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(successor_evidence, (0, 0));
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the legacy-compatible transcript remains readable");
+    assert_eq!(snapshot.turns().len(), 2);
+    assert_eq!(snapshot.turns()[1].turn(), successor);
+    assert_eq!(snapshot.turns()[1].model_settings(), None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S08 / S21 / INV-006 / INV-014 / INV-032 / INV-036: immutable target
+/// resolution failure creates no targetless call, reclassifies the complete
+/// pending steering prefix, and atomically closes the prepared attempt and turn
+/// with its semantic failure boundary and typed outbox event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_steering()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8f1));
+    let direct_selection =
+        signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xcf1));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(_) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4f1)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct_selection)),
+        )?)
+        .await?
+    else {
+        panic!("the target-miss fixture session must be created");
+    };
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9f1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xaf1));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new([accepted_input], [turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4f2)),
+            session,
+            UserContent::try_text("request with unavailable target".to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?
+    else {
+        panic!("the target-miss fixture input must be accepted");
+    };
+    assert_eq!(origin.accepted_input(), accepted_input);
+    assert_eq!(origin.turn(), turn);
+
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbf1));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf1))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xef1))],
+            [attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        activation_service.execute(session).await?
+    else {
+        panic!("the target-miss fixture turn must activate");
+    };
+    assert_eq!(activated.turn(), turn);
+
+    let pending_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9f2));
+    let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(0xaf2));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(_),
+    )) = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x4f3)),
+                session,
+                UserContent::try_text("steering before target miss".to_owned())
+                    .expect("fixture steering is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            pending_input,
+            None,
+        )
+        .await?
+    else {
+        panic!("the target-miss fixture steering must remain pending");
+    };
+
+    let targets = ModelTargetCatalog::try_from_definitions([])
+        .expect("an empty immutable target catalog is valid");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xcf2));
+    let failure_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf2));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xef2));
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call_candidate,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf3)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xef3)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xff1)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                    turn,
+                )
+            },
+        )
+        .await
+        .expect_err("a source-turn fallback candidate must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::ReclassifiedTurn)
+    ));
+    let PrepareInitialModelCallOutcome::TargetUnavailable(failed) = repository
+        .prepare_initial_call(
+            session,
+            call_candidate,
+            FailedModelCallTurnIdentities::new(failure_entry, terminal_frontier),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xff2)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf3)),
+                    reclassified_turn,
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the unavailable configured target must close without a call");
+    };
+    assert_eq!(failed.turn(), turn);
+    assert!(failed.call().is_none());
+
+    let reclassification_shape: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM accepted_input
+              WHERE accepted_input_id = $1
+                AND disposition_kind = 'reclassified_as_turn_origin'
+                AND origin_turn_id = $2),
+            (SELECT count(*) FROM queued_input_origin
+              WHERE accepted_input_id = $1
+                AND turn_id = $2
+                AND source_configuration_turn_id = $3)",
+    )
+    .bind(pending_input.into_uuid())
+    .bind(reclassified_turn.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reclassification_shape, (1, 1));
+
+    let durable_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id = $1),
+            (SELECT count(*) FROM turn_attempt
+              WHERE turn_attempt_id = $2
+                AND state_kind = 'ended'
+                AND end_variant = 'without_stop'
+                AND end_disposition = 'known_failure'),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $3
+                AND payload_kind = 'turn_failed'
+                AND failed_turn_id = $4),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE turn_id = $4
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'failed'
+                AND terminal_frontier_id = $5
+                AND terminal_attempt_id = $2
+                AND terminal_model_call_id IS NULL),
+            (SELECT count(*) FROM turn_failed_outbox_event
+              WHERE turn_id = $4
+                AND failure_entry_id = $3
+                AND terminal_frontier_id = $5)",
+    )
+    .bind(call_candidate.into_uuid())
+    .bind(attempt.into_uuid())
+    .bind(failure_entry.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_shape, (0, 1, 1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-007 / INV-009: migration 004 gives every preexisting session its
+/// scheduler serialization row and every accepted queued origin one queued
+/// lifecycle row without inventing start, frontier, semantic, or attempt
+/// facts; migration 005 preserves that exact legacy receipt and correlation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR.iter().take(3) {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('10000000-0000-4000-8000-000000000401',
+             'create_session', 1, transaction_timestamp());
+         INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         VALUES
+            ('70000000-0000-7000-8000-000000000401',
+             'owner_initiated', 'none');
+         INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES
+            ('70000000-0000-7000-8000-000000000401', 1, 'direct',
+             '80000000-0000-7000-8000-000000000401', NULL);
+         INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('70000000-0000-7000-8000-000000000401', 1);
+         INSERT INTO create_session_command
+            (command_id, command_kind, storage_version,
+             creation_cause, ancestry_kind, initial_defaults_version,
+             model_selection_kind, direct_model_selection_id, model_alias_id,
+             result_kind, created_session_id)
+         VALUES
+            ('10000000-0000-4000-8000-000000000401',
+             'create_session', 1, 'owner_initiated', 'none', 1,
+             'direct', '80000000-0000-7000-8000-000000000401', NULL,
+             'applied', '70000000-0000-7000-8000-000000000401');
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('30000000-0000-4000-8000-000000000401',
+             'submit_input', 1, transaction_timestamp());
+         INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_expected_active_turn_id, result_expected_defaults_version,
+             result_current_defaults_version, result_unknown_alias_id,
+             result_selected_defaults_version, result_last_position)
+         VALUES
+            ('30000000-0000-4000-8000-000000000401',
+             'submit_input', 1,
+             '70000000-0000-7000-8000-000000000401',
+             'owner', NULL, NULL, 'text', 'queued before migration',
+             'start_when_no_active_turn', NULL, 1,
+             'use_session_default', NULL, NULL, NULL,
+             'applied', NULL,
+             '70000000-0000-7000-8000-000000000401',
+             '90000000-0000-7000-8000-000000000401',
+             'a0000000-0000-7000-8000-000000000401',
+             NULL, NULL, NULL, NULL, NULL, NULL);
+         INSERT INTO accepted_input
+            (accepted_input_id, accepting_command_id, session_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             acceptance_position, disposition_kind, origin_turn_id)
+         VALUES
+            ('90000000-0000-7000-8000-000000000401',
+             '30000000-0000-4000-8000-000000000401',
+             '70000000-0000-7000-8000-000000000401',
+             'text', 'queued before migration',
+             'start_when_no_active_turn', NULL, 1,
+             'use_session_default', NULL, NULL, NULL,
+             1, 'origin_of',
+             'a0000000-0000-7000-8000-000000000401');
+         INSERT INTO queued_input_origin
+            (turn_id, accepted_input_id, session_id, acceptance_position,
+             priority_kind, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             requested_model_alias_id, frozen_model_kind,
+             frozen_direct_model_selection_id, frozen_model_alias_id,
+             frozen_alias_selected_direct_id, model_parameters,
+             known_provider_failure_retry, model_fallback)
+         VALUES
+            ('a0000000-0000-7000-8000-000000000401',
+             '90000000-0000-7000-8000-000000000401',
+             '70000000-0000-7000-8000-000000000401',
+             1, 'ordinary', 1,
+             'direct', '80000000-0000-7000-8000-000000000401', NULL,
+             'direct', '80000000-0000-7000-8000-000000000401', NULL, NULL,
+             'provider_defaults', 'disabled', 'disabled');",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    migrate(&pool).await?;
+
+    let backfilled: (i64, String, i64, i64, i64, bool) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM session_scheduler WHERE session_id = $1),
+            turn.state_kind,
+            (SELECT count(*) FROM semantic_transcript_entry),
+            (SELECT count(*) FROM context_frontier),
+            (SELECT count(*) FROM turn_attempt),
+            typed.result_actual_active_turn_id IS NULL
+         FROM turn_lifecycle AS turn
+         JOIN accepted_input AS accepted
+           ON accepted.accepted_input_id = turn.origin_accepted_input_id
+         JOIN submit_input_command AS typed
+           ON typed.command_id = accepted.accepting_command_id
+         WHERE turn.turn_id = $2",
+    )
+    .bind(Uuid::from_u128(0x70000000000070008000000000000401))
+    .bind(Uuid::from_u128(0xa0000000000070008000000000000401))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(backfilled, (1, "queued".to_owned(), 0, 0, 0, true));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

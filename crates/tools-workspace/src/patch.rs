@@ -1,3 +1,10 @@
+//! Parses, plans, and applies the structured `*** Begin/End Patch` file-diff
+//! format used by `apply_patch` (see `mutation.rs`).
+//!
+//! Owns the bounded `WorkspacePatch` grammar (`MAX_PATCH_BYTES`,
+//! `MAX_PATCH_OPERATIONS`, `MAX_PATCH_HUNKS`) independent of any filesystem
+//! access; `mutation.rs` supplies the file contents a plan applies against.
+
 use std::{
     collections::BTreeMap,
     error::Error,

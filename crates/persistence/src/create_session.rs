@@ -225,7 +225,10 @@ impl CreateSessionRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -267,7 +270,10 @@ impl CreateSessionRepository {
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession
                     | CommandKind::Goal
-                    | CommandKind::UpdateSessionPlacement,
+                    | CommandKind::UpdateSessionPlacement
+                    | CommandKind::RegisterWorkspace
+                    | CommandKind::MintGitRemote
+                    | CommandKind::WithdrawGitRemote,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -314,7 +320,10 @@ impl CreateSessionRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }

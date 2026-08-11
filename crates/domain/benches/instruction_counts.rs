@@ -1,3 +1,9 @@
+//! Gungraun/Callgrind instruction-count benchmarks for the domain crate's six
+//! deterministic microbenchmark targets (see `targets` and `README.md`).
+//!
+//! Runs only when `SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK` is set, and refuses
+//! to run under a debug-assertions profile; this is the CI-facing suite.
+
 mod targets;
 
 use gungraun::{

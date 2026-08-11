@@ -408,7 +408,7 @@ mod tests {
     }
 
     /// A validated request whose one knob is the command-identity seed
-    /// (`docs/agents/testing-style.md`, rule 4); it targets the canonical session
+    /// (TS-4); it targets the canonical session
     /// with canonical "hello" content and the version-one
     /// start-when-no-active-turn delivery.
     fn request(command: u128) -> SubmitInputRequest {
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(transaction.observed.len(), 2);
         assert_eq!(nudge.observed.into_inner(), vec![session, session]);
         let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-            signalbox_domain::SubmitInputAppliedResult::TurnOrigin(applied),
+            SubmitInputAppliedResult::TurnOrigin(applied),
         )) = replay
         else {
             panic!("recorded replay remains applied");

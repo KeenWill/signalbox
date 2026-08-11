@@ -1,3 +1,11 @@
+//! `CargoDiagnosticsTool`: bounded whole-workspace Cargo check, clippy, and
+//! test passes that report typed compiler diagnostic locations and test
+//! outcomes instead of raw terminal output.
+//!
+//! Built on the same sandboxed `process` core as `SandboxedExecTool`; each
+//! collection is labeled workspace-influenced evidence because Cargo and
+//! test-body output share output channels.
+
 use std::{
     collections::BTreeSet,
     error::Error,

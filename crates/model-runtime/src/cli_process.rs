@@ -225,6 +225,28 @@ pub trait CliSession<C>: Sized {
     fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence;
     /// Produces typed boundary-loss evidence.
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence;
+    /// Records that bytes were read off the process but never delivered.
+    ///
+    /// `read_bounded_line` accumulates into a local buffer, so dropping its
+    /// future at a cancellation or deadline discards whatever prefix it had
+    /// already consumed — including, possibly, the start of an `assistant`
+    /// event carrying a tool call. The default is a no-op, correct for an
+    /// adapter that never claims a negative it did not establish; an adapter
+    /// whose partial facts do claim one must stop claiming it here.
+    fn note_undelivered_line(&mut self) {}
+    /// Boundary loss for a line the runner never delivered to the decoder.
+    ///
+    /// The bytes were read off the process and then rejected by the line bound,
+    /// so nothing about that event was examined. An adapter whose partial facts
+    /// track per-event examination must answer from that state rather than from
+    /// the previous event; the default is the ordinary loss, which is correct
+    /// for an adapter that never claims a negative it did not establish.
+    fn undelivered_line_loss(self, cause: LossCause) -> TerminalEvidence
+    where
+        Self: Sized,
+    {
+        self.boundary_loss(cause)
+    }
     /// Preserves a provider failure while demoting an incomplete upload.
     fn boundary_loss_unless_provider_failure(
         self,
@@ -517,13 +539,16 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
     drop(stdin);
 
     let mut stdout = BufReader::new(stdout);
+    // Survives each read future so an interrupted read can say whether it had
+    // taken bytes it never delivered.
+    let mut line_progress = LineProgress::AtLineBoundary;
     let mut reaped_status = None;
     let mut deadline_stderr = None;
     loop {
         let terminal_observed = decoder.terminal_observed();
         let next = tokio::select! {
             biased;
-            result = read_bounded_line(&mut stdout, event_limit, labels) => ProcessStep::Line(result),
+            result = read_bounded_line(&mut stdout, event_limit, labels, &mut line_progress) => ProcessStep::Line(result),
             () = &mut *cancellation => ProcessStep::Cancelled,
             () = tokio::time::sleep_until(deadline) => ProcessStep::TimedOut,
         };
@@ -546,11 +571,19 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
+                    // The failing line is already unexamined material; a suffix
+                    // the same batch left buffered behind it is a second chunk
+                    // nothing read, and is abandoned here too.
+                    note_held_bytes(&mut decoder, line_progress);
                     return decoder.decode_failure(class, detail);
                 }
                 if !decoder.terminal_observed() && cancellation.is_cancelled() {
                     // Work-first: an already-exited leader's status is
                     // definitive and outranks a simultaneous cancellation.
+                    // Every exit from here leaves any buffered suffix unread,
+                    // whether it returns loss directly or breaks to exit
+                    // classification, so the fact is recorded before both.
+                    note_held_bytes(&mut decoder, line_progress);
                     if let Some((status, detail)) =
                         reap_exited_leader(&mut child, &mut stderr_task, labels).await
                     {
@@ -579,6 +612,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                     // exit classifies as a provider error, and a successful
                     // exit without a terminal marker stays typed exit
                     // evidence, rather than either becoming timeout loss.
+                    // As on the cancellation check above: the buffered suffix is
+                    // abandoned by both the break and the direct return.
+                    note_held_bytes(&mut decoder, line_progress);
                     if let Some((status, detail)) =
                         reap_exited_leader(&mut child, &mut stderr_task, labels).await
                     {
@@ -597,11 +633,16 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 force_kill(&mut child).await;
                 abort_stderr_task(&mut stderr_task).await;
                 redacting_sink.finish();
-                return decoder.boundary_loss(LossCause::StreamProtocolViolation {
-                    detail: error.to_string(),
-                });
+                return read_error_loss(
+                    decoder,
+                    LossCause::StreamProtocolViolation {
+                        detail: error.to_string(),
+                    },
+                    line_progress,
+                );
             }
             ProcessStep::Cancelled => {
+                note_held_bytes(&mut decoder, line_progress);
                 // Work-first: a leader that has already exited on its own is
                 // definitive evidence a simultaneous cancellation must not
                 // discard — even after a terminal marker, because a nonzero
@@ -641,6 +682,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             ProcessStep::TimedOut => {
+                note_held_bytes(&mut decoder, line_progress);
                 // An inherited stdout handle can outlive a leader that
                 // already exited on its own; that exit stays definitive —
                 // an observed terminal marker or the exit status — and only
@@ -1235,11 +1277,74 @@ enum InputStep {
     TimedOut,
 }
 
+/// Whether the bounded-line reader is holding bytes it has not yet returned.
+///
+/// Caller-owned, because a dropped future returns nothing: this is the only way
+/// to learn what an interrupted read had already taken off the transport. It is
+/// equally the answer for a read that returns an error, so the reader keeps it
+/// accurate on those paths rather than clearing them: a call that hands the
+/// caller everything it read reports [`Self::AtLineBoundary`], and one that
+/// abandons a line reports [`Self::PartialLineHeld`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineProgress {
+    /// No byte of a next line has been consumed or rejected.
+    AtLineBoundary,
+    /// Bytes no decoder has seen are held — a line the reader consumed but has
+    /// not delivered, a line it rejected at the event bound, or a suffix left
+    /// buffered behind a line it did deliver. Losing them here discards them
+    /// unexamined.
+    PartialLineHeld,
+}
+
+/// Propagates held bytes to the decoder when the read loop is being left.
+///
+/// [`LineProgress::PartialLineHeld`] covers the undelivered material these exits
+/// can be holding: the prefix an interrupted read had consumed, and the suffix a
+/// batch left buffered behind a line the same call delivered. A line the reader
+/// rejected is the third shape, and reaches [`read_error_loss`] instead, since
+/// that read returned an error rather than a line. None has been examined by
+/// any decoder, so every exit that can build boundary-loss evidence must record
+/// the fact first — otherwise the evidence states a negative ("no tool call
+/// opened") about material nothing read. The marker is sticky, so it is applied
+/// only where the bytes are actually being abandoned; a loop iteration that goes
+/// on to deliver the held suffix must not pre-emptively poison later evidence.
+fn note_held_bytes<C, D: CliSession<C>>(decoder: &mut D, progress: LineProgress) {
+    match progress {
+        // Everything read has been delivered, so this exit abandons nothing and
+        // the decoder's own facts still stand.
+        LineProgress::AtLineBoundary => {}
+        LineProgress::PartialLineHeld => decoder.note_undelivered_line(),
+    }
+}
+
+/// Chooses the loss path for a failed read, from what the reader was holding.
+///
+/// [`read_bounded_line`] sets the boundary state before the `fill_buf` that
+/// starts a line, so an error propagated from there took no byte of that line
+/// and abandoned no response material: the events already decoded still answer
+/// for themselves, exactly as on the cancellation and deadline arms, and this is
+/// the ordinary boundary loss. Only a line the reader consumed without
+/// delivering, or rejected at the event bound, is material nothing examined —
+/// and only that takes the undelivered-line path, where an adapter tracking
+/// per-event examination stops answering from the previous event.
+fn read_error_loss<C, D: CliSession<C>>(
+    decoder: D,
+    cause: LossCause,
+    progress: LineProgress,
+) -> TerminalEvidence {
+    match progress {
+        LineProgress::AtLineBoundary => decoder.boundary_loss(cause),
+        LineProgress::PartialLineHeld => decoder.undelivered_line_loss(cause),
+    }
+}
+
 async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     limit: usize,
     labels: CliProcessLabels,
+    progress: &mut LineProgress,
 ) -> std::io::Result<Option<Vec<u8>>> {
+    *progress = LineProgress::AtLineBoundary;
     let mut line = Vec::new();
     // Payload bytes counted so far. Tracked apart from `line.len()` because a
     // `\r` ending a batch is only a delimiter byte once the next batch shows
@@ -1254,8 +1359,13 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             // it was payload rather than half a delimiter. It is still attached
             // to the line the decoder receives, so charge it before admitting.
             if deferred_carriage_return && counted.saturating_add(1) > limit {
+                // Rejected, so these bytes are abandoned without any decoder
+                // having seen them — the same undelivered material an
+                // interrupted read holds.
+                *progress = LineProgress::PartialLineHeld;
                 return Err(oversize_event(limit, labels));
             }
+            *progress = LineProgress::AtLineBoundary;
             return if line.is_empty() {
                 Ok(None)
             } else {
@@ -1270,8 +1380,9 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             }
             deferred_carriage_return = false;
         }
+        let available_len = available.len();
         let newline = available.iter().position(|byte| *byte == b'\n');
-        let take = newline.map_or(available.len(), |index| index + 1);
+        let take = newline.map_or(available_len, |index| index + 1);
         // Only the payload counts toward the event limit — the line delimiter
         // (`\n`, or a `\r\n` pair) is stripped before decoding, so including it
         // would reject an exactly-`limit`-byte event in ordinary
@@ -1289,14 +1400,29 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             None => available.len(),
         };
         if counted.saturating_add(payload) > limit {
+            // As above: a line rejected at the bound is material nothing
+            // examined, whether or not an earlier batch of it was consumed.
+            *progress = LineProgress::PartialLineHeld;
             return Err(oversize_event(limit, labels));
         }
         counted += payload;
         line.extend_from_slice(&available[..take]);
         reader.consume(take);
+        // Consumed and not yet delivered: from here until this call returns, an
+        // interruption discards these bytes.
+        if !line.is_empty() {
+            *progress = LineProgress::PartialLineHeld;
+        }
         if newline.is_some() {
             while matches!(line.last(), Some(b'\n' | b'\r')) {
                 line.pop();
+            }
+            // `consume` released only this line. Anything the same batch held
+            // behind it stays buffered in the reader, unseen by any decoder, so
+            // the caller is still holding undelivered bytes even though this
+            // call is returning a complete line.
+            if take == available_len {
+                *progress = LineProgress::AtLineBoundary;
             }
             return Ok(Some(line));
         }
@@ -1600,12 +1726,19 @@ fn timeout_cause(labels: CliProcessLabels) -> LossCause {
     )))
 }
 
+/// Boundary loss raised before the child produced any decodable output.
+///
+/// The session's decoder is still owned by the caller at every one of these
+/// sites and is deliberately not consulted: no provider byte has been read, so
+/// it holds no view of the response's tool material and the fact is
+/// [`crate::ToolCallsAtLoss::Unobserved`].
 fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(crate::BoundaryLossEvidence {
         cause,
         exchange: crate::ExchangeFacts::default(),
         reported_model: None,
         finish_reported: None,
+        tool_calls: crate::ToolCallsAtLoss::Unobserved,
         usage: crate::TokenUsage::unreported(),
     })
 }
@@ -1614,13 +1747,14 @@ mod tests {
     use super::{
         BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliEnvironmentOverride,
         CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
-        CliTerminalTextCapture, EnvironmentRejection, EnvironmentRejectionReason,
+        CliTerminalTextCapture, EnvironmentRejection, EnvironmentRejectionReason, LineProgress,
         TRUNCATION_SUFFIX, absolute_credential_home, allowlisted_environment, execute_cli_process,
-        read_bounded_line, read_bounded_output, sanitized_stderr, validated_environment_overrides,
+        read_bounded_line, read_bounded_output, read_error_loss, sanitized_stderr,
+        validated_environment_overrides,
     };
     use crate::{
-        CancellationSignal, LossCause, ProviderErrorKind, REDACTED, RedactingSink,
-        TerminalEvidence, UnsentCause,
+        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ProviderErrorKind,
+        REDACTED, RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
     };
 
     const TEST_ENVIRONMENT: &[CliEnvironmentVariable] = &[
@@ -1711,6 +1845,144 @@ mod tests {
         TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
             cause: UnsentCause::CancelledBeforeSend,
         })
+    }
+
+    /// A decoder whose only state is the per-event examination fact the Claude
+    /// adapter tracks: its ordinary loss states the negative that fact
+    /// establishes, and its undelivered-line path clears the fact first —
+    /// exactly as that adapter does. The evidence therefore reports which loss
+    /// path ran, which is what these tests are about.
+    struct ExaminedSession {
+        correlation: u8,
+        examined: bool,
+    }
+
+    impl ExaminedSession {
+        fn loss(self, cause: LossCause) -> TerminalEvidence {
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause,
+                exchange: ExchangeFacts::default(),
+                reported_model: None,
+                finish_reported: None,
+                tool_calls: if self.examined {
+                    ToolCallsAtLoss::NoneOpened
+                } else {
+                    ToolCallsAtLoss::Unobserved
+                },
+                usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    impl CliSession<u8> for ExaminedSession {
+        const LABELS: CliProcessLabels = TEST_LABELS;
+
+        fn correlation(&self) -> &u8 {
+            &self.correlation
+        }
+
+        fn terminal_text_capture(&self) -> CliTerminalTextCapture {
+            CliTerminalTextCapture::Disabled
+        }
+
+        fn terminal_observed(&self) -> bool {
+            false
+        }
+
+        fn push(
+            &mut self,
+            _line: &[u8],
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> Result<(), CliDecodeFailure> {
+            Ok(())
+        }
+
+        fn decode_failure(
+            self,
+            _class: CliDecodeFailureClass,
+            _detail: String,
+        ) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+
+        fn finish(self, _sink: &mut RedactingSink<'_, u8>) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+
+        fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
+            self.loss(cause)
+        }
+
+        fn undelivered_line_loss(mut self, cause: LossCause) -> TerminalEvidence {
+            self.examined = false;
+            self.loss(cause)
+        }
+
+        fn boundary_loss_unless_provider_failure(
+            self,
+            _cause: LossCause,
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+
+        fn classify_provider_error_after_exit(_classification: &str) -> ProviderErrorKind {
+            ProviderErrorKind::Unrecognized
+        }
+
+        fn provider_error_after_exit(
+            self,
+            _message: &str,
+            _kind: ProviderErrorKind,
+            _sink: &mut RedactingSink<'_, u8>,
+        ) -> TerminalEvidence {
+            unused_terminal_evidence()
+        }
+    }
+
+    fn examined_session() -> ExaminedSession {
+        ExaminedSession {
+            correlation: 7,
+            examined: true,
+        }
+    }
+
+    fn read_failure_cause() -> LossCause {
+        LossCause::StreamProtocolViolation {
+            detail: "the process stdout read failed".to_string(),
+        }
+    }
+
+    fn loss_tool_calls(evidence: TerminalEvidence) -> ToolCallsAtLoss {
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a failed read produces boundary loss");
+        };
+        loss.tool_calls
+    }
+
+    /// A reader that delivers its bytes and then fails, so a read error can be
+    /// raised at a chosen point in a line.
+    struct FailingReader {
+        deliverable: Vec<u8>,
+    }
+
+    impl tokio::io::AsyncRead for FailingReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.deliverable.is_empty() {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the process stdout read failed",
+                )));
+            }
+            let take = self.deliverable.len().min(buffer.remaining());
+            let batch: Vec<u8> = self.deliverable.drain(..take).collect();
+            buffer.put_slice(&batch);
+            std::task::Poll::Ready(Ok(()))
+        }
     }
 
     fn direct_request(exchange_timeout: std::time::Duration) -> CliProcessRequest<UnusedSession> {
@@ -2332,14 +2604,50 @@ mod tests {
         );
     }
 
+    /// `consume` releases only the delivered line, so a batch carrying two
+    /// events leaves the second buffered in the reader where no decoder has
+    /// seen it. Losing the stream there discards it.
+    #[tokio::test]
+    async fn a_batch_with_a_second_event_leaves_bytes_held() {
+        let mut reader = std::io::Cursor::new(b"one\ntwo\n".to_vec());
+        let mut progress = LineProgress::AtLineBoundary;
+
+        let line = read_bounded_line(&mut reader, 16, TEST_LABELS, &mut progress)
+            .await
+            .expect("the first line is within the bound");
+
+        assert_eq!(line.as_deref(), Some(b"one".as_slice()));
+        assert_eq!(progress, LineProgress::PartialLineHeld);
+    }
+
+    /// The same read with nothing behind it leaves the caller at a boundary, so
+    /// the state above is about the suffix rather than about delivering a line.
+    #[tokio::test]
+    async fn a_batch_with_one_event_leaves_nothing_held() {
+        let mut reader = std::io::Cursor::new(b"one\n".to_vec());
+        let mut progress = LineProgress::AtLineBoundary;
+
+        let line = read_bounded_line(&mut reader, 16, TEST_LABELS, &mut progress)
+            .await
+            .expect("the only line is within the bound");
+
+        assert_eq!(line.as_deref(), Some(b"one".as_slice()));
+        assert_eq!(progress, LineProgress::AtLineBoundary);
+    }
+
     #[tokio::test]
     async fn bounded_line_rejects_an_unterminated_oversize_event() {
         let input = b"12345".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let error = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect_err("the fifth byte exceeds the configured event bound");
+        let error = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("the fifth byte exceeds the configured event bound");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -2353,9 +2661,14 @@ mod tests {
         let input = b"1234\n".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let line = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect("an exactly-limit payload plus its delimiter is admitted");
+        let line = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("an exactly-limit payload plus its delimiter is admitted");
 
         assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
     }
@@ -2366,9 +2679,14 @@ mod tests {
         let input = b"1234\r\n".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let line = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect("an exactly-limit payload plus its CRLF delimiter is admitted");
+        let line = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("an exactly-limit payload plus its CRLF delimiter is admitted");
 
         assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
     }
@@ -2382,9 +2700,14 @@ mod tests {
         let input = b"1234\r\n".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(5, input);
 
-        let line = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect("a CRLF split across reader batches is still a delimiter");
+        let line = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("a CRLF split across reader batches is still a delimiter");
 
         assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
     }
@@ -2397,9 +2720,14 @@ mod tests {
         let input = b"12\r345\n".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(3, input);
 
-        let error = read_bounded_line(&mut reader, 5, TEST_LABELS)
-            .await
-            .expect_err("an interior carriage return counts toward the limit");
+        let error = read_bounded_line(
+            &mut reader,
+            5,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("an interior carriage return counts toward the limit");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -2413,9 +2741,14 @@ mod tests {
         let input = b"1234\r".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(5, input);
 
-        let error = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect_err("an unterminated trailing carriage return is payload");
+        let error = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("an unterminated trailing carriage return is payload");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -2426,9 +2759,14 @@ mod tests {
         let input = b"1234\r".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(5, input);
 
-        let line = read_bounded_line(&mut reader, 5, TEST_LABELS)
-            .await
-            .expect("payload plus its trailing carriage return fits the bound");
+        let line = read_bounded_line(
+            &mut reader,
+            5,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("payload plus its trailing carriage return fits the bound");
 
         assert_eq!(line.as_deref(), Some(b"1234\r".as_slice()));
     }
@@ -2439,10 +2777,100 @@ mod tests {
         let input = b"12345\n".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let error = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect_err("a payload past the limit is rejected even with a delimiter");
+        let error = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("a payload past the limit is rejected even with a delimiter");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// The error `fill_buf` propagates before any byte of the next line is taken
+    /// leaves the caller at a boundary, which is what lets the read-error path
+    /// keep the fact the decoded prefix established.
+    #[tokio::test]
+    async fn a_read_error_before_the_next_line_leaves_nothing_held() {
+        let mut reader = tokio::io::BufReader::new(FailingReader {
+            deliverable: b"one\n".to_vec(),
+        });
+        let mut progress = LineProgress::AtLineBoundary;
+
+        let line = read_bounded_line(&mut reader, 16, TEST_LABELS, &mut progress)
+            .await
+            .expect("the line is delivered before the transport fails");
+        assert_eq!(line.as_deref(), Some(b"one".as_slice()));
+
+        let error = read_bounded_line(&mut reader, 16, TEST_LABELS, &mut progress)
+            .await
+            .expect_err("the read that would start the next line fails");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(progress, LineProgress::AtLineBoundary);
+    }
+
+    /// The same failure once the reader has consumed a line's opening bytes
+    /// leaves them held: they came off the transport and were never delivered.
+    #[tokio::test]
+    async fn a_read_error_after_a_partial_line_leaves_bytes_held() {
+        let mut reader = tokio::io::BufReader::new(FailingReader {
+            deliverable: b"partial".to_vec(),
+        });
+        let mut progress = LineProgress::AtLineBoundary;
+
+        let error = read_bounded_line(&mut reader, 16, TEST_LABELS, &mut progress)
+            .await
+            .expect_err("the read fails before the line is terminated");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!(progress, LineProgress::PartialLineHeld);
+    }
+
+    /// A line rejected at the event bound is also material no decoder examined,
+    /// so the reader reports it as held rather than as a boundary — the
+    /// distinction below is between abandoning a line and abandoning nothing,
+    /// not between an oversize event and a transport failure.
+    #[tokio::test]
+    async fn a_rejected_oversize_event_leaves_bytes_held() {
+        let input = b"12345\n".as_slice();
+        let mut reader = tokio::io::BufReader::new(input);
+        let mut progress = LineProgress::AtLineBoundary;
+
+        read_bounded_line(&mut reader, 4, TEST_LABELS, &mut progress)
+            .await
+            .expect_err("a payload past the limit is rejected");
+
+        assert_eq!(progress, LineProgress::PartialLineHeld);
+    }
+
+    /// A read that failed at a line boundary abandoned no response material, so
+    /// the negative the decoded prefix established survives: an adapter that
+    /// tracks per-event examination must not be told to forget it.
+    #[test]
+    fn a_read_error_at_a_line_boundary_keeps_the_examined_fact() {
+        let evidence = read_error_loss(
+            examined_session(),
+            read_failure_cause(),
+            LineProgress::AtLineBoundary,
+        );
+
+        assert_eq!(loss_tool_calls(evidence), ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// A read that failed holding a line took bytes nothing examined, and that
+    /// line could itself have carried a tool call — so the undelivered-line path
+    /// still runs and the previous event stops answering for it.
+    #[test]
+    fn a_read_error_holding_a_line_takes_the_undelivered_line_path() {
+        let evidence = read_error_loss(
+            examined_session(),
+            read_failure_cause(),
+            LineProgress::PartialLineHeld,
+        );
+
+        assert_eq!(loss_tool_calls(evidence), ToolCallsAtLoss::Unobserved);
     }
 }
