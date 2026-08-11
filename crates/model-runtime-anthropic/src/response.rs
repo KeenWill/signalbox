@@ -898,8 +898,9 @@ mod tests {
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
-    /// A decode that classified every block states the fact either way, so a
-    /// caller reads the same vocabulary from a complete and a partial decode.
+    /// Decodes a response whose sole content block is `content`, under a stop
+    /// reason that is not definitive completion material, and asserts the tool
+    /// fact its boundary loss carries.
     #[track_caller]
     fn assert_classified_tool_fact(content: &str, expected: ToolCallsAtLoss) {
         let (evidence, _) = decode(&format!(
@@ -920,12 +921,20 @@ mod tests {
         assert_eq!(loss.tool_calls, expected);
     }
 
+    /// Every block was classified and none was a tool call, so the decode
+    /// examined the material the question is about and states the negative.
     #[test]
-    fn a_fully_classified_decode_states_the_tool_fact_either_way() {
+    fn a_fully_classified_decode_without_a_tool_call_states_the_negative() {
         assert_classified_tool_fact(
             r#"{"type": "text", "text": "hi"}"#,
             ToolCallsAtLoss::NoneOpened,
         );
+    }
+
+    /// The same decode carrying a `tool_use` block reports it, so a caller reads
+    /// one vocabulary from a complete and a partial decode.
+    #[test]
+    fn a_fully_classified_decode_with_a_tool_call_reports_it() {
         assert_classified_tool_fact(
             r#"{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}"#,
             ToolCallsAtLoss::Opened,

@@ -40,6 +40,19 @@ pub(crate) enum StreamStep {
     Terminal(Box<TerminalEvidence>),
 }
 
+/// Whether records this chunk framed sit behind the one being applied now.
+///
+/// This is the axis that separates a withheld answer from a stated negative: a
+/// terminal raised on the last record of a chunk discards nothing, while one
+/// raised earlier drops records the decoder never scanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaterRecords {
+    /// Records the caller framed but has not applied yet follow this one.
+    Unapplied,
+    /// This is the last record the chunk framed, so nothing follows it.
+    AllApplied,
+}
+
 enum BlockBuilder {
     Text(String),
     Thinking {
@@ -77,7 +90,7 @@ pub(crate) struct StreamDecoder {
     declared_stop_sequences: Vec<String>,
     tool_call_ids: BTreeSet<String>,
     discarded_unexamined_bytes: bool,
-    unapplied_records_follow: bool,
+    later_records: LaterRecords,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
@@ -99,7 +112,7 @@ impl StreamDecoder {
             declared_stop_sequences,
             tool_call_ids: BTreeSet::new(),
             discarded_unexamined_bytes: false,
-            unapplied_records_follow: false,
+            later_records: LaterRecords::AllApplied,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -146,10 +159,13 @@ impl StreamDecoder {
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if !self.tool_call_ids.is_empty() {
             ToolCallsAtLoss::Opened
-        } else if self.discarded_unexamined_bytes || self.unapplied_records_follow {
+        } else if self.discarded_unexamined_bytes {
             ToolCallsAtLoss::Unobserved
         } else {
-            ToolCallsAtLoss::NoneOpened
+            match self.later_records {
+                LaterRecords::Unapplied => ToolCallsAtLoss::Unobserved,
+                LaterRecords::AllApplied => ToolCallsAtLoss::NoneOpened,
+            }
         }
     }
 
@@ -163,12 +179,12 @@ impl StreamDecoder {
 
     /// Records whether this chunk framed records the caller has not applied yet.
     ///
-    /// Not sticky: it is true only while such records exist. A terminal built
+    /// Not sticky: it holds only while such records exist. A terminal built
     /// during the apply below discards them, and the evidence is constructed
     /// inside `apply`, so the decoder has to know before it is called rather
     /// than be corrected afterwards.
-    pub(crate) fn note_unapplied_records_follow(&mut self, follow: bool) {
-        self.unapplied_records_follow = follow;
+    pub(crate) fn note_later_records(&mut self, later_records: LaterRecords) {
+        self.later_records = later_records;
     }
 
     /// The tool fact for a violation raised by material that never decoded.

@@ -53,6 +53,19 @@ pub(crate) enum StreamStep {
     Terminal(Box<TerminalEvidence>),
 }
 
+/// Whether records this chunk framed sit behind the one being applied now.
+///
+/// This is the axis that separates a withheld answer from a stated negative: a
+/// terminal raised on the last record of a chunk discards nothing, while one
+/// raised earlier drops records the decoder never scanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaterRecords {
+    /// Records the caller framed but has not applied yet follow this one.
+    Unapplied,
+    /// This is the last record the chunk framed, so nothing follows it.
+    AllApplied,
+}
+
 #[derive(Default)]
 struct ToolBuilder {
     id: Option<String>,
@@ -81,7 +94,7 @@ pub(crate) struct StreamDecoder {
     /// (populated only there) survives every loss path.
     opened_tool_calls: bool,
     discarded_unexamined_bytes: bool,
-    unapplied_records_follow: bool,
+    later_records: LaterRecords,
     final_usage_reported: bool,
     /// The violation an unrecognized finish will report at `[DONE]`. Held
     /// rather than returned so records following that finish are still
@@ -105,7 +118,7 @@ impl StreamDecoder {
             completed_tools: Vec::new(),
             opened_tool_calls: false,
             discarded_unexamined_bytes: false,
-            unapplied_records_follow: false,
+            later_records: LaterRecords::AllApplied,
             final_usage_reported: false,
             pending_unrecognized_finish: None,
         }
@@ -481,10 +494,13 @@ impl StreamDecoder {
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
-        } else if self.discarded_unexamined_bytes || self.unapplied_records_follow {
+        } else if self.discarded_unexamined_bytes {
             ToolCallsAtLoss::Unobserved
         } else {
-            ToolCallsAtLoss::NoneOpened
+            match self.later_records {
+                LaterRecords::Unapplied => ToolCallsAtLoss::Unobserved,
+                LaterRecords::AllApplied => ToolCallsAtLoss::NoneOpened,
+            }
         }
     }
 
@@ -498,12 +514,12 @@ impl StreamDecoder {
 
     /// Records whether this chunk framed records the caller has not applied yet.
     ///
-    /// Not sticky: it is true only while such records exist. A terminal built
+    /// Not sticky: it holds only while such records exist. A terminal built
     /// during the apply below discards them, and the evidence is constructed
     /// inside `apply`, so the decoder has to know before it is called rather
     /// than be corrected afterwards.
-    pub(crate) fn note_unapplied_records_follow(&mut self, follow: bool) {
-        self.unapplied_records_follow = follow;
+    pub(crate) fn note_later_records(&mut self, later_records: LaterRecords) {
+        self.later_records = later_records;
     }
 
     /// The tool fact for a violation raised by a record that never decoded.
@@ -775,6 +791,11 @@ mod tests {
     use super::{StreamDecoder, StreamStep};
     use crate::response::StopSequences;
 
+    /// Larger than any fixture record in this module. These tests exercise the
+    /// decoder, not the framer's record bound, so the value only has to be out
+    /// of reach — the bound's own behavior is covered in the framer's tests.
+    const AMPLE_RECORD_LIMIT: usize = 1024 * 1024;
+
     /// Pushes one chunk that must frame without a failure and returns its
     /// completed records.
     #[track_caller]
@@ -801,7 +822,7 @@ mod tests {
         chunks: &[&[u8]],
         stop_sequences: StopSequences,
     ) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
-        let mut framing = SseFraming::new(1024 * 1024);
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
         let mut decoder = StreamDecoder::new(exchange(), stop_sequences);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
@@ -825,7 +846,7 @@ mod tests {
     /// Drives chunks that must not terminate, then reports the end-of-stream
     /// loss evidence for the resulting decoder state.
     fn drive_to_eof(chunks: &[&[u8]]) -> (TerminalEvidence, Vec<Observation<String>>) {
-        let mut framing = SseFraming::new(1024 * 1024);
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
         let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
@@ -1033,7 +1054,7 @@ mod tests {
     /// did reach the decoder was scanned.
     #[test]
     fn a_loss_with_unframed_bytes_held_withholds_the_tool_fact() {
-        let mut framing = SseFraming::new(1024 * 1024);
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
         let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
         let mut observations: Vec<Observation<String>> = Vec::new();
         apply_one_record(&mut framing, &mut decoder, &mut observations, first_chunk());
@@ -1058,7 +1079,7 @@ mod tests {
     /// lands mid-chunk would state a negative about records it discarded.
     #[test]
     fn records_dropped_before_the_decoder_applies_them_withhold() {
-        let mut framing = SseFraming::new(1024 * 1024);
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
         let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
         let mut observations: Vec<Observation<String>> = Vec::new();
         apply_one_record(&mut framing, &mut decoder, &mut observations, first_chunk());

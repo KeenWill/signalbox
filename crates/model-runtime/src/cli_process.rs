@@ -1309,8 +1309,11 @@ enum LineProgress {
 /// only where the bytes are actually being abandoned; a loop iteration that goes
 /// on to deliver the held suffix must not pre-emptively poison later evidence.
 fn note_held_bytes<C, D: CliSession<C>>(decoder: &mut D, progress: LineProgress) {
-    if progress == LineProgress::PartialLineHeld {
-        decoder.note_undelivered_line();
+    match progress {
+        // Everything read has been delivered, so this exit abandons nothing and
+        // the decoder's own facts still stand.
+        LineProgress::AtLineBoundary => {}
+        LineProgress::PartialLineHeld => decoder.note_undelivered_line(),
     }
 }
 

@@ -28,7 +28,7 @@ use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog, ModelCapabilityE
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
 use crate::status::{classify_error, classify_error_status};
-use crate::stream::{StreamDecoder, StreamStep};
+use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
@@ -607,13 +607,17 @@ fn process_streamed_chunk<C: Clone>(
         // A terminal raised by this record discards everything behind it, and
         // `apply` builds that evidence itself, so the fact has to be in place
         // before the call rather than patched onto its result.
-        decoder.note_unapplied_records_follow(index + 1 < framed_records);
+        decoder.note_later_records(if index + 1 < framed_records {
+            LaterRecords::Unapplied
+        } else {
+            LaterRecords::AllApplied
+        });
         match decoder.apply(&record, correlation, sink) {
             StreamStep::Continue => {}
             StreamStep::Terminal(evidence) => return Some(*evidence),
         }
     }
-    decoder.note_unapplied_records_follow(false);
+    decoder.note_later_records(LaterRecords::AllApplied);
     if let Some(error) = outcome.error {
         return Some(decoder.undecoded_violation_evidence(error.to_string()));
     }

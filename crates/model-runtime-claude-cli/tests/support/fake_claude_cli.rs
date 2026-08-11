@@ -240,11 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // tool fact must come from the pre-scan of its decoded content.
         "tool_use_with_conflicting_message_id" => {
             assistant_text(fixtures::ANSWER)?;
-            assistant_tool_with_message_id(
-                fixtures::OTHER_MESSAGE_ID,
-                fixtures::TOOL_ID,
-                fixtures::TOOL_NAME,
-            )?;
+            assistant_tool_with_message_id(fixtures::OTHER_MESSAGE_ID)?;
             success("tool_use", None)?;
         }
         "success_without_stop_reason" => {
@@ -472,16 +468,15 @@ fn assistant_text_with_identity(id: &str, model: &str, text: &str) -> std::io::R
     }))
 }
 
-fn assistant_tool_with_message_id(
-    message_id: &str,
-    tool_id: &str,
-    name: &str,
-) -> std::io::Result<()> {
+/// The standard tool-call event with the message id as its only knob: the tool
+/// identity is the usual fixture, since what varies here is whose message the
+/// event claims to belong to.
+fn assistant_tool_with_message_id(message_id: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "assistant", "parent_tool_use_id": null,
         "message": {"model": fixtures::MODEL, "id": message_id, "role": "assistant",
-            "content": [{"type": "tool_use", "id": tool_id,
-                "name": format!("mcp__signalbox_tools__{name}"),
+            "content": [{"type": "tool_use", "id": fixtures::TOOL_ID,
+                "name": format!("mcp__signalbox_tools__{}", fixtures::TOOL_NAME),
                 "input": {"subject": "synthetic"}, "caller": {"type": "direct"}}]}
     }))
 }
