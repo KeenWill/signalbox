@@ -15847,6 +15847,47 @@ async fn s32_inv032_inv044_runner_reconnect_after_suspicion_publishes_connected(
     Ok(())
 }
 
+/// INV-032 / INV-044: an established epoch publishes recovery only when its
+/// immediate durable predecessor is the suspicion that it supersedes.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_initial_connection_cannot_publish_recovery() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let source = connection_outbox_source(
+        &pool,
+        placement_event_ordinal,
+        expected_enrollment.enrollment(),
+        "established",
+    )
+    .await?;
+    let rejected = append_runner_state_transition_for_test(
+        &pool,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Connected,
+            source,
+        ),
+    )
+    .await
+    .expect_err("an initial established connection is not a recovery boundary");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: connection-state publication must name the enrollment's
 /// latest durable connection event at insertion time.
 #[tokio::test]
