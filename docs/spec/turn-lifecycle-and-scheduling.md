@@ -401,12 +401,16 @@ The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
 process ended after turn terminalization but before scheduler reconciliation.
 Each authoritative pass first asks its execution composition to reconcile any
-active running tool round for the hinted session, then runs ordinary queued-turn
-activation. Failure of the read-only active-round lookup is an ordinary failed
-pass for later scheduler retry; only a failure after active-turn execution
-begins trips fatal recovery supervision. A parked approval returns from the pass
-immediately and therefore retains no scheduler worker capacity. Activation
-returns the activated turn
+active running tool round for the hinted session. If the active turn instead
+retains a current `Prepared` model call, the pass reloads that call and hands it
+to the same `ModelCallExecutionService` used after activation; temporary
+attachment unavailability can therefore retain the call for a later sweep
+without requiring restart. Only a session with neither shape proceeds to
+ordinary queued-turn activation. Failure of either read-only lookup is an
+ordinary failed pass for later scheduler retry; only a failure after active-turn
+execution begins trips fatal recovery supervision. A parked approval returns
+from the pass immediately and therefore retains no scheduler worker capacity.
+Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 signalboxd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
