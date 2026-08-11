@@ -15939,6 +15939,34 @@ async fn s31_inv009_inv043_inv044_connection_loss_serializes_exact_selection_pin
     Ok(())
 }
 
+/// INV-043 / INV-044: clean shutdown is terminal for its exact connection
+/// epoch and cannot strand a newly offered lease behind unusable authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_shutdown_connection_rejects_later_lease_offer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::DaemonShutdown,
+        )
+        .await?;
+    let rejected = store
+        .store_lease(&lease)
+        .await
+        .expect_err("a cleanly shut down connection cannot authorize a lease offer");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-043 / INV-044: once a terminal transition owns enrollment authority,
 /// a concurrent lease offer observes the committed loss fence and is refused.
 #[tokio::test(flavor = "multi_thread")]
@@ -16717,6 +16745,47 @@ async fn s32_inv032_inv044_runner_reconnect_after_suspicion_publishes_connected(
             state: DispatchedRunnerState::Connected,
         }
     );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: an established epoch publishes recovery only when its
+/// immediate durable predecessor is the suspicion that it supersedes.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_initial_connection_cannot_publish_recovery() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let source = connection_outbox_source(
+        &pool,
+        placement_event_ordinal,
+        expected_enrollment.enrollment(),
+        "established",
+    )
+    .await?;
+    let rejected = append_runner_state_transition_for_test(
+        &pool,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Connected,
+            source,
+        ),
+    )
+    .await
+    .expect_err("an initial established connection is not a recovery boundary");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
