@@ -6,8 +6,8 @@ use serde_json::Value;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
     CliSession, CliTerminalTextCapture, CompletionEvidence, CompletionFinish, DeliveryMode,
-    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
-    ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
+    DiscardedField, ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation,
+    ObservationFact, ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
     TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     provider_json_has_duplicate_members, redact_json, redact_text, validate_provider_json_nesting,
@@ -353,18 +353,28 @@ impl<C: Clone> EventDecoder<C> {
                 "Claude assistant model contradicts prior assistant content",
             ));
         }
-        if self.native_assistant_model.is_none() {
-            // The provider-resolved model is accepted here and then discarded:
-            // it is retained only to detect a later contradiction and leaves
-            // the adapter in no record, so an ambient delivery has no exact
-            // value to redact downstream. A marker prefix ending it (`api_`)
-            // beside a first text block opening `key=value` still reconstructs
-            // the credential, so register it as a lookbehind chain of its own —
-            // the emitted chain belongs to the message id above, and the
-            // dropped chain to provider content this field does not sit in.
-            sink.add_discarded_field_identifier(&event.message.model);
+        // The provider-resolved model is accepted and then discarded: it is
+        // retained only to detect a later contradiction and leaves the adapter
+        // in no record, so an ambient delivery has no exact value to redact
+        // downstream. A marker prefix ending it (`api_`) beside a text block
+        // opening `key=value` still reconstructs the credential, so register it
+        // as a lookbehind chain of its own — the emitted chain belongs to the
+        // message id above, and the dropped chain to provider content this
+        // field does not sit in.
+        //
+        // Every assistant envelope repeats and discards this same field, and
+        // each repetition sits beside that envelope's own content blocks, so
+        // registration happens on every event rather than only the first:
+        // content that spends the lookbehind in one event would otherwise leave
+        // the next event's text unguarded. The check above has already proven a
+        // repeat equal to the stored value.
+        let repetition = if self.native_assistant_model.is_none() {
             self.native_assistant_model = Some(event.message.model.clone());
-        }
+            DiscardedField::New
+        } else {
+            DiscardedField::Repeated
+        };
+        sink.add_discarded_field_identifier(&event.message.model, repetition);
         if let Some(usage) = event.message.usage {
             self.usage.absorb(message_usage(usage));
         }

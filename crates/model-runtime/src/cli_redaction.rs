@@ -1524,6 +1524,22 @@ struct PendingRescanWork {
     bytes: usize,
 }
 
+/// Which presentation of a discarded provider field a registration carries.
+///
+/// A stream may repeat the same discarded field in every envelope (the Claude
+/// CLI's resolved model), and each repetition sits beside that envelope's own
+/// content. Distinguishing the repetition from a genuinely new field is what
+/// lets the sink re-seed a spent lookbehind without reading an ordinary repeat
+/// as two independent live chains and failing closed over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardedField {
+    /// A field the sink has not been given before.
+    New,
+    /// The same field again, already proven equal to the registered one by the
+    /// adapter's own contradiction check.
+    Repeated,
+}
+
 /// Holds an incomplete credential shape between streamed facts.
 pub struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
@@ -1645,7 +1661,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     }
 
     /// Registers a provider-controlled field value the adapter accepted, stored
-    /// for its own bookkeeping, and then discarded (the first assistant event's
+    /// for its own bookkeeping, and then discarded (an assistant event's
     /// resolved model). The value reaches no record, so an ambient delivery has
     /// no exact value to redact downstream — yet a credential marker ending it
     /// still marks whatever follows it in the stream as that credential's
@@ -1653,10 +1669,17 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     ///
     /// The value seeds a lookbehind chain of its own, so protecting it neither
     /// breaks the chronological adjacency of the dropped provider-text chain
-    /// nor contends for the emitted chain's single identifier slot. One slot
-    /// still cannot represent two independent live discarded fields, so a
-    /// second registration carrying its own candidate fails closed.
-    pub fn add_discarded_field_identifier(&mut self, discarded: &str) {
+    /// nor contends for the emitted chain's single identifier slot.
+    ///
+    /// Every envelope that repeats the field presents it again beside that
+    /// envelope's own content, so the adapter registers it once per envelope
+    /// and [`DiscardedField`] says which presentation this is. A repeat seeds
+    /// the chain again only once the previous registration has been spent by
+    /// intervening content; while that registration is still live it already
+    /// governs, and re-seeding would discard whatever it has grown into. One
+    /// slot still cannot represent two independent live discarded fields, so a
+    /// genuinely new second field carrying its own candidate fails closed.
+    pub fn add_discarded_field_identifier(&mut self, discarded: &str, field: DiscardedField) {
         if self.suppressing {
             return;
         }
@@ -1668,7 +1691,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.discarded_field_context = carried;
             return;
         }
-        self.suppress_remaining();
+        match field {
+            DiscardedField::Repeated => {}
+            DiscardedField::New => self.suppress_remaining(),
+        }
     }
 
     /// Every lookbehind chain the sink judges, in evaluation order: the emitted
@@ -3507,14 +3533,15 @@ mod tests {
     use crate::{Observation, ObservationFact, ObservationSink, TokenUsage};
 
     use super::{
-        CREDENTIAL_INDICATORS, CURL_USER_FLAGS, LINE_CREDENTIAL_MARKERS, LINE_CREDENTIAL_NAMES,
-        MAX_PENDING_RESCAN_BYTES, MAX_PENDING_STREAM_BYTES, PendingRescanWork, REDACTED,
-        REDACTED_JSON_OBJECT, RedactingSink, SPACE_SEPARATED_CREDENTIAL_FLAGS, TOKEN_PREFIXES,
-        VALUE_CREDENTIAL_MARKERS, VALUE_CREDENTIAL_NAMES, decode_unicode_escapes,
-        identifier_assignment_candidate, identifier_assignment_unsafe_start, json_claim_scan_bytes,
-        redact_identifier_assignment, redact_json, redact_text, reset_json_claim_scan_bytes,
-        stream_candidate_starts_at_zero, text_might_contain_credential,
-        trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
+        CREDENTIAL_INDICATORS, CURL_USER_FLAGS, DiscardedField, LINE_CREDENTIAL_MARKERS,
+        LINE_CREDENTIAL_NAMES, MAX_PENDING_RESCAN_BYTES, MAX_PENDING_STREAM_BYTES,
+        PendingRescanWork, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
+        SPACE_SEPARATED_CREDENTIAL_FLAGS, TOKEN_PREFIXES, VALUE_CREDENTIAL_MARKERS,
+        VALUE_CREDENTIAL_NAMES, decode_unicode_escapes, identifier_assignment_candidate,
+        identifier_assignment_unsafe_start, json_claim_scan_bytes, redact_identifier_assignment,
+        redact_json, redact_text, reset_json_claim_scan_bytes, stream_candidate_starts_at_zero,
+        text_might_contain_credential, trailing_credential_context, unsafe_stream_suffix_start,
+        unterminated_json_key_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -5420,7 +5447,10 @@ safe-line"
         let mut observed = Vec::new();
         {
             let mut sink = RedactingSink::new(&mut observed);
-            sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+            sink.add_discarded_field_identifier(
+                "model-synthetic-resolved-api_",
+                DiscardedField::New,
+            );
             sink.observe(Observation {
                 correlation: 7_u8,
                 fact: ObservationFact::TextDelta {
@@ -5447,7 +5477,7 @@ safe-line"
     fn credential_discarded_field_suppresses_a_failure_continuation() {
         let mut observed: Vec<Observation<u8>> = Vec::new();
         let mut sink = RedactingSink::new(&mut observed);
-        sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+        sink.add_discarded_field_identifier("model-synthetic-resolved-api_", DiscardedField::New);
 
         assert_eq!(
             sink.redact_terminal_failure_text("key=opaque-discarded-value refused"),
@@ -5464,7 +5494,7 @@ safe-line"
         let mut observed: Vec<Observation<u8>> = Vec::new();
         let mut sink = RedactingSink::new(&mut observed);
         sink.extend_dropped_context("api_");
-        sink.add_discarded_field_identifier("model-synthetic-resolved");
+        sink.add_discarded_field_identifier("model-synthetic-resolved", DiscardedField::New);
 
         assert_eq!(
             sink.redact_terminal_failure_text("key=opaque-context-value done"),
@@ -5480,7 +5510,7 @@ safe-line"
         let mut observed: Vec<Observation<u8>> = Vec::new();
         let mut sink = RedactingSink::new(&mut observed);
         sink.seed_emitted_context("api_");
-        sink.add_discarded_field_identifier("model-synthetic-resolved");
+        sink.add_discarded_field_identifier("model-synthetic-resolved", DiscardedField::New);
 
         assert_eq!(
             sink.redact_terminal_failure_text("key=opaque-context-value done"),
@@ -5499,7 +5529,10 @@ safe-line"
         {
             let mut sink = RedactingSink::new(&mut observed);
             sink.add_emitted_identifier("message-synthetic-api_");
-            sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+            sink.add_discarded_field_identifier(
+                "model-synthetic-resolved-api_",
+                DiscardedField::New,
+            );
             suppressed = sink.is_suppressing();
             sink.observe(Observation {
                 correlation: 7_u8,
@@ -5516,6 +5549,71 @@ safe-line"
         assert_eq!(emitted, vec!["ordinary completion text.".to_string()]);
     }
 
+    /// Credential redaction: every envelope repeating a discarded field
+    /// presents it again beside that envelope's own content, so a repeat
+    /// re-seeds a chain earlier content has already spent. Without the reseed
+    /// the later text continues an unguarded marker.
+    #[test]
+    fn credential_repeated_discarded_field_reseeds_a_spent_chain() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.add_discarded_field_identifier(
+                "model-synthetic-resolved-api_",
+                DiscardedField::New,
+            );
+            // Clean content resolves the chain: nothing continues the marker.
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "an ordinary first answer.".to_string(),
+                },
+            });
+            // The next envelope repeats the same discarded field.
+            sink.add_discarded_field_identifier(
+                "model-synthetic-resolved-api_",
+                DiscardedField::Repeated,
+            );
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "key=opaque-second-event-value done".to_string(),
+                },
+            });
+            sink.finish();
+        }
+        let emitted: Vec<String> = observed.into_iter().map(observation_text).collect();
+
+        assert!(
+            !emitted
+                .iter()
+                .any(|text| text.contains("opaque-second-event-value"))
+        );
+        assert!(emitted.iter().any(|text| text.contains(REDACTED)));
+    }
+
+    /// Credential redaction: a repeat while the earlier registration is still
+    /// live is the same field, not a second one — it neither fails the stream
+    /// closed nor discards the candidate that registration has grown into.
+    #[test]
+    fn credential_repeated_discarded_field_leaves_a_live_chain_alone() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.add_discarded_field_identifier("model-synthetic-resolved-api_", DiscardedField::New);
+        sink.add_discarded_field_identifier(
+            "model-synthetic-resolved-api_",
+            DiscardedField::Repeated,
+        );
+
+        assert!(!sink.is_suppressing());
+        assert_eq!(
+            sink.redact_terminal_failure_text("key=opaque-discarded-value refused"),
+            REDACTED
+        );
+    }
+
     /// Credential redaction: one slot cannot represent two independent live
     /// discarded fields, so a second registration carrying its own candidate
     /// fails closed rather than dropping either chain.
@@ -5523,10 +5621,13 @@ safe-line"
     fn credential_second_live_discarded_field_fails_closed() {
         let mut observed: Vec<Observation<u8>> = Vec::new();
         let mut sink = RedactingSink::new(&mut observed);
-        sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+        sink.add_discarded_field_identifier("model-synthetic-resolved-api_", DiscardedField::New);
         assert!(!sink.is_suppressing());
 
-        sink.add_discarded_field_identifier("model-synthetic-other-Authorization:");
+        sink.add_discarded_field_identifier(
+            "model-synthetic-other-Authorization:",
+            DiscardedField::New,
+        );
 
         assert!(sink.is_suppressing());
     }
@@ -5538,7 +5639,7 @@ safe-line"
         let mut observed = Vec::new();
         {
             let mut sink = RedactingSink::new(&mut observed);
-            sink.add_discarded_field_identifier("model-synthetic-resolved");
+            sink.add_discarded_field_identifier("model-synthetic-resolved", DiscardedField::New);
             sink.observe(Observation {
                 correlation: 7_u8,
                 fact: ObservationFact::TextDelta {
@@ -5560,7 +5661,7 @@ safe-line"
     fn discarded_field_chain_broken_by_final_text_releases_later_ids() {
         let mut observed: Vec<Observation<u8>> = Vec::new();
         let mut sink = RedactingSink::new(&mut observed);
-        sink.add_discarded_field_identifier("model-synthetic-resolved-api_");
+        sink.add_discarded_field_identifier("model-synthetic-resolved-api_", DiscardedField::New);
 
         assert_eq!(
             sink.redact_final_envelope_text("hello there."),

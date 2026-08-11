@@ -1019,11 +1019,15 @@ fixed acknowledgement. Only a terminal `result` event can establish success or
 refusal. The selected alias in `system/init` remains the provider-reported
 model; the first assistant event may name the provider-resolved model, but every
 later assistant event must repeat that same value. That resolved model is
-retained only for this comparison and reaches no record, so before the event's
-content blocks it seeds a redaction lookbehind of its own — a credential prefix
-ending it would otherwise escape the shape redactor through the same message's
-first text block continuing it, which under ambient delivery no exact-value
-redaction downstream can catch (INV-035). Each discarded source holds an
+retained only for this comparison and reaches no record, so it seeds a redaction
+lookbehind of its own — a credential prefix ending it would otherwise escape the
+shape redactor through a text block continuing it, which under ambient delivery
+no exact-value redaction downstream can catch (INV-035). Every assistant
+envelope repeats and discards the field beside its own content, so each one
+re-seeds that lookbehind ahead of its content blocks rather than only the first:
+content that spends the lookbehind in one event must not leave the next event's
+text unguarded. A repeat re-seeds only once the previous registration has been
+spent; while it is still live it already governs. Each discarded source holds an
 independent lookbehind: the emitted identifier's adjacency to its record, the
 chronological dropped provider text, and this discarded field are judged
 separately, so bytes from one never sit between another's credential marker and

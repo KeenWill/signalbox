@@ -160,6 +160,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             success("end_turn", Some(fixtures::MODEL_CREDENTIAL_CONTINUATION))?;
         }
+        "repeated_model_prefix_redaction" => {
+            // Clean content in the first event spends the discarded model's
+            // lookbehind. The second event must repeat that same model, and its
+            // own text block continues the marker the model ends in.
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
+                fixtures::ANSWER,
+            )?;
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
+                fixtures::MODEL_CREDENTIAL_CONTINUATION,
+            )?;
+            success("end_turn", Some(fixtures::MODEL_CREDENTIAL_CONTINUATION))?;
+        }
         "conflicting_assistant_model" => {
             assistant_text_with_identity(
                 fixtures::MESSAGE_ID,

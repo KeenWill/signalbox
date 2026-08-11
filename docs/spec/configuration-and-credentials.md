@@ -904,14 +904,12 @@ no contract here says how the secret would reach that provider: `ambient`,
 separate questions — the deliveries this build refuses despite defining them are
 enumerated below.
 
-A profile's closed `delivery` states how its secret reaches the provider. Four
-are admitted. Which adapters admit which of them is the closed set stated once
-with the adapter inventory above, and startup rejects every pair outside it;
-each delivery's section below states only the route its secret takes. Each
-`[[credential_profiles]]` entry is one flat TOML table: `delivery` is a required
-TOML string discriminant, common fields are exactly `name`, `adapter`,
-`billing_kind`, and `delivery`, and the selected variant admits only its fields
-below. A field owned by another variant is unknown and rejected.
+Each delivery's section below states only the route its secret takes, never a
+restatement of which adapters admit it — that question has the single owner
+above. Each `[[credential_profiles]]` entry is one flat TOML table: `delivery`
+is a required TOML string discriminant, common fields are exactly `name`,
+`adapter`, `billing_kind`, and `delivery`, and the selected variant admits only
+its fields below. A field owned by another variant is unknown and rejected.
 
 Admitting a pair and supplying a surface for it stay separate questions, and
 this build answers them differently: `ambient` is delivered for both CLI

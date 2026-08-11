@@ -162,6 +162,20 @@ async fn inv_035_resolved_model_prefix_is_held_into_the_first_text_block() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: every assistant envelope repeats and discards the resolved model,
+/// so each one re-seeds the redaction lookbehind ahead of its own content. A
+/// first event whose clean text spends that lookbehind must not leave a second
+/// event's text free to continue the marker the model ends in.
+#[tokio::test]
+async fn inv_035_repeated_model_prefix_is_held_into_each_events_text() {
+    let result = execute_scenario("repeated_model_prefix_redaction", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn assistant_model_must_remain_stable_after_its_first_event() {
     let result = execute_scenario("conflicting_assistant_model", OperationShape::Text).await;
