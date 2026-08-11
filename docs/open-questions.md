@@ -37,13 +37,13 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 - **Content extensions and rendering.**
   [sessions-and-transcript](spec/sessions-and-transcript.md) fixes the initial
-  text-only `UserContent` value, exact equality, and PostgreSQL mapping.
-  Decided and specified: ordered multipart content with content-addressed
-  attachment parts, their replay equality, persistence, and model-visible
-  stubs, by [blob storage](spec/blob-storage.md#multipart-user-content).
-  Client rendering of attachment parts and any non-text variant beyond the
-  attachment part remain open. Blocks those remaining extensions, not the
-  first `SubmitInput` slice. (S01, S03, S08)
+  text-only `UserContent` value, exact equality, and PostgreSQL mapping. Decided
+  and specified: ordered multipart content with content-addressed attachment
+  parts, their replay equality, persistence, and model-visible stubs, by
+  [blob storage](spec/blob-storage.md#multipart-user-content). Client rendering
+  of attachment parts and any non-text variant beyond the attachment part remain
+  open. Blocks those remaining extensions, not the first `SubmitInput` slice.
+  (S01, S03, S08)
 
 ## Model-input projection
 
@@ -464,13 +464,12 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   reject an oversized response before result admission; the family contract owns
   that choice. `ResultTooLarge` remains the admission classification for an
   admitted result that still exceeds the durable bound. Where deliberately
-  larger payloads live, and how a durable record references rather than
-  embeds them, is decided and specified by
-  [blob storage](spec/blob-storage.md): content-addressed blobs with
-  model-visible stubs and bounded explicit reads. What remains open here is
-  the tool-result side — how a family's admitted result carries a blob
-  reference, its truncation and completeness evidence, and per-family
-  adoption. The existing family caps remain correct until that lands.
+  larger payloads live, and how a durable record references rather than embeds
+  them, is decided and specified by [blob storage](spec/blob-storage.md):
+  content-addressed blobs with model-visible stubs and bounded explicit reads.
+  What remains open here is the tool-result side — how a family's admitted
+  result carries a blob reference, its truncation and completeness evidence, and
+  per-family adoption. The existing family caps remain correct until that lands.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport
@@ -637,19 +636,18 @@ questions below remain open.
 
 ## General-purpose artifacts
 
-Artifact content addressing, byte storage, and the reference-not-embed
-posture are decided and specified by [blob storage](spec/blob-storage.md):
-immutable SHA-256-addressed blobs, a durable replica catalog, class-routed
-named stores, and an append-only version one. The reference-not-copy posture
-review workflows take today is owned by
-[review-workflows](spec/review-workflows.md). The questions below remain
-open; they block general-purpose workflow artifacts, not the implemented
-session and external-link evidence.
+Artifact content addressing, byte storage, and the reference-not-embed posture
+are decided and specified by [blob storage](spec/blob-storage.md): immutable
+SHA-256-addressed blobs, a durable replica catalog, class-routed named stores,
+and an append-only version one. The reference-not-copy posture review workflows
+take today is owned by [review-workflows](spec/review-workflows.md). The
+questions below remain open; they block general-purpose workflow artifacts, not
+the implemented session and external-link evidence.
 
-- **Artifact aggregate and authority.** What a named artifact is above a blob
-  — mutable aliases over changing digests, producer provenance, ownership,
-  and workflow attachment — needs its own foundation decision before a
-  workflow can attach one.
+- **Artifact aggregate and authority.** What a named artifact is above a blob —
+  mutable aliases over changing digests, producer provenance, ownership, and
+  workflow attachment — needs its own foundation decision before a workflow can
+  attach one.
 - **Content-type read tools and their isolation substrate.** The
   content-type-aware reader inventory (structured-format walks, document page
   rendering, image downscaling for vision-capable targets), which formats
