@@ -6,6 +6,10 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The durable usage-provenance column and read projection are verified against PR
 `#389` (`agent/cost-accounting`).
 
+Multipart attachment rendering and verification below are the foundation
+proposal from PR #553 (`agent/blob-storage-foundation`) and become verified with
+its implementing child stack.
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
@@ -186,9 +190,11 @@ append provenance fails closed. The resulting order becomes provider-neutral
 messages:
 
 - `OriginAcceptedInput` renders as a user-role message with its checked accepted
-  input content;
-- `SteeringAcceptedInput` renders as a user-role message with the referenced
-  accepted input's checked content;
+  input parts in order; text remains exact text and each attachment becomes the
+  exact bounded textual stub owned by
+  [blob storage](blob-storage.md#attachment-visibility-and-model-reads);
+- `SteeringAcceptedInput` renders the referenced accepted input through that
+  same ordered part projection;
 - `ModelIdentityChanged` renders as the structured provider-neutral identity
   change retaining the exact selected-model UUID and bound session-defaults
   epoch; the provider bridge later projects it as an injected user-role message
@@ -470,7 +476,17 @@ command. This proposal is accepted with the implementing stack's merge.
    commits the accepted `Prepared -> KnownFailed` closure with attempt and turn
    failure in a separate guarded transaction; an adapter defect is an operator
    failure and commits no provider-failure closure.
-3. **Authorize-send transaction.** After acquiring the process-shared
+3. **Attachment preparation (no transaction).** Before send authorization, the
+   application streams and verifies at least one recorded replica for every
+   distinct attachment represented in the rendered request. It retains no blob
+   bytes and holds no database transaction during store I/O. No matching
+   readable replica returns `AttachmentPreparationFailure::Missing` or
+   `AttachmentPreparationFailure::Corrupt` before authorization; its guarded
+   failure transaction closes the still-unsent call, attempt, and turn as known
+   failure without provider cause. A successful check seeds only the bounded
+   turn-scoped verification inventory owned by
+   [blob storage](blob-storage.md#wire-vocabulary).
+4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
    commits `Prepared -> InFlight`. A `Prepared` owning attempt moves
    `Prepared -> Running`, whether it is the turn's initial attempt or a
@@ -486,13 +502,13 @@ command. This proposal is accepted with the implementing stack's merge.
    the gate across the authorize commit and send start serializes
    execution-service passes for that attempt across the acceptance-capable
    boundary; it does not serialize interrupt application.
-4. **Provider interaction (no transaction).** The provider port is invoked at
+5. **Provider interaction (no transaction).** The provider port is invoked at
    most once per invocation, and exactly once only after the `InFlight` commit
    is known. It consumes the capability exactly once and returns one
    provider-neutral terminal observation bound to the sealed issued correlation
    (session, turn, attempt, call, target, frontier). Its runtime
    `CancellationSignal` is the shared durable signal defined above.
-5. **Commit-observation transaction.** A fresh transaction reloads and
+6. **Commit-observation transaction.** A fresh transaction reloads and
    revalidates complete authority — it never trusts the pre-send projection —
    checks the observation's correlation against fresh state, and atomically
    commits the call disposition, attempt and turn transitions, semantic entries,
@@ -509,9 +525,9 @@ command. This proposal is accepted with the implementing stack's merge.
    and a later release could readmit the profile whose failure parked the turn.
 
 Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
-render, capability, capability-failure commit, capability-failure reread,
-authorization, authorization reread, authorization reconciliation, provider, or
-observation commit failed.
+render, capability, attachment preparation, preparation-failure commit,
+preparation-failure reread, authorization, authorization reread, authorization
+reconciliation, provider, or observation commit failed.
 
 ### Identity minting and commit ambiguity
 

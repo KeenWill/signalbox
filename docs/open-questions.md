@@ -485,13 +485,13 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   crate-owned truncation and completeness evidence, or its bounded transport may
   reject an oversized response before result admission; the family contract owns
   that choice. `ResultTooLarge` remains the admission classification for an
-  admitted result that still exceeds the durable bound. Where deliberately
-  larger payloads live, and how a durable record references rather than embeds
-  them, is decided and specified by [blob storage](spec/blob-storage.md):
-  content-addressed blobs with model-visible stubs and bounded explicit reads.
-  What remains open here is the tool-result side — how a family's admitted
-  result carries a blob reference, its truncation and completeness evidence, and
-  per-family adoption. The existing family caps remain correct until that lands.
+  admitted result that still exceeds the durable bound. Blob storage decides
+  only where deliberately larger byte payloads live: content-addressed blobs
+  with model-visible attachment stubs and bounded explicit reads. The
+  tool-result side remains open — whether and how a family's durable admitted
+  result references a blob rather than embedding bytes, its truncation and
+  completeness evidence, and per-family adoption. The existing family caps
+  remain correct until that lands.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport
@@ -670,12 +670,10 @@ the implemented session and external-link evidence.
   mutable aliases over changing digests, producer provenance, ownership, and
   workflow attachment — needs its own foundation decision before a workflow can
   attach one.
-- **Content-type read tools and their isolation mechanism.** The
-  content-type-aware reader inventory (structured-format walks, document page
-  rendering, image downscaling for vision-capable targets), which formats
-  warrant dedicated tools, and the concrete sandbox mechanism remain undecided.
-  The required strong process-isolation posture and visibility contract are
-  fixed by
+- **Content-type read tools and their isolation mechanism.** Which
+  content-type-aware readers exist, which formats they support, and the concrete
+  sandbox mechanism remain undecided. The required strong process-isolation
+  posture and visibility contract are fixed by
   [blob storage](spec/blob-storage.md#attachment-visibility-and-model-reads).
 - **Non-socket ingest paths.** Daemon-local file adoption and runner-produced
   artifact ingest — moving multi-gigabyte content into the catalog without

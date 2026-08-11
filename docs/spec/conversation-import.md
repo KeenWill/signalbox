@@ -3,6 +3,10 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The raw-source blob convergence below is the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and becomes verified with its implementing
+child stack.
+
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
@@ -597,20 +601,31 @@ produced it.
 
 ## Persistence and reconstitution
 
-The Postgres representation uses append-only `imported_raw_source_record` blobs,
-`imported_conversation` headers, `imported_conversation_raw_record` occurrences,
-and `imported_transcript_entry` members. Imported text and opaque media data use
-UTF-8 `bytea`; complete structured records and nested values use a checked
-adapter encoding of the domain algebra, never provider JSON as a domain type.
-Every encoded top-level value carries a fixed format version and payload-kind
-discriminator; a decoder rejects a value from another column kind rather than
-reinterpreting it. Encoded collection counts bound parsing but never directly
-drive capacity allocation: collections grow fallibly after each decoded element.
-Structured-value and source-metadata encodings remain at version `1`. Content
-using the existing closed vocabulary, including `SourceMessageBlock`, also
-remains at version `1`. A content value containing the new `SourceResultBlock`
-uses version `2`; content decoding retains the version-1 message-block tag and
-rejects the new result-block tag beneath a version-1 header.
+The Postgres representation uses append-only `imported_raw_source_record` blob
+references, `imported_conversation` headers, `imported_conversation_raw_record`
+occurrences, and `imported_transcript_entry` members. Imported text and opaque
+media data use UTF-8 `bytea`; complete structured records and nested values use
+a checked adapter encoding of the domain algebra, never provider JSON as a
+domain type. Every encoded top-level value carries a fixed format version and
+payload-kind discriminator; a decoder rejects a value from another column kind
+rather than reinterpreting it. Encoded collection counts bound parsing but never
+directly drive capacity allocation: collections grow fallibly after each decoded
+element. Structured-value and source-metadata encodings remain at version `1`.
+Content using the existing closed vocabulary, including `SourceMessageBlock`,
+also remains at version `1`. A content value containing the new
+`SourceResultBlock` uses version `2`; content decoding retains the version-1
+message-block tag and rejects the new result-block tag beneath a version-1
+header.
+
+Raw source bytes live in the blob store under their existing SHA-256 content
+hash; the relational record stores that ordinary blob digest and never a second
+copy. New ingestion verifies and registers every raw blob before the aggregate
+transaction may reference it. Loading first reads the complete append-only
+relational projection and releases its transaction, then reads and verifies the
+referenced blobs, so no database transaction spans store I/O. The current
+converter and reconstitution surfaces retain their configured bounded
+whole-source behavior; future streaming conversion remains the committed
+unimplemented seam above.
 
 One transaction resolves or inserts a complete aggregate:
 
@@ -652,6 +667,16 @@ every expected entry using that version's fixed interpretation and requires
 exact agreement in entry count, order, content, speaker, and source metadata. It
 also reapplies the 128-container bound to complete records and entry-carried
 structured values (INV-002).
+
+The migration initially admits exactly one of legacy `raw_bytes` or the blob
+reference. Before socket admission, a restart-safe barrier verifies one legacy
+row's hash, publishes and registers it without an open database transaction,
+then locks and rechecks the row before replacing its bytes with the digest.
+Restart skips transitioned rows. This barrier is governed only by
+`blob_storage.max_blob_bytes`, not the current new-import admission limit: an
+oversized acknowledged legacy row makes startup fail until the blob ceiling is
+raised. Omitted blob configuration is admitted only when there is no such
+backlog. After the barrier, new imports write only blob references.
 
 ## Derived display titles
 
