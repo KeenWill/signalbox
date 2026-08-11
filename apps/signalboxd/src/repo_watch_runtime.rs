@@ -65,7 +65,7 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
-const MAX_AGGREGATE_WIRE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_AGGREGATE_WIRE_BYTES: usize = 512 * 1024 * 1024;
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
