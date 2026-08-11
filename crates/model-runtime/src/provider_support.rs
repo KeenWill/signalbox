@@ -4,8 +4,8 @@ use std::error::Error;
 
 use crate::{
     BoundaryLossEvidence, ExchangeFacts, LossCause, Observation, ObservationFact, ObservationSink,
-    PreparationDefect, ProvenUnsentEvidence, TerminalEvidence, TokenUsage, TransportFacts,
-    UnsentCause,
+    PreparationDefect, ProvenUnsentEvidence, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
+    TransportFacts, UnsentCause,
 };
 
 /// Maximum accepted size of one fully buffered provider response body.
@@ -92,12 +92,20 @@ pub fn pre_exchange_loss_evidence(cause: LossCause) -> TerminalEvidence {
 }
 
 /// Constructs boundary-loss evidence with the exchange facts observed so far.
+///
+/// Every caller is a transport-level loss raised without a response decoder in
+/// hand — a send failure, a cancelled or lost body, a status outside the
+/// provider's contract — so no response material was decoded and the tool fact
+/// is [`ToolCallsAtLoss::Unobserved`] rather than a claim that none opened. An
+/// adapter positioned to answer it builds the evidence from its decoder
+/// instead.
 pub fn boundary_loss_evidence(cause: LossCause, exchange: ExchangeFacts) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
         cause,
         exchange,
         reported_model: None,
         finish_reported: None,
+        tool_calls: ToolCallsAtLoss::Unobserved,
         usage: TokenUsage::unreported(),
     })
 }
