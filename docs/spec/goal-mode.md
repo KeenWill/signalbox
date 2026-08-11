@@ -71,6 +71,18 @@ statement is system-authored in shape but not in every byte, because the
 identifiers it renders come from the watched repository, so a consumer placing
 it in a model prompt owes it exactly the quoting it owes any session text.
 
+**Implemented behavior.** A synthesized statement delimits every
+repository-supplied identifier it renders, because those identifiers are
+ordinary text and the sentence around them is not: an identifier left bare could
+close the field it sits in and continue as though it were the statement. Each is
+rendered between double quotes, with the quote and the backslash escaped so the
+closing delimiter cannot be forged, and with every line terminator escaped so a
+value cannot leave its line. The encoding is injective, so two distinct
+identifiers never render alike and the statement always says which one it named.
+Delimiting bounds where the repository's bytes begin and end; it does not make
+quoted data harmless, and a consumer still owes the whole statement the quoting
+above.
+
 **Implemented behavior.** Every goal turn records the generation it belongs to,
 and a consumer reading the authority a turn ran under reads that generation and
 not the session's current one, so a supersession while the turn is parked cannot

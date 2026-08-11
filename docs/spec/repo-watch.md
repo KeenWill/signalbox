@@ -373,13 +373,15 @@ head and base branches or the branch with its workflow and conclusion, each in
 its repository. A pull request's head branch is qualified by the repository
 holding it, which is the fork rather than the watched repository when the pull
 request comes from one, so a consumer cannot read a fork's branch as though it
-were the watched repository's. These identifiers are named in the statement
-only; the injected tagged context is unchanged, and it already carries them
-inside its embedded event. It is composed by the dispatch rather than declared
-by the session, because only an already-attached goal admits a model
-declaration, so a session created without one has no transition available to it.
-Because commissioning schedules that generation's first goal turn, a dispatched
-session commits two queued turns: the tagged-context turn described above, whose
+were the watched repository's. Every one of these repository-supplied
+identifiers is delimited where the statement renders it, under the rule stated
+in [goal mode](goal-mode.md). These identifiers are named in the statement only;
+the injected tagged context is unchanged, and it already carries them inside its
+embedded event. It is composed by the dispatch rather than declared by the
+session, because only an already-attached goal admits a model declaration, so a
+session created without one has no transition available to it. Because
+commissioning schedules that generation's first goal turn, a dispatched session
+commits two queued turns: the tagged-context turn described above, whose
 accepted input belongs to its submit command, and the goal turn, whose input is
 the statement. The dispatched work turn is therefore not itself a goal turn. The
 tagged context is accepted first, so the session receives its triggering event
