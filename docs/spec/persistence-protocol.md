@@ -134,7 +134,7 @@ remains at SQLx defaults until an operational slice selects limits.
 
 Schema change is a forward-only, versioned SQL file set in
 `crates/persistence/migrations/` — seventy-one files, `202607180001` through
-`202608100004` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`202608100005` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -326,7 +326,7 @@ Representation rules, all enforced in the schema:
   unimplemented functionality.** No present adapter installs those transitions;
   their dedicated orchestration transactions will install these same checked
   records, and direct snapshot storage cannot stand in for those transactions.
-- Migration `202608100003` records the connection-loss epoch observed when each
+- Migration `202608100004` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
   enrollment, and connection/loss authority in the runner total order; callers
@@ -338,10 +338,10 @@ Representation rules, all enforced in the schema:
   connections until a checked replacement installs a fresh baseline. This is the
   implemented not-yet-projected placement fence; bounded session propagation
   remains the committed unimplemented transaction described below.
-- Migration `202608100004` gives every new durable connection-loss epoch a
+- Migration `202608100005` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction. Migration backfill marks a
   loss completed only when no affected current placement remains: losses already
-  absorbed into `202608100003`'s compatibility baseline complete, while a loss
+  absorbed into `202608100004`'s compatibility baseline complete, while a loss
   committed after that migration with an older placement baseline stays pending.
   A repeatable-read page authenticates the exact loss source and returns at most
   64 current pinned or exact-identity unpinned placements whose baselines
@@ -668,13 +668,13 @@ statements live in the schema instead:
 - the turn-attempt and tool-round before-insert guards in that migration share
   one `FOR UPDATE` helper that serializes new continuation evidence against the
   same session scheduler before either immutable row becomes visible; and
-- the lease-offer connection-loss fence in migration `202608100002` takes
+- the lease-offer connection-loss fence in migration `202608100003` takes
   `FOR SHARE` on the selected enrollment and connection authority head, then on
   the optional current loss head when the connection is terminal; and
 - the lease-claim connection-loss fence in that migration takes `FOR SHARE` on
   the selected enrollment and connection authority head before admitting the
   claim event; and
-- the placement-loss baseline trigger in migration `202608100003` takes
+- the placement-loss baseline trigger in migration `202608100004` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
   deriving the immutable baseline and before the placement row becomes visible.
