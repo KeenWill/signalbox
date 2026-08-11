@@ -644,7 +644,10 @@ and no configuration field or durable column supplies one, so the set of roots
 the daemon can open is fixed by the configured root alone. The derived parent is
 a sibling of the configured root rather than a child, because a per-session root
 inside the configured root would be readable, writable, and executable by every
-session still bound to the configured root.
+session still bound to the configured root. One root per session, and derivation
+from the configured root alone, are properties of this version rather than
+permanent limits; several bound roots per session and explicit operator rebinds
+are routed through [tool safety](../open-questions.md#tool-safety).
 
 Provisioning that directory is deployment work: creating a direct main worktree
 there is what makes a session use it. Only a reported absence at the derived
