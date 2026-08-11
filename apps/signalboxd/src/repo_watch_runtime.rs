@@ -1740,7 +1740,7 @@ impl GitHubRepositoryPoller {
             .header("X-GitHub-Api-Version", API_VERSION)
             .header(USER_AGENT, USER_AGENT_VALUE);
         let cached_entity_tag = self.cache().entity_tag(&key).cloned();
-        if let Some(entity_tag) = cached_entity_tag {
+        if let Some(entity_tag) = &cached_entity_tag {
             request = request.header(IF_NONE_MATCH, entity_tag.as_str());
         }
         if let Some(body) = body {
@@ -1751,10 +1751,14 @@ impl GitHubRepositoryPoller {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Request)?;
         if response.status() == StatusCode::NOT_MODIFIED {
-            let mut accepted = self.cache().accepted::<ConditionalJsonResponse<T>>(&key)?;
-            if let Some(entity_tag) = response.headers().get(ETAG).map(entity_tag).transpose()? {
-                self.cache().replace_entity_tag(&key, entity_tag)?;
-            }
+            let refreshed_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
+            let mut accepted = self
+                .cache()
+                .accepted_for_validator::<ConditionalJsonResponse<T>>(
+                    &key,
+                    cached_entity_tag.as_ref(),
+                    refreshed_entity_tag,
+                )?;
             if page_item_count.is_some() && accepted.page_is_full && !accepted.has_next_page {
                 accepted.has_next_page = true;
             }
@@ -1958,15 +1962,34 @@ impl PollCache {
         self.resources.get(key).map(|resource| &resource.entity_tag)
     }
 
-    fn accepted<T: Any + Clone>(
-        &self,
+    // Reading the accepted body and rebinding the entity tag happen under one
+    // lock, and the rebind only lands when the pair is still the one this
+    // request validated. Two open pull requests sharing a head SHA issue
+    // identical conditional requests, so a concurrent 200 can install a
+    // different pair in between; binding this request's validator onto that
+    // pair would leave a tag describing a body it never validated, and a later
+    // 304 against that tag would then reuse the wrong body.
+    fn accepted_for_validator<T: Any + Clone>(
+        &mut self,
         key: &ResourceKey,
+        validated: Option<&EntityTag>,
+        refreshed: Option<EntityTag>,
     ) -> Result<T, RepositoryWatchAttemptError> {
-        self.resources
-            .get(key)
-            .and_then(|resource| resource.accepted.downcast_ref::<T>())
+        let resource = self
+            .resources
+            .get_mut(key)
+            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)?;
+        let accepted = resource
+            .accepted
+            .downcast_ref::<T>()
             .cloned()
-            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)
+            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)?;
+        if let (Some(refreshed), Some(validated)) = (refreshed, validated)
+            && &resource.entity_tag == validated
+        {
+            resource.entity_tag = refreshed;
+        }
+        Ok(accepted)
     }
 
     // Admission is an accelerator, never a precondition for an observation: a
@@ -2060,19 +2083,6 @@ impl PollCache {
         } else {
             false
         }
-    }
-
-    fn replace_entity_tag(
-        &mut self,
-        key: &ResourceKey,
-        entity_tag: EntityTag,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        let resource = self
-            .resources
-            .get_mut(key)
-            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)?;
-        resource.entity_tag = entity_tag;
-        Ok(())
     }
 
     fn remove(&mut self, key: &ResourceKey) {
@@ -2560,6 +2570,8 @@ mod tests {
     const CACHE_REPLACEMENT_KEY: &str = "fixture/replacement";
     const TEST_CACHE_RESOURCE_LIMIT: usize = 2;
     const CACHE_WIRE_BYTES: usize = 1;
+    const CONCURRENTLY_REPLACED_ENTITY_TAG: &str = "\"fixture-etag-replaced\"";
+    const REFRESHED_ENTITY_TAG: &str = "\"fixture-etag-refreshed\"";
     const CACHE_KEY_KIND: &str = "fixture-page";
     const CACHE_KEY_QUERY_VALUE: &str = "provider-controlled-branch";
     const CACHE_KEY_URL: &str =
@@ -4532,6 +4544,56 @@ mod tests {
         assert!(cache.resources.contains_key(&retained));
         assert!(cache.resources.contains_key(&replacement));
         assert!(!cache.resources.contains_key(&stale));
+    }
+
+    #[test]
+    fn a_not_modified_response_refreshes_the_tag_it_validated() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache
+            .accepted_for_validator::<Vec<u8>>(
+                &key,
+                Some(&EntityTag(ENTITY_TAG.to_owned())),
+                Some(EntityTag(REFRESHED_ENTITY_TAG.to_owned())),
+            )
+            .expect("the validated pair is still cached");
+
+        assert_eq!(
+            cache.entity_tag(&key),
+            Some(&EntityTag(REFRESHED_ENTITY_TAG.to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_not_modified_response_leaves_a_concurrently_replaced_pair_alone() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(CONCURRENTLY_REPLACED_ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache
+            .accepted_for_validator::<Vec<u8>>(
+                &key,
+                Some(&EntityTag(ENTITY_TAG.to_owned())),
+                Some(EntityTag(REFRESHED_ENTITY_TAG.to_owned())),
+            )
+            .expect("the replacement pair is cached");
+
+        assert_eq!(
+            cache.entity_tag(&key),
+            Some(&EntityTag(CONCURRENTLY_REPLACED_ENTITY_TAG.to_owned()))
+        );
     }
 
     #[test]
