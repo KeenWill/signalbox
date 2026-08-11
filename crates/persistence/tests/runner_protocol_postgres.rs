@@ -12591,6 +12591,7 @@ async fn s32_inv002_inv044_historical_runner_replacement_rejects_loss_metadata()
     sqlx::query(
         "ALTER TABLE runner_session_placement_record
          DROP CONSTRAINT runner_session_placement_state_shape,
+         DROP CONSTRAINT runner_session_placement_loss_registration_shape,
          ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
     )
     .execute(&pool)
