@@ -8,13 +8,15 @@ use std::path::Path;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionFinish, CredentialReference, DeliveryMode,
-    FinishReason, LossCause, ModelOperation, ModelRuntime, PreparationDefect, PreparationOutcome,
-    ProviderErrorKind, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage, ToolChoice,
-    ToolDefinition, ToolName,
+    AssistantPart, CancellationSignal, CompletionFinish, CredentialAccess, CredentialAccessError,
+    CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, FinishReason,
+    LossCause, ModelOperation, ModelRuntime, PreparationDefect, PreparationFailure,
+    PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget, TerminalEvidence,
+    TokenUsage, ToolChoice, ToolDefinition, ToolName,
 };
 use signalbox_model_runtime_claude_cli::{
-    ClaudeCliConfig, ClaudeCliPreparedRequest, ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS,
+    CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConfig, ClaudeCliConstructionError,
+    ClaudeCliPreparedRequest, ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS,
 };
 use signalbox_test_bin::test_bin_path;
 
@@ -22,6 +24,8 @@ use signalbox_test_bin::test_bin_path;
 mod fixtures;
 
 const CREDENTIAL_REFERENCE: &str = "claude-subscription-synthetic";
+const CURRENT_CREDENTIAL_REFERENCE: &str = "claude-current-synthetic";
+const HISTORICAL_CREDENTIAL_REFERENCE: &str = "claude-historical-synthetic";
 const OFFLINE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
@@ -36,6 +40,28 @@ struct ExecutionResult {
     observations: Vec<signalbox_model_runtime::Observation<String>>,
     spawns: usize,
     argv: String,
+}
+
+#[derive(Clone)]
+struct SyntheticCredentialAccess {
+    reference: CredentialReference,
+    value: CredentialValue,
+}
+
+impl CredentialAccess for SyntheticCredentialAccess {
+    async fn resolve(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        if reference == &self.reference {
+            Ok(self.value.clone())
+        } else {
+            Err(CredentialAccessError::new(
+                reference.clone(),
+                CredentialAccessFailure::Unmapped,
+            ))
+        }
+    }
 }
 
 #[tokio::test]
@@ -58,6 +84,265 @@ async fn normal_completion_requires_typed_terminal_result() {
     assert!(result.argv.contains("--setting-sources\n\n--settings"));
     assert!(result.argv.contains("--tools\n\n--allowedTools\n"));
     assert!(result.argv.contains(&disabled_tools_argument()));
+}
+
+#[tokio::test]
+async fn nonterminal_system_events_do_not_mask_the_initialized_exchange() {
+    let result = execute_scenario("nonterminal_system_events", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a credential marker in a discarded lifecycle event remains part of
+/// the redaction lookbehind, so retained assistant output cannot disclose its
+/// otherwise opaque continuation.
+#[tokio::test]
+async fn inv_035_dropped_system_lifecycle_event_seeds_output_redaction() {
+    let result = execute_scenario("system_lifecycle_event_redaction", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::FRAGMENTED_SECRET_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// A lifecycle `session_id` is dropped as a repeated identity only where it is
+/// one. A differing value contradicts the correlation `system/init`
+/// established, exactly as it does on a `result` event.
+#[tokio::test]
+async fn lifecycle_session_contradicting_init_is_a_protocol_violation() {
+    let result = execute_scenario("lifecycle_session_contradicts_init", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an uncorrelated lifecycle `session_id` is provider content, not a
+/// repeated identity, so it seeds the redaction lookbehind rather than being
+/// discarded unexamined.
+#[tokio::test]
+async fn inv_035_uncorrelated_lifecycle_session_seeds_output_redaction() {
+    let result = execute_scenario("lifecycle_session_precedes_init", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::FRAGMENTED_SECRET_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
+    let result = execute_scenario("resolved_assistant_model", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: the provider-resolved model an assistant event newly accepts is
+/// stored for the contradiction check and then discarded, so it reaches no
+/// record and this ambient-delivery runtime holds no exact value to redact
+/// downstream. A marker prefix ending that model must still seed the redaction
+/// lookbehind, or its own first text block completes the credential across the
+/// two fields and is emitted verbatim.
+///
+/// The init model here is the clean selected alias, so the resolved model is
+/// the only source of the marker — no other chain can account for the
+/// suppression.
+#[tokio::test]
+async fn inv_035_resolved_model_prefix_is_held_into_the_first_text_block() {
+    let result = execute_scenario("resolved_model_prefix_redaction", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: every assistant envelope repeats and discards the resolved model,
+/// so each one re-seeds the redaction lookbehind ahead of its own content. A
+/// first event whose clean text spends that lookbehind must not leave a second
+/// event's text free to continue the marker the model ends in.
+#[tokio::test]
+async fn inv_035_repeated_model_prefix_is_held_into_each_events_text() {
+    let result = execute_scenario("repeated_model_prefix_redaction", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a repeat of the discarded resolved model is the same field, not a
+/// second one. Classifying it as new would spend the discarded-field slot and
+/// fail the exchange closed, destroying ordinary output that the held marker
+/// legitimately releases once its candidate resolves clean.
+#[tokio::test]
+async fn repeated_resolved_model_does_not_over_redact_an_ordinary_exchange() {
+    let result = execute_scenario("repeated_model_prefix_release", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(diagnostic.contains(fixtures::MODEL_MARKER_RELEASED_TAIL));
+    assert!(!diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn assistant_model_must_remain_stable_after_its_first_event() {
+    let result = execute_scenario("conflicting_assistant_model", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn file_delivery_materializes_private_claude_settings_without_direct_child_key() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("the test working directory is user-accessible under any process umask");
+    }
+    let runtime = file_delivery_runtime(temporary.path(), fixtures::FILE_DELIVERED_CREDENTIAL);
+    let prepared = prepare(
+        &runtime,
+        operation("file_credential_redaction", OperationShape::Text),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let _completion = completed(&report.evidence);
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(temporary.path().join("fake-claude-settings"))
+            .expect("the fake CLI recorded its explicit settings"),
+    )
+    .expect("the explicit settings are JSON");
+    assert!(settings.get("env").is_none());
+    let helper = settings["apiKeyHelper"]
+        .as_str()
+        .expect("file delivery configures an API-key helper");
+    assert!(helper.starts_with("exec /bin/sh '/"));
+    assert!(helper.ends_with("/credential-helper'"));
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-helper-credential"))
+            .expect("the fake CLI invoked the configured API-key helper"),
+        fixtures::FILE_DELIVERED_CREDENTIAL
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            temporary
+                .path()
+                .join("fake-claude-direct-credential-present")
+        )
+        .expect("the fake CLI recorded direct-key presence"),
+        "false"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-settings-mode"))
+            .expect("the fake CLI recorded its settings mode"),
+        "600"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-credential-mode"))
+            .expect("the fake CLI recorded its credential mode"),
+        "600"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-helper-mode"))
+            .expect("the fake CLI recorded its credential-helper mode"),
+        "600"
+    );
+    let argv = std::fs::read_to_string(temporary.path().join("fake-claude-argv"))
+        .expect("the fake CLI recorded its argument vector");
+    let settings_path = recorded_argument(&argv, "--settings");
+    let config_directory = std::fs::read_to_string(temporary.path().join("fake-claude-config-dir"))
+        .expect("the fake CLI recorded its config directory");
+    assert_eq!(
+        Path::new(&config_directory),
+        Path::new(settings_path)
+            .parent()
+            .expect("the private settings have a containing directory")
+    );
+    assert!(
+        !format!("{:?}{:?}", report.evidence, observations)
+            .contains(fixtures::FILE_DELIVERED_CREDENTIAL)
+    );
+}
+
+#[tokio::test]
+async fn file_delivery_resolves_a_historical_operation_pin_from_the_complete_catalog() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let historical_reference = CredentialReference::new(HISTORICAL_CREDENTIAL_REFERENCE);
+    let mut config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge_cli(),
+        temporary.path(),
+        CredentialReference::new(CURRENT_CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = ClaudeCliRuntime::new_with_credential_catalog(
+        config,
+        SyntheticCredentialAccess {
+            reference: historical_reference.clone(),
+            value: CredentialValue::new(fixtures::FILE_DELIVERED_CREDENTIAL.as_bytes().to_vec()),
+        },
+        None,
+        CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY,
+    )
+    .expect("the complete file catalog is valid");
+    let mut historical_operation = operation("file_credential_redaction", OperationShape::Text);
+    historical_operation.credential_reference = historical_reference;
+    let prepared = prepare(&runtime, historical_operation).await;
+    let mut observations = Vec::new();
+
+    let _report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(spawn_count(temporary.path()), 1);
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-helper-credential"))
+            .expect("the fake CLI invoked the historical credential helper"),
+        fixtures::FILE_DELIVERED_CREDENTIAL
+    );
+}
+
+#[test]
+fn file_delivery_rejects_any_other_environment_key() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let result = file_delivery_runtime_result(temporary.path(), "PATH", "synthetic-value");
+
+    assert_eq!(
+        construction_error(result),
+        ClaudeCliConstructionError::InvalidCredentialEnvironmentKey
+    );
+}
+
+#[tokio::test]
+async fn file_delivery_rejects_an_empty_credential_before_spawn() {
+    assert_unusable_file_credential(Vec::new()).await;
+}
+
+#[tokio::test]
+async fn file_delivery_rejects_a_non_utf8_credential_before_spawn() {
+    assert_unusable_file_credential(vec![0xff]).await;
+}
+
+#[tokio::test]
+async fn file_delivery_rejects_a_nul_bearing_credential_before_spawn() {
+    assert_unusable_file_credential(b"synthetic\0value".to_vec()).await;
 }
 
 #[tokio::test]
@@ -585,6 +870,87 @@ fn runtime(working_directory: &Path, executable: &Path) -> ClaudeCliRuntime {
     ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid")
 }
 
+fn file_delivery_runtime(working_directory: &Path, value: &str) -> ClaudeCliRuntime {
+    file_delivery_runtime_result(working_directory, CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, value)
+        .expect("offline file-delivery runtime configuration is valid")
+}
+
+fn file_delivery_runtime_result(
+    working_directory: &Path,
+    env_key: &str,
+    value: &str,
+) -> Result<ClaudeCliRuntime, ClaudeCliConstructionError> {
+    file_delivery_runtime_bytes_result(working_directory, env_key, value.as_bytes().to_vec())
+}
+
+fn file_delivery_runtime_bytes_result(
+    working_directory: &Path,
+    env_key: &str,
+    value: Vec<u8>,
+) -> Result<ClaudeCliRuntime, ClaudeCliConstructionError> {
+    let reference = CredentialReference::new(CREDENTIAL_REFERENCE);
+    let mut config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge_cli(),
+        working_directory,
+        reference.clone(),
+    );
+    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.interrupt_grace = Duration::from_millis(100);
+    ClaudeCliRuntime::new_with_file_delivery(
+        config,
+        SyntheticCredentialAccess {
+            reference,
+            value: CredentialValue::new(value),
+        },
+        env_key,
+    )
+}
+
+async fn assert_unusable_file_credential(value: Vec<u8>) {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = file_delivery_runtime_bytes_result(
+        temporary.path(),
+        CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY,
+        value,
+    )
+    .expect("the file-delivery runtime construction is valid");
+
+    let outcome = runtime
+        .prepare(
+            operation("normal_completion", OperationShape::Text),
+            CancellationSignal::never(),
+        )
+        .await;
+
+    assert_eq!(
+        credential_unusable_detail(outcome),
+        "Claude file credential must be nonempty, UTF-8, and NUL-free"
+    );
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+fn credential_unusable_detail(
+    outcome: PreparationOutcome<String, ClaudeCliPreparedRequest<String>>,
+) -> String {
+    match outcome {
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { detail },
+            ..
+        } => detail,
+        _ => panic!("expected an unusable credential preparation failure"),
+    }
+}
+
+fn construction_error(
+    result: Result<ClaudeCliRuntime, ClaudeCliConstructionError>,
+) -> ClaudeCliConstructionError {
+    match result {
+        Ok(_) => panic!("expected Claude runtime construction to fail"),
+        Err(error) => error,
+    }
+}
+
 fn operation(scenario: &str, shape: OperationShape) -> ModelOperation<String> {
     let mut operation = ModelOperation::new(
         scenario.to_string(),
@@ -795,6 +1161,15 @@ fn disabled_tools_argument() -> String {
         "--disallowedTools\n{}",
         DISABLED_CLAUDE_CLI_BUILTIN_TOOLS.join(",")
     )
+}
+
+fn recorded_argument<'a>(arguments: &'a str, name: &str) -> &'a str {
+    let values = arguments.lines().collect::<Vec<_>>();
+    values
+        .windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1])
+        .expect("the recorded argument is present")
 }
 
 fn spawn_count(directory: &Path) -> usize {

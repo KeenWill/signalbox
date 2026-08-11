@@ -20,7 +20,7 @@ use signalbox_persistence::{
     create_session::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
     },
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     process_read::{
         ProcessReadCorruption, ProcessReadError, ProcessReadRepository, ProcessScopedTranscriptRead,
     },
@@ -132,6 +132,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;

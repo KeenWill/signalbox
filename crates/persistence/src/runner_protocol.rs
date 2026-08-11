@@ -43,7 +43,10 @@ use crate::lock_inventory::{
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD,
 };
-use crate::mapping::{tool_permission_default_from_str, tool_permission_default_to_str};
+use crate::mapping::{
+    ToolAttemptDispositionStorageKind, tool_attempt_disposition_to_str,
+    tool_permission_default_from_str, tool_permission_default_to_str,
+};
 
 /// Adapter-owned positive revision of one validated registration.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1844,9 +1847,15 @@ impl RunnerProtocolStore {
                 if error.kind() == ToolExecutionErrorKind::CrashLost
                     && error.detail().is_none() =>
             {
-                ("known_failed", Some("crash_lost"))
+                (
+                    tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::KnownFailed),
+                    Some("crash_lost"),
+                )
             }
-            (ToolEffectClass::ExternalEffect, ToolAttemptEnd::Ambiguous) => ("ambiguous", None),
+            (ToolEffectClass::ExternalEffect, ToolAttemptEnd::Ambiguous) => (
+                tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Ambiguous),
+                None,
+            ),
             _ => {
                 return Err(RunnerProtocolStoreError::Domain(
                     RunnerDomainError::CorrelationMismatch,

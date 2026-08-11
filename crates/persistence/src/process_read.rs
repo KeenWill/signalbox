@@ -23,10 +23,11 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 use crate::{
     conversation_import_codec::decode_content,
     mapping::{
-        ToolApprovalDecisionSourceStorageKind, defaults_version_from_numeric,
-        durable_command_id_from_uuid, model_change_adjustments_from_json, model_settings_from_json,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        defaults_version_from_numeric, durable_command_id_from_uuid,
+        model_change_adjustments_from_json, model_settings_from_json,
         model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_decision_source_from_str,
+        tool_approval_decision_source_from_str, tool_attempt_disposition_from_str,
     },
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
@@ -704,6 +705,15 @@ pub enum ProcessImportedContentKind {
     MessageContentAbsent,
 }
 
+/// Typed outcome of an executed tool-result transcript entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessToolExecutionResultDisposition {
+    /// The executor returned admitted result content.
+    Completed,
+    /// The executor returned definitive typed failure evidence.
+    KnownFailed,
+}
+
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
@@ -869,6 +879,8 @@ pub enum ProcessTranscriptEntry {
         request: ToolRequestId,
         /// Exact physical tool attempt.
         attempt: ToolAttemptId,
+        /// Typed terminal outcome of the exact physical attempt.
+        disposition: ProcessToolExecutionResultDisposition,
         /// Exact provider-visible result content.
         content: String,
     },
@@ -4340,21 +4352,30 @@ fn decode_transcript_entry(
                 ProcessReadCorruption::Inconsistent("tool execution-result entry shape").into(),
             );
         };
-        let content = match (
+        let disposition = decode_tool_result_disposition(disposition)?;
+        let (disposition, content) = match (
             disposition,
             result_text,
             result_error_kind,
             result_error_detail,
         ) {
-            ("completed", Some(text), None, None) => text,
-            ("known_failed", None, Some(kind), detail) => serde_json::json!({
-                "error": {
-                    "kind": kind,
-                    "detail": detail,
-                }
-            })
-            .to_string(),
-            _ => {
+            (ToolAttemptDispositionStorageKind::Completed, Some(text), None, None) => {
+                (ProcessToolExecutionResultDisposition::Completed, text)
+            }
+            (ToolAttemptDispositionStorageKind::KnownFailed, None, Some(kind), detail) => (
+                ProcessToolExecutionResultDisposition::KnownFailed,
+                serde_json::json!({
+                    "error": {
+                        "kind": kind,
+                        "detail": detail,
+                    }
+                })
+                .to_string(),
+            ),
+            (ToolAttemptDispositionStorageKind::Completed, _, _, _)
+            | (ToolAttemptDispositionStorageKind::KnownFailed, _, _, _)
+            | (ToolAttemptDispositionStorageKind::AwaitingChild, _, _, _)
+            | (ToolAttemptDispositionStorageKind::Ambiguous, _, _, _) => {
                 return Err(
                     ProcessReadCorruption::Inconsistent("tool execution-result evidence").into(),
                 );
@@ -4383,6 +4404,7 @@ fn decode_transcript_entry(
             entry,
             request: ToolRequestId::from_uuid(request),
             attempt: ToolAttemptId::from_uuid(attempt),
+            disposition,
             content,
         });
     }
@@ -4659,6 +4681,15 @@ fn decode_transcript_entry(
     Ok(projected)
 }
 
+fn decode_tool_result_disposition(
+    value: &str,
+) -> Result<ToolAttemptDispositionStorageKind, ProcessReadCorruption> {
+    tool_attempt_disposition_from_str(value).ok_or_else(|| ProcessReadCorruption::Unsupported {
+        field: "terminal_disposition_kind",
+        value: value.to_owned(),
+    })
+}
+
 fn decode_process_tool_approval(
     row: &PgRow,
 ) -> Result<Option<ProcessToolApproval>, ProcessReadError> {
@@ -4856,7 +4887,8 @@ mod tests {
 
     use super::{
         DecodedTurnOrigin, ProcessModelCallInputTokenSemantics, ProcessModelCallUsageProvenance,
-        decode_execution_lineage_tip, decode_transcript_turn_origin,
+        ProcessReadCorruption, decode_execution_lineage_tip, decode_tool_result_disposition,
+        decode_transcript_turn_origin,
     };
 
     fn turn(value: u128) -> TurnId {
@@ -5025,6 +5057,19 @@ mod tests {
         assert_eq!(
             ProcessModelCallInputTokenSemantics::from_storage(Some(true)),
             Some(ProcessModelCallInputTokenSemantics::CacheInclusive)
+        );
+    }
+
+    #[test]
+    fn tool_result_disposition_preserves_an_unsupported_spelling() {
+        let unsupported = String::from("synthetic_future_disposition");
+
+        assert_eq!(
+            decode_tool_result_disposition(&unsupported),
+            Err(ProcessReadCorruption::Unsupported {
+                field: "terminal_disposition_kind",
+                value: unsupported,
+            })
         );
     }
 }
