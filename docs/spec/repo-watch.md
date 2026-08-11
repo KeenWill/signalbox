@@ -18,7 +18,9 @@ four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
 (`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against this PR (`agent/repo-watch-poll-performance-2`).
+against this PR (`agent/repo-watch-poll-performance-2`). The provider members
+the poller adopts as check-suite and check-run completion generations are
+verified against PR #541 (`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
 
@@ -174,21 +176,22 @@ event vocabulary below in deterministic order. The cursor retains provider
 identity and completion generation for completed check suites and check runs,
 plus provider identities for reviews, threads, and both the workflow definition
 and branch-workflow run attempt. The poller uses the provider's `updated_at`
-value as the completion generation for completed check suites. Check run objects
-carry no `updated_at` at all, so a completed run takes its generation from
-`completed_at`, and a run that reports completion without one is rejected as an
-invalid response. An edited completed run conclusion therefore stays observable
-through the conclusion itself: the differ treats a retained run as already seen
-only when its provider identity, completion generation, and conclusion all
-match. A rerequested suite or run emits its later completion even when its
-provider identity and conclusion are unchanged. Workflows that share a display
-name remain distinct, renaming a workflow cannot re-emit its already observed
-run attempt, and a new attempt under an unchanged run ID does emit. The display
-name remains the rule-visible event payload. A provider fact retained in the
-consecutive comparison baseline is not re-emitted. Rules receive only events:
-they cannot inspect normalized snapshots or rerun the differ. Why: transport
-independence requires both polling and a later authenticated webhook receiver to
-feed the same durable facts.
+value as a completed check suite's completion generation and the provider's
+`completed_at` value as a completed check run's: the provider defines
+`updated_at` on a check suite only, while a check run carries `started_at` and
+`completed_at`. A completed run whose payload carries no `completed_at` fails
+the poll as an invalid response. A rerequested suite therefore emits its later
+completion even when its provider identity and conclusion are unchanged, and a
+rerequested run emits when the provider gives it a new identity, a different
+completion time, or a different conclusion, so a conclusion edited under one
+completion time stays observable. Workflows that share a display name remain
+distinct, renaming a workflow cannot re-emit its already observed run attempt,
+and a new attempt under an unchanged run ID does emit. The display name remains
+the rule-visible event payload. A provider fact retained in the consecutive
+comparison baseline is not re-emitted. Rules receive only events: they cannot
+inspect normalized snapshots or rerun the differ. Why: transport independence
+requires both polling and a later authenticated webhook receiver to feed the
+same durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
