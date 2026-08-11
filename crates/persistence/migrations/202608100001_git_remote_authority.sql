@@ -46,9 +46,14 @@ AS $$
        AND candidate COLLATE "C" ~ '^[!-~]+$'
        AND candidate COLLATE "C" ~ (
                '^https://([^@/?#]*@)?'
-            || '[A-Za-z0-9._~-]+(:[0-9]+)?'
+            || '[A-Za-z0-9._~-]+(:[0-9]{1,5})?'
             || '([/?#].*)?$'
            )
+       AND coalesce(
+               (substring(candidate COLLATE "C"
+                          from '^https://[^/?#]*:([0-9]{1,5})(?:[/?#]|$)'))::int,
+               0
+           ) <= 65535
 $$;
 
 -- A workspace has no durable record in this schema, so a minted destination is
@@ -157,9 +162,6 @@ CREATE TABLE configured_git_remote_withdrawal (
 
 CREATE INDEX configured_git_remote_mint_workspace_name
     ON configured_git_remote_mint (workspace_root, remote_name);
-
-CREATE INDEX configured_git_remote_withdrawal_mint
-    ON configured_git_remote_withdrawal (mint_id);
 
 -- Both new kinds carry a typed record, so the registry's exhaustive case must
 -- reach them; without these branches an admitted kind raises at commit.

@@ -129,9 +129,16 @@ fn authority_names_a_host(authority: &str) -> bool {
         && port.is_none_or(port_is_numeric)
 }
 
-/// Returns whether one port is a non-empty run of digits.
+/// Returns whether one port is a run of digits inside the TCP range.
+///
+/// A port above 65535 names no TCP endpoint, so a destination carrying one
+/// could never be dispatched however well-formed its host is. The parse bounds
+/// the value; the digit test keeps a leading sign out, which `u16::from_str`
+/// would otherwise accept.
 fn port_is_numeric(port: &str) -> bool {
-    !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
 }
 
 /// One stable operator-chosen remote name.
@@ -459,6 +466,20 @@ mod tests {
     fn a_destination_carrying_a_non_ascii_byte_is_refused() {
         assert_destination_is_refused("https://example.test/a\u{00a0}project.git");
         assert_destination_is_refused("https://éxample.test/project.git");
+    }
+
+    /// A port above 65535 names no TCP endpoint, so a destination carrying one
+    /// could never be dispatched however well-formed its host is.
+    #[test]
+    fn a_destination_naming_a_port_outside_the_transport_range_is_refused() {
+        assert_destination_is_refused("https://example.test:65536/project.git");
+        assert_destination_is_refused("https://example.test:99999/project.git");
+        assert_destination_is_refused("https://example.test:123456/project.git");
+    }
+
+    #[test]
+    fn a_destination_naming_the_highest_port_is_admitted() {
+        assert_destination_is_admitted("https://example.test:65535/project.git");
     }
 
     #[test]
