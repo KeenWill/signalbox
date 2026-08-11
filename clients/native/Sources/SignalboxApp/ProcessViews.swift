@@ -1402,8 +1402,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     let directoryLabel = runner.workingDirectory.map {
       "selected directory \(String(reflecting: $0.rawValue))"
     } ?? "runner-default directory"
+    let healthLabel = runner.connectionHealth.map { " · health \($0.rawValue)" } ?? ""
     return SignalboxProcessPresentation.retainedLabel(
-      "Runner \(runnerID) · \(runner.state.rawValue) · health \(runner.connectionHealth.rawValue)"
+      "Runner \(runnerID) · \(runner.state.rawValue)\(healthLabel)"
         + " · revision \(runner.placementRevision.rawValue)"
         + " · sandbox \(runner.sandboxProfile.rawValue) · \(directoryLabel)"
     )
