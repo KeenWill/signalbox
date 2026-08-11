@@ -768,6 +768,13 @@ final class LiveScreenSnapshotTests: XCTestCase {
         )
         XCTAssertEqual(Self.declaredCanvasesByTest["testSessionCreationSheetContent"], ["sheet"])
         XCTAssertEqual(
+            Self.names(
+                in: Array(Self.directDeclaredCanvasesByTest.keys),
+                missingFrom: Self.definedTestNames
+            ),
+            []
+        )
+        XCTAssertEqual(
             Set(Self.definedTestNames.filter { $0.hasPrefix("testLegacy") }),
             Set(Self.legacyDeclaredCanvasesByTest.keys)
         )
