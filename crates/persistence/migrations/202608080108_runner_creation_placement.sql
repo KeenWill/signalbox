@@ -1,5 +1,7 @@
 -- Complete optional runner placement on both session-creation command families.
 
+-- Supersedes the durable-command version constraint from
+-- 202608030003_model_session_settings.sql.
 ALTER TABLE durable_command
     DROP CONSTRAINT durable_command_storage_version_supported,
     ADD CONSTRAINT durable_command_storage_version_supported CHECK (
@@ -17,11 +19,15 @@ ALTER TABLE durable_command
         ) AND storage_version = 1)
     );
 
+-- Supersedes the native creation version constraint from
+-- 202608030003_model_session_settings.sql.
 ALTER TABLE create_session_command
     DROP CONSTRAINT create_session_command_storage_version_supported,
     ADD CONSTRAINT create_session_command_storage_version_supported
         CHECK (storage_version IN (1, 2, 3, 4, 5, 6, 7, 8));
 
+-- Supersedes the imported creation version constraint from
+-- 202608030003_model_session_settings.sql.
 ALTER TABLE create_session_from_imported_frontier_command
     DROP CONSTRAINT
         create_session_from_imported_frontier_command_version_supported,
