@@ -24,9 +24,10 @@ import XCTest
 /// a label.
 ///
 /// The geometry — this declaration and `size` — deliberately names no UIKit
-/// type, and everything that does is in the extension below it. A macOS
-/// destination can reuse this half and supply its own pinning in place of that
-/// extension; that destination is not this suite's, and the note on
+/// type, and everything that does is in the extension below it. The declaration
+/// is currently inside this file's iOS platform gate; a macOS destination could
+/// extract this UIKit-free half and supply its own pinning in place of that
+/// extension. That destination is not this suite's, and the note on
 /// `LiveScreenRenderer` says what else it would need.
 enum SnapshotCanvas: String, CaseIterable {
     case iPhonePortrait = "iphone-portrait"
@@ -74,9 +75,10 @@ enum SnapshotCanvas: String, CaseIterable {
 
 /// Everything a canvas pins that only UIKit can express.
 ///
-/// Split from the declaration above so the geometry stays portable; see the
-/// note there. Nothing in this extension is reusable by an AppKit destination,
-/// and that is the whole reason for the seam.
+/// Split from the declaration above so the geometry can be extracted without
+/// UIKit dependencies; see the note there. Nothing in this extension is
+/// reusable by an AppKit destination, and that is the whole reason for the
+/// seam.
 extension SnapshotCanvas {
     /// Stated here for the same reason the scale is: a dynamic color resolves
     /// against the trait collection of whatever it is set on, so an inherited
@@ -294,10 +296,10 @@ extension SnapshotCanvas {
 /// The third cost is the platform, and it is refused rather than bounded. This
 /// renderer is UIKit: it hosts in a `UIWindow`, pins `UITraitCollection`
 /// overrides, and draws through `UIGraphicsImageRenderer`, none of which AppKit
-/// has. `SnapshotCanvas`'s geometry is written to be reusable by a macOS
-/// destination — the cases and their sizes name no UIKit type — but the pinning
-/// and the drawing are not, and a macOS golden needs its own renderer and its
-/// own destination. Nothing here renders `RootView`'s `macDesktopLayout`.
+/// has. `SnapshotCanvas`'s cases and sizes name no UIKit type, but the
+/// declaration remains inside this file's iOS gate; a macOS destination would
+/// need to extract that geometry and supply its own renderer, pinning, and test
+/// destination. Nothing here renders `RootView`'s `macDesktopLayout`.
 ///
 /// One appearance input is refused rather than pinned, because it is not a
 /// trait and nothing can override it; see `liveScreenSnapshotUnsupportedState`.

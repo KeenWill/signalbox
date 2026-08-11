@@ -4,16 +4,27 @@ import XCTest
 
 @testable import SignalboxNative
 
-/// The four canvases every scenario is promised on.
+extension SnapshotCanvas {
+    /// Whether this canvas represents a whole screen rather than standalone
+    /// presented content. Exhaustive so adding a canvas requires classifying it.
+    fileprivate var isScreenCanvas: Bool {
+        switch self {
+        case .iPhonePortrait, .iPhoneLandscape, .iPadPortrait, .iPadLandscape:
+            return true
+        case .sheet:
+            return false
+        }
+    }
+}
+
+/// The screen canvases every scenario is promised on.
 ///
 /// Named once because all fourteen dispositions declare it and a repeated
 /// literal set would be fourteen places to disagree. A scenario that ever needs
 /// a different set spells that set instead, and the difference is then visible
 /// against this name.
 extension Set where Element == SnapshotCanvas {
-    static let everyScreenCanvas: Set<SnapshotCanvas> = [
-        .iPhonePortrait, .iPhoneLandscape, .iPadPortrait, .iPadLandscape,
-    ]
+    static let everyScreenCanvas = Set(SnapshotCanvas.allCases.filter(\.isScreenCanvas))
 }
 
 /// Goldens for the screens `RootView` reaches, in every state
@@ -424,6 +435,10 @@ final class LiveScreenSnapshotTests: XCTestCase {
         static let absent = "absent-claim"
         /// Arbitrary; only that it is non-empty matters.
         static let statedReason = "a stated reason"
+        /// Arbitrary test identity used by the canvas inventory helpers.
+        static let canvasIndexedTest = "testOne"
+        /// Arbitrary second identity used only to prove grouping by test.
+        static let otherCanvasIndexedTest = "testTwo"
     }
 
     /// The blank-refusal detector reports a refusal with no reason.
@@ -592,12 +607,13 @@ final class LiveScreenSnapshotTests: XCTestCase {
     func testTheCanvasIndexGroupsGoldensByTest() {
         XCTAssertEqual(
             Self.canvasesByTest(inGoldensNamed: [
-                "testOne.iphone-portrait.png", "testOne.ipad-portrait.png",
-                "testTwo.sheet.png", "MANIFEST.sha256",
+                "\(ArbitraryClaim.canvasIndexedTest).iphone-portrait.png",
+                "\(ArbitraryClaim.canvasIndexedTest).ipad-portrait.png",
+                "\(ArbitraryClaim.otherCanvasIndexedTest).sheet.png", "MANIFEST.sha256",
             ]),
             [
-                "testOne": ["iphone-portrait", "ipad-portrait"],
-                "testTwo": ["sheet"],
+                ArbitraryClaim.canvasIndexedTest: ["iphone-portrait", "ipad-portrait"],
+                ArbitraryClaim.otherCanvasIndexedTest: ["sheet"],
             ]
         )
         XCTAssertEqual(Self.canvasesByTest(inGoldensNamed: []), [:])
@@ -607,22 +623,26 @@ final class LiveScreenSnapshotTests: XCTestCase {
     func testTheCanvasComparisonReportsADifference() {
         XCTAssertEqual(
             Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
-                declared: ["testOne": ["iphone-portrait", "ipad-portrait"]],
-                committed: ["testOne": ["iphone-portrait"]]
+                declared: [
+                    ArbitraryClaim.canvasIndexedTest: ["iphone-portrait", "ipad-portrait"]
+                ],
+                committed: [ArbitraryClaim.canvasIndexedTest: ["iphone-portrait"]]
             ),
-            ["testOne"]
+            [ArbitraryClaim.canvasIndexedTest]
         )
         XCTAssertEqual(
             Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
-                declared: ["testOne": ["iphone-portrait"]],
-                committed: ["testOne": ["iphone-portrait", "ipad-portrait"]]
+                declared: [ArbitraryClaim.canvasIndexedTest: ["iphone-portrait"]],
+                committed: [
+                    ArbitraryClaim.canvasIndexedTest: ["iphone-portrait", "ipad-portrait"]
+                ]
             ),
-            ["testOne"]
+            [ArbitraryClaim.canvasIndexedTest]
         )
         XCTAssertEqual(
             Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
-                declared: ["testOne": ["iphone-portrait"]],
-                committed: ["testOne": ["iphone-portrait"]]
+                declared: [ArbitraryClaim.canvasIndexedTest: ["iphone-portrait"]],
+                committed: [ArbitraryClaim.canvasIndexedTest: ["iphone-portrait"]]
             ),
             []
         )
