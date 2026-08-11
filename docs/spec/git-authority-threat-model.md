@@ -132,22 +132,23 @@ destination per workspace and name" a rule that holds: keyed by path,
 the rule would have admitted two destinations for it. There is deliberately no
 comparison-time normalization to forget.
 
-Three tiers mint workspace records, and they carry different authority:
+**Committed unimplemented functionality.** No present surface mints a workspace
+record. The schema admits three tiers of minting, and they are to carry
+different authority:
 
-1. **Operator-registered.** A person registers a new authority scope through the
-   client. This is the only tier that widens what Signalbox may push from, so
-   the record carries the durable command that registered it and the act stays
-   provable after the fact.
-2. **Daemon-system-minted.** The daemon records the roots its
+1. **Operator-registered.** A person is to register a new authority scope
+   through the client. This is the only tier that widens what Signalbox may push
+   from, so the record is to carry the durable command that registered it,
+   keeping that act provable after the fact.
+2. **Daemon-system-minted.** The daemon is to record the roots its
    [per-session derivation](configuration-and-credentials.md#derived-session-workspace-roots)
    materializes from the configured base. Authority still flows from that base
-   and its fixed formula: these rows are bookkeeping of what the formula
-   produced, never an input to which roots the daemon may open, and nothing
-   reads them to decide a binding.
+   and its fixed formula: these rows are to be bookkeeping of what the formula
+   produced, never an input to which roots the daemon may open, and nothing is
+   to read them to decide a binding.
 3. **Session-facing minting is future work.** A session cannot mint a workspace
    or a destination. If it is ever admitted it will be a posture-gated tool
-   under [tool safety](../open-questions.md#tool-safety), decided separately;
-   nothing in the current schema or surface provides it.
+   under [tool safety](../open-questions.md#tool-safety), decided separately.
 
 Retiring a destination is a new durable fact rather than an edit, because the
 minting tables are append-only. A withdrawal retires exactly one mint and frees
