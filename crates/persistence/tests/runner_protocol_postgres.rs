@@ -104,6 +104,7 @@ const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
 const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608080103;
 const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608080104;
 const PRE_REGISTRATION_RECONCILIATION_MIGRATION: i64 = 202608080105;
+const PRE_PENDING_SUCCESSOR_MIGRATION: i64 = 202608080106;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -3437,6 +3438,56 @@ async fn s30_inv042_second_pending_successor_request_is_rejected() -> Result<(),
     };
 
     assert_eq!(rejected.to_string(), expected.to_string());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: upgrading an active enrollment preserves its pristine request as
+/// active authority rather than inventing a pending predecessor relation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_pending_successor_migration_preserves_active_request_receipt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_PENDING_SUCCESSOR_MIGRATION, &pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_request_receipt
+            (request_id, enrollment_id, runner_id,
+             authentication_reference_id, registration_revision)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(uuid(ENROLLMENT_REQUEST))
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(expected_enrollment.authentication().into_uuid())
+    .bind(Decimal::from(registration.revision().get()))
+    .execute(&pool)
+    .await?;
+    migrate(&pool).await?;
+    let receipt = store
+        .resume_registration(
+            RunnerEnrollmentRequestId::from_uuid(uuid(ENROLLMENT_REQUEST)),
+            IssuedRunnerEnrollmentIdentities::new(
+                expected_enrollment.enrollment(),
+                expected_enrollment.runner(),
+                expected_enrollment.authentication(),
+            ),
+            registration.revision(),
+            advertisement(),
+        )
+        .await?;
+
+    assert_eq!(receipt.authority(), RunnerEnrollmentAuthority::Active);
+    assert_eq!(receipt.enrollment(), &expected_enrollment);
+    assert_eq!(receipt.registration(), &registration);
     drop(pool);
     Ok(())
 }

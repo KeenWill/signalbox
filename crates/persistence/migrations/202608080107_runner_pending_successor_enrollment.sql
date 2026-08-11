@@ -1,13 +1,10 @@
 -- Admit one provisioning-only pending successor after exact durable runner loss.
 
 ALTER TABLE runner_enrollment_request_receipt
-    ADD COLUMN authority_kind text;
-
-UPDATE runner_enrollment_request_receipt
-   SET authority_kind = 'active';
+    ADD COLUMN authority_kind text NOT NULL DEFAULT 'active';
 
 ALTER TABLE runner_enrollment_request_receipt
-    ALTER COLUMN authority_kind SET NOT NULL,
+    ALTER COLUMN authority_kind DROP DEFAULT,
     ADD CONSTRAINT runner_enrollment_request_receipt_authority_closed
         CHECK (authority_kind IN ('active', 'replacement_pending')),
     ADD CONSTRAINT runner_enrollment_request_receipt_request_enrollment_key

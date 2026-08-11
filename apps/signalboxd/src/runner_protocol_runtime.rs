@@ -2994,6 +2994,58 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn lost_active_runner_admits_one_pending_successor_over_the_wire() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store, []);
+        let advertisement = empty_advertisement();
+        let active = service
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("the initial runner receives active authority");
+        service
+            .transition_connection(
+                active.enrollment_id(),
+                active.connection_epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the predecessor connection loss commits");
+        let pending_request = identity(2);
+        let pending = service
+            .enroll(Enroll {
+                request_id: pending_request,
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("the lost predecessor admits one pending successor");
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let replay = enroll_over(client, pending_request, advertisement.clone());
+        let (served, observed) = tokio::join!(server, replay);
+        let expected = Message::ReplacementPending(ReplacementPending {
+            request_id: pending_request,
+            enrollment_id: pending.enrollment_id(),
+            runner_id: pending.runner_id(),
+            authentication_id: pending.authentication_id(),
+            registration_revision: pending.registration_revision(),
+            connection_epoch: PositiveU64::try_new(2)
+                .expect("the replay connection epoch is positive"),
+            advertisement_digest: advertisement_digest(&advertisement)
+                .expect("the advertisement has a digest"),
+        });
+
+        served.expect("the replayed pending connection completes");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn restart_resumes_the_same_registration_through_a_fresh_pool() {
         let (_container, database_url, store) = postgres_store().await;
         let request_id = identity(1);
