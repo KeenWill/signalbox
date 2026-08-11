@@ -1397,16 +1397,12 @@ mod tests {
     /// and the one commissioned generation is what that turn runs under.
     #[test]
     fn an_unrecorded_turn_reads_a_lineage_that_was_never_superseded() {
-        let goal = commissioned("Dispatched by rule watch-forward: template merge-forward");
+        let dispatched = "Dispatched by rule watch-forward: template merge-forward";
+        let goal = commissioned(dispatched);
 
         let resolved = judged_turn_goal_statement(goal.generations(), None, commission_precedes());
 
-        assert_eq!(
-            resolved,
-            Ok(Some(goal_statement(
-                "Dispatched by rule watch-forward: template merge-forward"
-            )))
-        );
+        assert_eq!(resolved, Ok(Some(goal_statement(dispatched))));
     }
 
     /// The hazard the turn binding exists for: with a supersession in the
@@ -1431,9 +1427,11 @@ mod tests {
     /// successor exists.
     #[test]
     fn a_recorded_turn_reads_its_own_generation_not_the_replacement() {
-        let superseded = commissioned("land the reviewer fixes")
+        let original = "land the reviewer fixes";
+        let replacement = "land anything at all";
+        let superseded = commissioned(original)
             .supersede(
-                goal_statement("land anything at all"),
+                goal_statement(replacement),
                 GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(3))),
             )
             .expect("a pursuing generation admits supersession");
@@ -1444,10 +1442,7 @@ mod tests {
             commission_precedes(),
         );
 
-        assert_eq!(
-            resolved,
-            Ok(Some(goal_statement("land the reviewer fixes")))
-        );
+        assert_eq!(resolved, Ok(Some(goal_statement(original))));
     }
 
     #[test]
