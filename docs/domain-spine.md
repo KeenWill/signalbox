@@ -3046,9 +3046,8 @@ impl AcceptedInputSchedulingReconstitutionInput {
         selected: DirectModelSelection,
     ) -> Self;
     // accessors: session(), imported_session(), turns(), semantic_entries(),
-    // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
-    // compactions(), consumed_steering(), delegated_consumed_steering(),
-    // delegated_turns(),
+    // snapshots(), pinned_targets(), model_calls(), consumed_steering(),
+    // delegated_consumed_steering(), delegated_turns(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -3250,6 +3249,14 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn resolved_snapshot(
+        &self,
+        snapshot: ContextFrontierId,
+    ) -> Option<&ResolvedContextFrontierSnapshot>;
+    pub fn semantic_entry(
+        &self,
+        entry: SemanticTranscriptEntryRef,
+    ) -> Option<&SemanticTranscriptEntry>;
     pub fn prepare_earliest_queued_activation(
         self,
         identities: AcceptedInputTurnActivationIdentities,
@@ -8188,7 +8195,38 @@ pub struct CanonicalCloneUrlDigest(/* private */);
 pub struct WorkspaceRevision(/* private */);
 pub struct WorkspaceBranchName(/* private */);
 pub struct WorkspaceRelativePath(/* private */);
-// each checked string exposes try_new(String) and as_str()
+impl RunnerCapabilityClass {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl CredentialProfileName {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl RunnerWorkingDirectory {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceRepositoryKey {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl CanonicalCloneUrlDigest {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceRevision {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceBranchName {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceRelativePath {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
 
 pub enum RunnerSelector {
     Identity(RunnerId),
@@ -8345,12 +8383,11 @@ impl RunnerEnrollment {
         input: RunnerEnrollmentReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: enrollment(), runner(), authentication(), state(),
-    // last_issued_registration_revision()
+    // allowed_classes(), last_issued_registration_revision()
 }
 pub struct RunnerEnrollmentReconstitutionInput {
     /* public complete typed facts, including independently recorded optional last registration revision */
 }
-// enrollment accessors include allowed_classes().
 pub struct PreparedRunnerRegistration { /* private */ }
 impl PreparedRunnerRegistration {
     pub const fn registration(&self) -> &ValidatedRunnerRegistration;
@@ -8953,7 +8990,42 @@ pub struct ReactionContent(/* private String */);
 pub struct RepoWatchRuleId(/* private String */);
 pub struct ReviewThreadId(/* private String */);
 pub struct PullRequestTitle(/* private String */);
-// Each bounded text type has try_new(), as_str(), and into_string().
+impl BranchName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl LabelName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl RepoWatchAuthorLogin {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl CheckRunName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl WorkflowName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl ReactionContent {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl RepoWatchRuleId {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl ReviewThreadId {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl PullRequestTitle {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
 
 pub struct PullRequestBody(/* private String */);
 impl PullRequestBody {
@@ -9174,6 +9246,7 @@ pub struct RepoWatchMatcherV1Input {
 }
 impl RepoWatchMatcherV1 {
     pub fn new(input: RepoWatchMatcherV1Input) -> Self;
+    pub fn matches(&self, event: &RepoWatchEvent) -> bool;
     // accessors: event_kinds(), repository(), base_branch(), head_branch(),
     //   title(), body(), labels(), draft(), author(), mergeable_state(),
     //   conclusion()
@@ -9281,6 +9354,10 @@ impl RepoWatchRule {
         declarations: &[RepoWatchTemplateContextDeclaration],
     ) -> Result<(), RepoWatchRuleValidationError>;
     pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
+    pub fn actions_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> Result<Vec<RepoWatchActionV1>, RepoWatchDispatchContextError>;
     // accessors: id(), version(), matcher(), actions(), singleton_per(), cooldown()
 }
 ```
