@@ -424,6 +424,11 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_connection_loss_complete();
 
+SET CONSTRAINTS ALL IMMEDIATE;
+
+ALTER TABLE runner_lease_generation
+    DISABLE TRIGGER runner_lease_generation_is_append_only;
+
 ALTER TABLE runner_lease_generation
     ADD COLUMN offer_connection_epoch numeric(20, 0),
     ADD COLUMN offer_connection_event_ordinal numeric(20, 0),
@@ -495,6 +500,9 @@ UPDATE runner_lease_generation AS generation
        offer_loss_epoch = authority.latest_loss_epoch
   FROM runner_connection_authority_head AS authority
  WHERE authority.enrollment_id = generation.registration_enrollment_id;
+
+ALTER TABLE runner_lease_generation
+    ENABLE TRIGGER runner_lease_generation_is_append_only;
 
 CREATE FUNCTION reject_runner_lease_generation_after_connection_loss()
 RETURNS trigger

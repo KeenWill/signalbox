@@ -3153,7 +3153,7 @@ async fn runner_loss_migration_rejects_legacy_rows_without_source() -> Result<()
 }
 
 /// INV-044: upgrading a terminal connection backfills its exact first durable
-/// loss epoch and current loss head.
+/// loss epoch, current loss head, and retained lease-offer authority.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
@@ -3162,9 +3162,64 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     MIGRATOR
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the pre-migration fixture prepares a lease");
+    store.store_pin(&pin, &registration).await?;
+    let mut lease_completion = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 1, 2, 'claimed')",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 2
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 1, 3, 'completed')",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 3
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    lease_completion.commit().await?;
     sqlx::query(
         "INSERT INTO runner_connection_event
             (enrollment_id, connection_epoch, event_ordinal,
@@ -3180,11 +3235,25 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
         .load_current_connection_loss(expected_enrollment.enrollment())
         .await?
         .expect("the migrated terminal connection has a loss fence");
+    let lease_offer_authority: (Decimal, Decimal, Decimal) = sqlx::query_as(
+        "SELECT offer_connection_epoch,
+                offer_connection_event_ordinal,
+                offer_loss_epoch
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(loaded.enrollment(), expected_enrollment.enrollment());
     assert_eq!(loaded.loss_epoch().get(), 1);
     assert_eq!(loaded.connection_epoch().get(), 1);
     assert_eq!(loaded.connection_event_ordinal(), 2);
+    assert_eq!(
+        lease_offer_authority,
+        (Decimal::ONE, Decimal::from(2_u64), Decimal::ONE)
+    );
     drop(pool);
     Ok(())
 }
