@@ -37,12 +37,12 @@ version = 1
 # account are billed: api_metered produces real dollar cost, subscription
 # produces metered-equivalent cost. Keep a name's billing meaning stable, and use
 # a new name when an authentication update changes it. `delivery` states how the
-# secret reaches the provider and which further fields the profile carries;
-# anthropic and openai admit "file", claude_cli admits "ambient" and "file",
-# and codex_cli admits "ambient", "file", "codex_home", and "oauth". This build
-# supplies "file" on the direct-HTTP and Claude CLI adapters and "ambient" on
-# both CLI adapters. The other Codex deliveries are rejected at startup until
-# their delivery slices land, rather than accepted and ignored. No credential
+# secret reaches the provider and which further fields the profile carries.
+# Which (adapter, delivery) pairs are admitted, and which of those this build
+# actually supplies a surface for, are the closed set stated in
+# docs/spec/configuration-and-credentials.md; a pair outside it is a startup
+# error rather than an inert setting. Read the set there rather than here, so
+# there is one place to change when an adapter gains a delivery. No credential
 # path is opened and no provider is contacted at startup.
 [[credential_profiles]]
 name = "anthropic-primary"
@@ -140,9 +140,13 @@ credential_pool = "anthropic-main"
 # delivery = "codex_home" — the daemon uses a login an operator established by
 # hand. Concurrent invocations are allowed by default; that store has no file
 # locking, but the CLI adopts a token another process wrote rather than
-# refreshing again, so the residual race is narrow and its consequence is a
-# quarantine the pool fails over from. Set max_concurrent_invocations to trade
-# throughput for avoiding it. Two profiles may not name the same directory.
+# refreshing again, so the residual race is narrow. If it does fire, the
+# provider rejects that profile's credential until an operator re-provisions it,
+# and what the pool does about that is whichever on_credential_rejected action
+# the pool configures — set that to "quarantine" if you want the profile taken
+# out of rotation and the pool failing over meanwhile. Set
+# max_concurrent_invocations to trade throughput for avoiding the race. Two
+# profiles may not resolve to the same login identity, even by different paths.
 # This build has no runtime delivery for this committed syntax, so uncommenting
 # either profile remains a typed startup error until the codex_home delivery
 # slice lands.
