@@ -93,7 +93,14 @@ impl FilesystemBlobStore {
         let destination = self.path(&key);
         let repair_destination = if private_regular_file_exists(&destination).await? {
             match verify_file(&destination, expected).await {
-                Ok(()) => return Ok(BlobPutOutcome::AlreadyPresent { key }),
+                Ok(()) => {
+                    let parent = destination
+                        .parent()
+                        .ok_or_else(|| BlobStoreError::unavailable("derive destination parent"))?
+                        .to_path_buf();
+                    sync_directory(parent).await?;
+                    return Ok(BlobPutOutcome::AlreadyPresent { key });
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -203,6 +210,7 @@ impl FilesystemBlobStore {
                     Ok(()) => {
                         drop(error.file);
                         sync_directory(self.publication_directory.clone()).await?;
+                        sync_directory(parent).await?;
                         Ok(BlobPutOutcome::AlreadyPresent { key })
                     }
                     Err(verification)
@@ -435,6 +443,13 @@ fn prepare_publication_directory(root: &Path, publication_directory: &Path) -> i
     if created {
         sync_directory_blocking(root)?;
     }
+    #[cfg(unix)]
+    if fs::symlink_metadata(root)?.dev() != fs::symlink_metadata(publication_directory)?.dev() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "publication directory is on another filesystem",
+        ));
+    }
     for entry in fs::read_dir(publication_directory)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -509,22 +524,18 @@ fn positively_classified_local_filesystem(path: &Path) -> io::Result<bool> {
     const EXT_SUPER_MAGIC: u32 = 0x0000_ef53;
     const XFS_SUPER_MAGIC: u32 = 0x5846_5342;
     const BTRFS_SUPER_MAGIC: u32 = 0x9123_683e;
-    const TMPFS_MAGIC: u32 = 0x0102_1994;
     const OVERLAYFS_SUPER_MAGIC: u32 = 0x794c_7630;
     const ZFS_SUPER_MAGIC: u32 = 0x2fc1_2fc1;
     const F2FS_SUPER_MAGIC: u32 = 0xf2f5_2010;
-    const RAMFS_MAGIC: u32 = 0x8584_58f6;
     let filesystem = rustix::fs::statfs(path).map_err(io::Error::from)?.f_type as u32;
     Ok(matches!(
         filesystem,
         EXT_SUPER_MAGIC
             | XFS_SUPER_MAGIC
             | BTRFS_SUPER_MAGIC
-            | TMPFS_MAGIC
             | OVERLAYFS_SUPER_MAGIC
             | ZFS_SUPER_MAGIC
             | F2FS_SUPER_MAGIC
-            | RAMFS_MAGIC
     ))
 }
 

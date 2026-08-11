@@ -15,7 +15,7 @@ use crate::{
 };
 
 const FIRST_CONTENT: &[u8] = b"shared blob-store conformance fixture";
-const DIFFERENT_CONTENT: &[u8] = b"different bytes";
+const SAME_LENGTH_DIFFERENT_CONTENT: &[u8] = b"shared blob-store conformance fixturf";
 const RANGE_OFFSET: usize = 7;
 const RANGE_LENGTH: usize = 10;
 const FIRST_CONTENT_LENGTH: NonZeroU64 = match NonZeroU64::new(FIRST_CONTENT.len() as u64) {
@@ -34,7 +34,7 @@ pub fn fixture_content() -> &'static [u8] {
 
 /// Returns bytes that do not match the shared expected fixture.
 pub fn corrupt_fixture_content() -> &'static [u8] {
-    DIFFERENT_CONTENT
+    SAME_LENGTH_DIFFERENT_CONTENT
 }
 
 /// Returns the shared expected fixture identity.
@@ -147,8 +147,9 @@ pub async fn assert_concurrent_publication_deduplicates(store: &dyn BlobStore) {
 
 /// Proves publication refuses bytes that do not match their declared identity.
 pub async fn assert_verification_failure(store: &dyn BlobStore) {
+    assert_eq!(SAME_LENGTH_DIFFERENT_CONTENT.len(), FIRST_CONTENT.len());
     let error = store
-        .put(expected(), reader(DIFFERENT_CONTENT))
+        .put(expected(), reader(SAME_LENGTH_DIFFERENT_CONTENT))
         .await
         .expect_err("mismatching conformance bytes must fail verification");
 
