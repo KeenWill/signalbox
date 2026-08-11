@@ -3583,12 +3583,33 @@ pub enum ModelCallReconstitutionFailure {
 
 ```rust
 pub struct ModelTargetDefinition { /* private */ }
+impl ModelTargetDefinition {
+    pub const fn new(selection: DirectModelSelection, target: ResolvedProviderTarget) -> Self;
+    // accessors: selection(), target()
+}
 pub struct ModelTargetCatalog { /* private */ }
+impl ModelTargetCatalog {
+    pub fn try_from_definitions(
+        definitions: impl IntoIterator<Item = ModelTargetDefinition>,
+    ) -> Result<Self, ModelTargetCatalogError>;
+    pub fn resolve(
+        &self,
+        selection: FrozenModelSelection,
+    ) -> Result<ResolvedModelSelection, ModelTargetResolutionError>;
+}
 pub enum ModelTargetCatalogError { DuplicateSelection { selection: DirectModelSelection } }
 pub struct ResolvedModelSelection { /* private */ }
+// sealed: ModelTargetCatalog::resolve
+impl ResolvedModelSelection {
+    // accessors: selection(), target()
+}
 pub struct ModelTargetResolutionError { /* private */ }
+impl ModelTargetResolutionError {
+    // accessors: selection(), direct_selection()
+}
 pub struct ModelCallOriginContent { /* private */ }
 impl ModelCallOriginContent {
+    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self;
     pub fn from_pending_steering(
         pending: &PendingSteeringInput,
         content: UserContent,
@@ -3673,27 +3694,41 @@ pub enum ModelCallExecutionReconstitutionFailure {
     LifecycleMismatch,
 }
 pub struct ModelCallExecutionReconstitutionError { /* private */ }
+impl ModelCallExecutionReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ModelCallExecutionReconstitutionInput,
+        ModelCallExecutionReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
 
 pub struct ModelCallExecution { /* private */ }
 impl ModelCallExecution {
+    pub fn frontier_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> Option<&UserContent>;
     pub fn preview_initial_call(
         &self,
         call: ModelCallId,
     ) -> Result<PreparedModelCallRequest, ModelCallPreparationError>;
+    pub fn prepare_initial_call(
+        self,
+        call: ModelCallId,
+    ) -> Result<PreparedInitialModelCall, ModelCallPreparationError>;
     pub fn prepare_initial_call_consuming_steering(
         self,
         call: ModelCallId,
         steering_entries: Vec<SemanticTranscriptEntryId>,
         steering_frontier: Option<ContextFrontierId>,
     ) -> Result<PreparedInitialModelCall, ModelCallPreparationError>;
-    pub fn recover_evidence_free_after_restart(
-        self,
-        failure_identities: FailedModelCallTurnIdentities,
-    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
-    pub fn recover_tool_crash_after_restart(
-        self,
-        failure_identities: FailedModelCallTurnIdentities,
-    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn resume_prepared_call(&self)
+        -> Result<PreparedModelCallRequest, ModelCallResumeFailure>;
+    pub fn authorize_send(self) -> Result<AuthorizedModelCall, ModelCallAuthorizationError>;
+    pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall>;
+    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn>;
     pub fn apply_interrupt(
         self,
         interrupt: AppliedInterruptCommandResult,
@@ -3705,12 +3740,34 @@ impl ModelCallExecution {
         result_projection: PreparedToolResultProjection,
         identities: CancelledModelCallTurnIdentities,
     ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_terminal_observation(
+        self,
+        observation: CorrelatedModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentities,
+    ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError>;
+    pub fn fail_target_resolution(
+        self,
+        resolution_error: ModelTargetResolutionError,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn fail_prepared_call(
+        self,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn recover_after_restart(
         self,
         failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError>;
-    pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall>;
-    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn>;
+    pub fn recover_evidence_free_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn recover_tool_crash_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    // accessors: active_turn(), session(), turn(), configuration(), start(),
+    // current_attempt(), current_call()
 }
 pub enum ModelCallPreparationFailure {
     TargetUnavailable,
@@ -3721,6 +3778,9 @@ pub enum ModelCallPreparationFailure {
     SteeringCorrelationMismatch,
 }
 pub struct ModelCallPreparationError { /* private */ }
+impl ModelCallPreparationError {
+    // accessors: failure(), execution(), target_resolution_error()
+}
 pub struct PreparedInitialModelCall { /* private */ }
 impl PreparedInitialModelCall {
     // accessors: session(), turn(), attempt(), call(), consumed_steering(),
@@ -3736,7 +3796,18 @@ pub struct PreparedModelCallRequest { /* private */ }
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
+impl ModelCallAuthorizationError {
+    // accessors: failure(), execution()
+}
 pub struct AuthorizedModelCall { /* private */ }
+// sealed: ModelCallExecution::authorize_send or resume_in_flight_call
+impl AuthorizedModelCall {
+    pub fn frontier_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> Option<&UserContent>;
+    // accessors: session(), turn(), attempt(), call(), observation_correlation()
+}
 pub struct IssuedModelCallCorrelation { /* private */ }
 impl IssuedModelCallCorrelation {
     // accessors: session(), turn(), attempt(), call(), target(), frontier()
@@ -3798,13 +3869,26 @@ pub enum ModelCallTerminalObservation {
     Cancelled,
     Ambiguous,
 }
+impl ModelCallTerminalObservation {
+    // accessor: disposition()
+}
 pub struct PendingSteeringReclassificationIdentity { /* private */ }
 impl PendingSteeringReclassificationIdentity {
     pub const fn new(accepted_input: AcceptedInputId, turn: TurnId) -> Self;
     // accessors: accepted_input(), turn()
 }
 pub struct CompletedModelCallIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl CompletedModelCallIdentities {
+    pub fn new(
+        assistant_entries: Vec<SemanticTranscriptEntryId>,
+        completion_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub enum ToolResponsePartIdentity {
     Text {
         entry: SemanticTranscriptEntryId,
@@ -3866,18 +3950,56 @@ impl StoppedToolRoundModelCallIdentities {
 }
 pub struct FailedModelCallTurnIdentities { /* private */ }
 impl FailedModelCallTurnIdentities {
+    pub fn new(
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
     pub const fn failure_entry(&self) -> SemanticTranscriptEntryId;
     pub const fn terminal_frontier(&self) -> ContextFrontierId;
 }
-// constructor plus with_pending_steering_reclassifications(...)
 pub struct CancelledModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
+impl CancelledModelCallTurnIdentities {
+    pub fn new(
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+    pub fn into_ambiguous(self) -> AmbiguousModelCallTurnIdentities;
+}
 pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl PhysicalCancellationModelCallTurnIdentities {
+    pub fn new(
+        terminal_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub struct RefusedModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl RefusedModelCallTurnIdentities {
+    pub fn new(terminal_frontier: ContextFrontierId) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub struct AmbiguousModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl AmbiguousModelCallTurnIdentities {
+    pub const fn new(terminal_frontier: ContextFrontierId) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub enum ModelCallTerminalIdentities {
     Completed(CompletedModelCallIdentities),
     ToolRound(ToolRoundModelCallIdentities),
@@ -3904,6 +4026,11 @@ pub enum ModelCallInterruptOutcome {
     ToolReconciliationRequired(ReconciliationRequiredToolTurn),
 }
 pub struct CompletedModelCallTurn { /* private */ }
+impl CompletedModelCallTurn {
+    // accessors: session(), turn(), call(), attempt(), disposition(),
+    // assistant_entries(), completion_entry(), terminal_snapshot(),
+    // reclassified_pending_steering()
+}
 pub struct ToolRoundModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), assistant_entries(), requests(),
 // automatic_approvals(), yielded_snapshot(), next_phase()
@@ -3912,6 +4039,10 @@ pub struct CancelledToolRoundModelCallTurn { /* private */ }
 // requests(), closed_result_entries(), cancellation_entry(), terminal_snapshot(),
 // reclassified_pending_steering()
 pub struct FailedModelCallTurn { /* private */ }
+impl FailedModelCallTurn {
+    // accessors: session(), turn(), optional call(), attempt(), disposition(),
+    // failure_entry(), terminal_snapshot(), reclassified_pending_steering()
+}
 pub struct CancelledModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), optional attempt(), disposition(),
 // tool_result_entries(), cancellation_entry(), terminal_snapshot(),
@@ -3919,7 +4050,10 @@ pub struct CancelledModelCallTurn { /* private */ }
 pub struct StopRequestedModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), interrupt(), observation_correlation()
 pub struct RefusedModelCallTurn { /* private */ }
-// each terminal turn exposes reclassified_pending_steering()
+impl RefusedModelCallTurn {
+    // accessors: session(), turn(), call(), attempt(), disposition(),
+    // terminal_snapshot(), reclassified_pending_steering()
+}
 pub struct ReconciliationRequiredModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
 // terminal_snapshot(), reclassified_pending_steering()
@@ -3933,6 +4067,9 @@ impl ReclassifiedPendingSteeringTurn {
     // binding(), effective_configuration()
 }
 pub struct AmbiguousModelCallTurn { /* private */ }
+impl AmbiguousModelCallTurn {
+    // accessors: session(), turn(), call(), attempt(), ambiguous_operations()
+}
 pub enum ModelCallClosureError {
     IdentityShapeMismatch,
     CallStateMismatch,
