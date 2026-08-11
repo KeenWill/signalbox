@@ -551,9 +551,10 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
     .bind(Uuid::from_u128(0x302))
     .fetch_one(&pool)
     .await?;
-    // Imported creation skips committed runner-placement version four and
-    // writes settings-bearing storage version five.
-    assert_eq!(versions, (5, 5));
+    // Imported creation skips committed runner-placement version four, writes
+    // settings-bearing storage version five, and adds creation placement in
+    // version six.
+    assert_eq!(versions, (6, 6));
     Ok(())
 }
 
