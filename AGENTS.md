@@ -217,11 +217,15 @@ owning implemented contract already retains — the durable-command
 [persistence-protocol](docs/spec/persistence-protocol.md), the credential
 `migration_backfill` fallback in
 [configuration-and-credentials](docs/spec/configuration-and-credentials.md) —
-stands until a migration or the contract's own sunset retires it, and that
-surface only narrows: a change migrates stored data to the current shape rather
-than widening tolerance. This rule is rescinded at the first durable deployment
-— the freeze condition [process-protocol](docs/spec/process-protocol.md) defines
-— after which compatibility policy is decided explicitly.
+stands until a migration or the contract's own sunset retires it. That surface
+only narrows: a change retires tolerated shapes rather than adding them,
+migrating stored data where its owning contract permits — append-only command
+records, which [identity-and-commands](docs/spec/identity-and-commands.md)
+forbids rewriting, keep their readers until an authorized change to that
+contract retires them. This rule is rescinded at the first durable deployment
+identified by the freeze condition in
+[process-protocol](docs/spec/process-protocol.md); compatibility policy is then
+decided explicitly.
 
 Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or
