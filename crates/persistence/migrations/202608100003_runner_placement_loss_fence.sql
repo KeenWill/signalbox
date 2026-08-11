@@ -140,6 +140,17 @@ BEGIN
         END IF;
         NEW.loss_fence_enrollment_id := prior.loss_fence_enrollment_id;
         NEW.observed_runner_loss_epoch := prior.observed_runner_loss_epoch;
+    ELSIF NEW.event_kind = 'pinned'
+          AND prior.selector_kind = 'identity'
+          AND prior.loss_fence_enrollment_id IS NULL
+    THEN
+        IF current_loss_epoch IS NOT NULL THEN
+            RAISE EXCEPTION
+                'runner placement predecessor is fenced by connection loss'
+                USING ERRCODE = '23514';
+        END IF;
+        NEW.loss_fence_enrollment_id := selected_enrollment;
+        NEW.observed_runner_loss_epoch := NULL;
     ELSIF NEW.event_kind = 'profile_replaced' OR (
         NEW.event_kind = 'pinned'
         AND prior.selector_kind = 'identity'
