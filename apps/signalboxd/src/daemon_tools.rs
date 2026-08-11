@@ -2158,6 +2158,22 @@ pub struct DaemonToolExecutor<
     goal: Option<GoalDeclarationExecutor>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DaemonExecRoute {
+    Sandboxed,
+    Unsandboxed,
+    CargoDiagnostics,
+}
+
+fn daemon_exec_route(name: &str) -> Option<DaemonExecRoute> {
+    match name {
+        SANDBOXED_EXEC_NAME => Some(DaemonExecRoute::Sandboxed),
+        UNSANDBOXED_EXEC_NAME => Some(DaemonExecRoute::Unsandboxed),
+        CARGO_DIAGNOSTICS_NAME => Some(DaemonExecRoute::CargoDiagnostics),
+        _ => None,
+    }
+}
+
 /// Sanitized aggregate executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DaemonToolExecutorError {
@@ -2237,7 +2253,16 @@ where
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
-        match invocation.request().name().as_str() {
+        let name = invocation.request().name().as_str();
+        if daemon_exec_route(name).is_some() {
+            return self
+                .workspace_bound
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await;
+        }
+        match name {
             CURRENT_TIME_NAME => self
                 .current_time
                 .execute(invocation)
@@ -2951,6 +2976,18 @@ mod tests {
                 WEB_SEARCH_NAME,
                 WRITE_FILE_NAME,
             ]
+        );
+        assert_eq!(
+            daemon_exec_route(SANDBOXED_EXEC_NAME),
+            Some(DaemonExecRoute::Sandboxed)
+        );
+        assert_eq!(
+            daemon_exec_route(UNSANDBOXED_EXEC_NAME),
+            Some(DaemonExecRoute::Unsandboxed)
+        );
+        assert_eq!(
+            daemon_exec_route(CARGO_DIAGNOSTICS_NAME),
+            Some(DaemonExecRoute::CargoDiagnostics)
         );
     }
 

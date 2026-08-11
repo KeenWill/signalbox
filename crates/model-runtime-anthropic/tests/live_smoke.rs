@@ -56,7 +56,7 @@ use signalbox_model_runtime::{
     CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts,
     FinishReason, ModelOperation, ModelRuntime, ModelSettings, NativeErrorFacts, Observation,
     ObservationFact, PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    TerminalEvidence, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 
@@ -641,6 +641,7 @@ mod require_decoded_response_tests {
                 exchange: exchange(200),
                 reported_model: None,
                 finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
                 usage: TokenUsage::unreported(),
             }),
             &[],
