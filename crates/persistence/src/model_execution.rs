@@ -29,8 +29,8 @@ use signalbox_domain::{
     CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
     DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
     DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
-    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -326,6 +326,25 @@ impl PostgresModelCallRepository {
         &self.pool
     }
 
+    /// Resolves the credential currently pinned for one session and exact
+    /// provider target through the same family catalog used by model calls.
+    pub async fn resolve_session_credential_reference(
+        &self,
+        session: SessionId,
+        target: ResolvedProviderTarget,
+    ) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        resolve_session_credential(
+            &mut connection,
+            session,
+            target,
+            FastMode::Disabled,
+            &self.credential_reference,
+            self.credential_families.as_ref(),
+        )
+        .await
+    }
+
     /// Derives tool-loop storage from this repository's exact database and
     /// continuation configuration.
     pub fn tool_loop_repository(&self) -> crate::tool_loop::PostgresToolLoopRepository {
@@ -426,6 +445,7 @@ impl PostgresModelCallRepository {
             &mut transaction,
             session_id,
             request.call().target(),
+            request.model_settings().effective().fast_mode(),
             &self.credential_reference,
             self.credential_families.as_ref(),
         )
@@ -462,6 +482,12 @@ impl PostgresModelCallRepository {
                 "counted activation gained uncounted call input",
             ));
         }
+        let fast_mode = execution
+            .configuration()
+            .effective()
+            .model_settings()
+            .effective()
+            .fast_mode();
         let prepared = execution
             .prepare_initial_call_consuming_steering(call, Vec::new(), None)
             .map_err(|_| {
@@ -473,6 +499,7 @@ impl PostgresModelCallRepository {
             connection,
             session,
             prepared.call().target(),
+            fast_mode,
             &self.credential_reference,
             self.credential_families.as_ref(),
         )
@@ -586,6 +613,12 @@ impl PostgresModelCallRepository {
                 ));
             }
             let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+            let fast_mode = execution
+                .configuration()
+                .effective()
+                .model_settings()
+                .effective()
+                .fast_mode();
             let prepared = match execution.prepare_initial_call_consuming_steering(
                 call,
                 steering_entries,
@@ -646,6 +679,7 @@ impl PostgresModelCallRepository {
                 &mut transaction,
                 session,
                 prepared.call().target(),
+                fast_mode,
                 &self.credential_reference,
                 self.credential_families.as_ref(),
             )
@@ -1654,6 +1688,12 @@ where
         ));
     }
     let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+    let fast_mode = execution
+        .configuration()
+        .effective()
+        .model_settings()
+        .effective()
+        .fast_mode();
     let prepared = match execution.prepare_initial_call_consuming_steering(
         call,
         steering_entries,
@@ -1712,6 +1752,7 @@ where
         connection,
         session,
         prepared.call().target(),
+        fast_mode,
         credential_reference,
         credential_families,
     )
@@ -1730,6 +1771,7 @@ pub(crate) async fn resolve_session_credential(
     connection: &mut PgConnection,
     session: SessionId,
     target: ResolvedProviderTarget,
+    fast_mode: FastMode,
     fallback: &ModelCallCredentialReference,
     families: Option<&crate::ModelCredentialFamilyCatalog>,
 ) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
@@ -1737,7 +1779,7 @@ pub(crate) async fn resolve_session_credential(
         return Ok(fallback.clone());
     };
     let family = families
-        .family(target)
+        .family_for_call(target, fast_mode)
         .ok_or(ModelCallCorruption::Missing("model credential family"))?;
     match crate::session_credentials::load_current_session_credential(
         connection,
@@ -1747,7 +1789,9 @@ pub(crate) async fn resolve_session_credential(
     .await
     {
         Ok(reference) => Ok(reference),
-        Err(sqlx::Error::RowNotFound) => match families.migration_fallback_family(target) {
+        Err(sqlx::Error::RowNotFound) => match families
+            .migration_fallback_family_for_call(target, fast_mode)
+        {
             Some(fallback_family) => crate::session_credentials::load_migrated_session_credential(
                 connection,
                 session_id_to_uuid(session),
