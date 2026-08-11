@@ -82,6 +82,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// happens to have PNGs, because the rendering itself is what reports.
     private var scenarioRenderings: [(scenario: ScreenshotScenario, canvas: SnapshotCanvas)] = []
     private var legacyRenderings: Set<SnapshotCanvas> = []
+    private var directRenderings: Set<SnapshotCanvas> = []
 
     /// What this suite does with one `ScreenshotScenario`.
     ///
@@ -370,8 +371,17 @@ final class LiveScreenSnapshotTests: XCTestCase {
         for (test, canvases) in legacyDeclaredCanvasesByTest {
             declared[test] = Set(canvases.map(\.rawValue))
         }
+        for (test, canvases) in directDeclaredCanvasesByTest {
+            declared[test] = Set(canvases.map(\.rawValue))
+        }
         return declared
     }
+
+    /// The canvases promised by tests that call the snapshot renderer directly.
+    static let directDeclaredCanvasesByTest: [String: Set<SnapshotCanvas>] = [
+        "testTemplatesCapabilityGate": [.iPadPortrait, .iPadLandscape],
+        "testSessionCreationSheetContent": [.sheet],
+    ]
 
     /// The canvases promised by every legacy snapshot test.
     static let legacyDeclaredCanvasesByTest: [String: Set<SnapshotCanvas>] = {
@@ -753,8 +763,23 @@ final class LiveScreenSnapshotTests: XCTestCase {
             ["iphone-portrait", "iphone-landscape", "ipad-portrait", "ipad-landscape"]
         )
         XCTAssertEqual(
+            Self.declaredCanvasesByTest["testTemplatesCapabilityGate"],
+            ["ipad-portrait", "ipad-landscape"]
+        )
+        XCTAssertEqual(Self.declaredCanvasesByTest["testSessionCreationSheetContent"], ["sheet"])
+        XCTAssertEqual(
             Set(Self.definedTestNames.filter { $0.hasPrefix("testLegacy") }),
             Set(Self.legacyDeclaredCanvasesByTest.keys)
+        )
+    }
+
+    /// Every test with a committed golden declares the canvases it promises.
+    func testEverySnapshotProducingTestHasACanvasDeclaration() {
+        XCTAssertEqual(
+            Self.snapshotProducingTestNames
+                .subtracting(Self.declaredCanvasesByTest.keys)
+                .sorted(),
+            []
         )
     }
 
@@ -1055,11 +1080,11 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// Templates section — a golden of it would be a reference for a screen no
     /// reader can reach and would go on passing after the section gained a tab.
     func testTemplatesCapabilityGate() async {
-        await assertLiveScreenSnapshot(
+        await assertDirectSnapshot(
             of: rootView(for: .sessions, selecting: .templates),
             canvas: .iPadPortrait
         )
-        await assertLiveScreenSnapshot(
+        await assertDirectSnapshot(
             of: rootView(for: .sessions, selecting: .templates),
             canvas: .iPadLandscape
         )
@@ -1072,7 +1097,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// reader comparing the form's fields wants and what the presented golden
     /// crops.
     func testSessionCreationSheetContent() async {
-        await assertLiveScreenSnapshot(of: processCreationSheet(), canvas: .sheet)
+        await assertDirectSnapshot(of: processCreationSheet(), canvas: .sheet)
     }
 
     /// Renders a scenario and records that this test is what rendered it.
@@ -1084,8 +1109,8 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// every guard because that method exists and has committed PNGs.
     ///
     /// Only scenario renderings go through here. `testTemplatesCapabilityGate`
-    /// and `testSessionCreationSheetContent` call `assertLiveScreenSnapshot`
-    /// directly and deliberately: neither is a scenario's own rendering — one
+    /// and `testSessionCreationSheetContent` call `assertDirectSnapshot`
+    /// deliberately: neither is a scenario's own rendering — one
     /// shows a section the scenario does not select, the other a sheet's
     /// content standing alone — and routing them through this would claim they
     /// were.
@@ -1149,6 +1174,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// `-only-testing` run checks exactly the tests it selected.
     override func tearDown() {
         verifyThisTestRenderedWhatItClaims()
+        verifyThisDirectTestRenderedEveryDeclaredCanvas()
         verifyThisLegacyTestRenderedEveryDeclaredCanvas()
         super.tearDown()
     }
@@ -1181,6 +1207,33 @@ final class LiveScreenSnapshotTests: XCTestCase {
             Rendered: \(legacyRenderings.map(\.rawValue).sorted()). \
             Declared: \(declared.map(\.rawValue).sorted()).
             """
+        )
+    }
+
+    private func verifyThisDirectTestRenderedEveryDeclaredCanvas() {
+        let runningTest = Self.methodName(ofTestCaseName: name)
+        guard let declared = Self.directDeclaredCanvasesByTest[runningTest] else { return }
+        XCTAssertEqual(
+            directRenderings,
+            declared,
+            "\(runningTest) did not render every canvas its declaration promises."
+        )
+    }
+
+    private func assertDirectSnapshot(
+        of view: some View,
+        canvas: SnapshotCanvas,
+        testName: String = #function,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        directRenderings.insert(canvas)
+        await assertLiveScreenSnapshot(
+            of: view,
+            canvas: canvas,
+            file: file,
+            testName: testName,
+            line: line
         )
     }
 
