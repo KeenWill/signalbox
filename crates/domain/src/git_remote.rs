@@ -140,11 +140,26 @@ const MAX_PORT_DIGITS: usize = 5;
 /// could never be dispatched however well-formed its host is. The parse bounds
 /// the value; the digit test keeps a leading sign out, which `u16::from_str`
 /// would otherwise accept.
+///
+/// Port zero is refused for the same reason as an out-of-range port: it is
+/// reserved and never identifies a listening HTTPS service, so an explicit
+/// `:0` names a destination no push could reach. An omitted port stays legal.
 fn port_is_numeric(port: &str) -> bool {
     !port.is_empty()
         && port.len() <= MAX_PORT_DIGITS
         && port.bytes().all(|byte| byte.is_ascii_digit())
-        && port.parse::<u16>().is_ok()
+        && port.parse::<u16>().is_ok_and(|value| value >= 1)
+}
+
+/// Returns whether what follows the authority is a bare path.
+///
+/// A query or fragment is refused for the same reason as `userinfo@`. A
+/// destination such as `https://example.test/repository?access_token=secret`
+/// writes a credential into an append-only column that no later act can clear,
+/// and the push credential policy is undecided. Neither component carries
+/// meaning for a Git remote, so refusing both costs a destination nothing.
+fn is_bare_path(path: &str) -> bool {
+    !path.contains(['?', '#'])
 }
 
 /// One stable operator-chosen remote name.
@@ -218,10 +233,13 @@ impl GitRemoteUrl {
         if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(GitRemoteTextError::Malformed);
         }
-        let authority = remainder
+        let (authority, path) = remainder
             .find(['/', '?', '#'])
-            .map_or(remainder, |offset| &remainder[..offset]);
+            .map_or((remainder, ""), |offset| remainder.split_at(offset));
         if !authority_names_a_host(authority) {
+            return Err(GitRemoteTextError::Malformed);
+        }
+        if !is_bare_path(path) {
             return Err(GitRemoteTextError::Malformed);
         }
         Ok(Self(value))
@@ -471,6 +489,26 @@ mod tests {
     fn a_destination_naming_a_host_is_admitted() {
         assert_destination_is_admitted("https://example.test:8443/namespace/project.git");
         assert_destination_is_admitted("https://example.test");
+    }
+
+    /// A query string is the other common credential channel a URL offers, and
+    /// the mint column is append-only, so it is refused on the same reasoning
+    /// as userinfo. A fragment carries no meaning for a remote either.
+    #[test]
+    fn a_destination_carrying_a_query_or_fragment_is_refused() {
+        assert_destination_is_refused("https://example.test/repository?access_token=secret");
+        assert_destination_is_refused("https://example.test/repository?a=1");
+        assert_destination_is_refused("https://example.test?a=1");
+        assert_destination_is_refused("https://example.test/repository#fragment");
+        assert_destination_is_refused("https://example.test/repository?a=1#fragment");
+    }
+
+    /// Port zero is reserved and names no listening service, so an explicit
+    /// `:0` mints a destination no push could reach.
+    #[test]
+    fn a_destination_naming_port_zero_is_refused() {
+        assert_destination_is_refused("https://example.test:0/repository");
+        assert_destination_is_refused("https://example.test:00000/repository");
     }
 
     /// A minted destination is stored append-only, so userinfo would publish a

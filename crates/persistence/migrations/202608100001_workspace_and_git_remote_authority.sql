@@ -71,6 +71,14 @@ $$;
 -- admitting userinfo now would settle it by accident: the narrower grammar can
 -- be widened once credentials have an approved representation, whereas a stored
 -- secret cannot be recalled.
+--
+-- A query or fragment is refused on the same reasoning. Userinfo is not the
+-- only credential channel a URL offers — `?access_token=secret` is the other
+-- common one — and neither component carries meaning for a Git remote, so
+-- refusing both costs a destination nothing it needs.
+--
+-- An explicit port of zero is refused because port zero is reserved and never
+-- identifies a listening HTTPS service; an omitted port stays legal.
 CREATE FUNCTION configured_git_remote_url_is_valid(candidate text)
 RETURNS boolean
 LANGUAGE sql
@@ -83,13 +91,13 @@ AS $$
        AND candidate COLLATE "C" ~ (
                '^https://'
             || '[A-Za-z0-9._~-]+(:[0-9]{1,5})?'
-            || '([/?#].*)?$'
+            || '(/[^?#]*)?$'
            )
        AND coalesce(
                (substring(candidate COLLATE "C"
                           from '^https://[^/?#]*:([0-9]{1,5})(?:[/?#]|$)'))::int,
-               0
-           ) <= 65535
+               1
+           ) BETWEEN 1 AND 65535
 $$;
 
 -- The rebuilt version constraint must carry every version supported immediately

@@ -210,10 +210,8 @@ fn push_receipts_canonicalize_equivalent_object_identifier_spelling() {
 /// `gix_validate` refuses would mint a destination that can never resolve.
 ///
 /// This test enforces the relation; it does not own it. The owning statement
-/// belongs in the cross-component specification for Git remote authority,
-/// which is not written yet because it must also state how a mint is scoped —
-/// the decision still open on this pull request. Point this comment at that
-/// statement once it lands.
+/// is `docs/spec/git-authority-threat-model.md`, under "Remote destination
+/// authority", which states the durable vocabulary and how a mint is scoped.
 #[track_caller]
 fn assert_minted_name_builds_a_configured_remote(candidate: &str) {
     assert!(

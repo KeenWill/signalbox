@@ -990,6 +990,13 @@ async fn the_destination_predicate_agrees_with_the_domain_newtype() -> Result<()
     assert_url_predicate_agrees(&pool, "https://user:token@example.test/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://@example.test/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://user@example.test:8443/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test/project.git?access_token=secret")
+        .await?;
+    assert_url_predicate_agrees(&pool, "https://example.test/project.git?a=1").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test?a=1").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test/project.git#fragment").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test:0/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://example.test:00000/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://[2001:db8::1]/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://[....]/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://?").await?;
