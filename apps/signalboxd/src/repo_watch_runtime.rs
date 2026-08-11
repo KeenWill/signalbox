@@ -1732,7 +1732,7 @@ impl GitHubRepositoryPoller {
         match response_entity_tag {
             Some(entity_tag) if !page_is_at_cap => {
                 self.cache()
-                    .insert(key, entity_tag, bytes.len(), accepted.clone())?;
+                    .insert(key, entity_tag, bytes.len(), accepted.clone());
             }
             Some(_) | None => self.cache().remove(&key),
         }
@@ -1927,14 +1927,25 @@ impl PollCache {
             .ok_or(RepositoryWatchAttemptError::MissingCachedResource)
     }
 
+    // Admission is an accelerator, never a precondition for an observation: a
+    // resource that does not fit is shed and simply refetched unconditionally
+    // on the next attempt. Failing the attempt instead would let the retention
+    // bound cap the transfer bound, because every resource already fetched in
+    // the current attempt is touched and therefore not evictable.
     fn insert<T: Any + Send + Sync>(
         &mut self,
         key: ResourceKey,
         entity_tag: EntityTag,
         wire_bytes: usize,
         accepted: T,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        self.insert_with_resource_limit(key, entity_tag, wire_bytes, accepted, MAX_CACHED_RESOURCES)
+    ) {
+        self.insert_with_resource_limit(
+            key,
+            entity_tag,
+            wire_bytes,
+            accepted,
+            MAX_CACHED_RESOURCES,
+        );
     }
 
     fn insert_with_resource_limit<T: Any + Send + Sync>(
@@ -1944,24 +1955,29 @@ impl PollCache {
         wire_bytes: usize,
         accepted: T,
         resource_limit: usize,
-    ) -> Result<(), RepositoryWatchAttemptError> {
+    ) {
         while !self.resources.contains_key(&key) && self.resources.len() >= resource_limit {
             if !self.evict_one_untouched() {
                 break;
             }
         }
         if !self.resources.contains_key(&key) && self.resources.len() >= resource_limit {
-            return Err(RepositoryWatchAttemptError::ResourceLimit);
+            return;
         }
-        let mut projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
+        let Ok(mut projected_bytes) = self.projected_cached_bytes(&key, wire_bytes) else {
+            return;
+        };
         while projected_bytes > MAX_CACHED_WIRE_BYTES {
             if !self.evict_one_untouched() {
                 break;
             }
-            projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
+            let Ok(next_projection) = self.projected_cached_bytes(&key, wire_bytes) else {
+                return;
+            };
+            projected_bytes = next_projection;
         }
         if projected_bytes > MAX_CACHED_WIRE_BYTES {
-            return Err(RepositoryWatchAttemptError::ResourceLimit);
+            return;
         }
         self.resources.insert(
             key,
@@ -1973,7 +1989,6 @@ impl PollCache {
             },
         );
         self.cached_wire_bytes = projected_bytes;
-        Ok(())
     }
 
     fn projected_cached_bytes(
@@ -4409,16 +4424,18 @@ mod tests {
     }
 
     #[test]
-    fn process_local_cache_rejects_a_resource_beyond_its_total_wire_bound() {
+    fn process_local_cache_sheds_a_resource_beyond_its_total_wire_bound() {
         let mut cache = PollCache::default();
-        let result = cache.insert(
-            ResourceKey(CACHE_RESOURCE_KEY.to_owned()),
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+
+        cache.insert(
+            key.clone(),
             EntityTag(ENTITY_TAG.to_owned()),
             MAX_CACHED_WIRE_BYTES + 1,
             Vec::<u8>::new(),
         );
 
-        assert_eq!(result, Err(RepositoryWatchAttemptError::ResourceLimit));
+        assert_eq!(cache.entity_tag(&key), None);
     }
 
     #[test]
@@ -4427,24 +4444,20 @@ mod tests {
         let retained = ResourceKey(CACHE_RETAINED_KEY.to_owned());
         let stale = ResourceKey(CACHE_STALE_KEY.to_owned());
         let replacement = ResourceKey(CACHE_REPLACEMENT_KEY.to_owned());
-        cache
-            .insert_with_resource_limit(
-                retained.clone(),
-                EntityTag(ENTITY_TAG.to_owned()),
-                CACHE_WIRE_BYTES,
-                Vec::<u8>::new(),
-                TEST_CACHE_RESOURCE_LIMIT,
-            )
-            .expect("retained cache fixture is admitted");
-        cache
-            .insert_with_resource_limit(
-                stale.clone(),
-                EntityTag(ENTITY_TAG.to_owned()),
-                CACHE_WIRE_BYTES,
-                Vec::<u8>::new(),
-                TEST_CACHE_RESOURCE_LIMIT,
-            )
-            .expect("stale cache fixture is admitted");
+        cache.insert_with_resource_limit(
+            retained.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+        cache.insert_with_resource_limit(
+            stale.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
         cache.begin_poll();
         cache
             .touch(retained.clone())
@@ -4453,20 +4466,57 @@ mod tests {
             .touch(replacement.clone())
             .expect("replacement cache fixture is touched");
 
-        cache
-            .insert_with_resource_limit(
-                replacement.clone(),
-                EntityTag(ENTITY_TAG.to_owned()),
-                CACHE_WIRE_BYTES,
-                Vec::<u8>::new(),
-                TEST_CACHE_RESOURCE_LIMIT,
-            )
-            .expect("replacement evicts the untouched stale fixture");
+        cache.insert_with_resource_limit(
+            replacement.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
 
         assert_eq!(cache.resources.len(), TEST_CACHE_RESOURCE_LIMIT);
         assert!(cache.resources.contains_key(&retained));
         assert!(cache.resources.contains_key(&replacement));
         assert!(!cache.resources.contains_key(&stale));
+    }
+
+    #[test]
+    fn process_local_cache_sheds_at_capacity_when_every_entry_is_touched() {
+        let mut cache = PollCache::default();
+        let first = ResourceKey(CACHE_RETAINED_KEY.to_owned());
+        let second = ResourceKey(CACHE_STALE_KEY.to_owned());
+        let admitted = ResourceKey(CACHE_REPLACEMENT_KEY.to_owned());
+        cache.insert_with_resource_limit(
+            first.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+        cache.insert_with_resource_limit(
+            second.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+        cache.begin_poll();
+        cache.touch(first.clone()).expect("first entry is touched");
+        cache
+            .touch(second.clone())
+            .expect("second entry is touched");
+
+        cache.insert_with_resource_limit(
+            admitted.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+            TEST_CACHE_RESOURCE_LIMIT,
+        );
+
+        assert_eq!(cache.entity_tag(&admitted), None);
+        assert!(cache.resources.contains_key(&first));
+        assert!(cache.resources.contains_key(&second));
     }
 
     #[test]

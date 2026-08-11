@@ -82,10 +82,18 @@ empty on every daemon start, so the first poll and the first poll after restart
 perform one complete unconditional fetch. When a current poll replaces a
 resource at the cache's entry bound, admission evicts an untouched stale entry
 before enforcing that bound; replacement within the bound cannot wedge later
-polls. REST continuation follows GitHub's `Link` relation for the next page, not
-response cardinality: a full terminal page at the 100-page bound completes the
-projection, while a next relation beyond that bound fails the poll. Because a
-`304` can omit changed pagination metadata, a cached full terminal page
+polls. Admission is an accelerator and never a precondition for an observation:
+a resource that does not fit the entry or retention bound is shed, not committed
+to the cache, and the poll continues, so that resource is refetched
+unconditionally on the next poll. Retention is bounded separately from, and
+lower than, what one poll may transfer, because retention is per watched
+repository and multiplies by the configured repository count; shedding is what
+keeps the lower retention bound from capping the transfer bound, since every
+resource already fetched in the current poll is touched and therefore not
+evictable. REST continuation follows GitHub's `Link` relation for the next page,
+not response cardinality: a full terminal page at the 100-page bound completes
+the projection, while a next relation beyond that bound fails the poll. Because
+a `304` can omit changed pagination metadata, a cached full terminal page
 conservatively probes one bounded successor; the cap page is reread
 unconditionally so that probe never manufactures page 101. A failed, rejected,
 partial, or unparseable poll submits no persistence candidate. The
