@@ -796,7 +796,11 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// records exactly what its disposition promises. Without it a canvas
     /// dropped from a body leaves its golden on disk and every other guard
     /// stays green.
-    func testEveryRenderedScenarioHasAGoldenForEveryDeclaredCanvas() {
+    func testEveryRenderedScenarioHasAGoldenForEveryDeclaredCanvas() throws {
+        try XCTSkipIf(
+            liveScreenSnapshotRecordMode() != .never,
+            "The committed snapshot inventory is verified after the recording run."
+        )
         XCTAssertEqual(
             Self.testsWhoseGoldensDoNotMatchTheirDeclaration(
                 declared: Self.declaredCanvasesByTest,
