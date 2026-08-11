@@ -288,13 +288,7 @@ pub(crate) const RUNNER_REGISTRATION_HEAD: &str = "SELECT registration_revision
               WHERE enrollment_id = $1
               FOR UPDATE";
 
-pub(crate) const RUNNER_PLACEMENT_HEAD: &str =
-    "SELECT record.event_ordinal, record.placement_revision,
-                    record.state_kind, record.pinned_runner_id,
-                    record.pinned_credential_profile_name,
-                    record.credential_grant_runner_id,
-                    record.credential_grant_lineage_origin_ordinal,
-                    record.credential_grant_revision
+pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
                FROM runner_current_session_placement AS current_placement
                JOIN runner_session_placement_record AS record
                  ON record.session_id = current_placement.session_id
