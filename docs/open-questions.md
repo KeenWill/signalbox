@@ -670,11 +670,12 @@ the implemented session and external-link evidence.
   mutable aliases over changing digests, producer provenance, ownership, and
   workflow attachment — needs its own foundation decision before a workflow can
   attach one.
-- **Content-type read tools and their isolation substrate.** The
+- **Content-type read tools and their isolation mechanism.** The
   content-type-aware reader inventory (structured-format walks, document page
   rendering, image downscaling for vision-capable targets), which formats
-  warrant dedicated tools, and the sandbox those processors execute in remain
-  undecided. The visibility contract they must satisfy is fixed by
+  warrant dedicated tools, and the concrete sandbox mechanism remain undecided.
+  The required strong process-isolation posture and visibility contract are
+  fixed by
   [blob storage](spec/blob-storage.md#attachment-visibility-and-model-reads).
 - **Non-socket ingest paths.** Daemon-local file adoption and runner-produced
   artifact ingest — moving multi-gigabyte content into the catalog without

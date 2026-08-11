@@ -285,6 +285,14 @@ The converter does not read files or choose paths. Its caller supplies bytes, so
 later formats implement the same seam without adding filesystem types to the
 domain or application crates.
 
+Blob-bearing import conversion is committed unimplemented functionality: no
+present surface supplies a blob-backed source directly to a converter. The
+compatibility constraint is that such a path streams from the blob substrate
+through conversion without materializing the whole blob. The existing text-file
+and chunked socket paths remain the bounded whole-source conversion described
+below; this future streaming seam does not reinterpret an existing converter
+version.
+
 ## Operational surface
 
 The user terminal preserves the single-file form,
