@@ -5252,10 +5252,12 @@ async fn load_grant_policy_index(
                 grant_line.prior_runner_id,
                 grant_line.prior_grant_revision,
                 grant_line.placement_event_ordinal,
+                policy_placement.event_ordinal IS NOT NULL
+                    AS has_policy_placement,
                 policy_placement.pinned_credential_profile_name IS NOT NULL
                     AS defines_policy
            FROM grant_line
-           JOIN runner_session_placement_record AS policy_placement
+           LEFT JOIN runner_session_placement_record AS policy_placement
              ON policy_placement.session_id = grant_line.session_id
             AND policy_placement.event_ordinal = grant_line.placement_event_ordinal
             AND policy_placement.credential_grant_lineage_origin_ordinal =
@@ -5272,8 +5274,13 @@ async fn load_grant_policy_index(
     .await?;
     let mut events = BTreeMap::new();
     let mut inherited_policy = None;
+    let mut reached_base = false;
     for row in rows {
-        validate_grant_predecessor_shape(&row)?;
+        let revision = validate_grant_predecessor_shape(&row)?;
+        reached_base |= revision == RunnerGeneration::one();
+        if !row.decode_column::<bool>("has_policy_placement")? {
+            return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into());
+        }
         let identity = StoredGrantIdentity {
             lineage_origin: row.decode_column("lineage_origin_event_ordinal")?,
             runner: row.decode_column("runner_id")?,
@@ -5290,10 +5297,15 @@ async fn load_grant_policy_index(
     if !events.contains_key(&current) {
         return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into());
     }
+    if !reached_base {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
     Ok(GrantPolicyIndex { events })
 }
 
-fn validate_grant_predecessor_shape(row: &PgRow) -> Result<(), RunnerProtocolStoreError> {
+fn validate_grant_predecessor_shape(
+    row: &PgRow,
+) -> Result<RunnerGeneration, RunnerProtocolStoreError> {
     let revision = decode_generation(row.decode_column("grant_revision")?)?;
     let prior_runner = row.decode_column::<Option<Uuid>>("prior_runner_id")?;
     let prior_revision = row
@@ -5308,7 +5320,7 @@ fn validate_grant_predecessor_shape(row: &PgRow) -> Result<(), RunnerProtocolSto
     if !valid {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
-    Ok(())
+    Ok(revision)
 }
 
 async fn load_grant_for_placement(
