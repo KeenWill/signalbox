@@ -209,10 +209,10 @@ rather than a compatibility variant beside the string form.
 
 The satellite migration raises the owning storage versions, inserts exactly one
 ordinal-zero text part for every legacy command and accepted-input row, verifies
-one complete ordered sequence per owner, and only then removes the legacy
-`content_text` columns from read authority. Its inserts are idempotent on owner
-plus ordinal, disagreement aborts the migration, and new code reconstructs and
-compares only the satellites. Command-side and accepted-side parts remain
+one complete ordered sequence per parent row, and only then removes the legacy
+`content_text` columns from read authority. Its inserts are idempotent on parent
+row plus ordinal, disagreement aborts the migration, and new code reconstructs
+and compares only the satellites. Command-side and accepted-side parts remain
 separate mirrored records rather than shared mutable authority.
 
 ## Attachment visibility and model reads
