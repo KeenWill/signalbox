@@ -13884,7 +13884,7 @@ async fn s32_inv002_inv045_base_grant_authenticates_policy_placement_identity()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runner_placement_semantic_boundary_round_trips_exact_successor_facts()
+async fn s32_inv044_runner_placement_boundary_round_trips_exact_successor_facts()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -13989,7 +13989,7 @@ async fn runner_placement_semantic_boundary_round_trips_exact_successor_facts()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runner_placement_semantic_boundary_requires_its_exact_frontier_pointer()
+async fn s32_inv044_runner_placement_boundary_requires_its_exact_frontier_pointer()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -14048,7 +14048,7 @@ async fn runner_placement_semantic_boundary_requires_its_exact_frontier_pointer(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runner_placement_semantic_readback_rejects_a_missing_frontier_pointer()
+async fn s32_inv044_runner_placement_readback_rejects_a_missing_frontier_pointer()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;

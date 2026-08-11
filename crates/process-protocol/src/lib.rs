@@ -11921,7 +11921,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_placement_change_transcript_entry_round_trips_closed_facts()
+    fn inv033_inv044_runner_placement_change_entry_round_trips_closed_facts()
     -> Result<(), Box<dyn std::error::Error>> {
         let placement_entry = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(5),

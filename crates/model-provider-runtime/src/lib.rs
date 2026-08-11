@@ -2307,7 +2307,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_restricted_runner_placement_boundary_uses_the_exact_message() {
+    fn s32_inv015_inv044_workspace_restricted_placement_uses_the_exact_message() {
         let source = source(14);
         let placement_revision = signalbox_domain::RunnerGeneration::try_from_u64(7)
             .expect("the fixture placement revision is positive");
@@ -2325,7 +2325,7 @@ mod tests {
     }
 
     #[test]
-    fn ambient_runner_placement_boundary_uses_the_exact_message() {
+    fn s32_inv015_inv044_ambient_runner_placement_uses_the_exact_message() {
         let source = source(15);
         let placement_revision = signalbox_domain::RunnerGeneration::try_from_u64(7)
             .expect("the fixture placement revision is positive");

@@ -2519,7 +2519,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_placement_boundary_renders_exact_resolved_successor_evidence() {
+    fn s32_inv015_inv044_runner_placement_renders_exact_resolved_successor_evidence() {
         let source = SemanticTranscriptEntryRef::from_source(
             identity(58, SessionId::from_uuid),
             identity(59, SemanticTranscriptEntryId::from_uuid),
@@ -2547,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_placement_boundary_rejects_missing_successor_evidence() {
+    fn s32_inv015_inv044_runner_placement_rejects_missing_successor_evidence() {
         let source = SemanticTranscriptEntryRef::from_source(
             identity(60, SessionId::from_uuid),
             identity(61, SemanticTranscriptEntryId::from_uuid),
@@ -2568,7 +2568,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_placement_boundary_rejects_mismatched_successor_revision() {
+    fn s32_inv015_inv044_runner_placement_rejects_mismatched_successor_revision() {
         let source = SemanticTranscriptEntryRef::from_source(
             identity(62, SessionId::from_uuid),
             identity(63, SemanticTranscriptEntryId::from_uuid),
@@ -2596,7 +2596,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_placement_boundary_rejects_duplicate_successor_evidence() {
+    fn s32_inv015_inv044_runner_placement_rejects_duplicate_successor_evidence() {
         let source = SemanticTranscriptEntryRef::from_source(
             identity(64, SessionId::from_uuid),
             identity(65, SemanticTranscriptEntryId::from_uuid),
@@ -2621,7 +2621,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_placement_boundary_rejects_unreferenced_successor_evidence() {
+    fn s32_inv015_inv044_runner_placement_rejects_unreferenced_successor_evidence() {
         let source = SemanticTranscriptEntryRef::from_source(
             identity(66, SessionId::from_uuid),
             identity(67, SemanticTranscriptEntryId::from_uuid),
