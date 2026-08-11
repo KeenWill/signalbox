@@ -2957,13 +2957,14 @@ async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(),
                 model_selection,
                 placement_version,
                 placement,
-                runner: _,
+                runner,
             } => output.session_summary(
                 *session_id,
                 defaults_version.value(),
                 &selection_display(*model_selection),
                 placement_version.value(),
                 &placement_display(placement),
+                runner.as_ref(),
             )?,
             _ => {
                 return Err(ClientError::Protocol(
