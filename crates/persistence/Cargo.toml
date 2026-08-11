@@ -82,7 +82,7 @@ required-features = ["postgres-integration"]
 
 [[test]]
 name = "postgres_integration"
-path = "tests/postgres_integration.rs"
+path = "tests/postgres_integration/main.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
