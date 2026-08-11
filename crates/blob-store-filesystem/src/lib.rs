@@ -114,23 +114,15 @@ impl FilesystemBlobStore {
         drop(output);
 
         let destination_for_publish = destination.clone();
-        let publication = tokio::task::spawn_blocking(move || {
-            temporary.persist_noclobber(&destination_for_publish)
-        })
-        .await
-        .map_err(|source| BlobStoreError::io("join atomic publication", source))?;
-        match publication {
-            Ok(_) => {
-                sync_directory(parent).await?;
-                verify_file(&destination, expected).await?;
-                Ok(BlobPutOutcome::Published { key })
-            }
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                verify_file(&destination, expected).await?;
-                Ok(BlobPutOutcome::AlreadyPresent { key })
-            }
-            Err(error) => Err(BlobStoreError::io("atomically publish object", error.error)),
-        }
+        let persisted =
+            tokio::task::spawn_blocking(move || temporary.persist(&destination_for_publish))
+                .await
+                .map_err(|source| BlobStoreError::io("join atomic publication", source))?
+                .map_err(|error| BlobStoreError::io("atomically publish object", error.error))?;
+        drop(persisted);
+        sync_directory(parent).await?;
+        verify_file(&destination, expected).await?;
+        Ok(BlobPutOutcome::Published { key })
     }
 
     async fn open_inner(&self, key: &BlobObjectKey) -> Result<OpenedBlob, BlobStoreError> {
