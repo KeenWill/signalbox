@@ -12,7 +12,7 @@ use signalbox_model_runtime::{
     CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, FinishReason,
     LossCause, ModelOperation, ModelRuntime, PreparationDefect, PreparationFailure,
     PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget, TerminalEvidence,
-    TokenUsage, ToolChoice, ToolDefinition, ToolName,
+    TokenUsage, ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName,
 };
 use signalbox_model_runtime_claude_cli::{
     CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConfig, ClaudeCliConstructionError,
@@ -738,6 +738,100 @@ async fn truncated_stream_is_boundary_loss() {
     assert_eq!(result.spawns, 1);
 }
 
+/// a tool call the decoder rejects before registering it is still
+/// reported as opened.
+///
+/// The CLI announces a `tool_use` block for a tool this operation never
+/// declared. The decoder refuses it before `proposal_indexes` or any
+/// observation records it, so the loss evidence is the only place the fact can
+/// survive. The refusal is itself a decode failure, so this also pins that an
+/// established `Opened` outranks the withholding the next test asserts.
+#[tokio::test]
+async fn a_rejected_tool_use_still_reports_the_opened_call() {
+    let result = execute_scenario("undeclared_tool_use", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+}
+
+/// A loss raised from a decoded prefix carries the negative fact, so it is told
+/// apart from the case above by type rather than by the rendered detail.
+///
+/// The stream here ends without its terminal marker after events the decoder
+/// read and classified in full — unlike a decode failure, nothing about this
+/// response went unexamined, so "none opened" is a fact the adapter can state.
+#[tokio::test]
+async fn a_loss_from_a_decoded_prefix_without_tool_calls_reports_none_opened() {
+    let result = execute_scenario("truncated_stream", OperationShape::Text).await;
+
+    assert_eq!(
+        boundary_loss(&result.evidence).tool_calls,
+        ToolCallsAtLoss::NoneOpened
+    );
+}
+
+/// An event whose content decoded and was then rejected on semantics states the
+/// negative: the adapter read the blocks and no tool call was among them.
+///
+/// The rejection is a decode failure like the one below, so this is what makes
+/// the withholding a statement about unexamined material rather than about the
+/// failure class.
+///
+/// The rejected event ends the stream deliberately. A writer that continues past
+/// it can leave the next line buffered in the reader when the failure is raised,
+/// and that undelivered line withholds the fact on its own — which is the
+/// separate behavior pinned by the prefetched-line test below. Ending here keeps
+/// this test measuring only the rejected event's own examination.
+#[tokio::test]
+async fn a_decoded_event_rejected_on_semantics_reports_none_opened() {
+    let result = execute_scenario(
+        "conflicting_message_id_at_end_of_stream",
+        OperationShape::Text,
+    )
+    .await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+}
+
+/// The same semantic rejection on an event that *did* announce a tool call
+/// reports it, which pins that the scan runs before the identity checks.
+#[tokio::test]
+async fn a_decoded_event_rejected_after_announcing_a_tool_reports_opened() {
+    let result =
+        execute_scenario("tool_use_with_conflicting_message_id", OperationShape::Text).await;
+
+    assert_eq!(
+        boundary_loss(&result.evidence).tool_calls,
+        ToolCallsAtLoss::Opened
+    );
+}
+
+/// A line that never decoded withholds the fact instead of stating a negative.
+///
+/// The failing line was never classified, so it could itself have carried the
+/// `tool_use` block. Reporting "none opened" would claim a negative about
+/// material the adapter never read.
+#[tokio::test]
+async fn a_line_that_never_decodes_withholds_the_tool_fact() {
+    let result = execute_scenario("malformed_stream", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
 #[tokio::test]
 async fn malformed_stream_line_is_protocol_boundary_loss() {
     let result = execute_scenario("malformed_stream", OperationShape::Text).await;
@@ -839,6 +933,128 @@ async fn non_utf8_bridge_path_is_a_preparation_defect_before_spawn() {
 
     assert!(request_construction_defect(outcome).contains("UTF-8"));
     assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+/// A line the runner rejects by its own bound never reaches the decoder, so the
+/// tool fact is withheld: that line may itself have been the `assistant` event
+/// carrying a `tool_use` block.
+///
+/// The bound is lowered rather than the fixture enlarged so the test states the
+/// one value the behavior depends on.
+#[tokio::test]
+async fn a_line_rejected_by_the_event_bound_withholds_the_tool_fact() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.interrupt_grace = Duration::from_millis(100);
+    config.event_limit = 16;
+    let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation("normal_completion", OperationShape::Text),
+    )
+    .await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("a line past the event bound is boundary loss");
+    };
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
+/// A deadline that fires at a line boundary discarded nothing, so every event
+/// the adapter received was examined and the negative is a fact.
+///
+/// This is the companion to the test below: without it, marking every deadline
+/// as undelivered would pass, and the fact would be withheld across ordinary
+/// idle cancellations.
+#[tokio::test]
+async fn a_deadline_at_a_line_boundary_states_the_negative() {
+    let report = execute_hanging_scenario("complete_event_then_hang").await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report else {
+        panic!("an exchange deadline is boundary loss");
+    };
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+}
+
+/// A deadline that fires while the bounded-line reader holds a partial event
+/// discards those bytes without ever decoding them, so the fact is withheld.
+///
+/// `read_bounded_line` accumulates into a local buffer, so dropping its future
+/// loses the prefix it consumed — the discarded suffix may have carried a
+/// `tool_use`.
+#[tokio::test]
+async fn a_deadline_dropping_a_partial_line_withholds_the_tool_fact() {
+    let report = execute_hanging_scenario("partial_assistant_then_hang").await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report else {
+        panic!("an exchange deadline is boundary loss");
+    };
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
+/// A decode failure that leaves a prefetched line buffered withholds the tool
+/// fact, because that discarded line is exactly what would have answered it.
+///
+/// The undecodable event is one the adapter *did* examine — its `type`
+/// discriminator alone precludes content blocks — so the decode-failure path
+/// would otherwise state the negative from that event's own examination while a
+/// `tool_use` event sat unread in the reader's buffer. Both lines are written as
+/// one batch so the reader holds the second while the first is being decoded.
+#[tokio::test]
+async fn a_decode_failure_holding_a_prefetched_line_withholds_the_tool_fact() {
+    let result = execute_scenario(
+        "undecodable_event_then_buffered_tool_use",
+        OperationShape::Text,
+    )
+    .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = result.evidence else {
+        panic!("an undecodable event is boundary loss");
+    };
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
+/// Runs a scenario that never terminates, against a deadline short enough to
+/// keep the test quick.
+///
+/// Plumbing: the timeout is the only value these two tests depend on, and they
+/// depend on it identically.
+async fn execute_hanging_scenario(scenario: &str) -> TerminalEvidence {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    // The deadline starts before environment setup and spawn, so it has to
+    // cover both and still fire well inside the scenario's own 60s hang. A
+    // tighter bound races process startup under load.
+    config.exchange_timeout = Duration::from_secs(3);
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(&runtime, operation(scenario, OperationShape::Text)).await;
+    runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await
+        .evidence
 }
 
 async fn execute_scenario(scenario: &str, shape: OperationShape) -> ExecutionResult {

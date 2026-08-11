@@ -1,16 +1,16 @@
-#![allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
-)]
-
 //! End-to-end adapter tests against a canned loopback HTTP server.
 //!
 //! No live provider is contacted and no credential exists: the server is a
 //! local socket replaying canned bytes, which lets these tests assert the
 //! real transport path — headers sent, redirect discipline, connect-failure
 //! classification, and stream-integrity evidence — deterministically.
+
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
+)]
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1096,7 +1096,7 @@ async fn a_401_with_an_unrecognized_error_token_still_classifies_by_status() {
     };
     assert_eq!(
         error.kind,
-        signalbox_model_runtime::ProviderErrorKind::CredentialRejected,
+        ProviderErrorKind::CredentialRejected,
         "classification must not depend on incidental body shape"
     );
     assert_eq!(
@@ -1300,7 +1300,7 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
 
     assert!(matches!(
         error,
-        signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
+        AnthropicConstructionError::InvalidBaseUrl { .. }
     ));
 }
 
@@ -1314,7 +1314,7 @@ fn an_authority_less_base_url_fails_construction() {
 
     assert!(matches!(
         error,
-        signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
+        AnthropicConstructionError::InvalidBaseUrl { .. }
     ));
 }
 
@@ -1353,6 +1353,6 @@ fn a_non_http_base_url_scheme_fails_construction() {
 
     assert!(matches!(
         error,
-        signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
+        AnthropicConstructionError::InvalidBaseUrl { .. }
     ));
 }
