@@ -347,7 +347,7 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
 pub(crate) const RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER: &str = "SELECT enrollment_id
                FROM runner_enrollment
               WHERE runner_id = $1
-              FOR SHARE";
+              FOR UPDATE";
 
 pub(crate) const RUNNER_PLACEMENT_CONNECTION_AUTHORITY: &str = "SELECT connection_epoch
                FROM runner_connection_authority_head
