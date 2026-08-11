@@ -2116,10 +2116,11 @@ async fn load_runner_state_transition(
                     .try_get::<Option<String>, _>("source_connection_state_kind")?
                     .as_deref()
                     == Some("connected")
-                && row
-                    .try_get::<Option<String>, _>("source_connection_cause_kind")?
-                    .as_deref()
-                    == Some("heartbeat_recovered")
+                && matches!(
+                    row.try_get::<Option<String>, _>("source_connection_cause_kind")?
+                        .as_deref(),
+                    Some("established" | "heartbeat_recovered")
+                )
         }
         DispatchedRunnerState::RunnerLostBeforePin => {
             source_event == "runner_lost_before_pin"
