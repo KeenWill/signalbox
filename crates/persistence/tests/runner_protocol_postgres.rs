@@ -96,7 +96,7 @@ const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const SERIALIZATION_TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
-const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
+const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080103;
 const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608100002;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
@@ -3326,6 +3326,61 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_backfills_pinned_state
     assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
     assert_eq!(baseline.1, Decimal::from(loss.loss_epoch().get()));
     assert_eq!(loaded, pin.lease);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: migration refuses an outstanding legacy offer because
+/// its offer-time connection authority cannot be reconstructed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE runner_connection_authority_head (
+            enrollment_id uuid PRIMARY KEY,
+            connection_epoch numeric(20, 0) NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE runner_current_connection_loss (
+            enrollment_id uuid PRIMARY KEY,
+            loss_epoch numeric(20, 0) NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    let (_, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
+    sqlx::query("DROP TABLE runner_current_connection_loss")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DROP TABLE runner_connection_authority_head")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, 1, 1, 'connected', 'established')",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .execute(&pool)
+    .await?;
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
+
+    assert!(
+        refusal
+            .to_string()
+            .contains("outstanding runner lease lacks reconstructible offer authority")
+    );
     drop(pool);
     Ok(())
 }
