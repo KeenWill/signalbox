@@ -1,4 +1,5 @@
 #if os(iOS)
+import SnapshotTesting
 import SwiftUI
 import XCTest
 
