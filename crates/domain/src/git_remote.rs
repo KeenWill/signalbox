@@ -93,10 +93,18 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), GitRemoteTextError> 
 /// Returns whether one URL authority names a host an HTTPS transport could
 /// dispatch to.
 ///
-/// The admitted shape mirrors the SQL predicate byte for byte: an optional
-/// `userinfo@`, then a host of unreserved name bytes, then an optional numeric
-/// port. A scheme-only destination such as `https://?` carries an empty
-/// authority and is refused here.
+/// The admitted shape mirrors the SQL predicate byte for byte: a host of
+/// unreserved name bytes, then an optional numeric port. A scheme-only
+/// destination such as `https://?` carries an empty authority and is refused
+/// here.
+///
+/// A `userinfo@` prefix is refused. A minted destination is recorded in an
+/// append-only column, so `https://user:token@example.test/repo` would durably
+/// publish that token to every database reader and every backup with no later
+/// act able to remove it. The credential policy for a push is undecided, and
+/// admitting userinfo here would settle it by accident; the grammar can be
+/// widened once credentials have an approved representation, whereas a stored
+/// secret cannot be recalled.
 ///
 /// Accepted cost: a bracketed IP-literal host is refused outright rather than
 /// parsed. Admitting one would need a real IPv6 parser on this side and an
@@ -105,12 +113,12 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), GitRemoteTextError> 
 /// destination is expected to name a host, and this bound is stated rather
 /// than approximated.
 fn authority_names_a_host(authority: &str) -> bool {
-    let host_and_port = authority
-        .split_once('@')
-        .map_or(authority, |(_, remainder)| remainder);
-    let (host, port) = host_and_port
+    if authority.contains('@') {
+        return false;
+    }
+    let (host, port) = authority
         .split_once(':')
-        .map_or((host_and_port, None), |(host, port)| (host, Some(port)));
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
     !host.is_empty()
         && host
             .bytes()
@@ -462,8 +470,18 @@ mod tests {
     #[test]
     fn a_destination_naming_a_host_is_admitted() {
         assert_destination_is_admitted("https://example.test:8443/namespace/project.git");
-        assert_destination_is_admitted("https://user@example.test/namespace/project.git");
         assert_destination_is_admitted("https://example.test");
+    }
+
+    /// A minted destination is stored append-only, so userinfo would publish a
+    /// credential no later act could remove. The grammar refuses it until the
+    /// push credential policy is decided.
+    #[test]
+    fn a_destination_carrying_userinfo_is_refused() {
+        assert_destination_is_refused("https://user@example.test/namespace/project.git");
+        assert_destination_is_refused("https://user:token@example.test/namespace/project.git");
+        assert_destination_is_refused("https://@example.test/namespace/project.git");
+        assert_destination_is_refused("https://user@example.test:8443/namespace/project.git");
     }
 
     #[test]

@@ -62,6 +62,15 @@ $$;
 -- cannot represent. A bracketed IP-literal host is refused for the same
 -- reason: a POSIX regular expression cannot express the IPv6 grammar, so the
 -- two sides could not be held in agreement.
+--
+-- A `userinfo@` prefix is refused rather than admitted. This column is
+-- append-only, so a destination such as `https://user:token@example.test/repo`
+-- would durably record that token where every database reader and every backup
+-- can see it, and no later act could remove it. The credential policy for a
+-- push is undecided (`docs/open-questions.md`, daemon Git push transport), and
+-- admitting userinfo now would settle it by accident: the narrower grammar can
+-- be widened once credentials have an approved representation, whereas a stored
+-- secret cannot be recalled.
 CREATE FUNCTION configured_git_remote_url_is_valid(candidate text)
 RETURNS boolean
 LANGUAGE sql
@@ -72,7 +81,7 @@ AS $$
     SELECT octet_length(candidate) BETWEEN 9 AND 4096
        AND candidate COLLATE "C" ~ '^[!-~]+$'
        AND candidate COLLATE "C" ~ (
-               '^https://([^@/?#]*@)?'
+               '^https://'
             || '[A-Za-z0-9._~-]+(:[0-9]{1,5})?'
             || '([/?#].*)?$'
            )
@@ -134,6 +143,15 @@ ALTER TABLE durable_command
 -- decide which roots the daemon may open. The `CHECK` below binds the two
 -- facts together, so a derived row cannot claim command provenance and a
 -- registered one cannot omit it.
+--
+-- Both legal shapes are spelled out rather than compared as one equality
+-- between `origin` and "provenance is present". Under that shorter form a
+-- derived row carrying only `command_id` made both sides false and passed,
+-- and the composite foreign key's default `MATCH SIMPLE` then skipped
+-- validation because one of its columns was null — precisely the partial
+-- provenance this comment says a derived row cannot carry. `MATCH FULL` on
+-- that key refuses a partly-null reference for the same reason, so the two
+-- declarations now agree.
 CREATE TABLE workspace (
     workspace_id uuid PRIMARY KEY,
     root_path text NOT NULL,
@@ -155,14 +173,19 @@ CREATE TABLE workspace (
         CHECK (storage_version IS NULL OR storage_version = 1),
     CONSTRAINT workspace_command_matches_origin
         CHECK (
-            (origin = 'operator_registered')
-            = (command_id IS NOT NULL
-               AND command_kind IS NOT NULL
-               AND storage_version IS NOT NULL)
+            (origin = 'operator_registered'
+             AND command_id IS NOT NULL
+             AND command_kind IS NOT NULL
+             AND storage_version IS NOT NULL)
+            OR (origin = 'daemon_derived'
+                AND command_id IS NULL
+                AND command_kind IS NULL
+                AND storage_version IS NULL)
         ),
     CONSTRAINT workspace_command_fk
         FOREIGN KEY (command_id, command_kind, storage_version)
         REFERENCES durable_command (command_id, command_kind, storage_version)
+        MATCH FULL
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,

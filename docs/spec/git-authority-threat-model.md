@@ -114,9 +114,13 @@ disposition commit.
 
 **Minting a destination is a human act; pushing to a minted destination is an
 approval-gated agent act.** A push destination is durable data, not deployment
-configuration and not a tool argument. The push surface accepts a remote *name*
-and resolves it against the durable record; no caller — model, session, or tool
-— can supply a URL. Only `https` destinations are storable, and the transport
+configuration and not a tool argument. No caller — model, session, or tool — can
+supply a URL: `GitPushArguments` carries a branch and nothing else, and the
+executor is constructed with one already-validated `ConfiguredGitRemote`.
+Committed but unimplemented: the push surface is to accept a remote *name* and
+resolve it against the durable record this PR lands. Until that resolver is
+built the destination reaches the executor by construction, and the durable
+record has no reader. Only `https` destinations are storable, and the transport
 compiles no SSH support, so the two sides refuse the same set.
 
 A destination is scoped to a **workspace**, and a workspace is a durable record
@@ -179,8 +183,21 @@ its name, so a withdrawal and its replacement may land in one transaction.
 - A minted destination is machine-independent only insofar as its workspace is.
   Registering a workspace records the canonical root a person resolved at that
   moment; moving the directory afterwards leaves the record naming a path that
-  no longer exists, and re-registering is the stated remedy. The identity is
-  stable across the move, so the grants scoped to it survive re-registration.
+  no longer exists. Re-registration mints a *new* workspace identity rather than
+  preserving the existing one: `workspace_id` is the primary key, `root_path` is
+  unique, and the table is append-only, so nothing can rebind a recorded
+  identity to a moved directory. Grants are scoped by identity, so they do not
+  survive the move and must be minted again under the new workspace. Modeling
+  relocation as a durable fact that preserves identity is committed but
+  unimplemented.
+- Workspace roots are globally unique by canonical spelling, and the key carries
+  no runner or location dimension. Version one enrolls a single runner, so no
+  two machines can present the same root; more than one simultaneously enrolled
+  runner is committed and deferred, and a second runner hosting an identically
+  spelled root is what this key would then refuse. Scoping physical root
+  bindings by runner identity — or separating the stable workspace identity from
+  its per-runner locations — is the migration that deferral will require. It is
+  not attempted here because this slice models no runner identity to scope by.
 - Canonical form is judged as *bytes* by the durable store, which cannot see the
   filesystem. A root whose spelling is canonical but whose components are
   symbolic links is admitted; resolving those is what the minting boundary does

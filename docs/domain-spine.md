@@ -9959,7 +9959,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 63                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **761 (+14 free fn)** |
+| **signalbox-domain total**                         | **763 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -9983,4 +9983,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **250**               |
+| **signalbox-application total**                    | **249 (+1 free fn)**  |

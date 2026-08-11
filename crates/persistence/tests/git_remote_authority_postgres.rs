@@ -18,7 +18,10 @@
 
 use std::{error::Error, time::Duration};
 
-use signalbox_domain::{GitRemoteName, GitRemoteUrl, WorkspaceRootPath};
+use signalbox_domain::{
+    DurableCommandId, GitRemoteMintId, GitRemoteName, GitRemoteUrl, GitRemoteWithdrawalId,
+    WorkspaceId, WorkspaceRootPath,
+};
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
@@ -65,36 +68,36 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
 /// The seed carries no meaning beyond uniqueness. The identity kinds are drawn
 /// from disjoint ranges so a transposed same-typed argument names nothing that
 /// exists rather than silently naming a row of the other kind.
-fn command_id(seed: u128) -> Uuid {
-    Uuid::from_u128(0xc0de_0000 + seed)
+fn command_id(seed: u128) -> DurableCommandId {
+    DurableCommandId::from_uuid(Uuid::from_u128(0xc0de_0000 + seed))
 }
 
 /// One mint identity, distinct per seed and otherwise arbitrary.
-fn mint_id(seed: u128) -> Uuid {
-    Uuid::from_u128(0xa11d_0000 + seed)
+fn mint_id(seed: u128) -> GitRemoteMintId {
+    GitRemoteMintId::from_uuid(Uuid::from_u128(0xa11d_0000 + seed))
 }
 
 /// One withdrawal identity, distinct per seed and otherwise arbitrary.
-fn withdrawal_id(seed: u128) -> Uuid {
-    Uuid::from_u128(0xbeef_0000 + seed)
+fn withdrawal_id(seed: u128) -> GitRemoteWithdrawalId {
+    GitRemoteWithdrawalId::from_uuid(Uuid::from_u128(0xbeef_0000 + seed))
 }
 
 /// One workspace identity, distinct per seed and otherwise arbitrary.
-fn workspace_id(seed: u128) -> Uuid {
-    Uuid::from_u128(0x5eed_0000 + seed)
+fn workspace_id(seed: u128) -> WorkspaceId {
+    WorkspaceId::from_uuid(Uuid::from_u128(0x5eed_0000 + seed))
 }
 
 /// Records one durable command of the given kind.
 async fn insert_command(
     connection: &mut PgConnection,
-    command: Uuid,
+    command: DurableCommandId,
     kind: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at)
          VALUES ($1, $2, 1, now())",
     )
-    .bind(command)
+    .bind(command.into_uuid())
     .bind(kind)
     .execute(connection)
     .await
@@ -104,14 +107,14 @@ async fn insert_command(
 /// Records one daemon-derived workspace, which carries no command provenance.
 async fn insert_derived_workspace(
     connection: &mut PgConnection,
-    workspace: Uuid,
+    workspace: WorkspaceId,
     root_path: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO workspace (workspace_id, root_path, origin)
          VALUES ($1, $2, 'daemon_derived')",
     )
-    .bind(workspace)
+    .bind(workspace.into_uuid())
     .bind(root_path)
     .execute(connection)
     .await
@@ -121,7 +124,7 @@ async fn insert_derived_workspace(
 /// Records one daemon-derived workspace in its own committed transaction.
 async fn derived_workspace(
     pool: &PgPool,
-    workspace: Uuid,
+    workspace: WorkspaceId,
     root_path: &str,
 ) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
@@ -132,9 +135,9 @@ async fn derived_workspace(
 /// Records one mint row bound to an already-recorded command and workspace.
 async fn insert_mint(
     connection: &mut PgConnection,
-    mint: Uuid,
-    command: Uuid,
-    workspace: Uuid,
+    mint: GitRemoteMintId,
+    command: DurableCommandId,
+    workspace: WorkspaceId,
     remote_name: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -143,9 +146,9 @@ async fn insert_mint(
               workspace_id, remote_name, remote_url)
          VALUES ($1, $2, 'mint_git_remote', 1, $3, $4, $5)",
     )
-    .bind(mint)
-    .bind(command)
-    .bind(workspace)
+    .bind(mint.into_uuid())
+    .bind(command.into_uuid())
+    .bind(workspace.into_uuid())
     .bind(remote_name)
     .bind(URL)
     .execute(connection)
@@ -156,18 +159,18 @@ async fn insert_mint(
 /// Records one withdrawal of an already-recorded mint.
 async fn insert_withdrawal(
     connection: &mut PgConnection,
-    withdrawal: Uuid,
-    mint: Uuid,
-    command: Uuid,
+    withdrawal: GitRemoteWithdrawalId,
+    mint: GitRemoteMintId,
+    command: DurableCommandId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO configured_git_remote_withdrawal
              (withdrawal_id, mint_id, command_id, command_kind, storage_version)
          VALUES ($1, $2, $3, 'withdraw_git_remote', 1)",
     )
-    .bind(withdrawal)
-    .bind(mint)
-    .bind(command)
+    .bind(withdrawal.into_uuid())
+    .bind(mint.into_uuid())
+    .bind(command.into_uuid())
     .execute(connection)
     .await
     .map(|_| ())
@@ -176,9 +179,9 @@ async fn insert_withdrawal(
 /// Mints one destination in its own committed transaction.
 async fn mint(
     pool: &PgPool,
-    command: Uuid,
-    mint: Uuid,
-    workspace: Uuid,
+    command: DurableCommandId,
+    mint: GitRemoteMintId,
+    workspace: WorkspaceId,
     remote_name: &str,
 ) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
@@ -540,21 +543,65 @@ async fn a_withdrawn_mint_stops_standing_live() -> Result<(), Box<dyn Error>> {
 }
 
 /// The live view carries the uniqueness rule, so it must be provably derived.
-/// A row written by hand for a mint that never existed is what would disarm it.
+/// A row filed under a name its own mint never named is what would disarm it:
+/// the rule is keyed by `(workspace_id, remote_name)`, so a mis-scoped row
+/// frees the real name while the destination still stands.
+///
+/// The legitimate row is deleted and the mis-scoped replacement inserted inside
+/// one transaction. Inserting the replacement alongside the legitimate row
+/// instead is refused immediately by the unique key on `mint_id`, and the
+/// deferred scope check this test exists to pin would never run — the test
+/// would pass while proving nothing about that branch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_hand_written_live_row_is_refused() -> Result<(), Box<dyn Error>> {
+async fn a_live_row_misstating_its_mint_scope_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
     mint(&pool, command_id(1), mint_id(1), workspace_id(1), NAME).await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM configured_git_remote_live WHERE mint_id = $1")
+        .bind(mint_id(1).into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO configured_git_remote_live (workspace_id, remote_name, mint_id)
+         VALUES ($1, 'backup', $2)",
+    )
+    .bind(workspace_id(1).into_uuid())
+    .bind(mint_id(1).into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+
+    assert!(
+        transaction.commit().await.is_err(),
+        "a live row misstating a mint's scope was admitted"
+    );
+    assert_counts_agree(
+        live_mints(&pool).await?,
+        un_withdrawn_mints(&pool).await?,
+        1,
+        "the destination still stands after the refused rewrite",
+    );
+    Ok(())
+}
+
+/// A live row naming a mint that never existed is refused by the foreign key,
+/// before the derivation check is reached. Pinning it separately keeps the
+/// scope test above honest about which guard each case exercises.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_live_row_naming_no_mint_is_refused() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
     let mut transaction = pool.begin().await?;
     let inserted = sqlx::query(
         "INSERT INTO configured_git_remote_live (workspace_id, remote_name, mint_id)
          VALUES ($1, 'backup', $2)",
     )
-    .bind(workspace_id(1))
-    .bind(mint_id(1))
+    .bind(workspace_id(1).into_uuid())
+    .bind(mint_id(9).into_uuid())
     .execute(&mut *transaction)
     .await;
 
@@ -565,7 +612,44 @@ async fn a_hand_written_live_row_is_refused() -> Result<(), Box<dyn Error>> {
 
     assert!(
         refused.is_err(),
-        "a live row misstating a mint's scope was admitted"
+        "a live row naming no mint at all was admitted"
+    );
+    Ok(())
+}
+
+/// A derived workspace carries no command provenance at all, and the `CHECK`
+/// spells both legal shapes out rather than comparing `origin` against
+/// "provenance is present". Under that shorter equality a row carrying only
+/// `command_id` made both sides false and passed, and the composite foreign
+/// key's default `MATCH SIMPLE` then skipped validation because one of its
+/// columns was null — admitting exactly the partial provenance the schema says
+/// a derived row cannot carry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_derived_workspace_carrying_partial_command_provenance_is_refused()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let mut transaction = pool.begin().await?;
+    insert_command(&mut transaction, command_id(1), "register_workspace").await?;
+    let inserted = sqlx::query(
+        "INSERT INTO workspace (workspace_id, root_path, origin, command_id)
+         VALUES ($1, $2, 'daemon_derived', $3)",
+    )
+    .bind(workspace_id(1).into_uuid())
+    .bind(WORKSPACE_ROOT)
+    .bind(command_id(1).into_uuid())
+    .execute(&mut *transaction)
+    .await;
+
+    let refused = match inserted {
+        Err(error) => Err(error),
+        Ok(_) => transaction.commit().await,
+    };
+
+    assert!(
+        refused.is_err(),
+        "a derived workspace carrying partial command provenance was admitted"
     );
     Ok(())
 }
@@ -581,7 +665,7 @@ async fn retiring_a_live_row_without_a_withdrawal_is_refused() -> Result<(), Box
 
     let mut transaction = pool.begin().await?;
     sqlx::query("DELETE FROM configured_git_remote_live WHERE mint_id = $1")
-        .bind(mint_id(1))
+        .bind(mint_id(1).into_uuid())
         .execute(&mut *transaction)
         .await?;
 
@@ -612,9 +696,9 @@ async fn a_mint_row_stating_another_command_kind_is_refused() -> Result<(), Box<
               workspace_id, remote_name, remote_url)
          VALUES ($1, $2, 'goal', 1, $3, $4, $5)",
     )
-    .bind(mint_id(1))
-    .bind(command_id(1))
-    .bind(workspace_id(1))
+    .bind(mint_id(1).into_uuid())
+    .bind(command_id(1).into_uuid())
+    .bind(workspace_id(1).into_uuid())
     .bind(NAME)
     .bind(URL)
     .execute(&mut *transaction)
@@ -701,9 +785,9 @@ async fn an_operator_registered_workspace_commits_through_its_command() -> Resul
              (workspace_id, root_path, origin, command_id, command_kind, storage_version)
          VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)",
     )
-    .bind(workspace_id(1))
+    .bind(workspace_id(1).into_uuid())
     .bind(WORKSPACE_ROOT)
-    .bind(command_id(1))
+    .bind(command_id(1).into_uuid())
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -732,9 +816,9 @@ async fn a_derived_workspace_claiming_command_provenance_is_refused() -> Result<
              (workspace_id, root_path, origin, command_id, command_kind, storage_version)
          VALUES ($1, $2, 'daemon_derived', $3, 'register_workspace', 1)",
     )
-    .bind(workspace_id(1))
+    .bind(workspace_id(1).into_uuid())
     .bind(WORKSPACE_ROOT)
-    .bind(command_id(1))
+    .bind(command_id(1).into_uuid())
     .execute(&mut *transaction)
     .await;
 
@@ -758,7 +842,7 @@ async fn an_operator_registered_workspace_without_a_command_is_refused()
         "INSERT INTO workspace (workspace_id, root_path, origin)
          VALUES ($1, $2, 'operator_registered')",
     )
-    .bind(workspace_id(1))
+    .bind(workspace_id(1).into_uuid())
     .bind(WORKSPACE_ROOT)
     .execute(&mut *transaction)
     .await;
@@ -905,6 +989,9 @@ async fn the_destination_predicate_agrees_with_the_domain_newtype() -> Result<()
     assert_url_predicate_agrees(&pool, "https://a").await?;
     assert_url_predicate_agrees(&pool, "https://example.test:8443/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://user@example.test/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://user:token@example.test/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://@example.test/project.git").await?;
+    assert_url_predicate_agrees(&pool, "https://user@example.test:8443/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://[2001:db8::1]/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://[....]/project.git").await?;
     assert_url_predicate_agrees(&pool, "https://?").await?;
@@ -1004,9 +1091,9 @@ async fn mint_through_the_table(
               workspace_id, remote_name, remote_url)
          VALUES ($1, $2, 'mint_git_remote', 1, $3, $4, $5)",
     )
-    .bind(mint_id(1))
-    .bind(command_id(1))
-    .bind(workspace_id(1))
+    .bind(mint_id(1).into_uuid())
+    .bind(command_id(1).into_uuid())
+    .bind(workspace_id(1).into_uuid())
     .bind(remote_name)
     .bind(remote_url)
     .execute(&mut *transaction)
