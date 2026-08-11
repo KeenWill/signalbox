@@ -554,7 +554,7 @@ final class ProcessProtocolTests: XCTestCase {
             "defaults_version":"1",
             "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
             "placement_version":"1",
-            "placement":{"kind":"pathless"},
+            "placement":{"kind":"scoped","path":"workspace.project"},
             "runner":{
               "selector":{"type":"capability_class","name":"linux.workspace"},
               "runner_id":"\(runnerID)",
@@ -588,6 +588,8 @@ final class ProcessProtocolTests: XCTestCase {
       sessionID: try SignalboxCanonicalUUID(validating: sessionID),
       defaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
       modelSelection: .alias(aliasID: try SignalboxCanonicalUUID(validating: turnID)),
+      placementVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      placement: .scoped(path: "workspace.project"),
       runner: projection
     )
 
@@ -609,6 +611,122 @@ final class ProcessProtocolTests: XCTestCase {
             "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
             "placement_version":"1",
             "placement":{"kind":"pathless"}
+          }
+        }
+        """.utf8
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  func testSessionSummaryDecodesPathlessPlacement() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"8",
+          "message":{
+            "type":"session_summary",
+            "session_id":"\(sessionID)",
+            "defaults_version":"1",
+            "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
+            "placement_version":"1",
+            "placement":{"kind":"pathless"},
+            "runner":null
+          }
+        }
+        """.utf8
+      )
+    )
+    let expected = SignalboxProcessSessionSummary(
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      defaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .alias(aliasID: try SignalboxCanonicalUUID(validating: turnID)),
+      placementVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      placement: .pathless,
+      runner: nil
+    )
+
+    XCTAssertEqual(frame.message, .sessionSummary(expected))
+  }
+
+  func testSessionSummaryDecodesRootGlobalReadPlacement() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"8",
+          "message":{
+            "type":"session_summary",
+            "session_id":"\(sessionID)",
+            "defaults_version":"1",
+            "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
+            "placement_version":"2",
+            "placement":{
+              "kind":"root_global_read",
+              "path":"workspace",
+              "intent":"acknowledged"
+            },
+            "runner":null
+          }
+        }
+        """.utf8
+      )
+    )
+    let expected = SignalboxProcessSessionSummary(
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      defaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .alias(aliasID: try SignalboxCanonicalUUID(validating: turnID)),
+      placementVersion: SignalboxCanonicalUInt64(rawValue: 2),
+      placement: .rootGlobalRead(path: "workspace", intent: .acknowledged),
+      runner: nil
+    )
+
+    XCTAssertEqual(frame.message, .sessionSummary(expected))
+  }
+
+  func testSessionSummaryRejectsZeroPlacementVersion() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"8",
+          "message":{
+            "type":"session_summary",
+            "session_id":"\(sessionID)",
+            "defaults_version":"1",
+            "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
+            "placement_version":"0",
+            "placement":{"kind":"pathless"},
+            "runner":null
+          }
+        }
+        """.utf8
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  func testSessionSummaryRejectsMalformedScopedPlacement() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"8",
+          "message":{
+            "type":"session_summary",
+            "session_id":"\(sessionID)",
+            "defaults_version":"1",
+            "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
+            "placement_version":"1",
+            "placement":{"kind":"scoped","path":"root"},
+            "runner":null
           }
         }
         """.utf8

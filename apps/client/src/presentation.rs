@@ -1076,12 +1076,69 @@ impl<'a> Output<'a> {
         selection: &str,
         placement_version: u64,
         placement: &str,
+        runner: Option<&RunnerProjection>,
     ) -> io::Result<()> {
-        writeln!(
+        write!(
             self.stdout,
             "{session_id} defaults_version={defaults_version} {selection} \
              placement_version={placement_version} {placement}"
-        )
+        )?;
+        if let Some(runner) = runner {
+            write!(self.stdout, " runner_selector=")?;
+            match runner.selector() {
+                RunnerProjectionSelector::Runner { runner_id } => {
+                    write!(self.stdout, "runner runner_selector_runner={runner_id}")?;
+                }
+                RunnerProjectionSelector::CapabilityClass { name } => write!(
+                    self.stdout,
+                    "capability_class runner_selector_capability={}",
+                    self.render_field(name.as_str(), TextField::DelimitedOnLine)
+                )?,
+            }
+            if let Some(runner_id) = runner.runner_id() {
+                write!(self.stdout, " runner={runner_id}")?;
+            }
+            write!(
+                self.stdout,
+                " runner_placement_revision={} runner_sandbox={}",
+                runner.placement_revision().value(),
+                runner_sandbox_profile(runner.sandbox_profile())
+            )?;
+            if let Some(profile) = runner.credential_profile() {
+                write!(
+                    self.stdout,
+                    " runner_credential_profile={}",
+                    self.render_field(profile.as_str(), TextField::DelimitedOnLine)
+                )?;
+            }
+            if let Some(repository) = runner.repository() {
+                write!(
+                    self.stdout,
+                    " runner_repository={}",
+                    self.render_field(repository.as_str(), TextField::DelimitedOnLine)
+                )?;
+            }
+            if let Some(directory) = runner.working_directory() {
+                write!(
+                    self.stdout,
+                    " runner_working_directory={}",
+                    self.render_field(directory.as_str(), TextField::DelimitedOnLine)
+                )?;
+            }
+            if let Some(health) = runner.connection_health() {
+                write!(
+                    self.stdout,
+                    " runner_connection_health={}",
+                    runner_connection_health(health)
+                )?;
+            }
+            write!(
+                self.stdout,
+                " runner_state={}",
+                runner_projection_state(runner.state())
+            )?;
+        }
+        writeln!(self.stdout)
     }
 
     pub(crate) fn session_placement_updated(
@@ -3653,6 +3710,55 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         assert!(rendered.contains("state=queued"));
         assert!(rendered.contains("queued user text"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn session_summary_renders_its_complete_runner_projection() {
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                    .expect("the fixture capability class is valid"),
+            },
+            Some(wire_uuid(2)),
+            RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            Some(
+                RunnerCredentialProfileName::try_new(String::from("readonly"))
+                    .expect("the fixture credential profile is valid"),
+            ),
+            Some(
+                RunnerRepositoryKey::try_new(String::from("signalbox"))
+                    .expect("the fixture repository key is valid"),
+            ),
+            Some(
+                RunnerWorkingDirectory::try_new(String::from("workspace root\nproject"))
+                    .expect("the fixture working directory is valid"),
+            ),
+            Some(RunnerConnectionHealth::Suspect),
+            RunnerProjectionState::Pinned,
+        )
+        .expect("the fixture projection is coherent");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        Output::new(&mut stdout, &mut stderr, false)
+            .session_summary(
+                wire_uuid(1),
+                4,
+                "model=alias alias=fast",
+                2,
+                "placement=pathless",
+                Some(&projection),
+            )
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            00000000-0000-0000-0000-000000000001 defaults_version=4 model=alias alias=fast placement_version=2 placement=pathless runner_selector=capability_class runner_selector_capability=linux.workspace runner=00000000-0000-0000-0000-000000000002 runner_placement_revision=3 runner_sandbox=workspace_restricted runner_credential_profile=readonly runner_repository=signalbox runner_working_directory=workspace\u{20}root\u{a}project runner_connection_health=suspect runner_state=pinned
+        "#]]
+        .assert_eq(&rendered);
         assert!(stderr.is_empty());
     }
 

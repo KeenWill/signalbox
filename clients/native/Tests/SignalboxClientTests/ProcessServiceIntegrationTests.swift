@@ -11624,6 +11624,45 @@ private enum ProcessDriverUpdateRecorderError: Error {
 
 extension ProcessServiceIntegrationTests {
   @MainActor
+  func testAuthoritativeSnapshotPublishesRunnerStatus() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithRunner())
+    )
+
+    XCTAssertEqual(viewModel.runner, try ProcessProjectionFixture.runnerProjection())
+    XCTAssertNil(viewModel.runnerTransition)
+    XCTAssertEqual(
+      viewModel.runnerStatusLabel,
+      ProcessProjectionFixture.runnerSnapshotStatusLabel
+    )
+  }
+
+  @MainActor
+  func testLiveRunnerTransitionReplacesPresentedRunnerStatus() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithRunner())
+    )
+
+    viewModel.apply(.event(try ProcessProjectionFixture.runnerLossEvent()))
+
+    XCTAssertEqual(
+      viewModel.runnerTransition,
+      try ProcessProjectionFixture.runnerLossTransition()
+    )
+    XCTAssertEqual(
+      viewModel.runnerStatusLabel,
+      ProcessProjectionFixture.runnerLossStatusLabel
+    )
+  }
+
+  @MainActor
   func testToolApprovalDecisionPresentsDelegateProvenanceAndRationale() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -12067,7 +12106,60 @@ extension ProcessProjectionFixture {
   static let delegateRationale = "The requested effect exceeds the delegated scope."
   static let delegateDenialLabel =
     "Denied by delegate; model selection \(delegateModelSelection); call \(delegateModelCall)"
+  static let runnerID = "44444444-4444-4444-8444-444444444444"
+  static let runnerSnapshotStatusLabel = "Runner \(runnerID) · pinned · revision 3"
+  static let runnerLossStatusLabel = "Runner \(runnerID) · runner_lost · revision 4"
   static let futureSessionEventKind = "fixture_future_session_event"
+
+  static func runnerProjection() throws -> SignalboxRunnerProjection {
+    try SignalboxRunnerProjection(
+      selector: .capabilityClass(
+        name: SignalboxRunnerCapabilityClass(validating: "linux.workspace")
+      ),
+      runnerID: SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 3),
+      sandboxProfile: .workspaceRestricted,
+      credentialProfile: SignalboxRunnerCredentialProfileName(validating: "readonly"),
+      repository: SignalboxRunnerRepositoryKey(validating: "primary"),
+      workingDirectory: SignalboxRunnerWorkingDirectory(validating: "workspace/project"),
+      connectionHealth: .suspect,
+      state: .pinned
+    )
+  }
+
+  static func snapshotWithRunner() throws -> SignalboxSynchronizationSnapshot {
+    SignalboxSynchronizationSnapshot(
+      sessionID: try ProcessDriverFixture.sessionID(),
+      cursor: SignalboxCanonicalUInt64(rawValue: 8),
+      runner: try runnerProjection(),
+      records: []
+    )
+  }
+
+  static func runnerLossTransition() throws -> ProcessRunnerTransition {
+    ProcessRunnerTransition(
+      runnerID: try SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 4),
+      sandboxProfile: .workspaceRestricted,
+      workingDirectory: try SignalboxRunnerWorkingDirectory(validating: "workspace/project"),
+      state: .runnerLost
+    )
+  }
+
+  static func runnerLossEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"runner_state_transition",
+        "runner_id":"\(runnerID)",
+        "placement_revision":"4",
+        "sandbox_profile":"workspace-restricted",
+        "working_directory":"workspace/project",
+        "state":"runner_lost"
+      }
+      """
+    )
+  }
   static let formerUsageCollisionEntryIndex = UInt64(7)
   static let disjointUsageAndSemanticPresentationIDs = [Int.min + 1, Int.min / 4]
   static let disjointUsageAndSemanticEventKinds = [
