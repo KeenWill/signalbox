@@ -101,18 +101,26 @@ names.
 ## Raw source records
 
 Every nonempty physical JSONL record is preserved before normalization. A raw
-record blob stores the exact bytes between line delimiters and their SHA-256
-content hash; a conversation occurrence stores the blob hash and a positive
+record blob stores the exact bytes between line delimiters under their SHA-256
+identity; a conversation occurrence stores the blob digest and a positive
 contiguous physical-record position. Line delimiters and source paths are not
 part of a record. Duplicate content in one or many conversations creates
 distinct ordered occurrences referencing one content-addressed blob.
 
-The Postgres representation uses `bytea`, not `jsonb`, as raw authority. JSON
-key order, whitespace, escapes, number spelling, empty strings, and U+0000
-therefore remain recoverable even when normalization has a different typed
-representation. A hash collision whose stored bytes differ is typed corruption
-and fails closed; equality is never inferred from the hash alone at a checked
-boundary.
+One source admits at most 65,536 physical records. Conversion counts records in
+physical order before any per-record blob publication and rejects record 65,537
+with the typed `raw_record_count_exceeded` conversion class and that one-based
+ordinal. The fixed count bounds per-object publication, catalog work, relational
+members, and the time one import can retain the process-wide bulk-ingest permit
+independently of its source-byte ceiling.
+
+The verified blob is the raw-byte authority; PostgreSQL stores only its ordinary
+blob digest and occurrence relationships, never a second `bytea` copy.
+Exact-byte loading through that reference preserves JSON key order, whitespace,
+escapes, number spelling, empty strings, and U+0000 even when normalization has
+a different typed representation. A referenced blob whose bytes disagree with
+its digest is typed corruption and fails closed; equality is never inferred from
+an unverified hash at a checked boundary.
 
 Each occurrence also carries the complete source JSON object normalized into the
 source-neutral structured-value algebra. Non-message records produce a typed

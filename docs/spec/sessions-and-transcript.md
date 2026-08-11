@@ -928,17 +928,19 @@ INV-007, INV-036).
 
 ### Bounds
 
-The domain value is unbounded. Admission is bounded at the application boundary:
-`SubmitInputRequest::try_new` rejects text whose UTF-8 encoding exceeds
-`MAX_CONTENT_UTF8_BYTES` = 1,048,576 bytes before typed command construction, so
-no command identifier is claimed. The `OversizedContent` failure retains only
-the byte length, never the rejected content. Matching
-`octet_length(convert_to(content_text, 'UTF8'))` CHECK constraints protect both
-durable content columns (migration `202607200001_bounded_user_content.sql`).
+The multipart value and application admission apply the exact structural,
+text-byte, attachment-metadata, catalog, and complete-frontier bounds owned by
+[blob storage](blob-storage.md#multipart-user-content) before typed command
+construction, so no command identifier is claimed for a structurally invalid
+value. Resource failures retain counts and configured maxima, never rejected
+text or attachment metadata. The final schema stores one complete ordinally
+guarded part sequence in each mirrored command and accepted-input satellite,
+with no `content_text` authority; its one-time migration and exact storage
+version are owned by that same cross-crate contract.
 
-Why (bytes, at admission): byte measurement matches wire and storage cost and
-keeps the domain value exactly as accepted; rejecting before construction can
-never truncate or rewrite content.
+Why (bytes and parts, at admission): measurement matches wire, storage, and
+verification cost and keeps the domain value exactly as accepted; rejecting
+before construction can never truncate, reorder, or rewrite content.
 
 This is a provisional maintainer-approved floor, not the resource-governance
 policy.
@@ -1146,9 +1148,9 @@ placement and this stack implements no placement logic.
   maintainer amendment choice.
 - `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
-- The 1 MiB content bound is a provisional maintainer floor; the
-  resource-governance limit question stays open, and non-text content kinds
-  remain unconstructible pending their owning decisions.
+- The multipart part-count, text-byte, metadata, and attachment-work bounds are
+  provisional maintainer floors; the resource-governance limit question stays
+  open.
 - The session system prompt remains one optional bounded string per defaults
   epoch. Composition from base, per-use-case, and instruction-file sources and
   richer named profiles remain the open
