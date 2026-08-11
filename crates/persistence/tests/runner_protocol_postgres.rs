@@ -4682,6 +4682,39 @@ async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result
     Ok(())
 }
 
+/// INV-043 / INV-044: a later lease offered on a live connection retains the
+/// exact offer authority required by its subsequent claim.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_connected_later_lease_offer_admits_exact_claim()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, _, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact live-connection lease correlation claims");
+    store.store_lease(&claimed).await?;
+    let loaded = store
+        .load_connection(expected_enrollment.enrollment())
+        .await?
+        .expect("the offer connection remains current");
+
+    assert_eq!(loaded, connection);
+    assert_eq!(
+        store
+            .load_lease(lease.correlation().lease, lease.correlation().generation)
+            .await?,
+        Some(claimed)
+    );
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s31_inv004_inv043_orphan_request_lease_binding_cannot_commit() -> Result<(), Box<dyn Error>>
