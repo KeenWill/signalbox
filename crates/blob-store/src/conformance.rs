@@ -78,6 +78,28 @@ pub async fn assert_existing_destination_deduplicates(store: &dyn BlobStore) {
     );
 }
 
+/// Proves concurrent publication creates once and verifies the winning object.
+pub async fn assert_concurrent_publication_deduplicates(store: &dyn BlobStore) {
+    let expected = expected();
+    let (first, second) = tokio::join!(
+        store.put(expected, reader(FIRST_CONTENT)),
+        store.put(expected, reader(FIRST_CONTENT)),
+    );
+    let first = first.expect("the first concurrent publication succeeds");
+    let second = second.expect("the second concurrent publication succeeds");
+    let published = BlobPutOutcome::Published {
+        key: BlobObjectKey::for_digest(expected.digest()),
+    };
+    let already_present = BlobPutOutcome::AlreadyPresent {
+        key: BlobObjectKey::for_digest(expected.digest()),
+    };
+
+    assert!(
+        (first == published && second == already_present)
+            || (first == already_present && second == published)
+    );
+}
+
 /// Proves publication refuses bytes that do not match their declared identity.
 pub async fn assert_verification_failure(store: &dyn BlobStore) {
     let error = store

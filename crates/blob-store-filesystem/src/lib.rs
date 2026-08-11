@@ -16,9 +16,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Filesystem store rooted at one deployment-owned storage namespace.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FilesystemBlobStore {
     root: PathBuf,
+}
+
+impl std::fmt::Debug for FilesystemBlobStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FilesystemBlobStore { root: <redacted> }")
+    }
 }
 
 impl FilesystemBlobStore {
@@ -114,15 +120,25 @@ impl FilesystemBlobStore {
         drop(output);
 
         let destination_for_publish = destination.clone();
-        let persisted =
-            tokio::task::spawn_blocking(move || temporary.persist(&destination_for_publish))
-                .await
-                .map_err(|source| BlobStoreError::io("join atomic publication", source))?
-                .map_err(|error| BlobStoreError::io("atomically publish object", error.error))?;
-        drop(persisted);
-        sync_directory(parent).await?;
-        verify_file(&destination, expected).await?;
-        Ok(BlobPutOutcome::Published { key })
+        let publication = tokio::task::spawn_blocking(move || {
+            temporary.persist_noclobber(&destination_for_publish)
+        })
+        .await
+        .map_err(|source| BlobStoreError::io("join atomic publication", source))?;
+        match publication {
+            Ok(persisted) => {
+                drop(persisted);
+                sync_directory(parent).await?;
+                verify_file(&destination, expected).await?;
+                Ok(BlobPutOutcome::Published { key })
+            }
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                drop(error.file);
+                verify_file(&destination, expected).await?;
+                Ok(BlobPutOutcome::AlreadyPresent { key })
+            }
+            Err(error) => Err(BlobStoreError::io("atomically publish object", error.error)),
+        }
     }
 
     async fn open_inner(&self, key: &BlobObjectKey) -> Result<OpenedBlob, BlobStoreError> {
@@ -246,7 +262,6 @@ async fn sync_directory(path: PathBuf) -> Result<(), BlobStoreError> {
 }
 
 /// Why a filesystem store root was rejected.
-#[derive(Debug)]
 pub enum FilesystemBlobStoreConstructionError {
     /// The configured root was not absolute.
     NotAbsolute { root: PathBuf },
@@ -256,24 +271,28 @@ pub enum FilesystemBlobStoreConstructionError {
     NotDirectory { root: PathBuf },
 }
 
+impl std::fmt::Debug for FilesystemBlobStoreConstructionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotAbsolute { .. } => "FilesystemBlobStoreConstructionError::NotAbsolute",
+            Self::Inspect { .. } => "FilesystemBlobStoreConstructionError::Inspect",
+            Self::NotDirectory { .. } => "FilesystemBlobStoreConstructionError::NotDirectory",
+        })
+    }
+}
+
 impl std::fmt::Display for FilesystemBlobStoreConstructionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotAbsolute { root } => write!(
-                formatter,
-                "filesystem blob-store root is not absolute: {}",
-                root.display()
-            ),
-            Self::Inspect { root, .. } => write!(
-                formatter,
-                "filesystem blob-store root cannot be inspected: {}",
-                root.display()
-            ),
-            Self::NotDirectory { root } => write!(
-                formatter,
-                "filesystem blob-store root is not a directory: {}",
-                root.display()
-            ),
+            Self::NotAbsolute { .. } => {
+                formatter.write_str("filesystem blob-store root is not absolute")
+            }
+            Self::Inspect { .. } => {
+                formatter.write_str("filesystem blob-store root cannot be inspected")
+            }
+            Self::NotDirectory { .. } => {
+                formatter.write_str("filesystem blob-store root is not a directory")
+            }
         }
     }
 }

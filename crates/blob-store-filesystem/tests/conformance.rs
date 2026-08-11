@@ -32,6 +32,13 @@ async fn inv059_filesystem_deduplicates_an_existing_destination() {
 }
 
 #[tokio::test]
+async fn inv059_filesystem_concurrent_publication_is_no_clobber() {
+    let (_root, store) = fixture();
+
+    signalbox_blob_store::conformance::assert_concurrent_publication_deduplicates(&store).await;
+}
+
+#[tokio::test]
 async fn inv059_filesystem_rejects_publication_verification_failure() {
     let (_root, store) = fixture();
 
