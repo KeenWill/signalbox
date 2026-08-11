@@ -968,8 +968,11 @@ impl GitHubRepositoryPoller {
                     if run.status == "completed" {
                         observations.push(RepoWatchCheckRunObservation::new(
                             object_id(run.id)?,
-                            RepoWatchCheckCompletionGeneration::try_new(run.updated_at)
-                                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                            RepoWatchCheckCompletionGeneration::try_new(
+                                run.completed_at
+                                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                            )
+                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             CheckRunName::try_new(run.name)
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
@@ -2063,7 +2066,12 @@ struct CheckRunResponse {
     status: String,
     name: String,
     conclusion: Option<String>,
-    updated_at: String,
+    /// The provider defines `updated_at` on a check suite and never on a check
+    /// run: a run carries `started_at` and `completed_at` only. A completed
+    /// run's completion generation is therefore its `completed_at`, which the
+    /// provider populates exactly when the run reaches `completed`; a required
+    /// member the provider does not define makes every real page undecodable.
+    completed_at: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2296,8 +2304,12 @@ mod tests {
     const PULL_AUTHOR: &str = "pull-author";
     const PULL_LABEL: &str = "watch-me";
     const CHECK_RUN_NAME: &str = "build";
+    /// The completed check suite's `updated_at`, the provider member the poller
+    /// adopts as a suite's completion generation. It differs from the run's so
+    /// a poller reading a suite's generation onto a run cannot pass.
     const CHECK_SUITE_COMPLETION_GENERATION: &str = "2026-08-03T12:34:56Z";
-    const CHECK_RUN_COMPLETED_AT: &str = "2026-08-03T12:35:07Z";
+    /// The completed check run's `completed_at`, the provider member the poller
+    /// adopts as a run's completion generation.
     const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:08Z";
     const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
@@ -2385,6 +2397,12 @@ mod tests {
         .to_string()
     }
 
+    /// One completed and one unfinished check run, carrying the members the
+    /// poller reads and no member the provider does not define. `updated_at` is
+    /// absent because the provider defines it on a check suite and never on a
+    /// check run; a fixture that supplied it would describe a page no provider
+    /// can send. [`provider_defined_check_runs`] carries the provider's
+    /// complete member set.
     fn check_runs() -> String {
         serde_json::json!({
             "check_runs": [
@@ -2393,20 +2411,68 @@ mod tests {
                     "status": "completed",
                     "name": CHECK_RUN_NAME,
                     "conclusion": "failure",
-                    "completed_at": CHECK_RUN_COMPLETED_AT,
-                    "updated_at": CHECK_RUN_COMPLETION_GENERATION
+                    "completed_at": CHECK_RUN_COMPLETION_GENERATION
                 },
                 {
                     "id": IN_PROGRESS_CHECK_RUN_ID,
                     "status": "in_progress",
                     "name": IN_PROGRESS_CHECK_RUN_NAME,
                     "conclusion": null,
-                    "completed_at": null,
-                    "updated_at": QUEUED_CHECK_SUITE_UPDATED_AT
+                    "completed_at": null
                 }
             ]
         })
         .to_string()
+    }
+
+    /// A completed check run carrying exactly the member set the provider's
+    /// check-runs response defines for a run — the payload the decoder must
+    /// survive. Only the members the decoder reads carry meaningful values,
+    /// drawn from this module's constants; every other member exists so that
+    /// the set is complete and its value is arbitrary, with the nested `app`,
+    /// `check_suite`, `output`, and `pull_requests` bodies abridged, since it is
+    /// the top-level member names that this fixture pins. `updated_at` is not
+    /// among them, so a decoder requiring it rejects this page.
+    fn provider_defined_check_runs() -> String {
+        serde_json::json!({
+            "check_runs": [
+                {
+                    "app": { "id": 15368, "slug": "github-actions" },
+                    "check_suite": { "id": COMPLETED_CHECK_SUITE_IDS[0] },
+                    "completed_at": CHECK_RUN_COMPLETION_GENERATION,
+                    "conclusion": "failure",
+                    "details_url": "https://provider.invalid/checks/21",
+                    "external_id": "b1a5bc25-67cd-58b1-b7c0-449a03988c8c",
+                    "head_sha": HEAD_SHA,
+                    "html_url": "https://provider.invalid/checks/21",
+                    "id": COMPLETED_CHECK_RUN_IDS[0],
+                    "name": CHECK_RUN_NAME,
+                    "node_id": "CR_provider_defined_check_run",
+                    "output": {
+                        "annotations_count": 0,
+                        "annotations_url": "https://provider.invalid/checks/21/annotations",
+                        "summary": null,
+                        "text": null,
+                        "title": null
+                    },
+                    "pull_requests": [],
+                    "started_at": "2026-08-03T12:30:00Z",
+                    "status": "completed",
+                    "url": "https://provider.invalid/checks/21"
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    /// The provider-defined page with the completion time the provider
+    /// populates on every completed run removed. A run that reports `completed`
+    /// without one carries no generation the differ could compare.
+    fn completed_check_run_without_a_completion_time() -> String {
+        let mut page = serde_json::from_str::<serde_json::Value>(&provider_defined_check_runs())
+            .expect("provider-defined check-runs fixture is JSON");
+        page["check_runs"][0]["completed_at"] = serde_json::Value::Null;
+        page.to_string()
     }
 
     fn empty_check_runs() -> &'static str {
@@ -3381,6 +3447,54 @@ mod tests {
                 .as_str(),
             CHECK_RUN_COMPLETION_GENERATION
         );
+    }
+
+    /// A required member the provider does not define fails every check-runs
+    /// page, and therefore every poll, closed. Decoding the provider's complete
+    /// member set is what proves the decoder asks only for members that arrive.
+    #[tokio::test]
+    async fn every_check_run_member_the_decoder_requires_exists_in_the_provider_payload() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            COMPLETED_SUITE_CHECK_RUNS_TARGET,
+            provider_defined_check_runs(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let suite =
+            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+
+        let runs = fixture
+            .poller
+            .fetch_check_runs(std::slice::from_ref(&suite))
+            .await
+            .expect("a page carrying the provider's complete check-run member set must decode");
+        server.finish().await;
+
+        assert_eq!(runs.len(), COMPLETED_CHECK_RUN_IDS.len());
+        assert_eq!(
+            runs[0].completion_generation().as_str(),
+            CHECK_RUN_COMPLETION_GENERATION
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_check_run_without_a_completion_time_is_an_invalid_response() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            COMPLETED_SUITE_CHECK_RUNS_TARGET,
+            completed_check_run_without_a_completion_time(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let suite =
+            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+
+        let result = fixture
+            .poller
+            .fetch_check_runs(std::slice::from_ref(&suite))
+            .await;
+        server.finish().await;
+
+        assert_eq!(result, Err(RepositoryWatchAttemptError::InvalidResponse));
     }
 
     #[tokio::test]
