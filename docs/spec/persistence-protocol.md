@@ -350,26 +350,28 @@ Representation rules, all enforced in the schema:
   implemented placement fence consumed by the bounded session-propagation
   transaction described below.
 - Migration `202608080105` gives every new durable connection-loss epoch a
-  pending propagation cursor in the same transaction and backfills older loss
-  epochs as completed because migration `202608080104` already absorbed them
-  into the compatibility baseline. A repeatable-read page authenticates the
-  exact loss source and returns at most 64 current pinned or exact-identity
-  unpinned placements whose baselines precede that loss, ordered strictly after
-  the durable session-identity cursor. Cursor advancement is monotonic, cannot
-  pass an affected current placement, and cannot complete while one remains. A
-  per-session transaction locks the scheduler, authenticates the exact loss and
-  cursor, then atomically changes placement, any current lease and physical
-  attempt, an active runner-boundary turn, the runner-state outbox, and the
-  cursor. An offered lease records no execution; a claimed pure or idempotent
-  lease remains retryable in flight; a claimed side-effecting lease becomes
-  terminal ambiguous. A separate checked operation completes an exhausted
-  cursor. After an applied terminal connection transition or an exact replay of
-  its current lost state, the daemon pages every pending loss, invokes the
-  per-session transaction in page order, and completes each exhausted cursor.
-  Startup performs the same scan after marking prior-process nonterminal
-  connections lost, so a crash after the short loss transaction cannot strand
-  session projection. **Committed unimplemented functionality.** No present
-  daemon transaction retires an unacknowledged workspace release.
+  pending propagation cursor in the same transaction. Migration backfill marks a
+  loss completed only when no affected current placement remains: losses already
+  absorbed into `202608080104`'s compatibility baseline complete, while a loss
+  committed after that migration with an older placement baseline stays pending.
+  A repeatable-read page authenticates the exact loss source and returns at most
+  64 current pinned or exact-identity unpinned placements whose baselines
+  precede that loss, ordered strictly after the durable session-identity cursor.
+  Cursor advancement is monotonic, cannot pass an affected current placement,
+  and cannot complete while one remains. A per-session transaction locks the
+  scheduler, authenticates the exact loss and cursor, then atomically changes
+  placement, any current lease and physical attempt, an active runner-boundary
+  turn, the runner-state outbox, and the cursor. An offered lease records no
+  execution; a claimed pure or idempotent lease remains retryable in flight; a
+  claimed side-effecting lease becomes terminal ambiguous. A separate checked
+  operation completes an exhausted cursor. After an applied terminal connection
+  transition or an exact replay of its current lost state, the daemon pages
+  every pending loss, invokes the per-session transaction in page order, and
+  completes each exhausted cursor. Startup performs the same scan after marking
+  prior-process nonterminal connections lost, so a crash after the short loss
+  transaction cannot strand session projection. **Committed unimplemented
+  functionality.** No present daemon transaction retires an unacknowledged
+  workspace release.
 - Migration `202608080106` gives every changed registration beyond revision one
   a pending reconciliation cursor in its registration transaction. An ordered
   page returns at most 64 still-pinned sessions whose pinned registration is
