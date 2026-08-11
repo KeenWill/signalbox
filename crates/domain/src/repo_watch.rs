@@ -13,7 +13,10 @@ use std::{
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
-use crate::{RepoWatchEventId, SessionTemplateName};
+use crate::{
+    RepoWatchEventId, SessionTemplateName,
+    goal::{GoalStatement, GoalTextError},
+};
 
 const MAX_REPOSITORY_BYTES: usize = 201;
 const MAX_BRANCH_BYTES: usize = 255;
@@ -1291,6 +1294,8 @@ pub struct PullRequestContext {
     repository: RepositorySlug,
     number: PullRequestNumber,
     head_sha: CommitSha,
+    head_branch: BranchName,
+    base_branch: BranchName,
     event: RepoWatchEvent,
 }
 
@@ -1303,6 +1308,12 @@ impl PullRequestContext {
     }
     pub const fn head_sha(&self) -> &CommitSha {
         &self.head_sha
+    }
+    pub const fn head_branch(&self) -> &BranchName {
+        &self.head_branch
+    }
+    pub const fn base_branch(&self) -> &BranchName {
+        &self.base_branch
     }
     pub const fn event(&self) -> &RepoWatchEvent {
         &self.event
@@ -1352,6 +1363,8 @@ impl DispatchSessionParameters {
                 repository,
                 number: context.number,
                 head_sha: context.head_sha.clone(),
+                head_branch: context.head_branch.clone(),
+                base_branch: context.base_branch.clone(),
                 event,
             }),
             RepoWatchEventTarget::Branch => {
@@ -1434,6 +1447,59 @@ impl DispatchSessionAction {
     }
     pub const fn params(&self) -> &DispatchSessionParameters {
         &self.params
+    }
+
+    /// Synthesizes the goal statement a dispatched session is commissioned with.
+    ///
+    /// The statement is derived only from the dispatching rule, the resolved
+    /// template, and the typed parameters this action already carries, so a
+    /// given dispatch always produces the same bytes. It names those facts and
+    /// nothing else: a dispatched session's authority is what the rule matched,
+    /// and prose telling the session what to do would make an operator-visible
+    /// statement into an instruction channel the rule never authorized.
+    ///
+    /// The rendered identifiers are repository-supplied, so the statement is
+    /// system-authored in shape but not in every byte; consumers that place it
+    /// in a model prompt still owe it the quoting they owe any session text.
+    pub fn synthesized_goal_statement(
+        &self,
+        rule: &RepoWatchRuleId,
+    ) -> Result<GoalStatement, GoalTextError> {
+        GoalStatement::try_new(match &self.params {
+            DispatchSessionParameters::PullRequest(context) => format!(
+                "Dispatched by rule {}: template {}, pull request #{} (head {}, base {}) in {}",
+                rule.as_str(),
+                self.template.as_str(),
+                context.number().get(),
+                context.head_branch().as_str(),
+                context.base_branch().as_str(),
+                context.repository().as_str(),
+            ),
+            DispatchSessionParameters::Branch(context) => format!(
+                "Dispatched by rule {}: template {}, branch {} (workflow {}, conclusion {}) in {}",
+                rule.as_str(),
+                self.template.as_str(),
+                context.branch().as_str(),
+                context.workflow().as_str(),
+                check_conclusion_statement_name(context.conclusion()),
+                context.repository().as_str(),
+            ),
+        })
+    }
+}
+
+/// Names one check conclusion for a synthesized dispatch goal statement.
+const fn check_conclusion_statement_name(conclusion: CheckConclusion) -> &'static str {
+    match conclusion {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
     }
 }
 

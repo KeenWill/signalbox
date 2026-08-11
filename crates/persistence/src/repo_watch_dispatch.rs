@@ -32,6 +32,7 @@ pub enum RepoWatchDispatchRepositoryError {
     EventStore(crate::repo_watch::RepoWatchStoreError),
     SessionCreation(crate::create_session::CreateSessionRepositoryError),
     InitialInput(crate::submit_input::SubmitInputRepositoryError),
+    GoalCommission(crate::goal::GoalRepositoryError),
     ReusedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
@@ -56,6 +57,7 @@ impl fmt::Display for RepoWatchDispatchRepositoryError {
             ),
             Self::SessionCreation(error) => error.fmt(formatter),
             Self::InitialInput(error) => error.fmt(formatter),
+            Self::GoalCommission(error) => error.fmt(formatter),
             Self::EventStore(error) => error.fmt(formatter),
             Self::ReusedRuleIdentity {
                 rule_id,
@@ -92,6 +94,7 @@ impl Error for RepoWatchDispatchRepositoryError {
             Self::EventStore(error) => Some(error),
             Self::SessionCreation(error) => Some(error),
             Self::InitialInput(error) => Some(error),
+            Self::GoalCommission(error) => Some(error),
             Self::ReusedRuleIdentity { .. }
             | Self::ChangedRuleIdentity { .. }
             | Self::Corruption(_) => None,
@@ -442,6 +445,7 @@ impl PostgresRepoWatchDispatchStore {
                         turn,
                         cancellation_entry,
                         cancellation_frontier,
+                        goal,
                     ) = action.into_parts();
                     let RepoWatchActionV1::DispatchSession(configured_dispatch) = configured_action;
                     let session = prepared_session.applied_result().session();
@@ -459,6 +463,11 @@ impl PostgresRepoWatchDispatchStore {
                     if initial_input.session() != session {
                         return Err(RepoWatchDispatchRepositoryError::Corruption(
                             "dispatch initial input targets another session",
+                        ));
+                    }
+                    if goal.command().session() != session {
+                        return Err(RepoWatchDispatchRepositoryError::Corruption(
+                            "dispatch goal targets another session",
                         ));
                     }
                     let command_id = command.command_id();
@@ -523,6 +532,16 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(turn.as_uuid())
                     .execute(&mut *transaction)
                     .await?;
+                    let (goal_command, goal_accepted_input, goal_turn) =
+                        (goal.command().clone(), goal.accepted_input(), goal.turn());
+                    crate::goal::insert_fresh_commissioned_goal(
+                        &mut transaction,
+                        goal_command,
+                        crate::goal_turn::GoalTurnCandidates::new(goal_accepted_input, goal_turn),
+                        select_definition,
+                    )
+                    .await
+                    .map_err(RepoWatchDispatchRepositoryError::GoalCommission)?;
                     sessions.push(session);
                 }
                 insert_evaluation(

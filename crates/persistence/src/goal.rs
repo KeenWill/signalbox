@@ -675,6 +675,82 @@ fn scheduler_failure_rejection(
     }
 }
 
+/// Commissions a dispatched session's goal on the caller's open transaction.
+///
+/// Repository-watch dispatch creates a session, its first input, and this goal
+/// at one commit boundary, so a dispatched session is never durably visible
+/// without the goal that states the authority it was dispatched under. The
+/// session cannot perform this itself: only an existing goal admits a model
+/// declaration, so a session with no goal has no transition to make.
+///
+/// Every branch here is a fail-closed assertion rather than a recoverable
+/// outcome. The caller has just created this session inside this transaction,
+/// so a rejected commission, an absent session, or an occupied identity is a
+/// contradiction in durable state, not a race a dispatch could lose.
+pub(crate) async fn insert_fresh_commissioned_goal<SelectDefinition>(
+    connection: &mut PgConnection,
+    command: GoalUserCommand,
+    candidates: GoalTurnCandidates,
+    select_definition: SelectDefinition,
+) -> Result<(), GoalRepositoryError>
+where
+    SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+{
+    let claimed = sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .bind(GOAL_KIND)
+    .bind(STORAGE_VERSION)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        return Err(GoalCorruption::Inconsistent("fresh dispatch goal command identity").into());
+    }
+    if !lock_session(connection, command.session()).await? {
+        return Err(GoalCorruption::Missing("dispatched goal session").into());
+    }
+    let result = apply_user_command(connection, &command).await?;
+    let GoalCommandResult::Applied(event) = &result else {
+        return Err(GoalCorruption::Inconsistent("rejected dispatch goal commission").into());
+    };
+    lock_scheduler(connection, command.session()).await?;
+    let configuration =
+        match current_origin_configuration(connection, command.session(), select_definition).await?
+        {
+            CurrentOriginConfiguration::Selected(configuration) => configuration,
+            CurrentOriginConfiguration::UnknownAlias(_) => {
+                return Err(GoalCorruption::Inconsistent("dispatched goal turn model alias").into());
+            }
+        };
+    let position = match next_goal_turn_acceptance_position(connection, command.session()).await? {
+        GoalTurnAcceptancePosition::Available(position) => position,
+        GoalTurnAcceptancePosition::Exhausted { .. } => {
+            return Err(GoalCorruption::Inconsistent("dispatched goal acceptance position").into());
+        }
+    };
+    insert_command(connection, &command, &result).await?;
+    insert_event(connection, command.session(), event).await?;
+    let goal = load_goal_from_connection(connection, command.session())
+        .await?
+        .ok_or(GoalCorruption::Missing("dispatched goal"))?;
+    insert_goal_turn(
+        connection,
+        command.session(),
+        goal.current().generation(),
+        GoalTurnSource::UserEvent(event.ordinal()),
+        pursuit_input(&goal, event)?,
+        &configuration,
+        GoalTurnInsertion::new(position, candidates),
+    )
+    .await
+}
+
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
     match event.kind() {
         GoalEventKind::Commissioned { .. }

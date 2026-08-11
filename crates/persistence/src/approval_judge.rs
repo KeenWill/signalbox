@@ -768,14 +768,26 @@ async fn load_session_authority_context(
 /// parked for delegated approval. Reading the session's current generation
 /// would then show the judge a broadened replacement and let it authorize a
 /// request the originating goal never covered, defeating the narrow-only
-/// guarantee. The generation recorded for the turn is the only sound binding,
-/// and a turn that no goal drives carries no goal authority to show.
+/// guarantee. The generation recorded for the turn is therefore the binding
+/// whenever the turn has one.
+///
+/// A turn the goal machinery did not schedule has no such record, and a goal
+/// session runs those too: repository-watch dispatch commissions a goal and
+/// delivers its tagged context as an ordinary input, so the turn doing the
+/// dispatched work is not itself a goal turn. Refusing every such turn would
+/// leave the judge deciding a dispatched session's requests with no statement
+/// of the authority that session was created under. It is admitted only while
+/// the lineage has exactly one generation, which is precisely the condition
+/// under which no broadened replacement can exist: the hazard above needs a
+/// supersession, and a lineage that has had one resolves to no statement, so
+/// the judge escalates rather than reading authority that may not cover the
+/// parked request.
 async fn load_judged_turn_goal(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
 ) -> Result<Option<GoalStatement>, ApprovalJudgeRepositoryError> {
-    let Some(generation) = sqlx::query_scalar::<_, Decimal>(
+    let recorded = sqlx::query_scalar::<_, Decimal>(
         "SELECT goal_generation
            FROM goal_turn
           WHERE session_id = $1
@@ -784,20 +796,27 @@ async fn load_judged_turn_goal(
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .fetch_optional(&mut *connection)
-    .await?
-    else {
-        return Ok(None);
-    };
+    .await?;
     let goal = load_goal_from_connection(&mut *connection, session)
         .await
-        .map_err(map_goal_error)?
-        .ok_or(ApprovalJudgeCorruption::Missing("judged turn goal"))?;
-    goal.generations()
-        .iter()
-        .find(|snapshot| Decimal::from(snapshot.generation().get()) == generation)
-        .map(|snapshot| snapshot.statement().clone())
-        .ok_or_else(|| ApprovalJudgeCorruption::Inconsistent("judged turn goal generation").into())
-        .map(Some)
+        .map_err(map_goal_error)?;
+    match (goal, recorded) {
+        (None, Some(_)) => Err(ApprovalJudgeCorruption::Missing("judged turn goal").into()),
+        (None, None) => Ok(None),
+        (Some(goal), None) => Ok(match goal.generations() {
+            [only] => Some(only.statement().clone()),
+            _ => None,
+        }),
+        (Some(goal), Some(generation)) => goal
+            .generations()
+            .iter()
+            .find(|snapshot| Decimal::from(snapshot.generation().get()) == generation)
+            .map(|snapshot| snapshot.statement().clone())
+            .ok_or_else(|| {
+                ApprovalJudgeCorruption::Inconsistent("judged turn goal generation").into()
+            })
+            .map(Some),
+    }
 }
 
 fn decode_prepared(
