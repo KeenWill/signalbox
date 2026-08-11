@@ -18,7 +18,8 @@ use signalbox_application::{
     CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
     ModelCallAuthorizationReread, ModelCallCredentialReference,
     ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome,
+    ResolvedRunnerPlacementConversationEntry, ResolvedToolConversationEntry,
     RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
@@ -41,11 +42,11 @@ use signalbox_domain::{
     ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
     ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
-    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
-    ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
-    ToolRoundModelCallTurn, TurnId, UserContent,
+    ResolvedProviderTarget, RunnerGeneration, RunnerSandboxProfile, SemanticTranscriptEntry,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
+    StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
+    ToolRequest, ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -77,6 +78,7 @@ pub struct ProspectiveModelCall {
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
     tool_entries: Box<[ResolvedToolConversationEntry]>,
+    runner_placement_entries: Box<[ResolvedRunnerPlacementConversationEntry]>,
 }
 
 impl ProspectiveModelCall {
@@ -94,6 +96,7 @@ impl ProspectiveModelCall {
             self.system_prompt,
             tools,
             &self.tool_entries,
+            &self.runner_placement_entries,
         )
     }
 }
@@ -441,6 +444,8 @@ impl PostgresModelCallRepository {
         )
         .await?;
         let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
+        let runner_placement_entries =
+            load_runner_placement_conversation_entries(&mut transaction, &request).await?;
         let credential_reference = resolve_session_credential(
             &mut transaction,
             session_id,
@@ -456,6 +461,7 @@ impl PostgresModelCallRepository {
             credential_reference,
             system_prompt,
             tool_entries,
+            runner_placement_entries,
         })
     }
 
@@ -564,6 +570,9 @@ impl PostgresModelCallRepository {
                         .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
+                        let runner_placement_entries =
+                            load_runner_placement_conversation_entries(&mut transaction, &request)
+                                .await?;
                         Ok((
                             false,
                             PrepareInitialModelCallOutcome::Ready {
@@ -572,6 +581,7 @@ impl PostgresModelCallRepository {
                                 dangerous_tool_auto_approval,
                                 system_prompt,
                                 tool_entries,
+                                runner_placement_entries,
                             },
                         ))
                     }
@@ -4165,6 +4175,7 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -4610,6 +4621,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
@@ -4710,6 +4722,7 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
@@ -4717,6 +4730,121 @@ async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
+    }
+    Ok(resolved.into_boxed_slice())
+}
+
+async fn load_runner_placement_conversation_entries(
+    connection: &mut PgConnection,
+    request: &PreparedModelCallRequest,
+) -> Result<Box<[ResolvedRunnerPlacementConversationEntry]>, ModelCallRepositoryError> {
+    let expected = request
+        .frontier_entries()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } => {
+                Some((entry.reference(), *placement_revision))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if expected.is_empty() {
+        return Ok(Box::new([]));
+    }
+    let source_sessions = expected
+        .iter()
+        .map(|(source, _)| session_id_to_uuid(source.source_session()))
+        .collect::<Vec<_>>();
+    let entry_ids = expected
+        .iter()
+        .map(|(source, _)| source.entry().into_uuid())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT
+            entry.source_session_id,
+            entry.semantic_entry_id,
+            entry.runner_placement_revision,
+            placement.requested_sandbox_profile
+           FROM UNNEST($1::uuid[], $2::uuid[])
+                AS requested(source_session_id, semantic_entry_id)
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = requested.source_session_id
+            AND entry.semantic_entry_id = requested.semantic_entry_id
+            AND entry.payload_kind = 'runner_placement_changed'
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = entry.source_session_id
+            AND placement.event_ordinal = entry.runner_placement_event_ordinal
+            AND placement.placement_revision = entry.runner_placement_revision
+            AND placement.event_kind IN ('runner_replaced', 'profile_replaced')
+            AND placement.state_kind = 'pinned'
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = entry.source_session_id
+            AND pointer.placement_revision = entry.runner_placement_revision
+            AND pointer.semantic_entry_id = entry.semantic_entry_id
+           JOIN context_frontier AS frontier
+             ON frontier.owning_session_id = pointer.session_id
+            AND frontier.context_frontier_id = pointer.context_frontier_id
+           JOIN context_frontier_member AS final_member
+             ON final_member.owning_session_id = frontier.owning_session_id
+            AND final_member.context_frontier_id = frontier.context_frontier_id
+            AND final_member.member_position = frontier.member_count
+            AND final_member.source_session_id = entry.source_session_id
+            AND final_member.semantic_entry_id = entry.semantic_entry_id",
+    )
+    .bind(&source_sessions)
+    .bind(&entry_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut loaded = BTreeMap::new();
+    for row in rows {
+        let source = SemanticTranscriptEntryRef::from_source(
+            session_id_from_uuid(required(&row, "source_session_id")?),
+            SemanticTranscriptEntryId::from_uuid(required(&row, "semantic_entry_id")?),
+        );
+        let revision = positive_u64_from_numeric(required(&row, "runner_placement_revision")?)
+            .ok()
+            .and_then(RunnerGeneration::try_from_u64)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "runner placement semantic revision",
+            ))?;
+        let sandbox = match required::<String>(&row, "requested_sandbox_profile")?.as_str() {
+            "ambient" => RunnerSandboxProfile::Ambient,
+            "workspace_restricted" => RunnerSandboxProfile::WorkspaceRestricted,
+            _ => {
+                return Err(
+                    ModelCallCorruption::Inconsistent("runner placement semantic sandbox").into(),
+                );
+            }
+        };
+        if loaded
+            .insert(
+                source,
+                ResolvedRunnerPlacementConversationEntry::new(source, revision, sandbox),
+            )
+            .is_some()
+        {
+            return Err(ModelCallCorruption::Inconsistent(
+                "duplicate runner placement semantic evidence",
+            )
+            .into());
+        }
+    }
+    let mut resolved = Vec::with_capacity(expected.len());
+    for (source, revision) in expected {
+        let evidence = loaded.remove(&source).ok_or(ModelCallCorruption::Missing(
+            "runner placement semantic evidence",
+        ))?;
+        if evidence.placement_revision() != revision {
+            return Err(
+                ModelCallCorruption::Inconsistent("runner placement semantic evidence").into(),
+            );
+        }
+        resolved.push(evidence);
+    }
+    if !loaded.is_empty() {
+        return Err(ModelCallCorruption::Inconsistent(
+            "unexpected runner placement semantic evidence",
+        )
+        .into());
     }
     Ok(resolved.into_boxed_slice())
 }

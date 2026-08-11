@@ -926,6 +926,7 @@ async fn insert_prepared_accepted_activation(
         | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
         | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+        | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -1009,6 +1010,7 @@ async fn insert_prepared_accepted_activation(
             | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
             | InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+            | InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
             | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }

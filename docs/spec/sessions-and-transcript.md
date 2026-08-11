@@ -22,9 +22,9 @@ become verified only with its implementing child pull requests. The append-only
 context-compaction record and projection were verified through PR #312
 (`agent/context-compaction-core`); the command path and canonical visible-range
 selection were verified through PR #314 (`agent/context-compaction-protocol`).
-The runner placement-entry paragraphs are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests. The imported-conversation record and converter are owned by
+The runner placement-entry payload and checked relational readback were verified
+against this PR (`agent/runner-placement-semantic-persistence`). The
+imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
 where mechanics owned by another contract are summarized, the owning sibling
@@ -705,7 +705,11 @@ migration that first admits the `pending_steering` disposition — replaces the
 entry/turn-state trigger so an origin entry additionally requires its input's
 `origin_of` disposition (constraint
 `semantic_transcript_entry_origin_disposition`); pending steering can never
-appear as a semantic origin.
+appear as a semantic origin. Migration
+`202608080109_runner_placement_semantic_frontier.sql` adds the unique
+reference-only placement-change payload, binds it to one exact same-session
+successor placement record, and requires its exact semantic entry to be the
+final member of the installing frontier.
 
 ### Context compaction
 

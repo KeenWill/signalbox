@@ -6,6 +6,10 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The durable usage-provenance column and read projection are verified against PR
 `#389` (`agent/cost-accounting`).
 
+The resolved runner-placement boundary and both exact profile-specific provider
+messages were verified against this PR
+(`agent/runner-placement-semantic-persistence`).
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /

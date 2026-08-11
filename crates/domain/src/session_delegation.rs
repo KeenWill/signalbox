@@ -522,6 +522,7 @@ fn delegation_content_from_live_completed(
             | crate::SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | crate::SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | crate::SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | crate::SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | crate::SemanticTranscriptEntryPayload::TurnFailed { .. }
             | crate::SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | crate::SemanticTranscriptEntryPayload::ToolExecutionResult { .. }

@@ -716,6 +716,7 @@ impl ModelCallExecution {
                 | SemanticTranscriptEntryPayload::DelegationResult { .. }
                 | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | SemanticTranscriptEntryPayload::ContextSummary { .. }
+                | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3318,6 +3319,7 @@ fn reconstitute(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3695,6 +3697,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
@@ -3743,6 +3746,7 @@ fn frontier_closes_latest_tool_round(
             }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3775,6 +3779,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
         | SemanticTranscriptEntryPayload::DelegationResult { .. }
         | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | SemanticTranscriptEntryPayload::ContextSummary { .. }
+        | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | SemanticTranscriptEntryPayload::TurnFailed { .. }
         | SemanticTranscriptEntryPayload::Imported { .. }

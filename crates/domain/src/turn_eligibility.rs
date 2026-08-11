@@ -4095,6 +4095,7 @@ fn reconstitute_inner(
                     );
                 }
             }
+            InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. } => {}
             InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
                 let Some(turn) = accepted_input_turns.get(accepted_input).copied() else {
                     return Err(
@@ -5638,19 +5639,18 @@ fn reconstitute_inner(
                         crate::ReconstitutedModelCall::Current(_) => None,
                     });
                     let mut observed_requests = Vec::new();
-                    let suffix_valid =
-                        source.is_some_and(|source| {
-                            source.is_semantic_prefix_of(&tool_batch.yielded_snapshot)
-                                && source.entry_count() < tool_batch.yielded_snapshot.entry_count()
-                                && tool_batch
-                                    .yielded_snapshot
-                                    .ordered_entries()
-                                    .skip(source.entry_count())
-                                    .all(|reference| {
-                                        let Some(entry) = semantic_entries.get(&reference) else {
-                                            return false;
-                                        };
-                                        match entry.payload() {
+                    let suffix_valid = source.is_some_and(|source| {
+                        source.is_semantic_prefix_of(&tool_batch.yielded_snapshot)
+                            && source.entry_count() < tool_batch.yielded_snapshot.entry_count()
+                            && tool_batch
+                                .yielded_snapshot
+                                .ordered_entries()
+                                .skip(source.entry_count())
+                                .all(|reference| {
+                                    let Some(entry) = semantic_entries.get(&reference) else {
+                                        return false;
+                                    };
+                                    match entry.payload() {
                                         SemanticTranscriptEntryPayload::AssistantText {
                                             producing_call,
                                             ..
@@ -5671,6 +5671,9 @@ fn reconstitute_inner(
                                             ..
                                         }
                                         | SemanticTranscriptEntryPayload::ContextSummary { .. }
+                                        | SemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                                            ..
+                                        }
                                         | SemanticTranscriptEntryPayload::OriginAcceptedInput {
                                             ..
                                         }
@@ -5688,8 +5691,8 @@ fn reconstitute_inner(
                                             false
                                         }
                                     }
-                                    })
-                        });
+                                })
+                    });
                     let producing_matches = matches!(
                         producing,
                         Some(crate::ReconstitutedModelCall::Ended(call))

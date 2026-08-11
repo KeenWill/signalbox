@@ -56,6 +56,7 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
+        ProcessTranscriptEntry,
     },
     runner_protocol::{
         IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
@@ -13877,6 +13878,244 @@ async fn s32_inv002_inv045_base_grant_authenticates_policy_placement_identity()
         .expect_err("a base grant cannot borrow another grant's policy placement");
 
     assert_store_corruption(corrupted, RunnerProtocolCorruption::MissingCanonicalGrant);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn runner_placement_semantic_boundary_round_trips_exact_successor_facts()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb001));
+    let frontier = ContextFrontierId::from_uuid(uuid(0xb002));
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .bind(entry.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(entry.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(session, entry);
+    let loaded = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await?;
+
+    assert_eq!(
+        loaded.as_ref(),
+        &[ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index: 0,
+            source_session: session,
+            entry,
+            prior_runner: registration.registration().runner(),
+            new_runner: registration.registration().runner(),
+            placement_revision: revision,
+            sandbox: RunnerSandboxProfile::Ambient,
+        }]
+    );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn runner_placement_semantic_boundary_requires_its_exact_frontier_pointer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb003));
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    let missing_pointer = transaction
+        .commit()
+        .await
+        .expect_err("a runner placement semantic entry requires its exact frontier pointer");
+
+    assert_check_violation(missing_pointer);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn runner_placement_semantic_readback_rejects_a_missing_frontier_pointer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb004));
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+         DISABLE TRIGGER runner_placement_semantic_frontier_is_required",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+         ENABLE TRIGGER runner_placement_semantic_frontier_is_required",
+    )
+    .execute(&pool)
+    .await?;
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(session, entry);
+    let corrupted = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await
+        .expect_err("readback rejects a placement entry without its frontier pointer");
+
+    assert_eq!(
+        corrupted.to_string(),
+        "process read has inconsistent runner placement entry shape"
+    );
     drop(pool);
     Ok(())
 }

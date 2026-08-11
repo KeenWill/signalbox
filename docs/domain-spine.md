@@ -4271,6 +4271,7 @@ pub enum SemanticTranscriptEntryPayload {
         summarized: ContextCompactionRange,
         value: AssistantText,
     },
+    RunnerPlacementChanged { placement_revision: RunnerGeneration },
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
     AssistantToolUse { producing_call: ModelCallId, request: ToolRequestId },
@@ -5813,6 +5814,11 @@ pub enum ModelConversationMessage {
         summarized: ContextCompactionRange,
         content: AssistantText,
     },
+    RunnerPlacementChanged {
+        source: SemanticTranscriptEntryRef,
+        placement_revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+    },
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
@@ -5878,6 +5884,17 @@ pub enum ModelToolResultContent {
 }
 
 pub struct PreparedModelOperation { /* private */ }
+pub struct ResolvedRunnerPlacementConversationEntry { /* private */ }
+impl ResolvedRunnerPlacementConversationEntry {
+    pub const fn new(
+        source: SemanticTranscriptEntryRef,
+        placement_revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+    ) -> Self;
+    pub const fn source(self) -> SemanticTranscriptEntryRef;
+    pub const fn placement_revision(self) -> RunnerGeneration;
+    pub const fn sandbox(self) -> RunnerSandboxProfile;
+}
 impl PreparedModelOperation {
     pub fn render(
         request: PreparedModelCallRequest,
@@ -5885,6 +5902,7 @@ impl PreparedModelOperation {
         system_prompt: Option<SessionSystemPrompt>,
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
+        runner_placement_entries: &[ResolvedRunnerPlacementConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError>;
     // accessors: request(), credential_reference(), system_prompt(), messages(), tools()
 }
@@ -5898,6 +5916,9 @@ pub enum ModelFrontierRenderingError {
     MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
     UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
+    DuplicateRunnerPlacementEvidence { entry: SemanticTranscriptEntryRef },
+    MissingOrMismatchedRunnerPlacementEvidence { entry: SemanticTranscriptEntryRef },
+    UnexpectedRunnerPlacementEvidence { entry: SemanticTranscriptEntryRef },
     MissingProjectedEntry { entry: SemanticTranscriptEntryRef },
     InvalidDelegationDelivery { entry: SemanticTranscriptEntryRef },
     InvalidContextProjection(ContextFrontierProjectionFailure),
@@ -5913,6 +5934,7 @@ pub enum PrepareModelCallOutcome {
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
         tool_entries: Box<[ResolvedToolConversationEntry]>,
+        runner_placement_entries: Box<[ResolvedRunnerPlacementConversationEntry]>,
     },
     TargetUnavailable(Box<FailedModelCallTurn>),
 }
@@ -10053,7 +10075,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 32 (incl. 8 traits)   |
+| application: model_execution                       | 33 (incl. 8 traits)   |
 | application: tool_loop                             | 26 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
@@ -10069,4 +10091,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **250**               |
+| **signalbox-application total**                    | **251**               |

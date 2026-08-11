@@ -15,7 +15,10 @@ against this PR (`agent/runner-registration-reconciliation`). Pending-successor
 enrollment admission and exact receipt replay were verified against this PR
 (`agent/runner-pending-successor-promotion`). Creation-command runner placement
 and revision-one readback were verified against this PR
-(`agent/runner-creation-placement-persistence`).
+(`agent/runner-creation-placement-persistence`). The reference-only
+placement-change entry, successor-placement foreign key, and exact final-member
+frontier link were verified against this PR
+(`agent/runner-placement-semantic-persistence`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR

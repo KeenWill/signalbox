@@ -7654,6 +7654,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::DelegationMessage { .. }
                 | ProcessTranscriptEntry::DelegationResult { .. }
                 | ProcessTranscriptEntry::ModelIdentityChanged { .. }
+                | ProcessTranscriptEntry::RunnerPlacementChanged { .. }
                 | ProcessTranscriptEntry::ContextSummary { .. }
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
@@ -7996,6 +7997,7 @@ fn completed_tool_result_entry_indices(entries: &[ProcessTranscriptEntry]) -> BT
             | ProcessTranscriptEntry::DelegationMessage { .. }
             | ProcessTranscriptEntry::DelegationResult { .. }
             | ProcessTranscriptEntry::ModelIdentityChanged { .. }
+            | ProcessTranscriptEntry::RunnerPlacementChanged { .. }
             | ProcessTranscriptEntry::ContextSummary { .. }
             | ProcessTranscriptEntry::User { .. }
             | ProcessTranscriptEntry::Assistant { .. }
