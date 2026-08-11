@@ -6815,7 +6815,7 @@ fn promote_external_interrupt_chains(
     let Some((start, insertion)) = total_order
         .iter()
         .enumerate()
-        .filter(|(_, turn)| external_successors.contains(turn))
+        .filter(|(_, turn)| external_successors.contains(turn) && queued_turns.contains(turn))
         .find_map(|(start, _)| {
             total_order[..start]
                 .iter()
@@ -16771,7 +16771,12 @@ mod tests {
         let interrupt_descendant = turn_id(813);
         let later_ordinary = turn_id(814);
         let ordinary_roots = BTreeSet::from([older_ordinary, later_ordinary]);
-        let queued_turns = BTreeSet::from([older_ordinary, later_ordinary]);
+        let queued_turns = BTreeSet::from([
+            older_ordinary,
+            external_successor,
+            interrupt_descendant,
+            later_ordinary,
+        ]);
 
         let promoted = super::promote_external_interrupt_chains(
             vec![
@@ -16807,7 +16812,14 @@ mod tests {
         let second_descendant = turn_id(825);
         let later_ordinary = turn_id(826);
         let ordinary_roots = BTreeSet::from([older_ordinary, later_ordinary]);
-        let queued_turns = BTreeSet::from([older_ordinary, later_ordinary]);
+        let queued_turns = BTreeSet::from([
+            older_ordinary,
+            first_external_successor,
+            first_descendant,
+            second_external_successor,
+            second_descendant,
+            later_ordinary,
+        ]);
 
         let promoted = super::promote_external_interrupt_chains(
             vec![
@@ -16848,7 +16860,7 @@ mod tests {
             vec![terminal, external_successor],
             BTreeSet::from([external_successor]),
             &ordinary_roots,
-            &BTreeSet::new(),
+            &BTreeSet::from([external_successor]),
         );
 
         assert_eq!(promoted, vec![terminal, external_successor]);
@@ -16862,7 +16874,7 @@ mod tests {
         let older_queued = turn_id(842);
         let external_successor = turn_id(843);
         let ordinary_roots = BTreeSet::from([terminal, older_queued]);
-        let queued_turns = BTreeSet::from([older_queued]);
+        let queued_turns = BTreeSet::from([older_queued, external_successor]);
 
         let promoted = super::promote_external_interrupt_chains(
             vec![terminal, older_queued, external_successor],
@@ -16882,10 +16894,10 @@ mod tests {
         let older_queued = turn_id(852);
         let crossing_external = turn_id(853);
         let ordinary_roots = BTreeSet::from([older_queued]);
-        let queued_turns = BTreeSet::from([older_queued]);
+        let queued_turns = BTreeSet::from([older_queued, crossing_external]);
 
         let promoted = super::promote_external_interrupt_chains(
-            vec![historical_external, older_queued, crossing_external],
+            vec![older_queued, historical_external, crossing_external],
             BTreeSet::from([historical_external, crossing_external]),
             &ordinary_roots,
             &queued_turns,
@@ -16893,7 +16905,7 @@ mod tests {
 
         assert_eq!(
             promoted,
-            vec![historical_external, crossing_external, older_queued]
+            vec![crossing_external, older_queued, historical_external]
         );
     }
 }

@@ -17455,6 +17455,75 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
     Ok(())
 }
 
+/// INV-044: initial pin rechecks connection health under enrollment authority
+/// and cannot commit after a concurrent first-heartbeat suspicion.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_initial_pin_rejects_suspect_connection() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the validated registration prepares the initial pin");
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    let rejected = store
+        .store_pin(&pin, &registration)
+        .await
+        .expect_err("a suspect connection cannot authorize initial pin");
+    let state: String = sqlx::query_scalar(
+        "SELECT placement.state_kind
+           FROM runner_current_session_placement AS current_placement
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current_placement.session_id
+            AND placement.event_ordinal = current_placement.event_ordinal
+          WHERE current_placement.session_id = $1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    assert_eq!(state, "unpinned");
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: a follower-event refusal rolls the exact connection
 /// transition back rather than leaving durable health without its update.
 #[tokio::test]
