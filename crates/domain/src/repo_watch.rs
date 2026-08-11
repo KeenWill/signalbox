@@ -1986,6 +1986,7 @@ mod tests {
     }
     use std::{error::Error, num::NonZeroU64, time::Duration};
 
+    use expect_test::expect;
     use uuid::Uuid;
 
     use crate::{RepoWatchEventId, SessionTemplateName};
@@ -2288,6 +2289,73 @@ mod tests {
             RepoWatchDispatchContextShape::PullRequest
         );
         assert_eq!(parameters.event(), &event);
+        Ok(())
+    }
+
+    /// The statement a dispatched pull-request session is commissioned with.
+    ///
+    /// The base branch is the fact this exists to carry: a judge asked to
+    /// approve a fetch of the base branch cannot tell whether it is in scope
+    /// unless something the session did not write names that branch.
+    #[test]
+    fn dispatched_pull_request_goal_names_its_rule_template_and_branches()
+    -> Result<(), Box<dyn Error>> {
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(NonZeroU64::MIN),
+            head_sha: CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+            head_repository: RepositorySlug::try_new(String::from("namespace/repo"))?,
+            base_branch: BranchName::try_new(String::from("main"))?,
+            head_branch: BranchName::try_new(String::from("topic/watch"))?,
+            title: PullRequestTitle::try_new(String::from("Watch repositories"))?,
+            body: PullRequestBody::try_new(String::new())?,
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(3)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            context,
+            RepoWatchEventKindV1::PullRequestOpened,
+        )?;
+        let action = super::DispatchSessionAction::new(
+            SessionTemplateName::try_new(String::from("merge-forward"))?,
+            super::DispatchSessionParameters::try_from_event(event)?,
+        );
+
+        let statement = action
+            .synthesized_goal_statement(&RepoWatchRuleId::try_new(String::from("watch-forward"))?)?;
+
+        expect![[
+            "Dispatched by rule watch-forward: template merge-forward, pull request #1 (head topic/watch, base main) in namespace/repo"
+        ]]
+        .assert_eq(statement.as_str());
+        Ok(())
+    }
+
+    /// The branch-shaped counterpart, naming the workflow and its conclusion.
+    #[test]
+    fn dispatched_branch_goal_names_its_rule_template_workflow_and_conclusion()
+    -> Result<(), Box<dyn Error>> {
+        let event = RepoWatchEvent::branch_workflow(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(4)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            BranchName::try_new(String::from("main"))?,
+            super::WorkflowName::try_new(String::from("ci"))?,
+            CheckConclusion::Failure,
+        );
+        let action = super::DispatchSessionAction::new(
+            SessionTemplateName::try_new(String::from("repair-red-main"))?,
+            super::DispatchSessionParameters::try_from_event(event)?,
+        );
+
+        let statement = action
+            .synthesized_goal_statement(&RepoWatchRuleId::try_new(String::from("watch-main"))?)?;
+
+        expect![[
+            "Dispatched by rule watch-main: template repair-red-main, branch main (workflow ci, conclusion failure) in namespace/repo"
+        ]]
+        .assert_eq(statement.as_str());
         Ok(())
     }
 

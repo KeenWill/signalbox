@@ -17,7 +17,8 @@ use signalbox_domain::{
     DurableCommandId, GoalCommandResult, GoalNeed, GoalSchedulerProvenance, GoalStatement,
     GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionRequest, PullRequestBody,
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
+    RepoWatchEventKindNameV1,
     RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
     RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
     SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
@@ -543,6 +544,73 @@ async fn equal_event_rule_recovery_replays_the_original_sessions() -> Result<(),
             sessions: fixture.sessions,
         }
     );
+    Ok(())
+}
+
+/// The goal a dispatch synthesizes is committed with the session itself.
+///
+/// A dispatched session declares nothing about itself, so without this it
+/// reaches its first turn with no statement of the authority it was created
+/// under, and every consumer that reads session authority — the approval judge
+/// above all — has nothing to read.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn dispatched_sessions_are_commissioned_with_their_synthesized_goal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let expected = synthesized_dispatch_goal(&fixture)?;
+    let [first, second] = fixture.sessions.as_ref() else {
+        panic!("the fixture rule dispatches exactly two sessions");
+    };
+
+    assert_commissioned_with(&fixture, *first, &expected).await?;
+    assert_commissioned_with(&fixture, *second, &expected).await?;
+    Ok(())
+}
+
+/// The dispatched work turn carries the tagged context through submit-input,
+/// which owns its accepted input, so that turn is deliberately not a goal
+/// turn. This pins the shape the judge's unrecorded-turn resolution exists
+/// for; changing it means revisiting that resolution.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_dispatched_work_turn_is_not_itself_a_goal_turn() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+
+    let work_turns_bound_to_a_goal: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_dispatch_delivery AS delivery
+           JOIN goal_turn ON goal_turn.turn_id = delivery.turn_id
+          WHERE delivery.dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(work_turns_bound_to_a_goal, 0);
+    Ok(())
+}
+
+fn synthesized_dispatch_goal(fixture: &DispatchFixture) -> Result<GoalStatement, Box<dyn Error>> {
+    let actions = fixture.rule.actions_for_event(&fixture.event)?;
+    let Some(RepoWatchActionV1::DispatchSession(action)) = actions.first() else {
+        panic!("the fixture rule emits one dispatch action per configured action");
+    };
+    Ok(action.synthesized_goal_statement(fixture.rule.id())?)
+}
+
+async fn assert_commissioned_with(
+    fixture: &DispatchFixture,
+    session: SessionId,
+    expected: &GoalStatement,
+) -> Result<(), Box<dyn Error>> {
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .ok_or("a dispatched session is commissioned when it is created")?;
+
+    assert_eq!(goal.current().statement(), expected);
+    assert_eq!(goal.generations().len(), 1);
     Ok(())
 }
 

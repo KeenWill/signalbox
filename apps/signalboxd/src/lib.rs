@@ -2291,6 +2291,42 @@ mod tests {
         );
     }
 
+    /// A dispatched session's commissioned goal reaches the judge intact.
+    ///
+    /// The statement is the one repository-watch dispatch synthesizes; its
+    /// exact bytes are pinned where they are produced, by
+    /// `dispatched_pull_request_goal_names_its_rule_template_and_branches` in
+    /// the domain crate. What this pins is that the base branch such a
+    /// statement names survives quoting and is what a judge asked to approve a
+    /// fetch of that branch actually reads.
+    #[test]
+    fn a_dispatched_session_goal_reaches_the_judge_naming_its_base_branch() {
+        let context = SessionAuthorityContext::new(
+            Some(goal_statement(
+                "Dispatched by rule watch-forward: template merge-forward, pull request #1 (head topic/watch, base main) in namespace/repo",
+            )),
+            Some(template_name("merge-forward")),
+            None,
+        );
+
+        let rendered = render_session_authority_context(&context);
+
+        assert_eq!(
+            rendered,
+            concat!(
+                "-----BEGIN UNTRUSTED SESSION CONTEXT: session_goal-----\n",
+                "| Dispatched by rule watch-forward: template merge-forward, pull request #1 (head topic/watch, base main) in namespace/repo\n",
+                "-----END UNTRUSTED SESSION CONTEXT: session_goal-----\n",
+                "-----BEGIN UNTRUSTED SESSION CONTEXT: session_template-----\n",
+                "| merge-forward\n",
+                "-----END UNTRUSTED SESSION CONTEXT: session_template-----\n",
+                "-----BEGIN UNTRUSTED SESSION CONTEXT: session_system_prompt-----\n",
+                "(absent)\n",
+                "-----END UNTRUSTED SESSION CONTEXT: session_system_prompt-----\n",
+            )
+        );
+    }
+
     #[test]
     fn absent_session_context_fields_render_as_explicitly_absent() {
         let rendered = render_session_authority_context(&SessionAuthorityContext::default());
