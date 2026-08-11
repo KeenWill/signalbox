@@ -138,14 +138,14 @@ a whole blob in memory. Bounded in-memory materialization exists only at
 explicitly bounded consumers, and each such consumer names its bound.
 
 The configured staging directory is a daemon-owned private directory. The daemon
-creates one `uploads-v1` child with owner-only access and holds the
-installation's exclusive daemon lock while using it; upload spools are
-create-new owner-only regular files directly beneath that child. Before socket
-admission, startup removes every regular spool in that child. A symlink,
-subdirectory, wrong-owner entry, or otherwise unprovable occupant fails startup
-rather than being followed or removed. Clean shutdown cancels active uploads and
-performs the same sweep. This reclaims crash leftovers without treating
-unrelated paths as Signalbox-owned.
+creates one `uploads-v1` child with mode `0700` and holds the installation's
+exclusive daemon lock while using it; upload spools are create-new mode `0600`
+regular files directly beneath that child. Before socket admission, startup
+removes every regular spool in that child. A symlink, subdirectory, entry whose
+UID differs from the daemon's effective UID, or otherwise unprovable occupant
+fails startup rather than being followed or removed. Clean shutdown cancels
+active uploads and performs the same sweep. This reclaims crash leftovers
+without treating unrelated paths as Signalbox-owned.
 
 Every S3 logical operation has a 10-second connect timeout, a 60-second
 no-progress read/write timeout, and a 24-hour whole-operation deadline. The
