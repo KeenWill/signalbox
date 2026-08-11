@@ -205,6 +205,14 @@ with the same retry consequence. The inactivity deadline therefore bounds a
 stalled client while the whole-session deadline bounds one making indefinite
 minimal progress.
 
+A single-shot conversation import has the same non-resetting 24-hour monotonic
+operation deadline beginning when it acquires the bulk-ingest permit. The
+deadline spans conversion, raw-blob publication and verification, catalog
+registration, and aggregate persistence; it is never restarted by progress in
+one of those phases. Expiry cancels active work, releases the permit, and closes
+the connection with the same retry consequence. A single-shot request has no
+inactivity deadline because its complete body has already been received.
+
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
 exist.

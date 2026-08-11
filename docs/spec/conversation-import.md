@@ -633,7 +633,11 @@ relational projection and releases its transaction, then reads and verifies the
 referenced blobs, so no database transaction spans store I/O. The current
 converter and reconstitution surfaces retain their configured bounded
 whole-source behavior; future streaming conversion remains the committed
-unimplemented seam above.
+unimplemented seam above. Each checked aggregate load — including ordinary read,
+replay comparison, and imported-frontier reconstitution — has one non-resetting
+24-hour monotonic deadline shared across every referenced digest and replica
+candidate. It performs at most one referenced-blob store operation at a time;
+digest or candidate changes never restart the deadline.
 
 One transaction resolves or inserts a complete aggregate:
 

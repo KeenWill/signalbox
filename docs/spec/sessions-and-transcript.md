@@ -4,7 +4,7 @@ The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
 The multipart user-content aggregate below is the foundation proposal from PR
-#553 (`agent/blob-storage-foundation`) and becomes verified with its
+`#553` (`agent/blob-storage-foundation`) and becomes verified with its
 implementing child stack.
 
 This page specifies the implemented behavior of session creation and ancestry,
@@ -929,18 +929,23 @@ INV-007, INV-036).
 ### Bounds
 
 The multipart value and application admission apply the exact structural,
-text-byte, attachment-metadata, catalog, and complete-frontier bounds owned by
+text-byte, and attachment-metadata bounds owned by
 [blob storage](blob-storage.md#multipart-user-content) before typed command
 construction, so no command identifier is claimed for a structurally invalid
-value. Resource failures retain counts and configured maxima, never rejected
-text or attachment metadata. The final schema stores one complete ordinally
-guarded part sequence in each mirrored command and accepted-input satellite,
-with no `content_text` authority; its one-time migration and exact storage
-version are owned by that same cross-crate contract.
+value. Typed construction and the registry claim precede the current-state
+catalog-existence, aggregate-attachment, and prospective-complete-frontier
+checks. Failure of one of those post-claim checks records its closed terminal
+rejection and no accepted-input effect. Resource failures retain counts and
+configured maxima, never rejected text or attachment metadata. The final schema
+stores one complete ordinally guarded part sequence in each mirrored command and
+accepted-input satellite, with no `content_text` authority; its one-time
+migration and exact storage version are owned by that same cross-crate contract.
 
 Why (bytes and parts, at admission): measurement matches wire, storage, and
-verification cost and keeps the domain value exactly as accepted; rejecting
-before construction can never truncate, reorder, or rewrite content.
+verification cost and keeps the domain value exactly as accepted. Stable shape
+failures precede construction, while checks whose answer depends on current
+catalog or session state occur under durable command authority; neither path can
+truncate, reorder, or rewrite content.
 
 This is a provisional maintainer-approved floor, not the resource-governance
 policy.
