@@ -35,7 +35,7 @@ use signalbox_persistence::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
     },
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
 };
 use sqlx::{PgPool, Transaction, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -155,6 +155,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -177,6 +178,7 @@ async fn postgres_before_codex_format()
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -209,6 +211,7 @@ async fn postgres_before_frontier_prefixes()
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
