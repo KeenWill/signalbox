@@ -76,9 +76,13 @@ and a consumer reading the authority a turn ran under reads that generation and
 not the session's current one, so a supersession while the turn is parked cannot
 broaden what that consumer sees. A turn the goal machinery did not schedule
 carries no such record, and a goal session runs those too. Such a turn reads the
-session's goal only while its lineage has exactly one generation — the condition
-under which no broadened replacement can exist — and otherwise resolves to no
-statement, leaving the consumer to treat the authority as unsettled.
+session's goal only when three conditions hold together: the lineage has exactly
+one generation, so no supersession can have broadened it; that generation is
+still open, so a goal already stopped or achieved cannot authorize a request
+still awaiting a decision; and the commission was accepted strictly before the
+turn, so a goal attached after the turn existed cannot authorize it
+retroactively. Any other shape resolves to no statement, leaving the consumer to
+treat the authority as unsettled.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no

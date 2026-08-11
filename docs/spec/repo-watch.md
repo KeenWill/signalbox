@@ -348,15 +348,17 @@ validation before polling starts. Dispatch therefore cannot discover a shape
 mismatch at runtime.
 
 **Implemented behavior.** Each admitted action creates a fresh session from the
-complete resolved template copy and submits the tagged context as its first
-accepted JSON text input through the existing `StartWhenNoActiveTurn` path in
-the same durable transaction. No dispatched session can become visible without
-that accepted input, its queued turn, and the dispatch-to-turn audit link. The
-input selects the session's version-one defaults and its template-selected
-model. The JSON object carries `type = "pull_request"` or `type = "branch"`, the
-fields of that tagged context, and an `event` object containing version, event
-identity, repository, complete normalized target, kind, and payload. A durable
-delivery intent records the reserved submit-command, accepted-input, turn, and
+complete resolved template copy and submits the tagged context as an accepted
+JSON text input through the existing `StartWhenNoActiveTurn` path in the same
+durable transaction, at the second acceptance position: the goal described below
+is commissioned first, so the tagged context follows the statement of authority
+rather than preceding it. No dispatched session can become visible without that
+accepted input, its queued turn, and the dispatch-to-turn audit link. The input
+selects the session's version-one defaults and its template-selected model. The
+JSON object carries `type = "pull_request"` or `type = "branch"`, the fields of
+that tagged context, and an `event` object containing version, event identity,
+repository, complete normalized target, kind, and payload. A durable delivery
+intent records the reserved submit-command, accepted-input, turn, and
 cancellation candidates beside the applied link. Equal recovery reuses the
 complete committed batch. A lost post-commit scheduler nudge remains recoverable
 by the ordinary eligibility sweep.
@@ -376,11 +378,14 @@ inside its embedded event. It is composed by the dispatch rather than declared
 by the session, because only an already-attached goal admits a model
 declaration, so a session created without one has no transition available to it.
 Because commissioning schedules that generation's first goal turn, a dispatched
-session commits two queued turns: the tagged-context turn described above, whose
-accepted input belongs to its submit command, and the goal turn, whose input is
-the statement. The dispatched work turn is therefore not itself a goal turn.
-Pursuit also holds the batch's singleton until the goal reaches a terminal
-state, which is the release rule stated below rather than a new one.
+session commits two queued turns: the goal turn, whose input is the statement,
+accepted first, and the tagged-context turn, whose accepted input belongs to its
+submit command, accepted second. The dispatched work turn is therefore not
+itself a goal turn, and the goal that authorizes it is durably earlier than it.
+A consumer deciding what that turn may do can check that ordering rather than
+trust that one code path happened to establish it. Pursuit also holds the
+batch's singleton until the goal reaches a terminal state, which is the release
+rule stated below rather than a new one.
 
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
