@@ -191,13 +191,20 @@ impl SseFraming {
         }
     }
 
+    /// Whether bytes have been accepted that no record has yet carried out.
+    ///
+    /// A loss raised while this holds — a transport failure, a cancellation, a
+    /// framing error, or an adapter byte limit — discards material the decoder
+    /// never saw, so the adapter reports its partial facts about that material
+    /// as unobserved rather than as stated negatives.
+    pub fn holds_unframed_bytes(&self) -> bool {
+        !self.line_buffer.is_empty() || !self.data_lines.is_empty() || self.current_event.is_some()
+    }
+
     /// Reports how the stream stood at end of transport. Meaningful only on
     /// a stream that reported no framing failure.
     pub fn finish(self) -> SseTermination {
-        if !self.line_buffer.is_empty()
-            || !self.data_lines.is_empty()
-            || self.current_event.is_some()
-        {
+        if self.holds_unframed_bytes() {
             SseTermination::TruncatedRecord
         } else {
             SseTermination::Clean
@@ -425,6 +432,27 @@ mod tests {
 
         assert_eq!(records, vec![]);
         assert_eq!(framing.finish(), SseTermination::TruncatedRecord);
+    }
+
+    /// The mid-stream accessor answers the same question `finish` answers at
+    /// end of transport, so an adapter losing a stream early can tell whether
+    /// bytes are being discarded unexamined.
+    #[test]
+    fn unframed_bytes_are_visible_before_the_stream_ends() {
+        let mut framing = framer();
+
+        assert!(!framing.holds_unframed_bytes());
+
+        let records = push_ok(&mut framing, b"data: partial");
+        assert_eq!(records, vec![]);
+        assert!(framing.holds_unframed_bytes());
+
+        let records = push_ok(&mut framing, b" line\n\n");
+        assert_eq!(records.len(), 1);
+        assert!(
+            !framing.holds_unframed_bytes(),
+            "a dispatched record leaves nothing held"
+        );
     }
 
     #[test]

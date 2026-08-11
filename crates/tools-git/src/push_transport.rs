@@ -7,10 +7,9 @@ use std::{
 use bstr::BStr;
 use git2::ObjectFormat;
 
-use crate::layout::parse_full_object_id;
+use signalbox_domain::{GitRemoteUrl, max_git_remote_name_bytes};
 
-const MAX_REMOTE_NAME_BYTES: usize = 255;
-const MAX_REMOTE_URL_BYTES: usize = 4096;
+use crate::layout::parse_full_object_id;
 
 /// Exact deployment-owned remote configuration.
 #[derive(Clone, Eq, PartialEq)]
@@ -21,6 +20,13 @@ pub struct ConfiguredGitRemote {
 
 impl ConfiguredGitRemote {
     /// Constructs one fixed remote name and exact destination URL.
+    ///
+    /// The destination is judged by [`GitRemoteUrl`], the same type the durable
+    /// mint stores, rather than by a second bounded-text rule here. Restating
+    /// the grammar locally is what let the two sides drift: the durable side
+    /// was https-only while this constructor admitted any bounded URL, so the
+    /// claim that both refuse the same set held in neither. Delegating makes it
+    /// true by construction — scheme, userinfo, query, and port bounds included.
     pub fn try_new(
         name: impl Into<String>,
         url: impl Into<String>,
@@ -29,12 +35,10 @@ impl ConfiguredGitRemote {
         let url = url.into();
         let probe = format!("refs/remotes/{name}/probe");
         if name.is_empty()
-            || name.len() > MAX_REMOTE_NAME_BYTES
+            || name.len() > max_git_remote_name_bytes()
             || name.contains('/')
             || gix_validate::reference::name(BStr::new(probe.as_bytes())).is_err()
-            || url.is_empty()
-            || url.len() > MAX_REMOTE_URL_BYTES
-            || url.chars().any(char::is_control)
+            || GitRemoteUrl::try_new(url.clone()).is_err()
         {
             return Err(InvalidConfiguredGitRemote);
         }

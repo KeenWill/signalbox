@@ -653,6 +653,24 @@ from the configured root alone, are properties of this version rather than
 permanent limits; several bound roots per session and explicit operator rebinds
 are routed through [tool safety](../open-questions.md#tool-safety).
 
+<a id="durable-workspace-records"></a>
+
+A workspace also has a durable record — an identity and the canonical root it
+was minted for — because authority grants must be scoped to something stabler
+than a path. The record is written *from* this derivation, never read *by* it,
+and the sentence above still holds unchanged, since nothing consults the table
+to decide which root to open. Committed but unimplemented: no present surface
+records a derived root. This PR lands the table and its constraints, and the
+daemon-side write arrives with the slice that owns it, as
+[identity and commands](identity-and-commands.md) states for `WorkspaceId`
+generation. What the identity is for is the other direction — a grant such as a
+minted Git push destination is keyed by it, so two spellings of one directory
+cannot become two scopes. The root is canonicalized once, when the record is
+minted, and stored in canonical form; no later comparison normalizes anything.
+The tiers that mint these records, and the one grant that currently uses them,
+are stated under
+[remote destination authority](git-authority-threat-model.md#remote-destination-authority).
+
 Provisioning that directory is deployment work: creating a direct main worktree
 there is what makes a session use it. Only a reported absence at the derived
 path is unprovisioned, and such a session binds the configured root exactly as

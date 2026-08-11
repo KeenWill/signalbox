@@ -2117,7 +2117,7 @@ mod tests {
         PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
         ProviderReportedModel, ReasoningLevel as RuntimeReasoningLevel, RefusalEvidence,
         ServiceTier as RuntimeServiceTier, TerminalEvidence, TokenUsage, ToolCallId,
-        ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+        ToolCallProposal, ToolCallsAtLoss, ToolName, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
 
@@ -2787,6 +2787,7 @@ mod tests {
                     exchange,
                     reported_model: None,
                     finish_reported: None,
+                    tool_calls: ToolCallsAtLoss::Unobserved,
                     usage: TokenUsage::unreported(),
                 }),
                 &[],
@@ -3284,6 +3285,7 @@ mod tests {
                     exchange: ExchangeFacts::default(),
                     reported_model: None,
                     finish_reported: None,
+                    tool_calls: ToolCallsAtLoss::Unobserved,
                     usage: TokenUsage::unreported(),
                 }),
             ),

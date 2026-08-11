@@ -68,7 +68,7 @@ use signalbox_model_runtime::{
     CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts,
     FinishReason, ModelOperation, ModelRuntime, ModelSettings, NativeErrorFacts, Observation,
     ObservationFact, PreparationOutcome, ProviderErrorKind, ProviderReportedModel, RequestedTarget,
-    ResolvedTarget, TerminalEvidence, TokenUsage,
+    ResolvedTarget, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_model_runtime_openai::{
     OUTPUT_CEILING_VIOLATION_DETAIL, OpenAiConfig, OpenAiRuntime,
@@ -310,7 +310,7 @@ fn require_decoded_response(
         TerminalEvidence::BoundaryLoss(loss)
             if loss.exchange.http_status == Some(200)
                 && loss.reported_model.is_some()
-                && is_the_output_ceiling_violation(&loss.cause)
+                && is_the_output_ceiling_violation(&loss)
                 && stopped_at_the_output_ceiling(loss.finish_reported.as_ref()) =>
         {
             DecodedResponse {
@@ -440,14 +440,27 @@ fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
 /// Whether this loss is the plain output-ceiling stop rather than some other
 /// protocol violation that reached the same evidence variant.
 ///
-/// Keyed on the cause rather than the observations because neither of the two
-/// alternatives works: the finish token is legitimately retained when a
-/// tool-bearing request truncates mid-call, so it cannot separate the cases,
-/// and a tool call that opens without an argument fragment emits no
-/// observation at all. `LossCause` is enumerated rather than matched loosely,
-/// so a new cause forces this merge-gating decision to be reconsidered.
-fn is_the_output_ceiling_violation(cause: &LossCause) -> bool {
-    match cause {
+/// Two questions, answered separately. *Which* violation is this — still the
+/// detail, because the loss vocabulary has no typed way to name the deferred
+/// unrecognized-finish verdict; see `OUTPUT_CEILING_VIOLATION_DETAIL`. And *was
+/// a tool call involved* — now `tool_calls`, which is what this PR added and
+/// what the suffix on that detail used to encode.
+///
+/// Both are needed. Dropping the detail admits any stream defect that follows a
+/// `length` finish before `[DONE]` — a record after the final usage chunk, a
+/// conflicting completion id — since those reach identical typed evidence and
+/// would pass this merge-gating check as a benign ceiling stop.
+///
+/// Only `NoneOpened` admits: `Unobserved` means the adapter could not establish
+/// that no call opened, which is not a basis for passing a merge-gating check,
+/// and `Opened` contradicts a plain ceiling stop outright. The two are collapsed
+/// with an or-pattern rather than a wildcard, so they stay visibly rejected.
+///
+/// Both enums are enumerated rather than compared loosely, so a new `LossCause`
+/// or a new `ToolCallsAtLoss` variant fails to compile here instead of silently
+/// inheriting a verdict this merge gate never considered.
+fn is_the_output_ceiling_violation(loss: &BoundaryLossEvidence) -> bool {
+    let cause_admits = match &loss.cause {
         LossCause::StreamProtocolViolation { detail } => detail == OUTPUT_CEILING_VIOLATION_DETAIL,
         LossCause::CancellationRequested
         | LossCause::TimedOut(_)
@@ -456,7 +469,12 @@ fn is_the_output_ceiling_violation(cause: &LossCause) -> bool {
         | LossCause::ResponseUnintelligible { .. }
         | LossCause::UnexpectedHttpStatus
         | LossCause::StreamEndedWithoutTerminalMarker { .. } => false,
-    }
+    };
+    let tool_calls_admit = match loss.tool_calls {
+        ToolCallsAtLoss::NoneOpened => true,
+        ToolCallsAtLoss::Opened | ToolCallsAtLoss::Unobserved => false,
+    };
+    cause_admits && tool_calls_admit
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
@@ -792,6 +810,8 @@ mod require_decoded_response_tests {
                 exchange: exchange(200),
                 reported_model: None,
                 finish_reported: None,
+                // A status-only loss reads no response material.
+                tool_calls: ToolCallsAtLoss::Unobserved,
                 usage: TokenUsage::unreported(),
             }),
             &[],
@@ -817,6 +837,10 @@ mod require_decoded_response_tests {
             finish_reported: Some(FinishReason::Unrecognized {
                 provider_token: OUTPUT_CEILING_FINISH_TOKEN.to_string(),
             }),
+            // The stream is well formed up to the ceiling: every record
+            // deserialized and was scanned for tool material, and none carried
+            // any. The negative is a stated fact, not an absence.
+            tool_calls: ToolCallsAtLoss::NoneOpened,
             usage: usage(),
         }
     }
@@ -833,6 +857,37 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected.exchange);
         assert_eq!(decoded.usage, expected.usage);
+    }
+
+    /// A different stream defect reaching the same typed evidence must not pass
+    /// as a benign ceiling stop.
+    ///
+    /// A stream that reports `length` and then trips another defect before
+    /// `[DONE]` keeps HTTP 200, the model identity, the retained `length`
+    /// finish, and `NoneOpened` — every typed conjunct — so only the violation
+    /// identity separates them. This is the merge-gating hole that dropping the
+    /// detail comparison opens.
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn another_violation_after_a_length_finish_panics() {
+        let mut loss = stopped_at_ceiling();
+        loss.cause = LossCause::StreamProtocolViolation {
+            detail: "stream record follows the requested final usage chunk".to_string(),
+        };
+
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
+    }
+
+    /// A stop the adapter could not establish as tool-free is not a basis for
+    /// passing a merge-gating check, so `Unobserved` is rejected alongside
+    /// `Opened` rather than treated as "not opened".
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_output_ceiling_stop_with_an_unobserved_tool_fact_panics() {
+        let mut loss = stopped_at_ceiling();
+        loss.tool_calls = ToolCallsAtLoss::Unobserved;
+
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
 
     #[test]
@@ -893,13 +948,11 @@ mod require_decoded_response_tests {
     fn an_output_ceiling_finish_after_a_tool_call_opened_panics() {
         // The decoder keeps `length` when a tool-bearing request truncates
         // mid-call, so the finish token cannot separate that from the benign
-        // ceiling stop; it records the difference in the cause instead. This
-        // smoke declares no tools, so the tool-aware variant means the
-        // provider volunteered something nobody asked for.
+        // ceiling stop; `tool_calls` is what records the difference. This smoke
+        // declares no tools, so an opened call means the provider volunteered
+        // something nobody asked for.
         let mut loss = stopped_at_ceiling();
-        loss.cause = LossCause::StreamProtocolViolation {
-            detail: format!("{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"),
-        };
+        loss.tool_calls = ToolCallsAtLoss::Opened;
 
         let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
