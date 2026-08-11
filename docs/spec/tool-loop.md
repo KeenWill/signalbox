@@ -821,14 +821,18 @@ tools:
 - `echo` requires exactly one `text` string and returns the same canonical
   compact `{"text": ...}` object. Its permission default is `Auto` and its
   effect class is `EffectFree`: execution observes no external state.
-- `blob_metadata` requires exactly one canonical blob `digest`. It returns text
-  containing compact JSON with that `digest`, canonical-decimal-string
-  `byte_length`, and numeric `replica_count`. Its permission default is `Auto`
-  and its effect class is `EffectFree`.
-- `blob_read` requires exactly one canonical blob `digest` plus `offset_bytes`
-  and `length_bytes` as canonical decimal-u64 strings. Length is 1 through
-  524,288 bytes; checked offset plus length must lie within the blob. It returns
-  text containing compact JSON with the `digest`, `offset_bytes`, and canonical
+- `blob_metadata`, as owned by the
+  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+  requires exactly one canonical blob `digest`. It returns text containing
+  compact JSON with that `digest`, canonical-decimal-string `byte_length`, and
+  numeric `replica_count`. Its permission default is `Auto` and its effect class
+  is `EffectFree`.
+- `blob_read`, as owned by the
+  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+  requires exactly one canonical blob `digest` plus `offset_bytes` and
+  `length_bytes` as canonical decimal-u64 strings. Length is 1 through 524,288
+  bytes; checked offset plus length must lie within the blob. It returns text
+  containing compact JSON with the `digest`, `offset_bytes`, and canonical
   padded `bytes_base64`. Its permission default is `Auto` and its effect class
   is `EffectFree`.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
@@ -881,15 +885,17 @@ tools:
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
 Both blob tools authorize only digests present in attachment stubs in the
-rendered frontier for the issuing turn. The read declaration's requested decoded
-length is charged once by tool-request identity to a durable per-turn counter
-before authorization; replay never charges twice, and exceeding 2,097,152 bytes
-is a typed preparation failure. Failed or denied requests do not refund the
-charge. Store I/O occurs only after durable authorization, and a missing or
-corrupt recorded replica becomes content-silent `ExecutionFailed` evidence. The
-compact result must also fit the ordinary 1 MiB text-result bound; admission
-accounts for JSON and base64 overhead rather than producing a result that the
-ordinary result boundary would reject.
+rendered frontier for the issuing turn, under the owning
+[blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads).
+The read declaration's requested decoded length is charged once by tool-request
+identity to a durable per-turn counter before authorization; replay never
+charges twice, and exceeding 2,097,152 bytes is a typed preparation failure.
+Failed or denied requests do not refund the charge. Store I/O occurs only after
+durable authorization, and a missing or corrupt recorded replica becomes
+content-silent `ExecutionFailed` evidence. The compact result must also fit the
+ordinary 1 MiB text-result bound; admission accounts for JSON and base64
+overhead rather than producing a result that the ordinary result boundary would
+reject.
 
 For both web tools, an explicit shipped `Human` posture supersedes the
 declaration's `Confirm` default and the session blanket, so a request parks for

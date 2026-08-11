@@ -636,14 +636,14 @@ One transaction resolves or inserts a complete aggregate:
   content, and source metadata; only the candidate conversation and entry
   identities are excluded. A semantic mismatch is typed
   `ExistingSnapshotMismatch`, never accepted as replay;
-- a new digest inserts or verifies every content-addressed raw blob, then
-  atomically inserts one header, every raw occurrence, and every normalized
-  entry; a concurrent header-insert loser re-inspects and completely
-  reconstitutes the winner, returning `AlreadyImported` only after the same
-  conversion-equivalence check, and raw-blob insert conflicts likewise reload
-  and verify the winning bytes before reuse; writers acquire both shared raw
-  hashes and globally unique imported-entry identities in their respective
-  sorted key order while storing physical positions explicitly; and
+- a new digest enters this transaction only after every content-addressed raw
+  blob has been published, verified, and registered without an open database
+  transaction, then atomically inserts one header, every raw occurrence, and
+  every normalized entry; a concurrent header-insert loser re-inspects and
+  completely reconstitutes the winner, returning `AlreadyImported` only after
+  the same conversion-equivalence check; writers acquire both shared raw hashes
+  and globally unique imported-entry identities in their respective sorted key
+  order while storing physical positions explicitly; and
 - every raw occurrence stores and rechecks its conversion digest before its
   normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
@@ -672,11 +672,13 @@ The migration initially admits exactly one of legacy `raw_bytes` or the blob
 reference. Before socket admission, a restart-safe barrier verifies one legacy
 row's hash, publishes and registers it without an open database transaction,
 then locks and rechecks the row before replacing its bytes with the digest.
-Restart skips transitioned rows. This barrier is governed only by
-`blob_storage.max_blob_bytes`, not the current new-import admission limit: an
-oversized acknowledged legacy row makes startup fail until the blob ceiling is
-raised. Omitted blob configuration is admitted only when there is no such
-backlog. After the barrier, new imports write only blob references.
+Restart re-verifies the routed replica for a transitioned row before skipping
+it. This barrier is governed only by `blob_storage.max_blob_bytes`, not the
+current new-import admission limit: an oversized acknowledged legacy row makes
+startup fail until the blob ceiling is raised. The owning
+[blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration)
+defines when omitted configuration is compatible with both durable inventories.
+After the barrier, new imports write only blob references.
 
 ## Derived display titles
 
