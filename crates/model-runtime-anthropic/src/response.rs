@@ -6,7 +6,7 @@ use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderMessageId,
     ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
-    ToolCallProposal, ToolName, validate_provider_json_nesting,
+    ToolCallProposal, ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
 use crate::wire::{MessagesResponse, WireResponseBlock, WireUsage, parse_response_block};
@@ -76,6 +76,81 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
     }
 }
 
+/// Whether a `tool_use` block had been reached in the content blocks the decode
+/// classified before it stopped.
+///
+/// Sticky across the block loop: once a call has opened, no later block can
+/// unopen it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallsOpened {
+    /// A `tool_use` block was reached.
+    Yes,
+    /// No `tool_use` block was reached in the blocks classified so far.
+    No,
+}
+
+/// Whether content blocks the loop never classified sit after the block that
+/// stopped the decode.
+///
+/// This is the axis that separates a withheld answer from a stated negative: a
+/// rejection on the final block leaves nothing unexamined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaterBlocks {
+    /// Blocks after the stopping one were never classified.
+    Unexamined,
+    /// The stopping block was the last, so every block was classified.
+    AllClassified,
+}
+
+/// The tool fact where the decode stopped on a block whose own content never
+/// parsed.
+///
+/// The provider sends content blocks as opaque JSON values that this adapter
+/// classifies one at a time, so a block that failed to parse could itself have
+/// been a `tool_use` — its own material is unexamined whatever its position in
+/// the list.
+fn unparsed_block_tool_calls(opened: ToolCallsOpened) -> ToolCallsAtLoss {
+    match opened {
+        ToolCallsOpened::Yes => ToolCallsAtLoss::Opened,
+        ToolCallsOpened::No => ToolCallsAtLoss::Unobserved,
+    }
+}
+
+/// The tool fact where the decode stopped on a block it had already classified.
+///
+/// Rejecting a block the adapter understood — a fallback marker, an unsigned
+/// thinking block, an unrecognized block type — leaves that block examined and
+/// known not to be a tool call, so only the blocks the loop never reached can
+/// withhold the answer. When the rejected block is the last one, nothing is
+/// unexamined and the negative is a fact.
+fn examined_block_tool_calls(opened: ToolCallsOpened, later: LaterBlocks) -> ToolCallsAtLoss {
+    match (opened, later) {
+        (ToolCallsOpened::Yes, LaterBlocks::Unexamined | LaterBlocks::AllClassified) => {
+            ToolCallsAtLoss::Opened
+        }
+        (ToolCallsOpened::No, LaterBlocks::Unexamined) => ToolCallsAtLoss::Unobserved,
+        (ToolCallsOpened::No, LaterBlocks::AllClassified) => ToolCallsAtLoss::NoneOpened,
+    }
+}
+
+/// The tool fact for a buffered decode that classified every content block.
+fn classified_tool_calls(opened: ToolCallsOpened) -> ToolCallsAtLoss {
+    examined_block_tool_calls(opened, LaterBlocks::AllClassified)
+}
+
+/// The tool fact where the envelope decoded but its content was never walked.
+///
+/// An empty content list is a decoded fact: the provider sent no blocks, so no
+/// tool call opened and the negative is established without classifying
+/// anything. A non-empty list is opaque until the loop reaches it.
+fn unwalked_content_tool_calls(content: &[Box<serde_json::value::RawValue>]) -> ToolCallsAtLoss {
+    if content.is_empty() {
+        ToolCallsAtLoss::NoneOpened
+    } else {
+        ToolCallsAtLoss::Unobserved
+    }
+}
+
 /// Decodes a complete success-status response body into terminal evidence,
 /// emitting the facts it learns as observations along the way.
 ///
@@ -101,6 +176,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model: None,
             finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
             usage: TokenUsage::unreported(),
         });
     }
@@ -114,6 +190,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 exchange,
                 reported_model: None,
                 finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
                 usage: TokenUsage::unreported(),
             });
         }
@@ -130,6 +207,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model: None,
             finish_reported: None,
+            tool_calls: unwalked_content_tool_calls(&response.content),
             usage: TokenUsage::unreported(),
         });
     }
@@ -165,12 +243,28 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: unwalked_content_tool_calls(&response.content),
             usage,
         });
     }
     let mut content = Vec::new();
     let mut tool_call_ids = BTreeSet::new();
-    for raw_block in response.content {
+    // Sticky, and deliberately not derived from `tool_call_ids`: that set holds
+    // only the proposals that survived validation, but `convert_block` rejects a
+    // `tool_use` block with a non-object `input` after its identity and name are
+    // already decoded. Reading the set would report "none opened" for exactly
+    // the malformed proposals this fact exists to distinguish.
+    let mut opened_tool_calls = ToolCallsOpened::No;
+    let block_count = response.content.len();
+    for (block_index, raw_block) in response.content.into_iter().enumerate() {
+        // Whether the loop still has blocks it has not classified. A rejection
+        // on the final block leaves nothing unexamined, so the negative is a
+        // fact rather than a gap.
+        let later_blocks = if block_index + 1 < block_count {
+            LaterBlocks::Unexamined
+        } else {
+            LaterBlocks::AllClassified
+        };
         let block = match parse_response_block(&raw_block) {
             Ok(block) => block,
             Err(error) => {
@@ -183,6 +277,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
+                    tool_calls: unparsed_block_tool_calls(opened_tool_calls),
                     usage,
                 });
             }
@@ -209,8 +304,15 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 exchange,
                 reported_model,
                 finish_reported: None,
+                tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                 usage,
             });
+        }
+        if matches!(block, WireResponseBlock::ToolUse { .. }) {
+            // Set before the conversion below, which can reject this block for a
+            // non-object `input` and return `None` indistinguishably from an
+            // unrecognized block type. The call demonstrably opened either way.
+            opened_tool_calls = ToolCallsOpened::Yes;
         }
         match convert_block(block) {
             Some(part)
@@ -231,6 +333,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
+                    tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                     usage,
                 });
             }
@@ -247,6 +350,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                             exchange,
                             reported_model,
                             finish_reported: None,
+                            tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                             usage,
                         });
                     }
@@ -266,6 +370,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
+                    tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                     usage,
                 });
             }
@@ -283,6 +388,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     };
@@ -295,6 +401,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -311,6 +418,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -323,6 +431,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: Some(finish),
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -341,6 +450,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: Some(finish),
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -370,7 +480,8 @@ mod tests {
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
         ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderMessageId, ProviderReportedModel,
-        ProviderRequestId, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        ProviderRequestId, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+        ToolCallsAtLoss, ToolName,
     };
 
     use super::{decode_buffered_response, map_finish};
@@ -565,6 +676,269 @@ mod tests {
             Some(ProviderReportedModel::new("model-exact-1"))
         );
         assert_eq!(loss.usage.input_tokens, Some(3));
+    }
+
+    /// a decode that stopped part way through the content blocks does
+    /// not report "no tool call opened".
+    ///
+    /// The provider sends content blocks as opaque values this adapter
+    /// classifies one at a time. A block it cannot classify ends the decode
+    /// with the following blocks unexamined, so their tool material is
+    /// unobserved — reporting it as absent would be a claim the decode never
+    /// established.
+    #[test]
+    fn a_decode_abandoned_mid_content_withholds_the_tool_fact() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "quasar"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an unclassifiable content block is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A `tool_use` block whose `input` is not an object is rejected by
+    /// `convert_block` *after* its identity and name are decoded, and never
+    /// reaches `tool_call_ids`. Reading the surviving-proposal set would report
+    /// the malformed proposal as no tool call at all — the exact distinction
+    /// this fact exists to carry.
+    #[test]
+    fn a_tool_call_rejected_for_a_non_object_input_still_reports_as_opened() {
+        let (evidence, observations) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": "not-an-object"}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a tool_use block with a non-object input is not completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+        // The rejected proposal reaches no observation, so the evidence field is
+        // the only channel carrying the fact that a call opened.
+        assert!(
+            !observations.iter().any(|observation| matches!(
+                observation.fact,
+                ObservationFact::ToolCallProposed(_)
+            )),
+            "a rejected proposal is never emitted as an observation"
+        );
+    }
+
+    /// Decodes a body whose only content block is `content`, asserting the tool
+    /// fact its rejection carries.
+    ///
+    /// Plumbing only: the body shape is irrelevant to what each case states, and
+    /// the block under test stays at its own call site.
+    #[track_caller]
+    fn assert_sole_block_tool_fact(content: &str, expected: ToolCallsAtLoss) {
+        let (evidence, _) = decode(&format!(
+            r#"{{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{content}],
+                "stop_reason": "end_turn",
+                "usage": {{"input_tokens": 3, "output_tokens": 1}}
+            }}"#
+        ));
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a rejected content block is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, expected);
+    }
+
+    /// An envelope that decoded with no content blocks establishes the negative
+    /// without walking anything: the provider sent nothing that could open a
+    /// call.
+    #[test]
+    fn an_empty_decoded_content_list_states_the_negative() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "quasar",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a bad envelope discriminator is not completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// The same exit with blocks present withholds: they are opaque until the
+    /// loop reaches them, and it never runs.
+    #[test]
+    fn an_unwalked_non_empty_content_list_withholds() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "quasar",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{"type": "text", "text": "hi"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a bad envelope discriminator is not completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A sole fallback marker is classified and known not to be a tool call,
+    /// and nothing follows it, so the negative is a fact.
+    #[test]
+    fn a_sole_fallback_block_states_the_negative() {
+        assert_sole_block_tool_fact(
+            r#"{"type": "fallback", "to_model": "other-model"}"#,
+            ToolCallsAtLoss::NoneOpened,
+        );
+    }
+
+    /// The same for a sole thinking block rejected for its missing signature.
+    #[test]
+    fn a_sole_unsigned_thinking_block_states_the_negative() {
+        assert_sole_block_tool_fact(
+            r#"{"type": "thinking", "thinking": "hm", "signature": ""}"#,
+            ToolCallsAtLoss::NoneOpened,
+        );
+    }
+
+    /// An unrecognized block type is still classified — serde matching no known
+    /// variant proves it is not `tool_use` — so it too states the negative.
+    #[test]
+    fn a_sole_unrecognized_block_states_the_negative() {
+        assert_sole_block_tool_fact(r#"{"type": "quasar"}"#, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// A block whose own bytes never parsed withholds even as the sole block:
+    /// its content is unexamined whatever its position.
+    #[test]
+    fn a_sole_unparsed_block_withholds() {
+        assert_sole_block_tool_fact(r#"{"type": 7}"#, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// The same rejections with a block still behind them withhold, which is
+    /// what makes the test above a statement about position rather than cause.
+    #[test]
+    fn the_same_rejection_with_a_block_behind_it_withholds() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "fallback", "to_model": "other-model"},
+                    {"type": "text", "text": "hi"}
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a fallback block is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A tool call already classified is a fact the same abandoned decode can
+    /// state, so the withholding above is not a blanket refusal to answer.
+    #[test]
+    fn a_decode_abandoned_after_a_tool_call_still_reports_it() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
+                    {"type": "quasar"}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an unclassifiable content block is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// Decodes a response whose sole content block is `content`, under a stop
+    /// reason that is not definitive completion material, and asserts the tool
+    /// fact its boundary loss carries.
+    #[track_caller]
+    fn assert_classified_tool_fact(content: &str, expected: ToolCallsAtLoss) {
+        let (evidence, _) = decode(&format!(
+            r#"{{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{content}],
+                "stop_reason": "quasar",
+                "usage": {{"input_tokens": 3, "output_tokens": 1}}
+            }}"#
+        ));
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an unrecognized stop_reason is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, expected);
+    }
+
+    /// Every block was classified and none was a tool call, so the decode
+    /// examined the material the question is about and states the negative.
+    #[test]
+    fn a_fully_classified_decode_without_a_tool_call_states_the_negative() {
+        assert_classified_tool_fact(
+            r#"{"type": "text", "text": "hi"}"#,
+            ToolCallsAtLoss::NoneOpened,
+        );
+    }
+
+    /// The same decode carrying a `tool_use` block reports it, so a caller reads
+    /// one vocabulary from a complete and a partial decode.
+    #[test]
+    fn a_fully_classified_decode_with_a_tool_call_reports_it() {
+        assert_classified_tool_fact(
+            r#"{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}"#,
+            ToolCallsAtLoss::Opened,
+        );
     }
 
     #[test]

@@ -444,7 +444,10 @@ impl PostgresToolLoopRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
