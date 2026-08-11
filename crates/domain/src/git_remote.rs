@@ -10,7 +10,15 @@ const MAX_REMOTE_NAME_BYTES: usize = 255;
 const MAX_REMOTE_URL_BYTES: usize = 4096;
 
 /// Longest admitted workspace root in bytes.
-const MAX_WORKSPACE_ROOT_BYTES: usize = 4096;
+///
+/// The bound is smaller than a platform `PATH_MAX` because the durable record
+/// indexes the root together with the remote name, and a PostgreSQL B-tree
+/// index tuple may not exceed roughly a third of an 8 KiB page. A longer bound
+/// would let an otherwise valid mint fail on index insertion rather than here.
+const MAX_WORKSPACE_ROOT_BYTES: usize = 1024;
+
+/// Reference component suffix Git refuses.
+const REFUSED_NAME_SUFFIX: &str = ".lock";
 
 /// The only admitted destination scheme.
 const REQUIRED_URL_SCHEME: &str = "https://";
@@ -73,21 +81,79 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), GitRemoteTextError> 
     Ok(())
 }
 
+/// Returns whether one URL authority names a host an HTTPS transport could
+/// dispatch to.
+///
+/// The admitted shape mirrors the SQL predicate byte for byte: an optional
+/// `userinfo@`, then either a bracketed IPv6 literal or a host of unreserved
+/// name bytes, then an optional numeric port. A scheme-only destination such as
+/// `https://?` carries an empty authority and is refused here.
+fn authority_names_a_host(authority: &str) -> bool {
+    let host_and_port = authority
+        .split_once('@')
+        .map_or(authority, |(_, remainder)| remainder);
+    if let Some(remainder) = host_and_port.strip_prefix('[') {
+        let Some((literal, trailing)) = remainder.split_once(']') else {
+            return false;
+        };
+        return !literal.is_empty()
+            && literal
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || matches!(byte, b':' | b'.'))
+            && trailing_port_is_numeric(trailing);
+    }
+    let (host, port) = host_and_port
+        .split_once(':')
+        .map_or((host_and_port, None), |(host, port)| (host, Some(port)));
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'~'))
+        && port.is_none_or(port_is_numeric)
+}
+
+/// Returns whether the bytes after a bracketed host are absent or a port.
+fn trailing_port_is_numeric(trailing: &str) -> bool {
+    trailing
+        .strip_prefix(':')
+        .map_or(trailing.is_empty(), port_is_numeric)
+}
+
+/// Returns whether one port is a non-empty run of digits.
+fn port_is_numeric(port: &str) -> bool {
+    !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// One stable operator-chosen remote name.
 ///
 /// The admitted shape is deliberately narrower than Git's own reference
 /// grammar so that one durable row, one Git reference component, and one
 /// command argument all admit exactly the same values.
+///
+/// Narrower is only sound while it stays a subset. The push executor builds
+/// `refs/remotes/<name>/probe` and validates it as a Git reference, so a name
+/// this type admitted but that reference grammar refused would mint a durable
+/// destination the executor could never resolve. The dot rules below are that
+/// grammar's component rules: no leading dot, no `..`, no trailing dot, and no
+/// `.lock` suffix.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GitRemoteName(String);
 
 impl GitRemoteName {
-    /// Admits one bounded alphanumeric, dot, dash, or underscore name.
+    /// Admits one bounded alphanumeric, dot, dash, or underscore name that is
+    /// also a legal Git reference component.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
         validate_text(&value, MAX_REMOTE_NAME_BYTES)?;
         if !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(GitRemoteTextError::Malformed);
+        }
+        if value.starts_with('.')
+            || value.ends_with('.')
+            || value.contains("..")
+            || value.ends_with(REFUSED_NAME_SUFFIX)
         {
             return Err(GitRemoteTextError::Malformed);
         }
@@ -113,19 +179,23 @@ impl GitRemoteName {
 pub struct GitRemoteUrl(String);
 
 impl GitRemoteUrl {
-    /// Admits one bounded https URL without control or space bytes.
+    /// Admits one bounded https URL naming a host, without control or space
+    /// bytes.
     pub fn try_new(value: String) -> Result<Self, GitRemoteTextError> {
         validate_text(&value, MAX_REMOTE_URL_BYTES)?;
-        if !value.starts_with(REQUIRED_URL_SCHEME) {
+        let Some(remainder) = value.strip_prefix(REQUIRED_URL_SCHEME) else {
             return Err(GitRemoteTextError::UnsupportedScheme);
-        }
-        if value.len() == REQUIRED_URL_SCHEME.len() {
-            return Err(GitRemoteTextError::Malformed);
-        }
+        };
         if value
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
         {
+            return Err(GitRemoteTextError::Malformed);
+        }
+        let authority = remainder
+            .find(['/', '?', '#'])
+            .map_or(remainder, |offset| &remainder[..offset]);
+        if !authority_names_a_host(authority) {
             return Err(GitRemoteTextError::Malformed);
         }
         Ok(Self(value))
@@ -252,6 +322,36 @@ mod tests {
     }
 
     #[test]
+    fn a_name_git_would_refuse_as_a_reference_component_is_refused() {
+        for refused in [
+            ".origin",
+            "origin..backup",
+            "origin.",
+            "origin.lock",
+            "..",
+            ".",
+        ] {
+            assert_eq!(
+                GitRemoteName::try_new(refused.to_owned()),
+                Err(GitRemoteTextError::Malformed),
+                "{refused} is not a legal Git reference component"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_carrying_interior_punctuation_is_admitted() {
+        for admitted in ["up-stream_2", "v1.0", "origin.lockfile"] {
+            assert_eq!(
+                GitRemoteName::try_new(admitted.to_owned())
+                    .as_ref()
+                    .map(GitRemoteName::as_str),
+                Ok(admitted)
+            );
+        }
+    }
+
+    #[test]
     fn an_empty_name_is_refused() {
         assert_eq!(
             GitRemoteName::try_new(String::new()),
@@ -287,6 +387,55 @@ mod tests {
         assert_eq!(
             GitRemoteUrl::try_new("https://".to_owned()),
             Err(GitRemoteTextError::Malformed)
+        );
+    }
+
+    #[test]
+    fn a_destination_naming_no_host_is_refused() {
+        for refused in [
+            "https://?",
+            "https://#fragment",
+            "https:///namespace/project.git",
+            "https://user@/project.git",
+            "https://example.test:/project.git",
+            "https://example.test:https/project.git",
+        ] {
+            assert_eq!(
+                GitRemoteUrl::try_new(refused.to_owned()),
+                Err(GitRemoteTextError::Malformed),
+                "{refused} names no dispatchable host"
+            );
+        }
+    }
+
+    #[test]
+    fn a_destination_naming_a_host_is_admitted() {
+        for admitted in [
+            "https://example.test:8443/namespace/project.git",
+            "https://user@example.test/namespace/project.git",
+            "https://[2001:db8::1]/namespace/project.git",
+            "https://[2001:db8::1]:8443/namespace/project.git",
+            "https://example.test",
+        ] {
+            assert_eq!(
+                GitRemoteUrl::try_new(admitted.to_owned())
+                    .as_ref()
+                    .map(GitRemoteUrl::as_str),
+                Ok(admitted)
+            );
+        }
+    }
+
+    #[test]
+    fn a_workspace_root_beyond_the_indexed_bound_is_refused() {
+        let root = format!("/{}", "a".repeat(MAX_WORKSPACE_ROOT_BYTES));
+
+        assert_eq!(
+            GitRemoteWorkspaceRoot::try_new(root),
+            Err(GitRemoteTextError::TooLong {
+                bytes: MAX_WORKSPACE_ROOT_BYTES + 1,
+                maximum: MAX_WORKSPACE_ROOT_BYTES,
+            })
         );
     }
 

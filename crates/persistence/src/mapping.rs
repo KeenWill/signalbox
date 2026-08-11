@@ -498,6 +498,10 @@ pub(crate) enum DurableCommandKind {
     Goal,
     /// Session placement update.
     UpdateSessionPlacement,
+    /// Git remote mint.
+    MintGitRemote,
+    /// Git remote withdrawal.
+    WithdrawGitRemote,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -516,6 +520,8 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::CompactSession => "compact_session",
         DurableCommandKind::Goal => "goal",
         DurableCommandKind::UpdateSessionPlacement => "update_session_placement",
+        DurableCommandKind::MintGitRemote => "mint_git_remote",
+        DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
     }
 }
 
@@ -535,6 +541,8 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "compact_session" => Some(DurableCommandKind::CompactSession),
         "goal" => Some(DurableCommandKind::Goal),
         "update_session_placement" => Some(DurableCommandKind::UpdateSessionPlacement),
+        "mint_git_remote" => Some(DurableCommandKind::MintGitRemote),
+        "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
         _ => None,
     }
 }

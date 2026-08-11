@@ -685,7 +685,9 @@ impl SubmitInputRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -775,7 +777,9 @@ where
             | CommandKind::ReviewOrchestration
             | CommandKind::CompactSession
             | CommandKind::Goal
-            | CommandKind::UpdateSessionPlacement,
+            | CommandKind::UpdateSessionPlacement
+            | CommandKind::MintGitRemote
+            | CommandKind::WithdrawGitRemote,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -814,7 +818,9 @@ where
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),
