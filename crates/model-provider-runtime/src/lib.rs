@@ -1107,6 +1107,12 @@ where
         let request = operation.request();
         let call = request.call();
         let correlation = call.id();
+        let telemetry = ModelCallTelemetry {
+            session: request.session(),
+            turn: request.turn(),
+            attempt: request.attempt(),
+            call: correlation,
+        };
         let (definition, effective_definition) = runtime_delivery_definitions(
             &self.models,
             call.target(),
@@ -1114,19 +1120,10 @@ where
         )
         .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(operation.messages());
-        let tools = operation
-            .tools()
-            .iter()
-            .map(|definition| {
-                let schema = decode_checked_raw_json(definition.input_schema().as_str())
-                    .map_err(|_| RuntimeInputTokenCountError::InvalidToolSchema)?;
-                Ok(ToolDefinition::with_raw_schema(
-                    definition.name().as_str(),
-                    definition.description(),
-                    schema,
-                ))
-            })
-            .collect::<Result<Vec<_>, RuntimeInputTokenCountError>>()?;
+        let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
+            report_invalid_runtime_tool_schema(telemetry, &error);
+            RuntimeInputTokenCountError::InvalidToolSchema
+        })?;
         let mut runtime_operation = ModelOperation::new(
             correlation,
             CredentialReference::new(operation.credential_reference().as_str().to_owned()),
@@ -1213,25 +1210,14 @@ where
             frontier: call.frontier().snapshot(),
         };
         let messages = render_runtime_messages(operation.messages());
-        let tools = operation
-            .tools()
-            .iter()
-            .map(|definition| {
-                let schema =
-                    decode_checked_raw_json(definition.input_schema().as_str()).map_err(|_| {
-                        fail_closed(
-                            telemetry,
-                            RuntimeModelCallProviderError::InvalidToolSchema,
-                            None,
-                        )
-                    })?;
-                Ok(ToolDefinition::with_raw_schema(
-                    definition.name().as_str(),
-                    definition.description(),
-                    schema,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let tools = runtime_tool_definitions(operation.tools()).map_err(|error| {
+            report_invalid_runtime_tool_schema(telemetry, &error);
+            fail_closed(
+                telemetry,
+                RuntimeModelCallProviderError::InvalidToolSchema,
+                None,
+            )
+        })?;
         let selected_target = ResolvedTarget::new(definition.provider_model().to_owned());
         let resolved_target = ResolvedTarget::new(effective_definition.provider_model().to_owned());
         let mut runtime_operation = ModelOperation::new(
@@ -1427,6 +1413,25 @@ fn fail_closed(
         ),
     }
     error
+}
+
+/// Records the attributed local schema defect before callers collapse it into
+/// their stable coarse outcome. `serde_json` syntax errors carry only grammar
+/// and source-position evidence; the rejected schema bytes are never logged.
+fn report_invalid_runtime_tool_schema(
+    telemetry: ModelCallTelemetry,
+    error: &InvalidRuntimeToolSchema,
+) {
+    tracing::error!(
+        failure_class = ?OperatorFailureClass::CallerOrHubBug,
+        cause_code = ModelCallCauseCode::InvalidToolSchema.as_str(),
+        session_id = %telemetry.session.as_uuid(),
+        turn_id = %telemetry.turn.as_uuid(),
+        model_call_id = %telemetry.call.as_uuid(),
+        tool_name = error.tool_name.as_str(),
+        schema_error = %error.source,
+        "application tool schema was rejected at the runtime bridge"
+    );
 }
 
 /// Records one classified terminal outcome for operators.
@@ -1643,6 +1648,65 @@ fn decode_checked_raw_json(
     value: &str,
 ) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
     serde_json::value::RawValue::from_string(value.to_owned())
+}
+
+/// One application tool definition carried a schema that is not valid JSON.
+#[derive(Debug)]
+pub struct InvalidRuntimeToolSchema {
+    tool_name: String,
+    source: serde_json::Error,
+}
+
+impl InvalidRuntimeToolSchema {
+    /// Returns the safe application tool name whose schema was rejected.
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+}
+
+impl fmt::Display for InvalidRuntimeToolSchema {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "application tool schema is invalid at the runtime bridge: {}",
+            self.tool_name
+        )
+    }
+}
+
+impl Error for InvalidRuntimeToolSchema {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Projects one application tool catalog into the runtime tool definitions
+/// every adapter receives.
+///
+/// This is the single production projection from the daemon registry toward a
+/// provider. Conformance tests derive their bridge input through it rather
+/// than reproducing it, so a projection that drops or alters a tool is
+/// classified instead of being reproduced on both sides of an assertion.
+pub fn runtime_tool_definitions(
+    definitions: &[signalbox_application::ToolDefinition],
+) -> Result<Vec<ToolDefinition>, InvalidRuntimeToolSchema> {
+    definitions
+        .iter()
+        .map(|definition| {
+            let schema =
+                decode_checked_raw_json(definition.input_schema().as_str()).map_err(|source| {
+                    InvalidRuntimeToolSchema {
+                        tool_name: definition.name().as_str().to_owned(),
+                        source,
+                    }
+                })?;
+            Ok(ToolDefinition::with_raw_schema(
+                definition.name().as_str(),
+                definition.description(),
+                schema,
+            ))
+        })
+        .collect()
 }
 
 /// A correlation mismatch is a fail-closed bridge defect like any other, so
@@ -2058,14 +2122,17 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AcceptanceObservations, ModelCallTelemetry, ProviderTextDelta, ProviderTextDeltaContext,
-        ProviderTextDeltaSink, RuntimeInputTokenCountError, RuntimeModelCallProviderError,
-        RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition,
-        RuntimeModelDefinitionError, classify_terminal, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages, runtime_delivery_definitions,
-        runtime_model_settings,
+        AcceptanceObservations, InvalidRuntimeToolSchema, ModelCallTelemetry, ProviderTextDelta,
+        ProviderTextDeltaContext, ProviderTextDeltaSink, RuntimeInputTokenCountError,
+        RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
+        RuntimeModelDefinition, RuntimeModelDefinitionError, classify_terminal,
+        decode_checked_raw_json, provider_reported_token_usage, render_runtime_messages,
+        runtime_delivery_definitions, runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
+
+    const SYNTHETIC_MALFORMED_TOOL_SCHEMA: &str = "{";
+    const SYNTHETIC_INVALID_TOOL_NAME: &str = "synthetic_invalid_tool";
 
     fn call() -> ModelCallId {
         ModelCallId::from_uuid(Uuid::from_u128(1))
@@ -3375,6 +3442,27 @@ mod tests {
         assert_eq!(
             RuntimeInputTokenCountError::CountFailed.operator_failure_cause_code(),
             "model_input_count_provider_failure"
+        );
+    }
+
+    #[test]
+    fn invalid_runtime_tool_schema_retains_its_json_source() {
+        let source = serde_json::from_str::<serde_json::Value>(SYNTHETIC_MALFORMED_TOOL_SCHEMA)
+            .expect_err("synthetic schema is invalid JSON");
+        let expected_source = source.to_string();
+        let error = InvalidRuntimeToolSchema {
+            tool_name: String::from(SYNTHETIC_INVALID_TOOL_NAME),
+            source,
+        };
+
+        expect![[
+            "application tool schema is invalid at the runtime bridge: synthetic_invalid_tool"
+        ]]
+        .assert_eq(&error.to_string());
+        assert_eq!(error.tool_name(), SYNTHETIC_INVALID_TOOL_NAME);
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some(expected_source)
         );
     }
 

@@ -17,11 +17,11 @@ final class LiveScreenRendererTests: XCTestCase {
     func testRenderingWaitsPastAFirstStableMatchForContentThatIsStillLoading() async {
         let loadsLate = await LiveScreenRenderer.render(
             DelayedContentView(before: .red, after: .blue, delay: .milliseconds(400)),
-            canvas: .compact
+            canvas: .iPhonePortrait
         )
         let loadedThroughout = await LiveScreenRenderer.render(
             DelayedContentView(before: .blue, after: .blue, delay: .milliseconds(400)),
-            canvas: .compact
+            canvas: .iPhonePortrait
         )
 
         XCTAssertEqual(
@@ -40,12 +40,12 @@ final class LiveScreenRendererTests: XCTestCase {
     func testRenderingRejectsAFrameTakenWhileTheScreenIsStillMoving() async {
         let stillMoving = await LiveScreenRenderer.render(
             SteppingThenRestingView(),
-            canvas: .compact,
+            canvas: .iPhonePortrait,
             timeout: .seconds(20)
         )
         let atRest = await LiveScreenRenderer.render(
             RestingView(),
-            canvas: .compact,
+            canvas: .iPhonePortrait,
             timeout: .seconds(20)
         )
 
@@ -66,7 +66,7 @@ final class LiveScreenRendererTests: XCTestCase {
 
         _ = await LiveScreenRenderer.render(
             ContinuouslyChangingView(),
-            canvas: .compact,
+            canvas: .iPhonePortrait,
             timeout: LiveScreenRenderer.minimumSettle + .milliseconds(500)
         )
     }
