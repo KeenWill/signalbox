@@ -541,6 +541,33 @@ const fn parent_aliases_the_configured_root(
         || parent.is_the_same_directory_as(standing.administration)
 }
 
+/// Whether a composed workspace is the very directory its pathname was reached
+/// through.
+///
+/// A session's identifier directory that is a bind mount of `<name>.sessions`
+/// itself composes to a root whose identity is the parent's own. The parent is
+/// the directory holding every sibling session's root, so admitting it would
+/// give one session a workspace that contains every other session's, and its
+/// mutation and execution tools reach all of them.
+///
+/// No other comparison shows it. The configured checks compare against the
+/// configured composition, which this parent is not, and `another_session_bound`
+/// compares against the pairs other sessions bound, which are distinct
+/// directories nested inside this one — ancestry is not equality. The parent is
+/// carried precisely because nothing downstream can recover it, so this is the
+/// one site holding both values.
+///
+/// Both composed directories are compared: a `.git` standing on the parent
+/// nests the siblings inside this session's administration directory just as a
+/// root standing on it nests them inside its worktree.
+const fn composition_aliases_its_own_parent(
+    composed: ComposedWorkspaceIdentity,
+    parent: ComposedRootIdentity,
+) -> bool {
+    composed.root.is_the_same_directory_as(parent)
+        || composed.administration.is_the_same_directory_as(parent)
+}
+
 /// Whether any session other than `session` holds a derived binding at all.
 ///
 /// Asked before the configured pathname is captured, so a deployment where no
@@ -1938,6 +1965,12 @@ where
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
+                    // The bound pair can equal the directory it is reached
+                    // through, which makes this session's workspace the one
+                    // holding every sibling session's root.
+                    if composition_aliases_its_own_parent(bound, *parent) {
+                        return Err(SessionWorkspaceFailure::SharedRootIdentity);
+                    }
                 }
                 if let Some(retained) = state.retained.get(session) {
                     return Ok(retained);
@@ -1992,6 +2025,14 @@ where
             self.configured.workspace_identity,
             standing_configured,
         ) {
+            return Err(SessionWorkspaceFailure::SharedRootIdentity);
+        }
+        // The composed pair can be disjoint from the configured composition and
+        // from every other session's, and still be the directory this pathname
+        // was reached through — a session identifier directory bind-mounted
+        // onto `<name>.sessions` itself — which makes this workspace the one
+        // holding every sibling session's root.
+        if composition_aliases_its_own_parent(composed, parent) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
         let mut state = self.state.lock().await;
@@ -4134,6 +4175,56 @@ mod tests {
             FIXTURE_PARENT_IDENTITY,
             FIXTURE_BOUND_IDENTITY,
             FIXTURE_CONFIGURED_STANDING_IDENTITY
+        ));
+    }
+
+    /// A session identifier directory bind-mounted onto `<name>.sessions`
+    /// itself composes to a root whose identity is the parent's own. The parent
+    /// holds every sibling session's root, so admitting it would hand one
+    /// session a workspace containing every other session's.
+    #[test]
+    fn a_composition_standing_on_its_own_parent_is_refused() {
+        let composed = ComposedWorkspaceIdentity {
+            root: FIXTURE_PARENT_IDENTITY,
+            administration: ComposedRootIdentity {
+                device: 0x10,
+                inode: 0xa0,
+            },
+        };
+
+        assert!(composition_aliases_its_own_parent(
+            composed,
+            FIXTURE_PARENT_IDENTITY
+        ));
+    }
+
+    /// A `.git` standing on the parent nests the siblings inside this session's
+    /// administration directory just as a root standing on it nests them inside
+    /// its worktree, so both composed directories are compared.
+    #[test]
+    fn a_composition_administering_its_own_parent_is_refused() {
+        let composed = ComposedWorkspaceIdentity {
+            root: ComposedRootIdentity {
+                device: 0x10,
+                inode: 0xa1,
+            },
+            administration: FIXTURE_PARENT_IDENTITY,
+        };
+
+        assert!(composition_aliases_its_own_parent(
+            composed,
+            FIXTURE_PARENT_IDENTITY
+        ));
+    }
+
+    /// The ordinary derived workspace sits inside the parent rather than being
+    /// it. Nesting is what the derivation is for, and ancestry is not equality,
+    /// so an ordinary composition is admitted here.
+    #[test]
+    fn a_composition_nested_in_its_parent_is_admitted() {
+        assert!(!composition_aliases_its_own_parent(
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_PARENT_IDENTITY
         ));
     }
 

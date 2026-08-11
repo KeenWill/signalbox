@@ -672,10 +672,17 @@ bind-mounted onto the configured root presents a real directory rather than a
 symlink, so the classification admits it while every child beneath it is nested
 inside the configured workspace — which the bound pair cannot show, since
 ancestry is not equality. The pinned and the standing configured pairs are both
-compared, since the configured pathname is never re-resolved. An accepted
-residual: a parent that is a real directory whose contents are a bind mount of a
-tree inside the configured root presents no symlink and no shared directory
-identity, and is admitted.
+compared, since the configured pathname is never re-resolved. A composed
+workspace that is the parent itself, rather than a directory inside it, is
+refused on the same comparison: a session's identifier directory bind-mounted
+onto that parent composes to the directory holding every sibling session's root,
+which neither the configured comparison nor another session's bound pair can
+show. Either composed directory standing on the parent is refused, since a
+`.git` there nests the siblings inside this session's administration directory
+just as a root there nests them inside its worktree. An accepted residual: a
+parent that is a real directory whose contents are a bind mount of a tree inside
+the configured root presents no symlink and no shared directory identity, and is
+admitted.
 
 Classifying the parent is a statement about one instant, so its identity is
 captured with that classification and revalidated wherever the pathname is
