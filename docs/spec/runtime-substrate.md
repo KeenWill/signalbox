@@ -42,10 +42,13 @@ composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
 the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
 Anthropic compatibility smoke was verified through PR #465
 (`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
-#466 (`agent/openai-api-smoke`). This page covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the four provider adapters; and their
-credential boundaries. Layer-2 authorization and evidence classification
+#466 (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
+carried in boundary-loss evidence is verified against this PR
+(`agent/typed-loss-cause`), against every streamed and buffered loss path in the
+four adapters. This page covers the provider-neutral operation, observation, and
+evidence vocabulary; SSE framing; structured-output and tool decode;
+`ScriptedModel`; the four provider adapters; and their credential boundaries.
+Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -243,6 +246,40 @@ strings appear only as retained detail inside already-classified variants:
   unintelligible success body, unexpected HTTP status, stream ended without
   terminal marker, stream protocol violation) and the partial facts observed
   before the loss.
+
+The partial facts include `ToolCallsAtLoss`: whether a tool call had opened in
+the response material the adapter decoded before the loss — opened, none opened,
+or unobserved. A tool call can open without producing any observation, because a
+provider may announce a call's identity and name and then be cut off before any
+argument fragment while the proposal observation is emitted only on
+finalization; and `LossCause` answers only *how* the exchange was lost. Without
+this fact the distinction is reachable only by reading a rendered violation
+detail, which the terminal-evidence rule above forbids. Like `finish_reported`,
+it reports the decoded prefix and nothing beyond it: none opened says no tool
+call opened in what the adapter decoded, never that the provider sent none.
+`Unobserved` is the honest answer where an adapter is not positioned to know — a
+body that never parsed, a decode abandoned with content blocks unexamined, a
+streamed record or CLI event that failed its framing, JSON-bound, or typed-event
+decode, a stream whose framing ended inside an incomplete record, material the
+runner read off the transport but never delivered to a decoder — a framed record
+dropped when cancellation lands mid-chunk, a CLI line past the event bound, a
+partial line lost when a deadline drops the reader — a loss raised by a layer
+that reads no response material, and every Codex CLI loss raised before the
+agent-message envelope parses, since that adapter's item lifecycle carries no
+tool item.
+
+The dividing line is whether the adapter examined the material that could open a
+tool call, not whether it accepted that material. A record read and then
+rejected on semantics has been examined, so it states none opened; material
+discarded before examination withholds. Examination does not require a full
+parse: where a type discriminator alone precludes a tool call — an SSE event
+name that is not `content_block_start`, a Claude CLI event type that is not
+`assistant` — the question is settled without parsing the payload, and the
+negative is stated. Nor does a rejection make the whole response unexamined:
+rejecting the final content block of a buffered body leaves nothing unread and
+states the negative, while the same rejection with blocks still behind it
+withholds. A tool call an earlier record already established outranks the
+withholding in every adapter.
 
 **Committed unimplemented functionality — provider non-acceptance evidence.** No
 present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that

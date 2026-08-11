@@ -15,9 +15,9 @@ item. The spine is parsed per `## crate: module` section, taking column-0
    identity invocation outside the supported doc-comment shape all fail
    loudly rather than silently thinning the ground truth, or
 4. a per-module count in the Inventory table disagrees with the export
-   surface, an aggregate total row disagrees with the per-module sum, an
-   exporting module has no Inventory row, or a section declares the same
-   name twice.
+   surface, an aggregate total row disagrees with the per-module sum or
+   states a different free-function split from those rows, an exporting
+   module has no Inventory row, or a section declares the same name twice.
 
 Known limitation of this mechanical check: signatures, associated
 items, and enum variant lists inside a declaration are not validated —
@@ -172,8 +172,15 @@ def parse_inventory(spine_text: str) -> dict[tuple[str, str], int]:
 
     A cell like `5 (+1 free fn)` expects 5 types plus 1 function = 6 exports;
     `8 (incl. 2 traits)` expects 8 (traits are already types).
+
+    The free-function component is returned separately as well as summed. An
+    aggregate row that credits types to the free-function column, or the
+    reverse, leaves the sum unchanged, so a check that compares only totals
+    cannot see that error — `761 (+14 free fn)` and `763 (+12 free fn)` both
+    total 775, and the wrong one stood for two commits.
     """
     expected: dict[tuple[str, str], int] = {}
+    free_functions: dict[tuple[str, str], int] = {}
     duplicate_rows: list[str] = []
     for crate, label, count, extra in re.findall(
         r"^\| (domain|application): ([^|]+?) \| (\d+)(?: \(\+(\d+) free fn\))?[^|]*\|",
@@ -186,7 +193,8 @@ def parse_inventory(spine_text: str) -> dict[tuple[str, str], int]:
                 f"Inventory table has more than one row for '{key[0]}: {key[1]}'"
             )
         expected[key] = int(count) + int(extra or 0)
-    return expected, duplicate_rows
+        free_functions[key] = int(extra or 0)
+    return expected, free_functions, duplicate_rows
 
 
 def main() -> int:
@@ -244,7 +252,7 @@ def main() -> int:
                 f"spine section '{crate}: {label}' matches no exporting module"
             )
 
-    expected, duplicate_rows = parse_inventory(spine_text)
+    expected, free_functions, duplicate_rows = parse_inventory(spine_text)
     failures.extend(duplicate_rows)
     if not expected:
         failures.append("could not parse any Inventory table rows")
@@ -265,6 +273,7 @@ def main() -> int:
                 )
 
     totals: dict[str, int] = {}
+    total_free_functions: dict[str, int] = {}
     for crate, count, extra in re.findall(
         r"^\| \*\*signalbox-(domain|application) total\*\*\s*\|"
         r" \*\*(\d+)(?: \(\+(\d+) free fn\))?\*\*\s*\|",
@@ -276,6 +285,7 @@ def main() -> int:
                 f"Inventory table has more than one signalbox-{crate} total row"
             )
         totals[crate] = int(count) + int(extra or 0)
+        total_free_functions[crate] = int(extra or 0)
     if ("domain", "lib.rs identities") not in expected:
         failures.append(
             "Inventory table is missing the 'domain: lib.rs identities' row"
@@ -288,6 +298,15 @@ def main() -> int:
         elif claimed != actual:
             failures.append(
                 f"signalbox-{crate} total row says {claimed} but per-module rows sum to {actual}"
+            )
+        claimed_free = total_free_functions.get(crate)
+        actual_free = sum(
+            count for (row_crate, _), count in free_functions.items() if row_crate == crate
+        )
+        if claimed_free is not None and claimed_free != actual_free:
+            failures.append(
+                f"signalbox-{crate} total row says {claimed_free} free functions "
+                f"but per-module rows sum to {actual_free}"
             )
 
     if failures:
