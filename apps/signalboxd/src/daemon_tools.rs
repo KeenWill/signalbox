@@ -2031,9 +2031,9 @@ where
     /// own executors.
     ///
     /// An unresolvable session workspace closes the attempt as a known tool
-    /// failure carrying sanitized detail — the model, the transcript, and both
-    /// clients see it — beside one telemetry event naming the session and a
-    /// closed reason. It is never silently redirected to another session's root.
+    /// failure whose sanitized detail names the closed reason — the model, the
+    /// transcript, and both clients see it. It is never silently redirected to
+    /// another session's root.
     async fn execute(
         &mut self,
         invocation: ToolExecutionInvocation,

@@ -329,9 +329,8 @@ executor is resolved. An argument carrying a full object identifier in the
 session's own format is refused at preflight as invalid arguments, since the one
 compiled validator admits only the format it was compiled with. Every other
 argument reaches composition, which rejects the disagreeing repository and
-closes the request as a known tool failure with sanitized detail, recorded
-beside a telemetry event naming the session and a closed reason. Neither shape
-redirects the request to another session's root.
+closes the request as a known tool failure whose sanitized detail names the
+closed reason. Neither shape redirects the request to another session's root.
 
 Every advertised argument schema declares an object at its root and carries no
 root keyword outside that object declaration (INV-055). One request carries the
