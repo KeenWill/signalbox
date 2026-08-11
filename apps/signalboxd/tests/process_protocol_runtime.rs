@@ -48,7 +48,7 @@ use signalbox_model_runtime::{
     DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
     ModelInputTokenCounter, ModelOperation, ModelRuntime, ObservationFact, ObservationSink,
     PreparationOutcome, ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared,
-    TerminalEvidence, TerminalReport, TokenUsage,
+    TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_persistence::{
     context_compaction::{
@@ -3721,6 +3721,7 @@ async fn s04_inv029_streamed_protocol_violation_parks_then_reconciles() -> Resul
         exchange: ExchangeFacts::default(),
         reported_model: Some(ProviderReportedModel::new("fixture-model")),
         finish_reported: None,
+        tool_calls: ToolCallsAtLoss::NoneOpened,
         usage: TokenUsage::unreported(),
     }))
     .observing(ObservationFact::SendCommenced);

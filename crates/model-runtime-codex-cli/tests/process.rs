@@ -16,7 +16,7 @@ use signalbox_model_runtime::{
     Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
     RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
     StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-    ToolChoice, ToolDefinition, ToolName, decode_structured,
+    ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName, decode_structured,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -325,6 +325,7 @@ fn boundary_material_reads_terminal_and_observation_text() {
             exchange: signalbox_model_runtime::ExchangeFacts::default(),
             reported_model: None,
             finish_reported: None,
+            tool_calls: signalbox_model_runtime::ToolCallsAtLoss::Unobserved,
             usage: TokenUsage::unreported(),
         }),
         observations: vec![Observation {
@@ -1491,6 +1492,50 @@ async fn an_undecodable_last_agent_message_is_boundary_loss() {
     assert!(
         response_unintelligible(&boundary_loss(&result.evidence).cause)
             .contains("last agent message")
+    );
+}
+
+/// the tool fact is withheld, not fabricated, when this adapter
+/// cannot observe it.
+///
+/// The CLI's item lifecycle carries no tool item and a turn's tool calls live
+/// only inside the agent-message envelope, so a loss raised before that
+/// envelope parses leaves the adapter with no view of the turn's tool
+/// material. Reporting "none opened" there would be a claim it never
+/// established.
+#[tokio::test]
+async fn a_loss_before_the_envelope_parses_withholds_the_tool_fact() {
+    let result = execute_scenario(
+        "credential_envelope_error",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        boundary_loss(&result.evidence).tool_calls,
+        ToolCallsAtLoss::Unobserved
+    );
+}
+
+/// Once the envelope parses the fact is in hand, so the withholding above is
+/// not a blanket refusal to answer.
+#[tokio::test]
+async fn a_loss_after_the_envelope_parses_states_the_tool_fact() {
+    let opened = execute_scenario(
+        "tool_call",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    assert!(
+        response_unintelligible(&boundary_loss(&opened.evidence).cause).contains("undeclared tool")
+    );
+    assert_eq!(
+        boundary_loss(&opened.evidence).tool_calls,
+        ToolCallsAtLoss::Opened
     );
 }
 

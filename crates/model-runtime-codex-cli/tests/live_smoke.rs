@@ -37,7 +37,7 @@ use signalbox_model_runtime::{
     ConversationMessage, CredentialReference, DeliveryMode, ExchangeFacts, LossCause,
     ModelOperation, ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure,
     PreparationOutcome, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    TerminalEvidence, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime,
@@ -1503,6 +1503,7 @@ fn decoded_response_rejects_an_unexpected_terminal_variant() {
         },
         reported_model: None,
         finish_reported: None,
+        tool_calls: ToolCallsAtLoss::Unobserved,
         usage: TokenUsage {
             input_tokens: Some(FIXTURE_INPUT_TOKENS),
             output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
