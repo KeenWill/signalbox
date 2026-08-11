@@ -410,6 +410,14 @@ struct DispatchFixture {
     sessions: Box<[SessionId]>,
 }
 
+impl DispatchFixture {
+    /// The session this dispatch created for the action at the given ordinal.
+    #[track_caller]
+    fn session(&self, action_ordinal: usize) -> SessionId {
+        self.sessions[action_ordinal]
+    }
+}
+
 async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
     dispatch_fixture_for(rule()?).await
 }
@@ -578,12 +586,10 @@ async fn dispatched_sessions_are_commissioned_with_their_synthesized_goal()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
     let expected = synthesized_dispatch_goal(&fixture)?;
-    let [first, second] = fixture.sessions.as_ref() else {
-        panic!("the fixture rule dispatches exactly two sessions");
-    };
 
-    assert_commissioned_with(&fixture, *first, &expected).await?;
-    assert_commissioned_with(&fixture, *second, &expected).await?;
+    assert_eq!(fixture.sessions.len(), 2);
+    assert_commissioned_with(&fixture, fixture.session(0), &expected).await?;
+    assert_commissioned_with(&fixture, fixture.session(1), &expected).await?;
     Ok(())
 }
 
@@ -612,9 +618,8 @@ async fn the_dispatched_work_turn_is_not_itself_a_goal_turn() -> Result<(), Box<
 
 fn synthesized_dispatch_goal(fixture: &DispatchFixture) -> Result<GoalStatement, Box<dyn Error>> {
     let actions = fixture.rule.actions_for_event(&fixture.event)?;
-    let Some(RepoWatchActionV1::DispatchSession(action)) = actions.first() else {
-        panic!("the fixture rule emits one dispatch action per configured action");
-    };
+    // One variant, so this destructuring is irrefutable rather than a branch.
+    let RepoWatchActionV1::DispatchSession(action) = &actions[0];
     Ok(action.synthesized_goal_statement(fixture.rule.id())?)
 }
 

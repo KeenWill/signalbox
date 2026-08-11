@@ -1294,6 +1294,7 @@ pub struct PullRequestContext {
     repository: RepositorySlug,
     number: PullRequestNumber,
     head_sha: CommitSha,
+    head_repository: RepositorySlug,
     head_branch: BranchName,
     base_branch: BranchName,
     event: RepoWatchEvent,
@@ -1308,6 +1309,9 @@ impl PullRequestContext {
     }
     pub const fn head_sha(&self) -> &CommitSha {
         &self.head_sha
+    }
+    pub const fn head_repository(&self) -> &RepositorySlug {
+        &self.head_repository
     }
     pub const fn head_branch(&self) -> &BranchName {
         &self.head_branch
@@ -1363,6 +1367,7 @@ impl DispatchSessionParameters {
                 repository,
                 number: context.number,
                 head_sha: context.head_sha.clone(),
+                head_repository: context.head_repository.clone(),
                 head_branch: context.head_branch.clone(),
                 base_branch: context.base_branch.clone(),
                 event,
@@ -1458,6 +1463,13 @@ impl DispatchSessionAction {
     /// and prose telling the session what to do would make an operator-visible
     /// statement into an instruction channel the rule never authorized.
     ///
+    /// The head branch is qualified by the repository that holds it, which is
+    /// the fork and not the watched repository whenever the pull request comes
+    /// from one. Naming only the branch would present a fork's branch as though
+    /// it lived in the watched repository, and a consumer deciding whether an
+    /// operation on that branch is in scope would be deciding it against the
+    /// wrong repository.
+    ///
     /// The rendered identifiers are repository-supplied, so the statement is
     /// system-authored in shape but not in every byte; consumers that place it
     /// in a model prompt still owe it the quoting they owe any session text.
@@ -1467,13 +1479,14 @@ impl DispatchSessionAction {
     ) -> Result<GoalStatement, GoalTextError> {
         GoalStatement::try_new(match &self.params {
             DispatchSessionParameters::PullRequest(context) => format!(
-                "Dispatched by rule {}: template {}, pull request #{} (head {}, base {}) in {}",
+                "Dispatched by rule {}: template {}, pull request #{} in {} (head {}:{}, base {})",
                 rule.as_str(),
                 self.template.as_str(),
                 context.number().get(),
+                context.repository().as_str(),
+                context.head_repository().as_str(),
                 context.head_branch().as_str(),
                 context.base_branch().as_str(),
-                context.repository().as_str(),
             ),
             DispatchSessionParameters::Branch(context) => format!(
                 "Dispatched by rule {}: template {}, branch {} (workflow {}, conclusion {}) in {}",
@@ -2328,7 +2341,50 @@ mod tests {
         )?)?;
 
         expect![[
-            "Dispatched by rule watch-forward: template merge-forward, pull request #1 (head topic/watch, base main) in namespace/repo"
+            "Dispatched by rule watch-forward: template merge-forward, pull request #1 in namespace/repo (head namespace/repo:topic/watch, base main)"
+        ]]
+        .assert_eq(statement.as_str());
+        Ok(())
+    }
+
+    /// A fork's head branch is named in the repository that actually holds it.
+    ///
+    /// The watched repository and the head repository differ here, so a
+    /// statement naming only the branch would place the fork's branch in the
+    /// watched repository and misdirect any consumer deciding whether an
+    /// operation on it is in scope.
+    #[test]
+    fn dispatched_fork_pull_request_goal_qualifies_the_head_branch_by_its_repository()
+    -> Result<(), Box<dyn Error>> {
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(NonZeroU64::MIN),
+            head_sha: CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+            head_repository: RepositorySlug::try_new(String::from("fork-source/repo"))?,
+            base_branch: BranchName::try_new(String::from("main"))?,
+            head_branch: BranchName::try_new(String::from("topic/watch"))?,
+            title: PullRequestTitle::try_new(String::from("Watch repositories"))?,
+            body: PullRequestBody::try_new(String::new())?,
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(5)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            context,
+            RepoWatchEventKindV1::PullRequestOpened,
+        )?;
+        let action = super::DispatchSessionAction::new(
+            SessionTemplateName::try_new(String::from("merge-forward"))?,
+            super::DispatchSessionParameters::try_from_event(event)?,
+        );
+
+        let statement = action.synthesized_goal_statement(&RepoWatchRuleId::try_new(
+            String::from("watch-forward"),
+        )?)?;
+
+        expect![[
+            "Dispatched by rule watch-forward: template merge-forward, pull request #1 in namespace/repo (head fork-source/repo:topic/watch, base main)"
         ]]
         .assert_eq(statement.as_str());
         Ok(())

@@ -328,8 +328,7 @@ one emitted `dispatch_session { template, params }` action in list order, where
 
 **Implemented behavior.** Dispatch context is the ratified tagged union:
 
-- `PullRequestContext { repo, number, head_sha, head_branch, base_branch, event }`;
-  or
+- `PullRequestContext { repo, number, head_sha, event }`; or
 - `BranchContext { repo, branch, workflow, conclusion, event }`.
 
 **Implemented behavior.** The embedded event is the complete triggering durable
@@ -368,11 +367,16 @@ authority it was dispatched under. The statement is synthesized from the
 dispatching rule, the resolved template, and that action's typed parameters, and
 states only those facts: rule, template, and either the pull request with its
 head and base branches or the branch with its workflow and conclusion, each in
-its repository. It is composed by the dispatch rather than declared by the
-session, because only an already-attached goal admits a model declaration, so a
-session created without one has no transition available to it. Because
-commissioning schedules that generation's first goal turn, a dispatched session
-commits two queued turns: the tagged-context turn described above, whose
+its repository. A pull request's head branch is qualified by the repository
+holding it, which is the fork rather than the watched repository when the pull
+request comes from one, so a consumer cannot read a fork's branch as though it
+were the watched repository's. These identifiers are named in the statement
+only; the injected tagged context is unchanged, and it already carries them
+inside its embedded event. It is composed by the dispatch rather than declared
+by the session, because only an already-attached goal admits a model
+declaration, so a session created without one has no transition available to it.
+Because commissioning schedules that generation's first goal turn, a dispatched
+session commits two queued turns: the tagged-context turn described above, whose
 accepted input belongs to its submit command, and the goal turn, whose input is
 the statement. The dispatched work turn is therefore not itself a goal turn.
 Pursuit also holds the batch's singleton until the goal reaches a terminal

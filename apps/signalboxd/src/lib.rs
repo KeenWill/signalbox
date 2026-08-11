@@ -2303,7 +2303,7 @@ mod tests {
     fn a_dispatched_session_goal_reaches_the_judge_naming_its_base_branch() {
         let context = SessionAuthorityContext::new(
             Some(goal_statement(
-                "Dispatched by rule watch-forward: template merge-forward, pull request #1 (head topic/watch, base main) in namespace/repo",
+                "Dispatched by rule watch-forward: template merge-forward, pull request #1 in namespace/repo (head namespace/repo:topic/watch, base main)",
             )),
             Some(template_name("merge-forward")),
             None,
@@ -2315,7 +2315,7 @@ mod tests {
             rendered,
             concat!(
                 "-----BEGIN UNTRUSTED SESSION CONTEXT: session_goal-----\n",
-                "| Dispatched by rule watch-forward: template merge-forward, pull request #1 (head topic/watch, base main) in namespace/repo\n",
+                "| Dispatched by rule watch-forward: template merge-forward, pull request #1 in namespace/repo (head namespace/repo:topic/watch, base main)\n",
                 "-----END UNTRUSTED SESSION CONTEXT: session_goal-----\n",
                 "-----BEGIN UNTRUSTED SESSION CONTEXT: session_template-----\n",
                 "| merge-forward\n",

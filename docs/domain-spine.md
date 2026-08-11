@@ -9017,7 +9017,8 @@ pub enum RepoWatchTemplateContextDeclarationError {
 
 pub struct PullRequestContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
-// accessors: repository(), number(), head_sha(), head_branch(), base_branch(), event()
+// accessors: repository(), number(), head_sha(), head_repository(), head_branch(),
+//            base_branch(), event()
 
 pub struct BranchContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
