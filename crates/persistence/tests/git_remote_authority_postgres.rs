@@ -596,7 +596,7 @@ async fn a_live_row_naming_no_mint_is_refused() -> Result<(), Box<dyn Error>> {
     derived_workspace(&pool, workspace_id(1), WORKSPACE_ROOT).await?;
 
     let mut transaction = pool.begin().await?;
-    let inserted = sqlx::query(
+    let refused = sqlx::query(
         "INSERT INTO configured_git_remote_live (workspace_id, remote_name, mint_id)
          VALUES ($1, 'backup', $2)",
     )
@@ -604,11 +604,6 @@ async fn a_live_row_naming_no_mint_is_refused() -> Result<(), Box<dyn Error>> {
     .bind(mint_id(9).into_uuid())
     .execute(&mut *transaction)
     .await;
-
-    let refused = match inserted {
-        Err(error) => Err(error),
-        Ok(_) => transaction.commit().await,
-    };
 
     assert!(
         refused.is_err(),
@@ -632,7 +627,7 @@ async fn a_derived_workspace_carrying_partial_command_provenance_is_refused()
 
     let mut transaction = pool.begin().await?;
     insert_command(&mut transaction, command_id(1), "register_workspace").await?;
-    let inserted = sqlx::query(
+    let refused = sqlx::query(
         "INSERT INTO workspace (workspace_id, root_path, origin, command_id)
          VALUES ($1, $2, 'daemon_derived', $3)",
     )
@@ -641,11 +636,6 @@ async fn a_derived_workspace_carrying_partial_command_provenance_is_refused()
     .bind(command_id(1).into_uuid())
     .execute(&mut *transaction)
     .await;
-
-    let refused = match inserted {
-        Err(error) => Err(error),
-        Ok(_) => transaction.commit().await,
-    };
 
     assert!(
         refused.is_err(),
@@ -871,6 +861,22 @@ async fn two_workspaces_cannot_share_one_root() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Asserts one aliasing spelling of [`WORKSPACE_ROOT`] dies at the durable
+/// boundary rather than at some later comparison.
+async fn assert_aliasing_root_is_refused(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    alias: &str,
+) -> Result<(), Box<dyn Error>> {
+    let refused = derived_workspace(pool, workspace, alias).await;
+
+    assert!(
+        refused.is_err(),
+        "the workspace table admitted the aliasing spelling {alias:?}"
+    );
+    Ok(())
+}
+
 /// The aliasing spellings the previous path-keyed shape would have admitted as
 /// distinct scopes. Each names the same directory as [`WORKSPACE_ROOT`], and
 /// each must die at the durable boundary rather than at some later comparison.
@@ -879,23 +885,15 @@ async fn two_workspaces_cannot_share_one_root() -> Result<(), Box<dyn Error>> {
 async fn a_workspace_root_aliasing_another_spelling_is_refused() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
-    for (seed, alias) in [
-        "/srv/signalbox/workspace/.",
+    assert_aliasing_root_is_refused(&pool, workspace_id(1), "/srv/signalbox/workspace/.").await?;
+    assert_aliasing_root_is_refused(
+        &pool,
+        workspace_id(2),
         "/srv/signalbox/nested/../workspace",
-        "/srv//signalbox/workspace",
-        "/srv/signalbox/workspace/",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let refused =
-            derived_workspace(&pool, workspace_id(u128::try_from(seed)? + 1), alias).await;
-
-        assert!(
-            refused.is_err(),
-            "the workspace table admitted the aliasing spelling {alias:?}"
-        );
-    }
+    )
+    .await?;
+    assert_aliasing_root_is_refused(&pool, workspace_id(3), "/srv//signalbox/workspace").await?;
+    assert_aliasing_root_is_refused(&pool, workspace_id(4), "/srv/signalbox/workspace/").await?;
     Ok(())
 }
 
