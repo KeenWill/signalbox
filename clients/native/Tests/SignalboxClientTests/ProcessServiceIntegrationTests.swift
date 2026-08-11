@@ -12125,7 +12125,9 @@ extension ProcessProjectionFixture {
   static let delegateDenialLabel =
     "Denied by delegate; model selection \(delegateModelSelection); call \(delegateModelCall)"
   static let runnerID = "44444444-4444-4444-8444-444444444444"
-  static let runnerSnapshotStatusLabel = "Runner \(runnerID) · pinned · revision 3"
+  static let runnerSnapshotStatusLabel =
+    "Runner \(runnerID) · pinned · health suspect · revision 3"
+    + " · sandbox workspace-restricted · selected directory \"workspace/project\""
   static let runnerLossStatusLabel =
     "Runner \(runnerID) · runner_lost · revision 4 · sandbox workspace-restricted"
     + " · selected directory \"workspace/project\""
