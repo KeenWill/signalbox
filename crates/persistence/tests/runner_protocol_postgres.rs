@@ -3258,6 +3258,39 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     Ok(())
 }
 
+/// INV-043 / INV-044: migration refuses an outstanding legacy offer because
+/// its offer-time connection authority cannot be reconstructed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
+        .await?;
+    let (_, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, 1, 1, 'connected', 'established')",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .execute(&pool)
+    .await?;
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
+
+    assert!(
+        refusal
+            .to_string()
+            .contains("outstanding runner lease lacks reconstructible offer authority")
+    );
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
