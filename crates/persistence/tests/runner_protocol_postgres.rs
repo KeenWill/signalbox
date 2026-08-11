@@ -96,7 +96,7 @@ const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const SERIALIZATION_TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
-const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080103;
+const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608100002;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
