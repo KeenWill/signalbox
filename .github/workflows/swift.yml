@@ -118,6 +118,54 @@ jobs:
           # unquoted YES is a YAML boolean that a parser may hand the step as
           # "true" instead, silently turning the measurement off.
           SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE: "YES"
+      # Codecov reads neither the xccov JSON nor the xccov text report the
+      # report step below writes, so the profile data behind both is exported
+      # once more in a format it does read. One instrumented run, a third
+      # rendering of it: no second build and no second simulator pass.
+      #
+      # Here rather than beside that report step, and deliberately. The
+      # snapshot pass below reuses this derived data and overwrites
+      # `Build/ProfileData` with a profile of its own. Exported after it, this
+      # file would describe the snapshot suite while the report beside it
+      # described the unit suites, and the two would disagree with nothing on
+      # either to say why.
+      #
+      # One binary holds every measured line: `Sources/SignalboxApp`,
+      # `SignalboxClient`, and `SignalboxModels` all compile into the
+      # SignalboxNative app target, and the four test bundles are separate
+      # binaries this deliberately does not pass. That is what keeps test code
+      # out of the numerator and the denominator alike, matching what
+      # cargo-llvm-cov excludes by default on the Rust side.
+      #
+      # The derived-data path is the default the scripts under
+      # clients/native/scripts compute; this job sets no override, so naming
+      # it here reads the same location test-xcode.sh just wrote.
+      - name: Export the native coverage as LCOV
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          COVERAGE_OUTPUT_DIR: ${{ runner.temp }}/native-coverage
+        run: |
+          derived_data=clients/native/.derivedData
+          profdata="$(find "$derived_data/Build/ProfileData" \
+            -name Coverage.profdata -print -quit 2>/dev/null || true)"
+          app_binary="$(find "$derived_data/Build/Products" -type f \
+            -path '*/SignalboxNative.app/SignalboxNative' \
+            -print -quit 2>/dev/null || true)"
+          # Named rather than left to llvm-cov: an empty path here means the
+          # derived-data layout moved, which is worth saying plainly.
+          test -n "$profdata" || {
+            echo "no Coverage.profdata under $derived_data" >&2
+            exit 1
+          }
+          test -n "$app_binary" || {
+            echo "no SignalboxNative binary under $derived_data" >&2
+            exit 1
+          }
+          mkdir -p "$COVERAGE_OUTPUT_DIR"
+          xcrun llvm-cov export -format=lcov \
+            -instr-profile "$profdata" "$app_binary" \
+            > "$COVERAGE_OUTPUT_DIR/lcov.info"
       # Report only, exactly as native coverage was rolled out: it never fails
       # the job. Promoting the suite to a merge gate is deleting the
       # `continue-on-error` line and the skip above.
@@ -212,6 +260,37 @@ jobs:
           path: ${{ runner.temp }}/native-coverage
           if-no-files-found: warn
           retention-days: 14
+      # The LCOV exported above, sent on to Codecov under a flag of its own.
+      # `swift` and coverage.yml's `rust` stay separate components there: the
+      # two are measured by different toolchains over disjoint trees, and one
+      # merged percentage across both would be a number describing nothing.
+      #
+      # Report-only by two independent mechanisms, as on the Rust side: this
+      # step continues on error, and codecov.yml marks every status
+      # `informational: true`, so neither a failed upload nor anything Codecov
+      # concludes from a good one can fail this job or gate a merge.
+      #
+      # Pinned to a commit like every other third-party action here. The tag it
+      # resolves to is codecov-action v5.5.5.
+      - name: Upload coverage reports to Codecov
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ runner.temp }}/native-coverage/lcov.info
+          flags: swift
+          # The one file above is the whole upload. `noop` matters more here
+          # than on the Rust side: the action's Xcode plugin runs by default,
+          # rediscovers profile data under Xcode's own derived-data directory,
+          # and renders it with `llvm-cov show` into competing reports. This
+          # job already knows which profile it means, and said so above.
+          disable_search: true
+          plugins: noop
+          # A report-only job does not fail on a failed upload to a third
+          # party. `continue-on-error` above would contain it anyway; this
+          # keeps the step's own outcome honest rather than relying on that.
+          fail_ci_if_error: false
       - name: Check privacy boundary
         run: clients/native/scripts/check-privacy.sh
       - name: Check Tart scripts (dry run)
