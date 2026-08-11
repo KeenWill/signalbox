@@ -4062,6 +4062,186 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         .expect("registration replacement serialization must finish within its test deadline")
 }
 
+/// INV-009 / INV-042: the atomic initial pin takes the session scheduler
+/// before the placement head, matching every later lease append.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s30_inv009_inv042_initial_pin_locks_scheduler_before_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
+        insert_session(&pool).await?;
+        insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+        let store = RunnerProtocolStore::new(pool.clone(), catalog());
+        let expected_enrollment = enrollment();
+        store.insert_enrollment(&expected_enrollment).await?;
+        let registration = store
+            .register(&expected_enrollment, advertisement())
+            .await?;
+        let session = SessionId::from_uuid(uuid(SESSION));
+        let placement = SessionRunnerPlacement::new(
+            session,
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::CapabilityClass(class()),
+                working_directory: WorkingDirectorySelection::RunnerDefault,
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                permission_overrides: no_permission_overrides(),
+            },
+        );
+        store.store_placement(&placement, None, None).await?;
+        let pin = placement
+            .pin_and_offer_lease(
+                &expected_enrollment,
+                registration.registration(),
+                RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                    .expect("the fixture working directory is valid"),
+                None,
+                authorized(INITIAL_PHYSICAL_ATTEMPT),
+                offer_request(),
+            )
+            .expect("the validated registration pins the placement");
+        let mut scheduler_owner = pool.begin().await?;
+        sqlx::query(
+            "SELECT session_id
+               FROM session_scheduler
+              WHERE session_id = $1
+              FOR UPDATE",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&mut *scheduler_owner)
+        .await?;
+        let pin_store = tokio::spawn(async move {
+            tokio::time::timeout(
+                LOCK_COMPLETION_TIMEOUT,
+                store.store_pin(&pin, &registration),
+            )
+            .await
+        });
+        let pin_blocked =
+            tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+                .await
+                .expect("initial pin lock observation must remain bounded")?;
+        let locked_placement: Uuid = tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            sqlx::query_scalar(
+                "SELECT session_id
+                   FROM runner_current_session_placement
+                  WHERE session_id = $1
+                  FOR UPDATE",
+            )
+            .bind(session.into_uuid())
+            .fetch_one(&mut *scheduler_owner),
+        )
+        .await
+        .expect("the scheduler owner must acquire placement before the queued pin")?;
+        scheduler_owner.commit().await?;
+        pin_store
+            .await
+            .expect("the initial pin task must remain joinable")
+            .expect("the initial pin must finish within its task-owned timeout")?;
+
+        assert!(pin_blocked, "the initial pin must wait for the scheduler");
+        assert_eq!(locked_placement, session.into_uuid());
+        Ok::<_, Box<dyn Error>>(())
+    })
+    .await;
+    drop(pool);
+    serialization.expect("initial pin lock ordering must finish within its test deadline")
+}
+
+/// INV-009 / INV-045: every generic placement projection takes the session
+/// scheduler before the placement head, matching a concurrent lease writer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv045_placement_projection_locks_scheduler_before_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
+        let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+        let session = pin.placement.session();
+        let original_grant = pin
+            .grant
+            .as_ref()
+            .expect("the fixture pin carries a credential grant");
+        let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+            .replace_credential_profile(
+                duplicate_grant(original_grant, registration.registration()),
+                registration.registration(),
+                replacement_profile(),
+                [tool("inspect")],
+            )
+            .expect("the active predecessor permits profile replacement");
+        let replacement_grant =
+            duplicate_grant(&replacement.grant.grant, registration.registration());
+        let mut scheduler_owner = pool.begin().await?;
+        sqlx::query(
+            "SELECT session_id
+               FROM session_scheduler
+              WHERE session_id = $1
+              FOR UPDATE",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&mut *scheduler_owner)
+        .await?;
+        let replacement_store = tokio::spawn(async move {
+            tokio::time::timeout(
+                LOCK_COMPLETION_TIMEOUT,
+                store.store_placement(
+                    &replacement.placement,
+                    Some(&registration),
+                    Some(&replacement_grant),
+                ),
+            )
+            .await
+        });
+        let replacement_blocked =
+            tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+                .await
+                .expect("placement projection lock observation must remain bounded")?;
+        let locked_placement: Uuid = tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            sqlx::query_scalar(
+                "SELECT session_id
+                   FROM runner_current_session_placement
+                  WHERE session_id = $1
+                  FOR UPDATE",
+            )
+            .bind(session.into_uuid())
+            .fetch_one(&mut *scheduler_owner),
+        )
+        .await
+        .expect("the scheduler owner must acquire placement before the queued projection")?;
+        scheduler_owner.commit().await?;
+        replacement_store
+            .await
+            .expect("the placement projection task must remain joinable")
+            .expect("the placement projection must finish within its task-owned timeout")?;
+        let event_kind: String = sqlx::query_scalar(
+            "SELECT event_kind
+               FROM runner_session_placement_record
+              WHERE session_id = $1
+              ORDER BY event_ordinal DESC
+              LIMIT 1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+
+        assert!(
+            replacement_blocked,
+            "the placement projection must wait for the scheduler"
+        );
+        assert_eq!(locked_placement, session.into_uuid());
+        assert_eq!(event_kind, "profile_replaced");
+        Ok::<_, Box<dyn Error>>(())
+    })
+    .await;
+    drop(pool);
+    serialization.expect("placement projection lock ordering must finish within its test deadline")
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s30_inv042_current_registration_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
