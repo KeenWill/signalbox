@@ -3944,18 +3944,12 @@ async fn load_authenticated_pinned_loss_predecessor(
     }
     let predecessor_event: String = predecessor.decode_column("event_kind")?;
     let predecessor_state: String = predecessor.decode_column("state_kind")?;
-    let predecessor_has_loss_metadata = predecessor
-        .decode_column::<Option<Uuid>>("lost_runner_id")?
-        .is_some()
-        || predecessor
-            .decode_column::<Option<String>>("loss_source_kind")?
-            .is_some();
     if predecessor_state != "pinned"
         || !matches!(
             predecessor_event.as_str(),
             "pinned" | "runner_replaced" | "profile_replaced"
         )
-        || predecessor_has_loss_metadata
+        || placement_row_has_loss_facts(&predecessor)?
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
@@ -4094,6 +4088,9 @@ async fn authenticate_pinned_predecessor(
                     && predecessor_state == "runner_lost"
                     && predecessor_revision.checked_next() == Some(revision) =>
             {
+                if placement_row_has_loss_facts(row)? {
+                    return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+                }
                 let prior_pinned = decode_pinned_placement(
                     connection,
                     &predecessor,
@@ -4614,14 +4611,17 @@ fn placement_row_has_invalid_pre_pin_loss_facts(
         || placement_row_has_pinned_facts(row)?)
 }
 
-fn placement_row_has_invalid_unpinned_facts(row: &PgRow) -> Result<bool, RunnerProtocolStoreError> {
+fn placement_row_has_loss_facts(row: &PgRow) -> Result<bool, RunnerProtocolStoreError> {
     Ok(row
         .decode_column::<Option<Uuid>>("lost_runner_id")?
         .is_some()
         || row
             .decode_column::<Option<String>>("loss_source_kind")?
-            .is_some()
-        || placement_row_has_pinned_facts(row)?)
+            .is_some())
+}
+
+fn placement_row_has_invalid_unpinned_facts(row: &PgRow) -> Result<bool, RunnerProtocolStoreError> {
+    Ok(placement_row_has_loss_facts(row)? || placement_row_has_pinned_facts(row)?)
 }
 
 async fn decode_placement_request(
