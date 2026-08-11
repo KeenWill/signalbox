@@ -78,11 +78,15 @@ broaden what that consumer sees. A turn the goal machinery did not schedule
 carries no such record, and a goal session runs those too. Such a turn reads the
 session's goal only when three conditions hold together: the lineage has exactly
 one generation, so no supersession can have broadened it; that generation is
-still open, so a goal already stopped or achieved cannot authorize a request
-still awaiting a decision; and the commission was accepted strictly before the
-turn, so a goal attached after the turn existed cannot authorize it
-retroactively. Any other shape resolves to no statement, leaving the consumer to
-treat the authority as unsettled.
+still open, so a goal already stopped or achieved supplies no statement; and the
+commission was accepted strictly before the turn, so a goal attached after the
+turn existed cannot authorize it retroactively. Any other shape resolves to no
+statement, leaving the consumer to treat the authority as unsettled.
+
+**Implemented behavior.** That resolution decides what a consumer reads, not
+what it commits. A consumer that reads the authority, performs work, and commits
+a decision afterwards holds the statement as it stood at the read: a generation
+closed in between is not seen by the commit.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no
@@ -229,6 +233,13 @@ failed goal turn into a silent retry or bypass execution-failure blocking.
 goal priority or more than one concurrent goal per session. Future extension
 must preserve immutable statements, full lineage, and the version-one rule that
 at most one generation is pursuing or blocked.
+
+**Committed unimplemented functionality.** No present goal-mode surface rechecks
+a generation's state when a consumer commits a decision it read that generation
+for. A consumer holding a statement across a long operation can commit after the
+generation closed. Future work binding the read to the commit must do so without
+making goal state part of a durable judge binding that deliberately excludes it,
+and must decide whether a generation closing mid-operation escalates or refuses.
 
 ## Open edges
 

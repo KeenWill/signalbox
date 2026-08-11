@@ -782,11 +782,16 @@ async fn load_session_authority_context(
 ///
 /// The lineage has exactly one generation, so no supersession can have
 /// broadened what the judge reads. That generation is still open, so a goal
-/// already stopped or achieved cannot authorize a request that is still parked
-/// awaiting approval. And the commission was accepted strictly before the
-/// judged turn, so a goal attached after the turn existed cannot retroactively
-/// authorize it. Anything else resolves to no statement and the judge
-/// escalates.
+/// already stopped or achieved supplies no statement. And the commission was
+/// accepted strictly before the judged turn, so a goal attached after the turn
+/// existed cannot retroactively authorize it. Anything else resolves to no
+/// statement and the judge escalates.
+///
+/// This runs while the judge is prepared, and the statement it yields is
+/// carried on the prepared binding rather than re-read at completion. A
+/// generation closed after preparation is therefore not seen by the decision
+/// that preparation feeds; rechecking under the completion lock is committed
+/// unimplemented functionality.
 async fn load_judged_turn_goal(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1463,8 +1468,10 @@ mod tests {
         );
     }
 
-    /// A goal stopped while the turn is parked has had its authority
-    /// withdrawn, and a withdrawn authority must not approve anything.
+    /// A goal stopped by the time the judge reads it has had its authority
+    /// withdrawn, so the read yields no statement and the judge escalates.
+    /// This pins the read, not the commit: a stop landing after preparation is
+    /// not seen by the decision that preparation feeds.
     #[test]
     fn an_unrecorded_turn_refuses_a_stopped_goal() {
         let stopped = commissioned("land the reviewer fixes")
