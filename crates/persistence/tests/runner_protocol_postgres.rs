@@ -14967,6 +14967,183 @@ async fn s31_inv043_inv044_lease_offer_wins_concurrent_connection_loss()
     Ok(())
 }
 
+/// INV-043 / INV-044: a claim retains the exact connection/loss baseline that
+/// authorized its offer, so neither terminal loss nor a successor connection
+/// can revive the stale execution capability.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_loss_fences_offered_lease_claim_across_reconnect()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, _, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact offered lease correlation prepares its claim");
+    store
+        .transition_connection(
+            enrollment,
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let lost_rejection = store
+        .store_lease(&claimed)
+        .await
+        .expect_err("terminal loss fences the outstanding lease claim");
+    store.open_connection(enrollment).await?;
+    let successor_rejection = store
+        .store_lease(&claimed)
+        .await
+        .expect_err("a successor connection cannot revive the prior offer");
+
+    assert_store_check_violation(lost_rejection);
+    assert_store_check_violation(successor_rejection);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: terminal loss that reaches connection authority first
+/// fences a concurrently queued claim before execution capability is issued.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_connection_loss_wins_concurrent_lease_claim()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, _, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact offered lease correlation prepares its claim");
+    let mut authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_one(&mut *authority)
+    .await?;
+    let loss_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let loss_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            loss_store.transition_connection(
+                enrollment,
+                connection.epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            ),
+        )
+        .await
+    });
+    let loss_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
+    let claim_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let claim_task = tokio::spawn(async move {
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, claim_store.store_lease(&claimed)).await
+    });
+    let claim_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
+    let authority_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, authority.commit()).await;
+    let loss_result = loss_task.await;
+    let claim_result = claim_task.await;
+    let loss_blocked = loss_observation.expect("loss lock observation must remain bounded")?;
+    let claim_blocked = claim_observation.expect("claim lock observation must remain bounded")?;
+    authority_commit.expect("connection-authority blocker commit must remain bounded")?;
+    loss_result
+        .expect("loss task must remain joinable")
+        .expect("loss must finish within its task-owned timeout")?;
+    let rejected = claim_result
+        .expect("claim task must remain joinable")
+        .expect("claim must finish within its task-owned timeout")
+        .expect_err("the claim observes the loss that won authority");
+
+    assert!(loss_blocked, "loss must reach connection authority");
+    assert!(claim_blocked, "claim must queue behind terminal loss");
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: a claim that reaches connection authority first commits
+/// before a racing loss and remains the durable execution-capability boundary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_lease_claim_wins_concurrent_connection_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, _, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact offered lease correlation prepares its claim");
+    let expected_state = claimed.state();
+    let lease_id = claimed.correlation().lease;
+    let generation = claimed.correlation().generation;
+    let mut authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_one(&mut *authority)
+    .await?;
+    let claim_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let claim_task = tokio::spawn(async move {
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, claim_store.store_lease(&claimed)).await
+    });
+    let claim_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
+    let loss_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let loss_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            loss_store.transition_connection(
+                enrollment,
+                connection.epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            ),
+        )
+        .await
+    });
+    let loss_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
+    let authority_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, authority.commit()).await;
+    let claim_result = claim_task.await;
+    let loss_result = loss_task.await;
+    let claim_blocked = claim_observation.expect("claim lock observation must remain bounded")?;
+    let loss_blocked = loss_observation.expect("loss lock observation must remain bounded")?;
+    authority_commit.expect("connection-authority blocker commit must remain bounded")?;
+    claim_result
+        .expect("claim task must remain joinable")
+        .expect("claim must finish within its task-owned timeout")?;
+    loss_result
+        .expect("loss task must remain joinable")
+        .expect("loss must finish within its task-owned timeout")?;
+    let retained = store
+        .load_lease(lease_id, generation)
+        .await?
+        .expect("the winning claim remains current after later loss");
+
+    assert!(claim_blocked, "claim must reach connection authority");
+    assert!(loss_blocked, "loss must queue behind the claim");
+    assert_eq!(retained.state(), expected_state);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: initial pin dispatches from its immutable placement
 /// record with the complete follower-visible runner facts.
 #[tokio::test]
