@@ -37,10 +37,13 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 - **Content extensions and rendering.**
   [sessions-and-transcript](spec/sessions-and-transcript.md) fixes the initial
-  text-only `UserContent` value, exact equality, and PostgreSQL mapping. Rich
-  content, attachments, other non-text variants, resource governance, and
-  provider/client rendering remain open. Blocks those extensions, not the first
-  `SubmitInput` slice. (S01, S03, S08)
+  text-only `UserContent` value, exact equality, and PostgreSQL mapping.
+  Decided and specified: ordered multipart content with content-addressed
+  attachment parts, their replay equality, persistence, and model-visible
+  stubs, by [blob storage](spec/blob-storage.md#multipart-user-content).
+  Client rendering of attachment parts and any non-text variant beyond the
+  attachment part remain open. Blocks those remaining extensions, not the
+  first `SubmitInput` slice. (S01, S03, S08)
 
 ## Model-input projection
 
@@ -464,7 +467,8 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   and dynamic replacement/equality semantics remain undecided.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
-  remain undecided.
+  remain undecided. The byte substrate such arms would reference is owned by
+  [blob storage](spec/blob-storage.md).
 - **Large durable payload architecture.** Tool evidence is bounded by storage
   policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
   bytes of error detail, and 4,096 bytes of exact runner value, all held in
@@ -474,12 +478,14 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   crate-owned truncation and completeness evidence, or its bounded transport may
   reject an oversized response before result admission; the family contract owns
   that choice. `ResultTooLarge` remains the admission classification for an
-  admitted result that still exceeds the durable bound. Deliberately delivering
-  larger payloads — files well past 1 MiB — needs its own design: where the
-  bytes live, how a result references rather than embeds them, what the model
-  and each client see, and the abuse and denial-of-service controls a larger
-  bound requires. Recorded as a design question rather than a blocker; the
-  existing family caps remain correct until it is answered.
+  admitted result that still exceeds the durable bound. Where deliberately
+  larger payloads live, and how a durable record references rather than
+  embeds them, is decided and specified by
+  [blob storage](spec/blob-storage.md): content-addressed blobs with
+  model-visible stubs and bounded explicit reads. What remains open here is
+  the tool-result side — how a family's admitted result carries a blob
+  reference, its truncation and completeness evidence, and per-family
+  adoption. The existing family caps remain correct until that lands.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport
@@ -627,12 +633,32 @@ questions below remain open.
 
 ## General-purpose artifacts
 
-Artifact identity, ownership, lifecycle, content addressing, and retention have
-no accepted aggregate boundary. The reference-not-copy posture review workflows
-take today is owned by [review-workflows](spec/review-workflows.md). A future
-foundation decision must define the artifact aggregate and its authority before
-a workflow can attach one. This blocks general-purpose workflow artifacts, not
-the implemented session and external-link evidence.
+Artifact content addressing, byte storage, and the reference-not-embed
+posture are decided and specified by [blob storage](spec/blob-storage.md):
+immutable SHA-256-addressed blobs, a durable replica catalog, class-routed
+named stores, and an append-only version one. The reference-not-copy posture
+review workflows take today is owned by
+[review-workflows](spec/review-workflows.md). The questions below remain
+open; they block general-purpose workflow artifacts, not the implemented
+session and external-link evidence.
+
+- **Artifact aggregate and authority.** What a named artifact is above a blob
+  — mutable aliases over changing digests, producer provenance, ownership,
+  and workflow attachment — needs its own foundation decision before a
+  workflow can attach one.
+- **Content-type read tools and their isolation substrate.** The
+  content-type-aware reader inventory (structured-format walks, document page
+  rendering, image downscaling for vision-capable targets), which formats
+  warrant dedicated tools, and the sandbox those processors execute in remain
+  undecided. The visibility contract they must satisfy is fixed by
+  [blob storage](spec/blob-storage.md#attachment-visibility-and-model-reads).
+- **Non-socket ingest paths.** Daemon-local file adoption and runner-produced
+  artifact ingest — moving multi-gigabyte content into the catalog without
+  base64 chunking over the local socket — remain undecided.
+- **Store lifecycle beyond append-only.** A native network-filesystem store
+  kind, replica-set routes, replica retirement, a marked-deleted state, and
+  garbage collection remain undecided; the append-only catalog and a
+  mark/sweep-not-refcount leaning are the constraints they design against.
 
 ## Destination features (target model)
 
