@@ -2291,10 +2291,70 @@ mod tests {
         );
     }
 
+    /// The statement repository-watch dispatch synthesizes for a pull request,
+    /// built through the same domain surface dispatch itself uses.
+    ///
+    /// Retyping the statement here would leave this file asserting against a
+    /// spelling the dispatch no longer produces, which is exactly what happened
+    /// when the rendered identifiers gained their delimiters.
+    fn synthesized_dispatch_goal() -> signalbox_domain::GoalStatement {
+        let context = signalbox_domain::PullRequestEventContext::new(
+            signalbox_domain::PullRequestEventContextInput {
+                number: signalbox_domain::PullRequestNumber::new(std::num::NonZeroU64::MIN),
+                head_sha: signalbox_domain::CommitSha::try_new(String::from(
+                    "1111111111111111111111111111111111111111",
+                ))
+                .expect("the fixture head sha is admitted"),
+                head_repository: repository_slug("namespace/repo"),
+                base_branch: branch_name("main"),
+                head_branch: branch_name("topic/watch"),
+                title: signalbox_domain::PullRequestTitle::try_new(String::from(
+                    "Watch repositories",
+                ))
+                .expect("the fixture title is admitted"),
+                body: signalbox_domain::PullRequestBody::try_new(String::new())
+                    .expect("the fixture body is admitted"),
+                labels: Vec::new(),
+                draft: false,
+                author: None,
+            },
+        );
+        let event = signalbox_domain::RepoWatchEvent::try_pull_request(
+            signalbox_domain::RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(3)),
+            repository_slug("namespace/repo"),
+            context,
+            signalbox_domain::RepoWatchEventKindV1::PullRequestOpened,
+        )
+        .expect("the fixture event is admitted");
+        signalbox_domain::DispatchSessionAction::new(
+            template_name("merge-forward"),
+            signalbox_domain::DispatchSessionParameters::try_from_event(event)
+                .expect("the fixture event dispatches"),
+        )
+        .synthesized_goal_statement(
+            &signalbox_domain::RepoWatchRuleId::try_new(String::from("watch-forward"))
+                .expect("the fixture rule identity is admitted"),
+        )
+        .expect("the synthesized statement is admitted")
+    }
+
+    fn repository_slug(value: &str) -> signalbox_domain::RepositorySlug {
+        signalbox_domain::RepositorySlug::try_new(String::from(value))
+            .expect("the fixture repository is admitted")
+    }
+
+    fn branch_name(value: &str) -> signalbox_domain::BranchName {
+        signalbox_domain::BranchName::try_new(String::from(value))
+            .expect("the fixture branch is admitted")
+    }
+
     /// A dispatched session's commissioned goal reaches the judge intact.
     ///
-    /// The statement is the one repository-watch dispatch synthesizes; its
-    /// exact bytes are pinned where they are produced, by
+    /// The statement is the one repository-watch dispatch synthesizes, taken
+    /// from the dispatch surface rather than retyped, so the delimiter and
+    /// escape bytes a dispatched session actually carries are the ones this
+    /// rendering path is exercised with. Their exact spelling is pinned where
+    /// they are produced, by
     /// `dispatched_pull_request_goal_names_its_rule_template_and_branches` in
     /// the domain crate. What this pins is that the base branch such a
     /// statement names survives quoting and is what a judge asked to approve a
@@ -2302,9 +2362,7 @@ mod tests {
     #[test]
     fn a_dispatched_session_goal_reaches_the_judge_naming_its_base_branch() {
         let context = SessionAuthorityContext::new(
-            Some(goal_statement(
-                "Dispatched by rule watch-forward: template merge-forward, pull request #1 in namespace/repo (head namespace/repo:topic/watch, base main)",
-            )),
+            Some(synthesized_dispatch_goal()),
             Some(template_name("merge-forward")),
             None,
         );
@@ -2315,7 +2373,8 @@ mod tests {
             rendered,
             concat!(
                 "-----BEGIN UNTRUSTED SESSION CONTEXT: session_goal-----\n",
-                "| Dispatched by rule watch-forward: template merge-forward, pull request #1 in namespace/repo (head namespace/repo:topic/watch, base main)\n",
+                r#"| Dispatched by rule watch-forward: template merge-forward, pull request #1 in "namespace/repo" (head "namespace/repo:topic/watch", base "main")"#,
+                "\n",
                 "-----END UNTRUSTED SESSION CONTEXT: session_goal-----\n",
                 "-----BEGIN UNTRUSTED SESSION CONTEXT: session_template-----\n",
                 "| merge-forward\n",
