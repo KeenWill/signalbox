@@ -189,6 +189,13 @@ jobs:
           lcov="$COVERAGE_OUTPUT_DIR/lcov.info"
           xcrun llvm-cov export -format=lcov \
             -instr-profile "$profdata" "${objects[@]}" > "$lcov"
+          # llvm-cov records the absolute paths the compiler saw. Codecov
+          # matches report paths against the repository tree and does resolve
+          # that shape on its own — the Rust upload lands 285 such paths
+          # correctly — but rewriting them here is one substitution against a
+          # prefix this job already knows, where a `fixes:` rule in codecov.yml
+          # would restate that prefix somewhere nothing checks it.
+          sed -i '' "s|^SF:$GITHUB_WORKSPACE/|SF:|" "$lcov"
           # An empty report is worse than none: uploaded, it would read as a
           # native client with no covered lines rather than as a measurement
           # that did not happen, and the flag carries that forward. The upload
@@ -197,7 +204,9 @@ jobs:
             echo "llvm-cov exported an empty report" >&2
             exit 1
           }
-          printf 'exported %s source files\n' "$(grep -c '^SF:' "$lcov")"
+          printf 'exported %s source files, %s left absolute\n' \
+            "$(grep -c '^SF:' "$lcov")" \
+            "$(grep -c '^SF:/' "$lcov" || true)"
           echo "exported=true" >> "$GITHUB_OUTPUT"
       # Report only, exactly as native coverage was rolled out: it never fails
       # the job. Promoting the suite to a merge gate is deleting the
