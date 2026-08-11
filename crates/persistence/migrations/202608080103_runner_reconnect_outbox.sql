@@ -9,6 +9,7 @@ DECLARE
     placement runner_session_placement_record%ROWTYPE;
     prior runner_session_placement_record%ROWTYPE;
     connection runner_connection_event%ROWTYPE;
+    predecessor runner_connection_event%ROWTYPE;
     expected_runner uuid;
 BEGIN
     SELECT *
@@ -55,6 +56,27 @@ BEGIN
         IF FOUND THEN
             RAISE EXCEPTION 'runner connection outbox source is not the latest event'
                 USING ERRCODE = '23514';
+        END IF;
+        IF NEW.state_kind = 'connected'
+           AND connection.cause_kind = 'established'
+        THEN
+            SELECT *
+              INTO predecessor
+              FROM runner_connection_event AS earlier
+             WHERE earlier.enrollment_id = connection.enrollment_id
+               AND (
+                    earlier.connection_epoch < connection.connection_epoch
+                    OR (
+                        earlier.connection_epoch = connection.connection_epoch
+                        AND earlier.event_ordinal < connection.event_ordinal
+                    )
+               )
+             ORDER BY earlier.connection_epoch DESC, earlier.event_ordinal DESC
+             LIMIT 1;
+            IF NOT FOUND OR predecessor.state_kind <> 'suspect' THEN
+                RAISE EXCEPTION 'established runner recovery lacks suspect predecessor'
+                    USING ERRCODE = '23514';
+            END IF;
         END IF;
         IF placement.state_kind <> 'pinned'
            OR placement.pinned_runner_id <> NEW.runner_id
