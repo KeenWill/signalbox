@@ -16,7 +16,7 @@ from the watcher.
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
-persistence, differ, polling, and rule-dispatch behavior below is verified
+persistence, differ, polling, and rule-dispatch behavior below (DOGFOOD SMOKE FIXTURE - this branch exists only to exercise the merge-forward dispatch rule and will be deleted) is verified
 against this PR (`agent/repo-watch-dispatch`). The provider members the poller
 adopts as check-suite and check-run completion generations are verified against
 PR #541 (`fix/check-run-updated-at`).
