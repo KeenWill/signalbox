@@ -3897,9 +3897,12 @@ async fn authenticate_pinned_predecessor(
                         .await?;
                 let grant_succeeds = runner_replacement_grant_is_successor(&predecessor, row)?
                     && durable_grant.matches;
+                let same_runner_replacement_admitted = match source {
+                    RunnerPlacementLossSource::Connection => false,
+                    RunnerPlacementLossSource::Registration => true,
+                };
                 if lost_runner != prior_pinned.runner
-                    || (current_pinned.runner == lost_runner
-                        && source != RunnerPlacementLossSource::Registration)
+                    || (current_pinned.runner == lost_runner && !same_runner_replacement_admitted)
                     || !grant_succeeds
                     || !workspace_is_fresh
                 {
@@ -4699,6 +4702,8 @@ async fn load_grant_policy_index(
          SELECT grant_line.lineage_origin_event_ordinal,
                 grant_line.runner_id,
                 grant_line.grant_revision,
+                grant_line.prior_runner_id,
+                grant_line.prior_grant_revision,
                 grant_line.placement_event_ordinal,
                 policy_placement.pinned_credential_profile_name IS NOT NULL
                     AS defines_policy
@@ -4721,6 +4726,7 @@ async fn load_grant_policy_index(
     let mut events = BTreeMap::new();
     let mut inherited_policy = None;
     for row in rows {
+        validate_grant_predecessor_shape(&row)?;
         let identity = StoredGrantIdentity {
             lineage_origin: row.decode_column("lineage_origin_event_ordinal")?,
             runner: row.decode_column("runner_id")?,
@@ -4738,6 +4744,24 @@ async fn load_grant_policy_index(
         return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into());
     }
     Ok(GrantPolicyIndex { events })
+}
+
+fn validate_grant_predecessor_shape(row: &PgRow) -> Result<(), RunnerProtocolStoreError> {
+    let revision = decode_generation(row.decode_column("grant_revision")?)?;
+    let prior_runner = row.decode_column::<Option<Uuid>>("prior_runner_id")?;
+    let prior_revision = row
+        .decode_column::<Option<Decimal>>("prior_grant_revision")?
+        .map(decode_generation)
+        .transpose()?;
+    let valid = match (revision, prior_runner, prior_revision) {
+        (revision, None, None) => revision == RunnerGeneration::one(),
+        (revision, Some(_), Some(prior)) => prior.checked_next() == Some(revision),
+        _ => false,
+    };
+    if !valid {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
 }
 
 async fn load_grant_for_placement(

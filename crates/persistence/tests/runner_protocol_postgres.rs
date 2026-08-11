@@ -7798,6 +7798,45 @@ async fn s32_inv002_inv045_grant_policy_resolution_excludes_sibling_lineage()
     Ok(())
 }
 
+/// INV-002 / INV-045: the grant policy loader fails closed when a corrupted
+/// revision-one grant names itself as its predecessor.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv045_grant_policy_rejects_cyclic_base_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_credential_grant
+             DROP CONSTRAINT runner_credential_grant_revision_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_credential_grant
+            SET prior_runner_id = runner_id,
+                prior_grant_revision = grant_revision
+          WHERE session_id = $1 AND grant_revision = 1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("a base grant cannot name itself as its predecessor");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result<(), Box<dyn Error>>
