@@ -279,6 +279,15 @@ mod linux {
         {
             return ExitCode::FAILURE;
         }
+        // Release the process-wide stderr lock before running the target. The
+        // output-copy helper that `run_target` spawns writes the target's
+        // stderr through `&mut std::io::stderr()`, which re-acquires this same
+        // lock on a different thread. `ReentrantLock` re-enters only for the
+        // thread that owns it, so holding this guard across the call parks that
+        // helper forever and then deadlocks this thread in
+        // `stderr_copy.join()` -- but only once the target actually writes a
+        // byte to stderr, which is why silent targets appear to work.
+        drop(stderr);
         emit_target_status(arguments)
     }
 
