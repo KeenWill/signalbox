@@ -188,6 +188,13 @@ DECLARE
     loss runner_connection_loss_epoch%ROWTYPE;
     placement runner_session_placement_record%ROWTYPE;
 BEGIN
+    IF NEW.offer_connection_epoch IS NOT NULL
+       OR NEW.offer_connection_event_ordinal IS NOT NULL
+       OR NEW.offer_loss_epoch IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'runner lease offer authority is adapter-owned'
+            USING ERRCODE = '23514';
+    END IF;
     PERFORM 1
       FROM runner_enrollment
      WHERE enrollment_id = NEW.registration_enrollment_id
@@ -233,6 +240,10 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF connection.state_kind IS DISTINCT FROM 'lost' THEN
+        NEW.offer_connection_epoch := authority.connection_epoch;
+        NEW.offer_connection_event_ordinal :=
+            authority.connection_event_ordinal;
+        NEW.offer_loss_epoch := authority.latest_loss_epoch;
         RETURN NEW;
     END IF;
     SELECT epoch.*
