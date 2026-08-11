@@ -10930,6 +10930,117 @@ async fn s32_inv002_inv044_runner_replacement_authenticates_historical_pin_regis
     Ok(())
 }
 
+/// INV-002 / INV-044: every historical runner-replacement row retains the
+/// closed pinned shape even when a later successor becomes current.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_historical_runner_replacement_rejects_loss_metadata()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the credential-bearing pin has its grant");
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    append_runner_lost_projection(&pool, lost.session()).await?;
+    let successor_enrollment = replacement_enrollment();
+    store.insert_enrollment(&successor_enrollment).await?;
+    let successor_registration = store
+        .register(&successor_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(successor_enrollment.enrollment())
+        .await?;
+    let revoked = store
+        .revoke_grant(
+            lost.session(),
+            original_grant.runner(),
+            original_grant.revision(),
+        )
+        .await?
+        .expect("the active predecessor grant revokes exactly once");
+    let replacement_request = lost.request().clone();
+    let replacement = lost
+        .replace_lost_runner(
+            replacement_request,
+            successor_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/replacement".to_owned())
+                .expect("the successor directory is valid"),
+            None,
+            Some(revoked),
+        )
+        .expect("the live successor replaces the lost runner");
+    store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &successor_registration,
+            replacement.grant.as_ref(),
+        )
+        .await?;
+    let historical_replacement_revision = replacement.placement.revision();
+    let replacement_grant = replacement
+        .grant
+        .as_ref()
+        .expect("the successor carries the advanced grant");
+    let profile_replacement = duplicate_placement(
+        &replacement.placement,
+        Some(successor_registration.registration()),
+    )
+    .replace_credential_profile(
+        duplicate_grant(replacement_grant, successor_registration.registration()),
+        successor_registration.registration(),
+        replacement_profile(),
+        [tool("inspect")],
+    )
+    .expect("the successor may replace its credential profile");
+    store
+        .store_placement(
+            &profile_replacement.placement,
+            Some(&successor_registration),
+            Some(&profile_replacement.grant.grant),
+        )
+        .await?;
+    let later_loss = profile_replacement
+        .placement
+        .mark_runner_lost()
+        .expect("the profile-replaced successor may be marked lost");
+    append_runner_lost_projection(&pool, later_loss.session()).await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET lost_runner_id = pinned_runner_id,
+                loss_source_kind = 'registration'
+          WHERE session_id = $1
+            AND event_kind = 'runner_replaced'
+            AND placement_revision = $2",
+    )
+    .bind(later_loss.session().into_uuid())
+    .bind(Decimal::from(historical_replacement_revision.get()))
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(later_loss.session())
+        .await
+        .expect_err("a current successor cannot hide loss metadata on historical pinned state");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_generic_store_rejects_abandonment_without_scheduler_authority()
