@@ -2602,6 +2602,11 @@ impl RunnerProtocolStore {
         .await?;
         match decode_enrollment_state(&enrollment_state)? {
             RunnerEnrollmentState::Active => {}
+            RunnerEnrollmentState::Pending => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::InvalidState,
+                ));
+            }
             RunnerEnrollmentState::Revoked => {
                 return Err(RunnerProtocolStoreError::Domain(
                     RunnerDomainError::EnrollmentRevoked,
