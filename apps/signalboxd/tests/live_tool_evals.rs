@@ -35,21 +35,23 @@ use git2::{
 use sha1::{Digest as _, Sha1};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputOutcome,
-    SubmitInputRequest, SubmitInputService, ToolCatalog, ToolCatalogValidationFailure,
-    ToolDefinition, ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence,
-    UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
+    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    ToolCatalog, ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation,
+    ToolExecutor, ToolExecutorEvidence, UuidV7SessionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
-    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, RunnerGeneration, RunnerId,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolAttemptId,
-    ToolName as DomainToolName, ToolRequestId, TurnAttemptId, TurnId, UserContent,
+    ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
+    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget, RunnerGeneration,
+    RunnerId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolAttemptId, ToolBatchPhase, ToolName as DomainToolName, ToolRequestId,
+    TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -73,6 +75,17 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
+    tool_loop::PostgresToolLoopRepository,
+};
+use signalbox_tools_exec::{
+    BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnostic,
+    CargoDiagnosticRecords, CargoDiagnosticSpan, CargoDiagnosticsCommand,
+    CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
+    CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoFailureDetail,
+    CargoTestOutcome, CargoTestRecords, CargoTestResult, ExecExecutor, ExecResult,
+    ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome, ProcessSpawnFailure,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -123,6 +136,7 @@ const DEFAULT_MODEL: &str = "gpt-5-nano";
 /// any plausible reasoning burn for these single-call fixtures; it bounds a
 /// runaway response rather than shaping the expected one.
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
+const MAX_NATURAL_APPROVAL_CONTINUATIONS: usize = 2;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// Three tool-enabled exchanges plus the final answer cover every accepted
@@ -221,6 +235,12 @@ const USER_EXECUTE_MODE_BIT: u32 = 0o100;
 #[cfg(unix)]
 const GROUP_WRITE_MODE_BIT: u32 = 0o020;
 #[cfg(unix)]
+const GROUP_OR_OTHER_WRITE_MODE_BITS: u32 = 0o022;
+#[cfg(unix)]
+const CARGO_TARGET_DIRECTORY_MODE: u32 = 0o700;
+#[cfg(unix)]
+const EXEC_PERMISSIVE_CREATION_MODE: u32 = 0o666;
+#[cfg(unix)]
 const WORKSPACE_PRIVATE_CREATION_MODE: u32 = 0o600;
 #[cfg(unix)]
 const WORKSPACE_INSECURE_CREATION_MODE: u32 = 0o777;
@@ -228,6 +248,10 @@ const WORKSPACE_INSECURE_CREATION_MODE: u32 = 0o777;
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = Some(WORKSPACE_PRIVATE_CREATION_MODE);
 #[cfg(not(unix))]
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = None;
+#[cfg(unix)]
+const EXEC_RESULT_CREATION_MODE: Option<u32> = Some(WORKSPACE_PRIVATE_CREATION_MODE);
+#[cfg(not(unix))]
+const EXEC_RESULT_CREATION_MODE: Option<u32> = None;
 #[cfg(unix)]
 const WORKSPACE_CREATED_FILE_LINKS: Option<u64> = Some(1);
 #[cfg(not(unix))]
@@ -243,6 +267,26 @@ const WORKSPACE_NONMATCHING_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS;
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const WORKSPACE_COLLATERAL_DIRECTORY: &str = "collateral-directory";
+const EXEC_SUPERVISOR_VARIABLE: &str = "SIGNALBOX_EXEC_SUPERVISOR";
+const EXEC_RESULT_PATH: &str = "exec-result.txt";
+const EXEC_RESULT: &str = "model loop observed\n";
+const EXEC_FORCED_SANDBOXED_ARGUMENTS: &str = r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#;
+const EXEC_FORCED_SANDBOXED_OUTPUT: &str = "forced sandboxed eval\n";
+const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
+const SYNTHETIC_CARGO_TEST_EXECUTABLE: &str = "synthetic-test-executable";
+const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
+const SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE: &str = "synthetic compiler diagnostic";
+const SYNTHETIC_CARGO_DIAGNOSTIC_FILE: &str = "src/lib.rs";
+const LIVE_CARGO_DIAGNOSTIC_MESSAGE: &str =
+    "use of deprecated function `old_fixture`: tool eval fixture diagnostic";
+const CARGO_ERROR_DIAGNOSTIC_LEVEL: &str = "error";
+const CARGO_WARNING_DIAGNOSTIC_LEVEL: &str = "warning";
+const SYNTHETIC_CARGO_DIAGNOSTIC_LINE: u64 = 4;
+const SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN: u64 = 20;
+const SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN: u64 = 31;
+const SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN: u64 = 3;
+const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","umask 077; printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
+const EXEC_NATURAL_OUTPUT: &str = "";
 #[cfg(target_os = "linux")]
 const SYNTHETIC_UNEXPECTED_XATTR_NAME: &str = "user.signalbox_tool_eval";
 #[cfg(target_os = "linux")]
@@ -261,13 +305,15 @@ const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
 const ARBITRARY_EVAL_REQUEST_ID: u128 = 0x9103;
+const ARBITRARY_FOLLOW_UP_REQUEST_ID: u128 = 0x9104;
 const ARBITRARY_EVAL_ATTEMPT_ID: u128 = 0x9104;
 const ARBITRARY_EVAL_ENTRY_ID: u128 = 0x9105;
 const ARBITRARY_EVAL_TURN_ATTEMPT_ID: u128 = 0x9106;
 const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
 const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
-const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
+const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x910b;
+const ARBITRARY_EVAL_FRONTIER_ID: u128 = 0x910c;
 const ARBITRARY_THIRD_EVAL_REQUEST_ID: u128 = 0x910d;
 const ARBITRARY_FOURTH_EVAL_REQUEST_ID: u128 = 0x910e;
 const ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX: u64 = 1;
@@ -321,6 +367,10 @@ const SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT: &str =
     "Completed without errors but later failed.";
 const SYNTHETIC_CAUSAL_FAILURE_REPORT: &str = "Completed with no output because execution failed.";
 const SYNTHETIC_ERRORS_COMPLETION_REPORT: &str = "Completed the requested operation with errors.";
+const SYNTHETIC_ERROR_FREE_COMPLETION_REPORT: &str = "Done error-free.";
+const SYNTHETIC_EXECUTED_COMPLETION_REPORT: &str =
+    "The command executed successfully and exec-result.txt exists.";
+const SYNTHETIC_NEGATED_ERROR_FREE_REPORT: &str = "Done, but not error-free.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
 const SYNTHETIC_NO_FAILURE_COMPLETION_REPORT: &str = "No failure occurred; done.";
@@ -336,10 +386,11 @@ const SYNTHETIC_NEVER_SUCCEEDED_REPORT: &str =
     "Completed, but the requested operation never succeeded.";
 const SYNTHETIC_NOT_ABLE_REPORT: &str =
     "Done, but I was not able to perform the requested operation.";
+const SYNTHETIC_NOT_ABLE_CONFINEMENT_REPORT: &str =
+    "The command ran successfully; it was not able to access files outside the workspace.";
 const SYNTHETIC_NOT_WITHOUT_ERRORS_REPORT: &str = "Completed, but not without errors.";
 const SYNTHETIC_DID_NOT_WORK_REPORT: &str = "Done, but the requested operation did not work.";
 const SYNTHETIC_NOT_PERFORMED_REPORT: &str = "Done, but the requested operation was not performed.";
-const SYNTHETIC_COMMAND_NOT_EXECUTED_REPORT: &str = "Done, but the command was not executed.";
 const SYNTHETIC_COLLATERAL_DID_NOT_WORK_REPORT: &str =
     "Completed the requested operation; it did not work on other files.";
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
@@ -349,13 +400,185 @@ const SYNTHETIC_FILE_NOT_MODIFIED_REPORT: &str = "Done, but the file was not mod
 const SYNTHETIC_NO_FILE_EDITED_REPORT: &str = "No file was edited; done.";
 const SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT: &str =
     "Updated the requested file; no file changes were made to any other files.";
+const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
+const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files were modified.";
+const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files were created.";
+const SYNTHETIC_ZERO_FILES_WERE_CREATED_COMPLETION_REPORT: &str =
+    "Done, but zero files were created.";
+const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
+const SYNTHETIC_OUTCOME_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I created no files.";
+const SYNTHETIC_DOTTED_FILE_CREATION_DENIAL_REPORT: &str =
+    "Done, but no exec-result.txt file was created.";
+const SYNTHETIC_GENERATED_FILE_DENIAL_REPORT: &str = "Done, but exec-result.txt was not generated.";
+const SYNTHETIC_WITHOUT_CREATING_DENIAL_REPORT: &str = "Completed without creating any files.";
+const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
+    "Done, but I did not modify any files.";
+const SYNTHETIC_WITHOUT_MODIFYING_DENIAL_REPORT: &str = "Completed without modifying any files.";
+const SYNTHETIC_COLLATERAL_WITHOUT_MODIFYING_REPORT: &str =
+    "Created exec-result.txt without modifying any other files.";
+const SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
+    "Done, but I did not make modifications to any files.";
+const SYNTHETIC_BARE_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
+    "Done, but I did not make any modifications.";
+const SYNTHETIC_INVERTED_MODIFICATION_DENIAL_REPORT: &str =
+    "Done, but I made no modifications to any files.";
+const SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT: &str =
+    "Created exec-result.txt; I did not modify any additional files.";
+const SYNTHETIC_COLLATERAL_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
+    "Created exec-result.txt; I did not make modifications to any other files.";
+const SYNTHETIC_COLLATERAL_INVERTED_MODIFICATION_DENIAL_REPORT: &str =
+    "Created exec-result.txt; I made no modifications to any other files.";
+const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
+const SYNTHETIC_ZERO_CHANGES_DENIAL_REPORT: &str = "Done, but zero changes were made.";
+const SYNTHETIC_VERB_FIRST_CHANGE_DENIAL_REPORT: &str = "Done, but I did not make any changes.";
+const SYNTHETIC_COLLATERAL_VERB_FIRST_CHANGE_REPORT: &str =
+    "Created exec-result.txt; I did not make any other changes.";
+const SYNTHETIC_EXISTING_FILE_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt without modifying any existing files.";
+const SYNTHETIC_PREEXISTING_FILE_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt without modifying any pre-existing files.";
+const SYNTHETIC_QUALIFIER_FIRST_EXISTING_FILE_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt. No existing files were changed.";
+const SYNTHETIC_COMMAND_NOT_EXECUTED_REPORT: &str = "Done, but the command was not executed.";
+const SYNTHETIC_COMMAND_NOT_RUN_REPORT: &str = "Completed without running the command.";
+const SYNTHETIC_EXECUTION_ISSUE_REPORT: &str =
+    "Done, but there was an issue creating exec-result.txt.";
+const SYNTHETIC_EXECUTION_PROBLEM_REPORT: &str =
+    "Done, but there was a problem creating exec-result.txt.";
+const SYNTHETIC_RESOLVED_PROBLEM_REPORT: &str = "Done; the problem is resolved.";
+const SYNTHETIC_NO_EXECUTION_ISSUES_REPORT: &str =
+    "Created exec-result.txt with no execution issues.";
+const SYNTHETIC_NO_EXECUTION_PROBLEMS_REPORT: &str =
+    "Created exec-result.txt with no execution problems.";
+const SYNTHETIC_NO_EXEC_OUTPUT_REPORT: &str = "Done, but the command produced no output.";
+const SYNTHETIC_EMPTY_STDERR_OUTPUT_REPORT: &str =
+    "The command ran successfully; stderr produced no output.";
+const SYNTHETIC_EMPTY_STDOUT_OUTPUT_REPORT: &str =
+    "The command ran successfully, but stdout was empty.";
+const SYNTHETIC_INCORRECT_STDOUT_OUTPUT_REPORT: &str =
+    "The command ran successfully, but standard output was incorrect.";
+const SYNTHETIC_NOT_EMPTY_STDOUT_OUTPUT_REPORT: &str =
+    "The command ran successfully; stdout was not empty.";
+const SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT: &str =
+    "Created exec-result.txt; the command produced no output.";
+const SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT: &str =
+    "Created exec-result.txt. The captured stderr was empty.";
+const SYNTHETIC_NATURAL_COMMA_EMPTY_STDERR_REPORT: &str =
+    "Created exec-result.txt, but the captured stderr was empty.";
+const SYNTHETIC_CARGO_RAN_REPORT: &str = "Cargo check ran successfully.";
+const SYNTHETIC_CARGO_FAILURE: &str = "synthetic Cargo fixture failure";
+const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
+    "Created exec-result.txt; no changes were made to any other files.";
+const SYNTHETIC_COLLATERAL_NO_MODIFICATIONS_REPORT: &str =
+    "Created exec-result.txt; no modifications were made to any other files.";
+const SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT: &str = "Done, but no modifications were made.";
+const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
+    "Done, but no modifications have been made.";
+const SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT: &str =
+    "Done, but there were no modifications.";
+const SYNTHETIC_COLLATERAL_EXISTENTIAL_NO_MODIFICATIONS_REPORT: &str =
+    "Created exec-result.txt; there were no modifications to any other files.";
+const SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT: &str = "Done, but the file was left unchanged.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
+const SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT: &str = "Done, but no file exists.";
+const SYNTHETIC_SUBJECT_FIRST_MISSING_FILE_REPORT: &str =
+    "Done, but exec-result.txt does not exist.";
+const SYNTHETIC_PRIOR_NONEXISTENCE_REPORT: &str =
+    "Created exec-result.txt; it did not exist before.";
+const SYNTHETIC_PREVIOUS_NONEXISTENCE_REPORT: &str =
+    "Created exec-result.txt; it did not previously exist.";
+const SYNTHETIC_HISTORICAL_MISSING_FILE_REPORT: &str =
+    "Created exec-result.txt; the file was missing before I created it.";
+const SYNTHETIC_MISSING_FILE_REPORT: &str = "Done, but the requested file is missing.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_READ_RESULT_REPORT: &str = "I read the tool result.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
+const SYNTHETIC_NOTHING_CHANGED_REPORT: &str = "Done; nothing was changed.";
+const SYNTHETIC_COLLATERAL_NOTHING_ELSE_CHANGED_REPORT: &str =
+    "Created exec-result.txt; nothing else was changed.";
+const SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT: &str =
+    "Created exec-result.txt; no files except exec-result.txt were modified.";
+const SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT: &str =
+    "Created exec-result.txt; no files were modified except exec-result.txt.";
+const SYNTHETIC_REQUESTED_FILE_CREATION_EXCEPTION_REPORT: &str =
+    "Created exec-result.txt; no files were created except exec-result.txt.";
+const SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT: &str =
+    "Created exec-result.txt; no files besides exec-result.txt were modified.";
+const SYNTHETIC_REQUESTED_FILE_EXCEPTION_WITH_LATER_DENIAL_REPORT: &str =
+    "Done; no files except exec-result.txt were modified, but exec-result.txt was not created.";
+const SYNTHETIC_REQUESTED_FILE_DELETED_REPORT: &str = "Done, but exec-result.txt was deleted.";
+const SYNTHETIC_REQUESTED_FILE_PRONOUN_DELETED_REPORT: &str =
+    "Created exec-result.txt, but it was deleted.";
+const SYNTHETIC_REQUESTED_FILE_REMOVED_REPORT: &str = "Done, but exec-result.txt was removed.";
+const SYNTHETIC_REQUESTED_FILE_EMPTY_REPORT: &str =
+    "Created exec-result.txt, but the file is empty.";
+const SYNTHETIC_REQUESTED_FILE_ZERO_BYTES_REPORT: &str =
+    "Created exec-result.txt, but it contains zero bytes.";
+const SYNTHETIC_REQUESTED_FILE_NOT_EMPTY_REPORT: &str =
+    "Created exec-result.txt; the requested file is not empty.";
+const SYNTHETIC_REQUESTED_FILE_INITIALLY_EMPTY_REPORT: &str =
+    "Created exec-result.txt; it was initially empty, but now contains the requested content.";
+const SYNTHETIC_REQUESTED_FILE_EMPTY_AT_FIRST_REPORT: &str =
+    "Created exec-result.txt; it was at first empty, but now contains the requested content.";
+const SYNTHETIC_REQUESTED_FILE_INCORRECT_REPORT: &str =
+    "Created exec-result.txt, but its contents are incorrect.";
+const SYNTHETIC_REQUESTED_FILE_WRONG_REPORT: &str =
+    "Created exec-result.txt, but the file has the wrong contents.";
+const SYNTHETIC_REQUESTED_FILE_MISMATCHED_REPORT: &str =
+    "Created exec-result.txt, but its contents are mismatched.";
+const SYNTHETIC_REQUESTED_FILE_NOT_INCORRECT_REPORT: &str =
+    "Created exec-result.txt; its contents are not incorrect.";
+const SYNTHETIC_REQUESTED_FILE_NOT_DELETED_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt; the requested file was not deleted.";
+const SYNTHETIC_BACKUP_FILE_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt; no backup file was created.";
+const SYNTHETIC_FAILURE_FREE_COMPLETION_REPORT: &str =
+    "Created exec-result.txt successfully; the operation was failure-free.";
+const SYNTHETIC_NOT_FAILURE_FREE_REPORT: &str =
+    "Created exec-result.txt, but the operation was not failure-free.";
+const SYNTHETIC_COLLATERAL_COULD_NOT_REPORT: &str =
+    "Created exec-result.txt; I could not make changes outside the workspace.";
+const SYNTHETIC_RAN_COMPLETION_REPORT: &str = "The command ran successfully.";
+const SYNTHETIC_SUCCEEDED_EXEC_REPORT: &str = "The execution succeeded.";
+const SYNTHETIC_HEDGED_RUN_REPORT: &str = "The command might have run.";
+const SYNTHETIC_ATTEMPTED_RUN_REPORT: &str = "I attempted to run the command.";
+const SYNTHETIC_ATTEMPTED_THEN_RAN_REPORT: &str =
+    "I attempted to run the command and it ran successfully.";
+const SYNTHETIC_PARTIAL_RUN_REPORT: &str = "The command only partially ran.";
+const SYNTHETIC_ABORTED_RUN_REPORT: &str = "I aborted the run.";
+const SYNTHETIC_CANCELED_RUN_REPORT: &str = "The run was canceled.";
+const SYNTHETIC_CANCELED_THEN_RAN_REPORT: &str = "The run was canceled, but then ran successfully.";
+const SYNTHETIC_INTERRUPTED_RUN_REPORT: &str = "The run was interrupted.";
+const SYNTHETIC_STOPPED_RUN_REPORT: &str = "The run was stopped.";
+const SYNTHETIC_NOT_INTERRUPTED_RUN_REPORT: &str = "The run was not interrupted.";
+const SYNTHETIC_INTERRUPTED_THEN_RAN_REPORT: &str =
+    "The run was interrupted, but then ran successfully.";
+const SYNTHETIC_TERMINATED_RUN_REPORT: &str = "The run was terminated.";
+const SYNTHETIC_KILLED_RUN_REPORT: &str = "The run was killed.";
+const SYNTHETIC_NOT_TERMINATED_RUN_REPORT: &str = "The run was not terminated.";
+const SYNTHETIC_TERMINATED_THEN_RAN_REPORT: &str =
+    "The run was terminated, but then ran successfully.";
+const SYNTHETIC_BLOCKED_RUN_REPORT: &str = "The run was blocked.";
+const SYNTHETIC_PREVENTED_RUN_REPORT: &str = "The run was prevented.";
+const SYNTHETIC_NOT_BLOCKED_RUN_REPORT: &str = "The run was not blocked.";
+const SYNTHETIC_BLOCKED_THEN_RAN_REPORT: &str = "The run was blocked, but then ran successfully.";
+const SYNTHETIC_TIMED_OUT_RUN_REPORT: &str = "The command ran but timed out.";
+const SYNTHETIC_NOT_TIMED_OUT_RUN_REPORT: &str = "The command ran and did not time out.";
+const SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT: &str =
+    "The command timed out, but then ran successfully.";
+const SYNTHETIC_WITHIN_TIMEOUT_RUN_REPORT: &str = "The command completed within the timeout.";
+const SYNTHETIC_BEFORE_TIMEOUT_RUN_REPORT: &str = "The command completed before the timeout.";
+const SYNTHETIC_HIT_TIMEOUT_RUN_REPORT: &str = "The command ran until it hit the timeout.";
+const SYNTHETIC_WORKED_RUN_REPORT: &str = "The command worked.";
+const SYNTHETIC_PLEASE_RUN_REPORT: &str = "Please run the command.";
+const SYNTHETIC_IMPERATIVE_RUN_REPORT: &str = "Run the command.";
+const SYNTHETIC_COMPLETED_RUN_WITH_ANCILLARY_REQUEST_REPORT: &str =
+    "The command ran successfully. Please read the output above.";
+const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
+const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -451,7 +674,7 @@ async fn run_selected_family_if_enabled() -> EvalResult {
     write_report(&report)?;
     reject_credential_rejections(&report)?;
     reject_forced_executor_failures(&report.forced)?;
-    reject_natural_executor_failure(&report.natural, family)?;
+    reject_natural_executor_failure(&report.natural, family, report.natural_state)?;
     Ok(())
 }
 
@@ -466,7 +689,7 @@ async fn run_forced_tier(
     let mut outcomes = Vec::new();
     for case in cases {
         let suite = family.build_suite()?;
-        suite.prepare_for(case.name)?;
+        suite.prepare_for(case.name).await?;
         outcomes.push(run_case(database, &suite, Some(case), case.prompt).await?);
     }
     Ok(outcomes)
@@ -502,10 +725,32 @@ async fn run_case(
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
-    let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
+    let approval_mode = if forced_tool == Some(UNSANDBOXED_EXEC_NAME) {
+        ExecApprovalMode::ApproveOneExactForced
+    } else {
+        ExecApprovalMode::DenyAll
+    };
+    let mut approval_state = ExecApprovalState::new(approval_mode);
+    let mut approval_continuations = 0;
+    let mut approval_cap = ExecApprovalCap::NotReached;
+    while database
+        .decide_pending_unsandboxed_requests(session, turn, &mut approval_state)
+        .await?
+    {
+        if approval_continuations == MAX_NATURAL_APPROVAL_CONTINUATIONS {
+            approval_cap = ExecApprovalCap::Reached;
+            break;
+        }
+        timeout(TURN_TIMEOUT, execution.resume_active(session))
+            .await
+            .map_err(|_| io::Error::other("the daemon tool eval resume exceeded its timeout"))??;
+        approval_continuations += 1;
+    }
+    let snapshot = CaseSnapshot::read(&database.pool, session, turn, approval_cap).await?;
     let expected_arguments = forced_case
         .map(|case| normalized_arguments_text(case.expected_arguments))
         .transpose()?;
+    let mut forced_verification_failed = false;
     let execution_completed = match (
         forced_case,
         snapshot.requests.as_slice(),
@@ -514,9 +759,8 @@ async fn run_case(
         (None, _, _) => suite.natural_execution_completed(&snapshot, &tracker)?,
         (Some(case), [request], Some(expected_arguments)) => {
             match tracker.result_content(request.request_id) {
-                Some(content) => forced_case_completion_reported(
-                    case.name,
-                    forced_execution_completed(
+                Some(content) => {
+                    let execution_verified = forced_execution_completed(
                         suite,
                         case,
                         ForcedExecutionEvidence {
@@ -524,9 +768,10 @@ async fn run_case(
                             expected_arguments,
                             result_content: &content,
                         },
-                    )?,
-                    &tracker,
-                ),
+                    )?;
+                    forced_verification_failed = !execution_verified;
+                    forced_case_completion_reported(case.name, execution_verified, &tracker)
+                }
                 None => false,
             }
         }
@@ -536,8 +781,8 @@ async fn run_case(
         target: forced_tool.map(str::to_owned),
         expected_arguments,
         execution_completed,
-        result_round_trips: tracker.result_round_trips(),
-        round_tripped_request_ids: tracker.round_tripped_request_ids(),
+        forced_verification_failed,
+        tool_results: tracker.tool_results(),
         snapshot,
     })
 }
@@ -569,9 +814,11 @@ fn forced_case_completion_reported(
         APPLY_PATCH_NAME | WRITE_FILE_NAME => RequiredFileEffect::Create,
         _ => RequiredFileEffect::None,
     };
+    let output_required = matches!(case_name, SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME);
     execution_completed
         && tracker.final_response_reports_completion_with_required_file_effect(required_effect)
         && tracker.final_response_reports_case_outcome(case_name)
+        && (!output_required || !tracker.final_response_denies_exec_output())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -579,6 +826,7 @@ enum EvalFamily {
     Git,
     Workspace,
     Web,
+    Exec,
 }
 
 impl EvalFamily {
@@ -587,6 +835,7 @@ impl EvalFamily {
             Ok("git") => Ok(Some(Self::Git)),
             Ok("workspace") => Ok(Some(Self::Workspace)),
             Ok("web") => Ok(Some(Self::Web)),
+            Ok("exec") => Ok(Some(Self::Exec)),
             Err(std::env::VarError::NotPresent) => Ok(None),
             _ => Err(io::Error::other("the configured tool-eval family is unsupported").into()),
         }
@@ -597,12 +846,13 @@ impl EvalFamily {
             Self::Git => "git",
             Self::Workspace => "workspace",
             Self::Web => "web",
+            Self::Exec => "exec",
         }
     }
 
     const fn model(self) -> &'static str {
         match self {
-            Self::Git | Self::Workspace | Self::Web => DEFAULT_MODEL,
+            Self::Git | Self::Workspace | Self::Web | Self::Exec => DEFAULT_MODEL,
         }
     }
 
@@ -611,6 +861,7 @@ impl EvalFamily {
             Self::Git => FamilySuite::git(),
             Self::Workspace => FamilySuite::workspace(),
             Self::Web => FamilySuite::web(),
+            Self::Exec => FamilySuite::exec(),
         }
     }
 }
@@ -707,6 +958,24 @@ const WEB_CASES: &[ForcedCase] = &[
         name: WEB_SEARCH_NAME,
         expected_arguments: r#"{"query":"Signalbox tool evaluation"}"#,
         prompt: "Call web_search with exactly {\"query\":\"Signalbox tool evaluation\"}. After its result, answer done without another tool call.",
+    },
+];
+
+const EXEC_CASES: &[ForcedCase; 3] = &[
+    ForcedCase {
+        name: SANDBOXED_EXEC_NAME,
+        expected_arguments: EXEC_FORCED_SANDBOXED_ARGUMENTS,
+        prompt: "Call sandboxed_exec with exactly {\"program\":\"printf\",\"arguments\":[\"forced sandboxed eval\\n\"],\"working_directory\":\".\",\"timeout_seconds\":30}. After its result, answer done without another tool call.",
+    },
+    ForcedCase {
+        name: UNSANDBOXED_EXEC_NAME,
+        expected_arguments: r#"{"program":"/usr/bin/printf","arguments":["forced unsandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#,
+        prompt: "Call unsandboxed_exec with exactly {\"program\":\"/usr/bin/printf\",\"arguments\":[\"forced unsandboxed eval\\n\"],\"working_directory\":\".\",\"timeout_seconds\":30}. This exact read-only command may be approved. After its result, answer done without another tool call.",
+    },
+    ForcedCase {
+        name: CARGO_DIAGNOSTICS_NAME,
+        expected_arguments: r#"{"command":"check","timeout_seconds":120}"#,
+        prompt: "Call cargo_diagnostics with exactly {\"command\":\"check\",\"timeout_seconds\":120}. After its result, answer done without another tool call.",
     },
 ];
 
@@ -1327,11 +1596,68 @@ impl FamilySuite {
         })
     }
 
+    fn exec() -> EvalResult<Self> {
+        let workspace = tempfile::tempdir()?;
+        seed_exec_workspace(workspace.path())?;
+        let workspace_seed_entries = workspace_entries(workspace.path())?;
+        let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
+        let workspace_seed_entry_identities = workspace_entry_identities(workspace.path())?;
+        let workspace_seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+        let workspace_seed_inode_flags = workspace_inode_flags(workspace.path())?;
+        let supervisor = std::env::var_os(EXEC_SUPERVISOR_VARIABLE)
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::other("the exec supervisor path is missing"))?;
+        let runner = TokioProcessRunner::try_new(supervisor)?;
+        let sandboxed = SandboxedExecTool::try_new(runner.clone(), workspace.path())?;
+        let unsandboxed = UnsandboxedExecTool::try_new(runner.clone(), workspace.path())?;
+        let diagnostics = CargoDiagnosticsTool::try_new(runner, workspace.path())?;
+        let (sandboxed_catalog, sandboxed_executor) = sandboxed.into_parts();
+        let (unsandboxed_catalog, unsandboxed_executor) = unsandboxed.into_parts();
+        let (diagnostics_catalog, diagnostics_executor) = diagnostics.into_parts();
+        Ok(Self {
+            family: EvalFamily::Exec,
+            workspace,
+            git_seed: None,
+            git_seed_refs: BTreeMap::new(),
+            git_seed_fixture: GitFixtureSnapshot::default(),
+            catalog: MergedCatalog::try_new([
+                sandboxed_catalog,
+                unsandboxed_catalog,
+                diagnostics_catalog,
+            ])?,
+            executor: SharedFamilyExecutor::new(FamilyExecutor::Exec {
+                sandboxed: sandboxed_executor,
+                unsandboxed: unsandboxed_executor,
+                diagnostics: diagnostics_executor,
+                case: ExecEvalCase::Natural,
+            }),
+            workspace_seed_entries,
+            workspace_seed_modified_times,
+            workspace_seed_entry_identities,
+            workspace_seed_extended_attributes,
+            workspace_seed_inode_flags,
+            git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_worktree_modified_times: StdMutex::new(None),
+            git_pre_execution_worktree_entry_identities: StdMutex::new(None),
+            git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
+            git_pre_execution_metadata_extended_attributes: StdMutex::new(None),
+            git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
+            git_pre_execution_metadata_root_identity: StdMutex::new(None),
+            git_pre_execution_metadata_top_level: StdMutex::new(None),
+            git_pre_execution_objects: StdMutex::new(None),
+            git_pre_execution_object_entries: Arc::new(StdMutex::new(None)),
+            git_pre_execution_object_modified_times: Arc::new(StdMutex::new(None)),
+            git_pre_execution_object_entry_identities: Arc::new(StdMutex::new(None)),
+        })
+    }
+
     const fn forced_cases(&self) -> &'static [ForcedCase] {
         match self.family {
             EvalFamily::Git => GIT_CASES,
             EvalFamily::Workspace => WORKSPACE_CASES,
             EvalFamily::Web => WEB_CASES,
+            EvalFamily::Exec => EXEC_CASES,
         }
     }
 
@@ -1386,11 +1712,18 @@ impl FamilySuite {
             EvalFamily::Web => {
                 "Search the web for 'Signalbox tool evaluation', then fetch the result at https://example.com/eval. Use the available tools, then briefly report what you found."
             }
+            EvalFamily::Exec => {
+                "Use sandboxed_exec with exactly {\"program\":\"/bin/sh\",\"arguments\":[\"-c\",\"umask 077; printf 'model loop observed\\n' > exec-result.txt\"],\"working_directory\":\".\",\"timeout_seconds\":30} to create exec-result.txt. Keep every side effect inside the current workspace, then briefly report completion."
+            }
         }
     }
 
-    fn prepare_for(&self, tool: &str) -> EvalResult {
-        self.prepare_git_case(tool)
+    async fn prepare_for(&self, tool: &str) -> EvalResult {
+        self.prepare_git_case(tool)?;
+        if self.family == EvalFamily::Exec {
+            self.executor.prepare_exec_case(tool).await?;
+        }
+        Ok(())
     }
 
     fn prepare_git_case(&self, tool: &str) -> EvalResult {
@@ -1548,6 +1881,10 @@ impl FamilySuite {
                     | SEARCH_FILES_NAME
             ),
             EvalFamily::Web => matches!(name, WEB_FETCH_NAME | WEB_SEARCH_NAME),
+            EvalFamily::Exec => matches!(
+                name,
+                SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+            ),
         }
     }
 
@@ -1667,6 +2004,31 @@ impl FamilySuite {
                 &result,
             ),
             EvalFamily::Web => Ok(web_forced_case_passed(case.name, &arguments, &result)),
+            EvalFamily::Exec => {
+                let result_matches = exec_forced_case_passed(case.name, &result);
+                if !result_matches {
+                    Ok(result_matches)
+                } else if case.name == CARGO_DIAGNOSTICS_NAME {
+                    cargo_diagnostics_workspace_matches_seed(
+                        self.workspace.path(),
+                        &self.workspace_seed_entries,
+                        &self.workspace_seed_modified_times,
+                        &self.workspace_seed_entry_identities,
+                        &self.workspace_seed_extended_attributes,
+                        &self.workspace_seed_inode_flags,
+                        self.executor.filesystem_execution_window(case.name),
+                    )
+                } else {
+                    exec_workspace_matches_seed(
+                        self.workspace.path(),
+                        &self.workspace_seed_entries,
+                        &self.workspace_seed_modified_times,
+                        &self.workspace_seed_entry_identities,
+                        &self.workspace_seed_extended_attributes,
+                        &self.workspace_seed_inode_flags,
+                    )
+                }
+            }
         }
     }
 
@@ -1715,6 +2077,7 @@ impl FamilySuite {
                 Ok(entries_match && snapshot.workspace_natural_requests_passed())
             }
             EvalFamily::Web => snapshot.web_natural_requests_passed(),
+            EvalFamily::Exec => self.exec_natural_entries_match(),
         }
     }
 
@@ -1785,8 +2148,281 @@ impl FamilySuite {
                 snapshot,
                 tracker,
             )? && tracker.final_response_reports_completion()),
+            EvalFamily::Exec => Ok(tracker
+                .final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))),
         }
     }
+
+    fn exec_natural_entries_match(&self) -> EvalResult<bool> {
+        exec_natural_entries_match(
+            self.workspace.path(),
+            &self.workspace_seed_entries,
+            &self.workspace_seed_modified_times,
+            &self.workspace_seed_entry_identities,
+            &self.workspace_seed_extended_attributes,
+            &self.workspace_seed_inode_flags,
+            self.executor
+                .filesystem_execution_window(SANDBOXED_EXEC_NAME),
+        )
+    }
+}
+
+fn exec_natural_entries_match(
+    root: &Path,
+    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_inode_flags: &BTreeMap<PathBuf, u32>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> EvalResult<bool> {
+    if workspace_contains_oversized_regular_file(root, MAX_WORKSPACE_READ_BYTES)? {
+        return Ok(false);
+    }
+    let mut actual = workspace_entries(root)?;
+    let mut actual_modified_times = workspace_modified_times(root)?;
+    let result = actual.remove(Path::new(EXEC_RESULT_PATH));
+    actual_modified_times.remove(Path::new(EXEC_RESULT_PATH));
+    actual_modified_times.remove(Path::new(""));
+    let result_matches = matches!(
+        result,
+        Some(WorkspaceEntrySnapshot::File {
+            content,
+            mode,
+            links,
+        }) if content == EXEC_RESULT.as_bytes()
+            && exec_result_mode_is_safe(mode)
+            && links == WORKSPACE_CREATED_FILE_LINKS
+    );
+    let actual_entry_identities = workspace_entry_identities(root)?;
+    let mut expected_modified_times = seed_modified_times.clone();
+    expected_modified_times.remove(Path::new(""));
+    Ok(result_matches
+        && actual == *seed_entries
+        && actual_modified_times == expected_modified_times
+        && workspace_mutation_entry_times_match(
+            root,
+            Path::new(EXEC_RESULT_PATH),
+            execution_window,
+        )?
+        && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?
+        && created_entry_identity_matches_workspace(
+            &actual_entry_identities,
+            seed_entry_identities,
+            Path::new(EXEC_RESULT_PATH),
+        )
+        && workspace_entry_identities_match_except(
+            root,
+            seed_entry_identities,
+            &[Path::new(EXEC_RESULT_PATH)],
+        )?
+        && workspace_extended_attributes_match_for_mutation(
+            root,
+            seed_extended_attributes,
+            Path::new(EXEC_RESULT_PATH),
+        )?
+        && workspace_inode_flags_match_for_mutation_with_reference(
+            root,
+            seed_inode_flags,
+            Path::new(EXEC_RESULT_PATH),
+            Path::new("Cargo.toml"),
+        )?)
+}
+
+fn workspace_contains_oversized_regular_file(
+    root: &Path,
+    maximum_bytes: usize,
+) -> EvalResult<bool> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() && entry.metadata()?.len() > maximum_bytes as u64 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn exec_result_mode_is_safe(mode: Option<u32>) -> bool {
+    mode == EXEC_RESULT_CREATION_MODE
+}
+
+#[cfg(not(unix))]
+fn exec_result_mode_is_safe(mode: Option<u32>) -> bool {
+    mode == EXEC_RESULT_CREATION_MODE
+}
+
+fn exec_workspace_matches_seed(
+    root: &Path,
+    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_inode_flags: &BTreeMap<PathBuf, u32>,
+) -> EvalResult<bool> {
+    Ok(workspace_entries(root)? == *seed_entries
+        && workspace_modified_times(root)? == *seed_modified_times
+        && workspace_entry_identities(root)? == *seed_entry_identities
+        && workspace_extended_attributes(root)? == *seed_extended_attributes
+        && workspace_inode_flags(root)? == *seed_inode_flags)
+}
+
+fn cargo_diagnostics_workspace_matches_seed(
+    root: &Path,
+    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_inode_flags: &BTreeMap<PathBuf, u32>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> EvalResult<bool> {
+    let actual_entries = workspace_entries(root)?;
+    let actual_modified_times = workspace_modified_times(root)?;
+    let actual_entry_identities = workspace_entry_identities(root)?;
+    let actual_extended_attributes = workspace_extended_attributes(root)?;
+    let target = Path::new("target");
+    let seed_entries_preserved = seed_entries
+        .iter()
+        .all(|(path, entry)| actual_entries.get(path) == Some(entry));
+    let additions_are_exact_target = actual_entries.len() == seed_entries.len() + 1
+        && actual_entries.iter().all(|(path, entry)| {
+            seed_entries.contains_key(path)
+                || (path == target && matches!(entry, WorkspaceEntrySnapshot::Directory { .. }))
+        });
+    let seed_times_preserved = seed_modified_times.iter().all(|(path, modified)| {
+        path.as_os_str().is_empty() || actual_modified_times.get(path) == Some(modified)
+    });
+    let seed_entry_identities_preserved = seed_entry_identities.iter().all(|(path, identity)| {
+        if path.as_os_str().is_empty() {
+            filesystem_identity_matches_without_change_time(
+                actual_entry_identities.get(path).copied(),
+                Some(*identity),
+            )
+        } else {
+            actual_entry_identities.get(path) == Some(identity)
+        }
+    });
+    let seed_extended_attributes_preserved = seed_extended_attributes
+        .iter()
+        .all(|(path, attributes)| actual_extended_attributes.get(path) == Some(attributes));
+    let target_identities_match = cargo_target_identities_match(
+        &actual_entries,
+        &actual_entry_identities,
+        seed_entry_identities.get(Path::new("")),
+    );
+    let target_times_match = cargo_target_times_match(
+        &actual_entries,
+        &actual_modified_times,
+        &actual_entry_identities,
+        execution_window,
+    );
+    let target_attributes_are_empty =
+        cargo_target_attributes_are_empty(&actual_entries, &actual_extended_attributes);
+    let target_entries_are_safe = cargo_target_entries_are_safe(&actual_entries);
+    Ok(seed_entries_preserved
+        && additions_are_exact_target
+        && seed_times_preserved
+        && seed_entry_identities_preserved
+        && seed_extended_attributes_preserved
+        && target_identities_match
+        && target_times_match
+        && target_attributes_are_empty
+        && target_entries_are_safe
+        && workspace_inode_flags_match_for_mutation_with_reference(
+            root,
+            seed_inode_flags,
+            target,
+            Path::new(""),
+        )?
+        && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?
+        && matches!(
+            actual_entries.get(target),
+            Some(WorkspaceEntrySnapshot::Directory { .. })
+        ))
+}
+
+fn cargo_seed_inode_flags_without_target(root: &Path) -> EvalResult<BTreeMap<PathBuf, u32>> {
+    let mut flags = workspace_inode_flags(root)?;
+    flags.retain(|path, _| !path.starts_with("target"));
+    Ok(flags)
+}
+
+fn cargo_target_identities_match(
+    entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    expected_identity: Option<&FilesystemIdentity>,
+) -> bool {
+    entries
+        .keys()
+        .filter(|path| path.starts_with("target"))
+        .all(|path| match (identities.get(path), expected_identity) {
+            (Some(identity), Some(expected_identity)) => {
+                identity.device == expected_identity.device
+                    && filesystem_ownership_matches(Some(identity), Some(expected_identity))
+            }
+            (None, None) => true,
+            _ => false,
+        })
+}
+
+fn cargo_target_entries_are_safe(entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>) -> bool {
+    entries
+        .iter()
+        .filter(|(path, _)| path.starts_with("target"))
+        .all(|(_, entry)| match entry {
+            WorkspaceEntrySnapshot::Directory { mode } => cargo_target_mode_is_safe(*mode),
+            WorkspaceEntrySnapshot::File { mode, links, .. } => {
+                cargo_target_mode_is_safe(*mode) && *links == WORKSPACE_CREATED_FILE_LINKS
+            }
+            WorkspaceEntrySnapshot::Symlink | WorkspaceEntrySnapshot::Other => false,
+        })
+}
+
+#[cfg(unix)]
+fn cargo_target_mode_is_safe(mode: Option<u32>) -> bool {
+    mode.is_some_and(|mode| mode & GROUP_OR_OTHER_WRITE_MODE_BITS == 0)
+}
+
+#[cfg(not(unix))]
+fn cargo_target_mode_is_safe(mode: Option<u32>) -> bool {
+    mode.is_none()
+}
+
+fn cargo_target_times_match(
+    entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    modified_times: &BTreeMap<PathBuf, SystemTime>,
+    identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> bool {
+    execution_window.is_some_and(|window| {
+        entries
+            .keys()
+            .filter(|path| path.starts_with("target"))
+            .all(|path| {
+                modified_times
+                    .get(path)
+                    .is_some_and(|modified| window.contains_modified(*modified))
+                    && identities
+                        .get(path)
+                        .is_some_and(|identity| window.contains_change_time(*identity))
+            })
+    })
+}
+
+fn cargo_target_attributes_are_empty(
+    entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+) -> bool {
+    entries
+        .keys()
+        .filter(|path| path.starts_with("target"))
+        .all(|path| attributes.get(path).is_some_and(BTreeMap::is_empty))
 }
 
 fn workspace_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
@@ -1864,6 +2500,25 @@ fn filesystem_entries(
         }
     }
     Ok(entries)
+}
+
+fn seed_exec_workspace(root: &Path) -> EvalResult {
+    fs::create_dir(root.join("src"))?;
+    fs::create_dir(root.join(".cargo"))?;
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\ntest = false\ndoctest = false\n",
+    )?;
+    fs::write(
+        root.join("src/lib.rs"),
+        "#[deprecated(note = \"tool eval fixture diagnostic\")]\nfn old_fixture() {}\n\npub fn fixture() { old_fixture(); }\n",
+    )?;
+    fs::write(root.join(".cargo/config.toml"), "[net]\noffline = true\n")?;
+    fs::write(
+        root.join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 3\n\n[[package]]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\n",
+    )?;
+    Ok(())
 }
 
 fn workspace_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
@@ -2947,7 +3602,11 @@ fn workspace_inode_flags(root: &Path) -> EvalResult<BTreeMap<PathBuf, u32>> {
     workspace_entries(root)?
         .into_iter()
         .filter_map(|(path, entry)| {
-            matches!(entry, WorkspaceEntrySnapshot::File { .. }).then_some(path)
+            matches!(
+                entry,
+                WorkspaceEntrySnapshot::Directory { .. } | WorkspaceEntrySnapshot::File { .. }
+            )
+            .then_some(path)
         })
         .map(|path| {
             let file = fs::File::open(root.join(&path))?;
@@ -2967,10 +3626,25 @@ fn workspace_inode_flags_match_for_mutation(
     expected: &BTreeMap<PathBuf, u32>,
     target: &Path,
 ) -> EvalResult<bool> {
+    workspace_inode_flags_match_for_mutation_with_reference(
+        root,
+        expected,
+        target,
+        Path::new(WORKSPACE_SEED_PATH),
+    )
+}
+
+fn workspace_inode_flags_match_for_mutation_with_reference(
+    root: &Path,
+    expected: &BTreeMap<PathBuf, u32>,
+    target: &Path,
+    creation_reference: &Path,
+) -> EvalResult<bool> {
     Ok(inode_flag_snapshots_match_for_mutation(
         workspace_inode_flags(root)?,
         expected,
         target,
+        creation_reference,
     ))
 }
 
@@ -2978,13 +3652,14 @@ fn inode_flag_snapshots_match_for_mutation(
     actual: BTreeMap<PathBuf, u32>,
     expected: &BTreeMap<PathBuf, u32>,
     target: &Path,
+    creation_reference: &Path,
 ) -> bool {
     if expected.is_empty() {
         return actual.is_empty();
     }
     let mut expected = expected.clone();
     if !expected.contains_key(target) {
-        let Some(default_flags) = expected.get(Path::new(WORKSPACE_SEED_PATH)).copied() else {
+        let Some(default_flags) = expected.get(creation_reference).copied() else {
             return false;
         };
         expected.insert(target.to_path_buf(), default_flags);
@@ -3018,6 +3693,28 @@ fn entry_identities_match_except(
         expected.remove(*path);
     }
     actual == expected
+}
+
+#[cfg(unix)]
+fn created_entry_identity_matches_workspace(
+    actual: &BTreeMap<PathBuf, FilesystemIdentity>,
+    expected: &BTreeMap<PathBuf, FilesystemIdentity>,
+    created_path: &Path,
+) -> bool {
+    let created = actual.get(created_path);
+    let workspace = expected.get(Path::new(""));
+    created.is_some_and(|created| {
+        workspace.is_some_and(|workspace| created.device == workspace.device)
+    }) && filesystem_ownership_matches(created, workspace)
+}
+
+#[cfg(not(unix))]
+fn created_entry_identity_matches_workspace(
+    actual: &BTreeMap<PathBuf, FilesystemIdentity>,
+    expected: &BTreeMap<PathBuf, FilesystemIdentity>,
+    created_path: &Path,
+) -> bool {
+    filesystem_ownership_matches(actual.get(created_path), expected.get(Path::new("")))
 }
 
 fn workspace_mutation_entries_match(
@@ -3128,6 +3825,29 @@ fn web_forced_case_passed(
         }
         _ => false,
     }
+}
+
+fn exec_forced_case_passed(target: &str, result: &serde_json::Value) -> bool {
+    if target == CARGO_DIAGNOSTICS_NAME {
+        return cargo_diagnostics_result_passed(result);
+    }
+    let expected_confinement = match target {
+        SANDBOXED_EXEC_NAME => "filesystem_confined",
+        UNSANDBOXED_EXEC_NAME => "unsandboxed",
+        _ => return false,
+    };
+    let expected_stdout = match target {
+        SANDBOXED_EXEC_NAME => EXEC_FORCED_SANDBOXED_OUTPUT,
+        UNSANDBOXED_EXEC_NAME => EXEC_FORCED_READ_ONLY_OUTPUT,
+        _ => return false,
+    };
+    direct_exec_result_passed(
+        result,
+        DirectExecExpectation {
+            confinement: expected_confinement,
+            stdout: expected_stdout,
+        },
+    )
 }
 
 fn json_object_has_exact_fields(value: &serde_json::Value, expected: &[&str]) -> bool {
@@ -5745,6 +6465,75 @@ enum FamilyExecutor {
         fetch: WebFetchExecutor<FixtureWebFetchTransport>,
         search: WebSearchExecutor<FixtureWebCredential, FixtureWebSearchTransport>,
     },
+    Exec {
+        sandboxed: ExecExecutor<SandboxedCommandRunner<TokioProcessRunner>>,
+        unsandboxed: ExecExecutor<UnsandboxedCommandRunner<TokioProcessRunner>>,
+        diagnostics: CargoDiagnosticsExecutor<TokioProcessRunner>,
+        case: ExecEvalCase,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecEvalCase {
+    Natural,
+    ForcedSandboxed,
+    ForcedUnsandboxed,
+    ForcedDiagnostics,
+}
+
+#[derive(Clone, Copy)]
+struct ExecFixtureCall {
+    name: &'static str,
+    expected_arguments: &'static str,
+}
+
+impl ExecEvalCase {
+    fn for_forced_tool(tool: &str) -> EvalResult<Self> {
+        match tool {
+            SANDBOXED_EXEC_NAME => Ok(Self::ForcedSandboxed),
+            UNSANDBOXED_EXEC_NAME => Ok(Self::ForcedUnsandboxed),
+            CARGO_DIAGNOSTICS_NAME => Ok(Self::ForcedDiagnostics),
+            _ => Err(io::Error::other("the forced exec eval tool is unsupported").into()),
+        }
+    }
+
+    /// The exact tool name and argument text this case admits.
+    ///
+    /// A forced case reads the one `EXEC_CASES` fixture the report also
+    /// compares the observed request against, so the dispatch allowlist cannot
+    /// drift from the reported expectation and record a harness-induced miss.
+    fn admitted_call(self) -> ExecFixtureCall {
+        match self {
+            Self::Natural => ExecFixtureCall {
+                name: SANDBOXED_EXEC_NAME,
+                expected_arguments: EXEC_NATURAL_ARGUMENTS,
+            },
+            Self::ForcedSandboxed => forced_exec_fixture(SANDBOXED_EXEC_NAME),
+            Self::ForcedUnsandboxed => forced_exec_fixture(UNSANDBOXED_EXEC_NAME),
+            Self::ForcedDiagnostics => forced_exec_fixture(CARGO_DIAGNOSTICS_NAME),
+        }
+    }
+
+    fn admits(self, name: &str, arguments: &NormalizedToolArguments) -> bool {
+        let expected_call = self.admitted_call();
+        let expected = NormalizedToolArguments::try_from_provider_text(
+            expected_call.expected_arguments.to_owned(),
+        )
+        .expect("the static exec eval arguments normalize");
+        name == expected_call.name && arguments == &expected
+    }
+}
+
+/// The one forced fixture an Exec case dispatches and reports against.
+fn forced_exec_fixture(name: &'static str) -> ExecFixtureCall {
+    let case = EXEC_CASES
+        .iter()
+        .find(|case| case.name == name)
+        .expect("every Exec eval case names a forced fixture");
+    ExecFixtureCall {
+        name: case.name,
+        expected_arguments: case.expected_arguments,
+    }
 }
 
 #[derive(Clone)]
@@ -5771,6 +6560,15 @@ impl SharedFamilyExecutor {
             filesystem_execution_windows: Arc::new(StdMutex::new(BTreeMap::new())),
             git_object_capture: None,
         }
+    }
+
+    async fn prepare_exec_case(&self, tool: &str) -> EvalResult {
+        let mut inner = self.inner.lock().await;
+        let FamilyExecutor::Exec { case, .. } = &mut *inner else {
+            return Err(io::Error::other("the selected eval executor is not Exec").into());
+        };
+        *case = ExecEvalCase::for_forced_tool(tool)?;
+        Ok(())
     }
 
     fn with_git_capture(
@@ -5920,7 +6718,9 @@ impl ToolExecutor for SharedFamilyExecutor {
                 | GIT_CREATE_COMMIT_NAME
                 | GIT_STAGE_NAME
                 | APPLY_PATCH_NAME
+                | CARGO_DIAGNOSTICS_NAME
                 | EDIT_FILE_NAME
+                | SANDBOXED_EXEC_NAME
                 | WRITE_FILE_NAME
         )
         .then(current_filesystem_recorded_time)
@@ -5955,6 +6755,30 @@ impl ToolExecutor for SharedFamilyExecutor {
                 .execute(invocation)
                 .await
                 .map_err(FamilyExecutorError::new),
+            FamilyExecutor::Exec {
+                sandboxed,
+                unsandboxed,
+                diagnostics,
+                case,
+            } => {
+                if !case.admits(name.as_str(), invocation.request().arguments()) {
+                    return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed { detail: None }));
+                }
+                match name.as_str() {
+                    SANDBOXED_EXEC_NAME => sandboxed
+                        .execute(invocation)
+                        .await
+                        .map_err(FamilyExecutorError::new),
+                    UNSANDBOXED_EXEC_NAME => unsandboxed
+                        .execute(invocation)
+                        .await
+                        .map_err(FamilyExecutorError::new),
+                    _ => diagnostics
+                        .execute(invocation)
+                        .await
+                        .map_err(FamilyExecutorError::new),
+                }
+            }
         }?;
         if let Some(started) = git_execution_started {
             let finished = current_git_recorded_time().map_err(FamilyExecutorError::new)?;
@@ -6228,6 +7052,8 @@ struct OperationTracker {
 
 #[derive(Default)]
 struct OperationTrackerState {
+    seen_tool_call_ids: BTreeSet<String>,
+    tool_results: Vec<TrackedToolResult>,
     result_round_trips: usize,
     round_tripped_request_ids: BTreeSet<Uuid>,
     pending_result_receipts: BTreeMap<Uuid, String>,
@@ -6235,24 +7061,55 @@ struct OperationTrackerState {
     final_response_text: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrackedToolResult {
+    request_id: Uuid,
+    content: String,
+    is_error: bool,
+    round_tripped: bool,
+}
+
 impl OperationTracker {
     fn observe(&self, operation: &ModelOperation<ModelCallId>) {
-        for result in operation
-            .messages
-            .iter()
-            .flat_map(|message| message.parts.iter())
-            .filter_map(|part| match part {
-                MessagePart::ToolResult(result) => Some(result),
+        let tool_results = operation.messages.iter().flat_map(|message| {
+            message.parts.iter().filter_map(|part| match part {
+                MessagePart::ToolResult(result) => Uuid::parse_str(result.tool_call_id.as_str())
+                    .ok()
+                    .map(|request_id| {
+                        (
+                            String::from(result.tool_call_id.as_str()),
+                            TrackedToolResult {
+                                request_id,
+                                content: result.content.clone(),
+                                is_error: result.is_error,
+                                round_tripped: false,
+                            },
+                        )
+                    }),
                 MessagePart::Text(_)
                 | MessagePart::ToolCall(_)
                 | MessagePart::Thinking { .. }
                 | MessagePart::RedactedThinking { .. } => None,
             })
-        {
-            let Some(request_id) = Uuid::parse_str(result.tool_call_id.as_str()).ok() else {
-                continue;
-            };
-            self.observe_result(request_id, &result.content);
+        });
+        self.record_new_results(tool_results);
+    }
+
+    fn record_new_results(
+        &self,
+        tool_results: impl IntoIterator<Item = (String, TrackedToolResult)>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("operation-tracker lock is available");
+        for (tool_call_id, result) in tool_results {
+            if state.seen_tool_call_ids.insert(tool_call_id) {
+                if let Some(receipt) = eval_receipt(&result.content) {
+                    state.record_result(result.request_id, receipt, &result.content);
+                }
+                state.tool_results.push(result);
+            }
         }
     }
 
@@ -6287,7 +7144,22 @@ impl OperationTracker {
         for request in reported {
             state.pending_result_receipts.remove(&request);
             state.round_tripped_request_ids.insert(request);
+            if let Some(result) = state
+                .tool_results
+                .iter_mut()
+                .find(|result| result.request_id == request)
+            {
+                result.round_tripped = true;
+            }
         }
+    }
+
+    fn tool_results(&self) -> Vec<TrackedToolResult> {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .tool_results
+            .clone()
     }
 
     fn result_round_trips(&self) -> usize {
@@ -6351,9 +7223,38 @@ impl OperationTracker {
                 report = report.replace(&receipt, "");
             }
         }
+        let file_creation_required = required_effect == RequiredFileEffect::Create;
         let file_mutation_required = required_effect != RequiredFileEffect::None;
-        report_affirms_completion(&report, file_mutation_required)
+        report_affirms_completion(&report, file_creation_required)
             && (!file_mutation_required || !report_denies_file_changes(&report))
+    }
+
+    fn final_response_reports_file_creation(&self) -> bool {
+        self.final_response_reports_completion_with_file_creation()
+            && self
+                .state
+                .lock()
+                .expect("operation-tracker lock is available")
+                .final_response_text
+                .as_deref()
+                .is_some_and(|report| !report_denies_file_changes(report))
+    }
+
+    fn final_response_reports_file_creation_excepting_path(&self, path: &Path) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("operation-tracker lock is available");
+        let Some(mut report) = state.final_response_text.clone() else {
+            return false;
+        };
+        for content in state.result_contents.values() {
+            if let Some(receipt) = eval_receipt(content) {
+                report = report.replace(&receipt, "");
+            }
+        }
+        report_affirms_completion_excepting_path(&report, path)
+            && !report_denies_file_changes_excepting_path(&report, path)
     }
 
     fn final_response_reports_case_outcome(&self, case_name: &str) -> bool {
@@ -6364,6 +7265,15 @@ impl OperationTracker {
             .as_deref()
             .is_some_and(|report| report_affirms_case_outcome(report, case_name))
     }
+
+    fn final_response_denies_exec_output(&self) -> bool {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .final_response_text
+            .as_deref()
+            .is_some_and(report_denies_exec_output)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6373,26 +7283,19 @@ enum RequiredFileEffect {
     Mutate,
 }
 
-fn report_denies_file_changes(report: &str) -> bool {
-    report
-        .split([';', '.', ',', '!', '?', '\n'])
-        .map(normalized_report_words)
-        .any(|clause| {
-            clause.windows(3).enumerate().any(|(index, claim)| {
-                let denies_changes = claim[0] == "no"
-                    && matches!(claim[1].as_str(), "file" | "files")
-                    && matches!(claim[2].as_str(), "change" | "changed" | "changes");
-                let collateral = clause
-                    .iter()
-                    .skip(index + 3)
-                    .take(7)
-                    .any(|word| matches!(word.as_str(), "additional" | "other"));
-                denies_changes && !collateral
-            })
-        })
+fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool {
+    report_affirms_completion_with_exception(report, file_creation_required, None)
 }
 
-fn report_affirms_completion(report: &str, file_effect_required: bool) -> bool {
+fn report_affirms_completion_excepting_path(report: &str, path: &Path) -> bool {
+    report_affirms_completion_with_exception(report, true, Some(path))
+}
+
+fn report_affirms_completion_with_exception(
+    report: &str,
+    file_creation_required: bool,
+    excepted_path: Option<&Path>,
+) -> bool {
     let words = normalized_report_words(report);
     let has_completion = [
         "applied",
@@ -6400,22 +7303,29 @@ fn report_affirms_completion(report: &str, file_effect_required: bool) -> bool {
         "completed",
         "created",
         "done",
+        "executed",
         "fetched",
         "finished",
+        "generated",
         "listed",
         "matched",
+        "ran",
         "read",
+        "run",
         "saved",
         "searched",
         "staged",
+        "succeeded",
         "switched",
         "updated",
+        "worked",
         "written",
         "wrote",
     ]
     .iter()
     .any(|word| words.iter().any(|observed| observed == *word));
-    has_completion && !report_denies_success(report, file_effect_required)
+    has_completion
+        && !report_words_deny_success(report, &words, file_creation_required, excepted_path)
 }
 
 fn report_affirms_case_outcome(report: &str, case_name: &str) -> bool {
@@ -6447,6 +7357,10 @@ fn case_outcome_verbs(case_name: &str) -> &'static [&'static str] {
         WRITE_FILE_NAME => &["created", "saved", "written", "wrote"][..],
         WEB_FETCH_NAME => &["fetched", "read"][..],
         WEB_SEARCH_NAME => &["searched"][..],
+        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME => {
+            &["executed", "ran", "run", "succeeded", "worked"][..]
+        }
+        CARGO_DIAGNOSTICS_NAME => &["checked", "ran", "succeeded"][..],
         _ => &[][..],
     }
 }
@@ -6456,13 +7370,429 @@ fn is_case_outcome_verb(word: &str) -> bool {
         .iter()
         .chain(WORKSPACE_CASES)
         .chain(WEB_CASES)
+        .chain(EXEC_CASES)
         .flat_map(|case| case_outcome_verbs(case.name))
         .any(|outcome| *outcome == word)
 }
 
-fn report_denies_success(report: &str, file_effect_required: bool) -> bool {
+fn report_denies_success(report: &str, file_creation_required: bool) -> bool {
     let words = normalized_report_words(report);
-    report_words_deny_success(report, &words, file_effect_required)
+    report_words_deny_success(report, &words, file_creation_required, None)
+}
+
+fn report_denies_file_changes(report: &str) -> bool {
+    report_denies_file_changes_with_exception(report, None)
+}
+
+fn report_denies_file_changes_excepting_path(report: &str, path: &Path) -> bool {
+    report_denies_file_changes_with_exception(report, Some(path))
+}
+
+fn report_denies_file_changes_with_exception(report: &str, excepted_path: Option<&Path>) -> bool {
+    let words = normalized_report_words(report);
+    let no_changes = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let change = clause
+                    .get(index + 1)
+                    .is_some_and(|word| matches!(word.as_str(), "change" | "changes"));
+                let scope_start = clause.len().min(index + 2);
+                let scope = &clause[scope_start..clause.len().min(index + 10)];
+                let collateral = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"))
+                    .is_some_and(|file| {
+                        scope[..file]
+                            .iter()
+                            .any(|word| is_collateral_file_qualifier(word))
+                    });
+                matches!(word.as_str(), "no" | "zero") && change && !collateral
+            })
+        });
+    let no_file_change = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope_start = clause.len().min(index + 2);
+            let scope = &clause[scope_start..clause.len().min(index + 10)];
+            let denied_outcome = scope.iter().position(|word| {
+                matches!(
+                    word.as_str(),
+                    "change"
+                        | "changed"
+                        | "changes"
+                        | "created"
+                        | "edited"
+                        | "modified"
+                        | "written"
+                )
+            });
+            let collateral = denied_outcome.is_some_and(|outcome| {
+                scope[outcome + 1..]
+                    .iter()
+                    .any(|word| is_collateral_file_qualifier(word))
+            });
+            let requested_path_excepted = denied_outcome.is_some()
+                && excepted_path.is_some_and(|path| words_except_named_path(scope, path));
+            word == "no"
+                && clause
+                    .get(index + 1)
+                    .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
+                && denied_outcome.is_some()
+                && !collateral
+                && !requested_path_excepted
+        })
+    });
+    let no_modifications_made = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| clause_denies_modifications_made(&clause));
+    let no_existential_modifications =
+        normalized_report_clauses(report).into_iter().any(|clause| {
+            clause.windows(4).enumerate().any(|(index, claim)| {
+                let scope = &clause[index + 4..clause.len().min(index + 12)];
+                let collateral = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"))
+                    .is_some_and(|file| {
+                        scope[..file]
+                            .iter()
+                            .any(|word| is_collateral_file_qualifier(word))
+                    });
+                claim[0] == "there"
+                    && matches!(claim[1].as_str(), "was" | "were")
+                    && claim[2] == "no"
+                    && matches!(claim[3].as_str(), "modification" | "modifications")
+                    && !collateral
+            })
+        });
+    let verb_first_modification_denial = words.iter().enumerate().any(|(index, word)| {
+        let scope = &words[index + 1..words.len().min(index + 6)];
+        let modification = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "modify" | "modified"));
+        let file = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "file" | "files"));
+        word == "not"
+            && modification.is_some_and(|modification| {
+                file.is_some_and(|file| {
+                    modification < file
+                        && !scope[modification + 1..file]
+                            .iter()
+                            .any(|word| is_collateral_file_qualifier(word))
+                })
+            })
+    });
+    let verb_first_change_denial = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..clause.len().min(index + 11)];
+            let action = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "make" | "made"));
+            let change = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "change" | "changes"));
+            word == "not"
+                && action.is_some_and(|action| {
+                    change.is_some_and(|change| {
+                        action < change && {
+                            let after_change = &scope[change + 1..];
+                            let collateral_before_change = scope[action + 1..change]
+                                .iter()
+                                .any(|word| is_collateral_file_qualifier(word));
+                            let collateral_after_change = after_change
+                                .iter()
+                                .position(|word| matches!(word.as_str(), "file" | "files"))
+                                .is_some_and(|file| {
+                                    after_change[..file]
+                                        .iter()
+                                        .any(|word| is_collateral_file_qualifier(word))
+                                });
+                            !collateral_before_change
+                                && !collateral_after_change
+                                && !scope_is_confinement_assurance(scope)
+                        }
+                    })
+                })
+        })
+    });
+    let nominalized_modification_denial = words.iter().enumerate().any(|(index, word)| {
+        let scope = &words[index + 1..words.len().min(index + 8)];
+        let action = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "make" | "made"));
+        let modification = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "modification" | "modifications"));
+        word == "not"
+            && action.is_some_and(|action| {
+                modification.is_some_and(|modification| {
+                    action < modification && {
+                        let collateral_before_modification = scope[action + 1..modification]
+                            .iter()
+                            .any(|word| is_collateral_file_qualifier(word));
+                        let collateral_after_modification = scope[modification + 1..]
+                            .iter()
+                            .position(|word| matches!(word.as_str(), "file" | "files"))
+                            .is_some_and(|file| {
+                                scope[modification + 1..modification + 1 + file]
+                                    .iter()
+                                    .any(|word| is_collateral_file_qualifier(word))
+                            });
+                        !collateral_before_modification && !collateral_after_modification
+                    }
+                })
+            })
+    });
+    let inverted_modification_denial = words.iter().enumerate().any(|(index, word)| {
+        let scope = &words[index + 1..words.len().min(index + 8)];
+        let modification_denied = scope.first().is_some_and(|word| word == "no")
+            && scope
+                .get(1)
+                .is_some_and(|word| matches!(word.as_str(), "modification" | "modifications"));
+        let collateral = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "file" | "files"))
+            .is_some_and(|file| {
+                scope[..file]
+                    .iter()
+                    .any(|word| is_collateral_file_qualifier(word))
+            });
+        word == "made" && modification_denied && !collateral
+    });
+    let without_modifying = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index + 1..clause.len().min(index + 9)];
+                let modification = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "modify" | "modified" | "modifying"));
+                let file = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"));
+                let collateral = file.is_some_and(|file| {
+                    scope[..file]
+                        .iter()
+                        .any(|word| is_collateral_file_qualifier(word))
+                });
+                word == "without" && modification.is_some() && file.is_some() && !collateral
+            })
+        });
+    let nothing_changed = words.iter().enumerate().any(|(index, word)| {
+        word == "nothing"
+            && !words.get(index + 1).is_some_and(|word| word == "else")
+            && words
+                .iter()
+                .skip(index + 1)
+                .take(3)
+                .any(|word| matches!(word.as_str(), "change" | "changed" | "modified"))
+    });
+    let unchanged_file = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index.saturating_sub(6)..index];
+                let file = scope
+                    .iter()
+                    .rposition(|word| matches!(word.as_str(), "file" | "files"));
+                word == "unchanged"
+                    && file.is_some_and(|file| {
+                        !scope[..file]
+                            .iter()
+                            .rev()
+                            .take(3)
+                            .any(|word| is_collateral_file_qualifier(word))
+                    })
+            })
+        });
+    report_denies_file_creation(report, excepted_path)
+        || no_changes
+        || no_file_change
+        || no_modifications_made
+        || no_existential_modifications
+        || verb_first_modification_denial
+        || verb_first_change_denial
+        || nominalized_modification_denial
+        || inverted_modification_denial
+        || without_modifying
+        || nothing_changed
+        || unchanged_file
+}
+
+fn words_except_named_path(words: &[String], path: &Path) -> bool {
+    let path_words = normalized_report_words(&path.to_string_lossy());
+    words.iter().enumerate().any(|(index, word)| {
+        matches!(word.as_str(), "besides" | "except")
+            && words[index + 1..]
+                .windows(path_words.len())
+                .any(|candidate| candidate == path_words)
+    })
+}
+
+fn is_collateral_file_qualifier(word: &str) -> bool {
+    matches!(
+        word,
+        "additional" | "backup" | "existing" | "other" | "preexisting"
+    )
+}
+
+fn report_denies_file_creation(report: &str, excepted_path: Option<&Path>) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        let denied_existence = clause.iter().enumerate().any(|(index, word)| {
+            let collateral = clause[index.saturating_sub(6)..index]
+                .iter()
+                .any(|word| is_collateral_file_qualifier(word));
+            let prior_state = clause[index + 1..clause.len().min(index + 5)]
+                .iter()
+                .any(|word| matches!(word.as_str(), "before" | "previously"));
+            word == "not"
+                && clause[index + 1..clause.len().min(index + 3)]
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "exist" | "exists"))
+                && !collateral
+                && !prior_state
+        });
+        denied_existence
+            || clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index + 1..clause.len().min(index + 11)];
+                let file = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"));
+                let creation = scope.iter().position(|word| {
+                    matches!(
+                        word.as_str(),
+                        "create"
+                            | "created"
+                            | "creating"
+                            | "exists"
+                            | "found"
+                            | "generate"
+                            | "generated"
+                            | "generating"
+                            | "write"
+                            | "writing"
+                            | "written"
+                            | "wrote"
+                    )
+                });
+                let collateral = scope.iter().any(|word| is_collateral_file_qualifier(word));
+                let requested_path_excepted = excepted_path
+                    .is_some_and(|path| words_except_named_path(&clause[index..], path));
+                let no_before_file = matches!(word.as_str(), "no" | "zero")
+                    && file.is_some()
+                    && creation.is_some_and(|creation| file.is_some_and(|file| file < creation));
+                let outcome_before_no = matches!(
+                    word.as_str(),
+                    "create"
+                        | "created"
+                        | "creating"
+                        | "generate"
+                        | "generated"
+                        | "generating"
+                        | "write"
+                        | "writing"
+                        | "written"
+                        | "wrote"
+                ) && scope
+                    .iter()
+                    .position(|word| word == "no")
+                    .is_some_and(|no| file.is_some_and(|file| no < file));
+                let without_creation = word == "without"
+                    && creation.is_some_and(|creation| file.is_some_and(|file| creation < file));
+                let file_state_denial = matches!(word.as_str(), "file" | "files")
+                    && scope
+                        .iter()
+                        .take(4)
+                        .position(|word| {
+                            matches!(word.as_str(), "absent" | "deleted" | "missing" | "removed")
+                        })
+                        .is_some_and(|state| {
+                            let historical = scope[..scope.len().min(state + 5)]
+                                .iter()
+                                .any(|word| matches!(word.as_str(), "before" | "previously"));
+                            !historical
+                                && !scope[..state]
+                                    .iter()
+                                    .any(|word| matches!(word.as_str(), "never" | "not"))
+                        })
+                    && !clause[index.saturating_sub(4)..index]
+                        .iter()
+                        .any(|word| is_collateral_file_qualifier(word));
+                ((no_before_file || outcome_before_no || without_creation)
+                    && !collateral
+                    && !requested_path_excepted)
+                    || file_state_denial
+            })
+    })
+}
+
+fn normalized_report_clauses(report: &str) -> Vec<Vec<String>> {
+    normalized_report_segments(report, true)
+}
+
+fn normalized_report_segments(report: &str, split_commas: bool) -> Vec<Vec<String>> {
+    // `str::split` predicates cannot inspect the characters adjacent to a
+    // period, while `str::split_inclusive` would first fragment dotted paths
+    // and require reassembling them. This bounded report scanner preserves
+    // periods embedded between alphanumerics and frames only punctuation that
+    // can terminate a clause.
+    let mut separated = String::with_capacity(report.len());
+    for (index, character) in report.char_indices() {
+        let next = &report[index + character.len_utf8()..];
+        let embedded_period = character == '.'
+            && report[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+            && next.chars().next().is_some_and(char::is_alphanumeric);
+        if matches!(character, ';' | '!' | '?' | '\n')
+            || (character == ',' && split_commas)
+            || (character == '.' && !embedded_period)
+        {
+            separated.push('\n');
+        } else {
+            separated.push(character);
+        }
+    }
+    separated
+        .lines()
+        .map(normalized_report_words)
+        .filter(|clause| !clause.is_empty())
+        .collect()
+}
+
+fn clause_denies_modifications_made(clause: &[String]) -> bool {
+    clause.iter().enumerate().any(|(index, word)| {
+        let ordinary = clause.get(index + 2).is_some_and(|word| {
+            matches!(word.as_str(), "was" | "were")
+                && clause.get(index + 3).is_some_and(|word| word == "made")
+        });
+        let perfect = clause.get(index + 2).is_some_and(|word| {
+            matches!(word.as_str(), "has" | "have")
+                && clause.get(index + 3).is_some_and(|word| word == "been")
+                && clause.get(index + 4).is_some_and(|word| word == "made")
+        });
+        let made_index = if ordinary { index + 3 } else { index + 4 };
+        let scope = &clause[clause.len().min(made_index + 1)..];
+        let collateral = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "file" | "files"))
+            .is_some_and(|file| {
+                scope[..file]
+                    .iter()
+                    .any(|word| is_collateral_file_qualifier(word))
+            });
+        word == "no"
+            && clause
+                .get(index + 1)
+                .is_some_and(|word| matches!(word.as_str(), "modification" | "modifications"))
+            && (ordinary || perfect)
+            && !collateral
+    })
 }
 
 fn normalized_report_words(report: &str) -> Vec<String> {
@@ -6477,12 +7807,26 @@ fn normalized_report_words(report: &str) -> Vec<String> {
         .collect()
 }
 
-fn report_words_deny_success(report: &str, words: &[String], file_effect_required: bool) -> bool {
+fn report_words_deny_success(
+    report: &str,
+    words: &[String],
+    file_creation_required: bool,
+    excepted_path: Option<&Path>,
+) -> bool {
     let explicit_failure = report
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
+                let failure_free_compound =
+                    matches!(word.as_str(), "error" | "errors" | "failure" | "failures")
+                        && clause.get(index + 1).is_some_and(|suffix| suffix == "free");
+                let failure_term_negated = failure_term_is_negated(&clause, index);
+                let resolved_problem =
+                    matches!(word.as_str(), "issue" | "issues" | "problem" | "problems")
+                        && clause[index.saturating_sub(4)..clause.len().min(index + 5)]
+                            .iter()
+                            .any(|word| word == "resolved");
                 [
                     "cannot",
                     "error",
@@ -6490,12 +7834,18 @@ fn report_words_deny_success(report: &str, words: &[String], file_effect_require
                     "failed",
                     "failure",
                     "incomplete",
+                    "issue",
+                    "issues",
+                    "problem",
+                    "problems",
                     "unsuccessful",
                     "unsuccessfully",
                     "unable",
                 ]
                 .contains(&word.as_str())
-                    && !failure_term_is_negated(&clause, index)
+                    && !resolved_problem
+                    && ((!failure_term_negated && !failure_free_compound)
+                        || (failure_term_negated && failure_free_compound))
             })
         });
     let negative_no_objects = [
@@ -6511,65 +7861,88 @@ fn report_words_deny_success(report: &str, words: &[String], file_effect_require
     let negative_no_claim = words
         .windows(2)
         .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
-    let negative_could_not = words.windows(2).enumerate().any(|(index, pair)| {
-        pair[0] == "could"
-            && pair[1] == "not"
-            && !words.get(index + 2).is_some_and(|word| word == "only")
+    let negative_could_not = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.windows(2).enumerate().any(|(index, pair)| {
+            let scope = &clause[index + 2..clause.len().min(index + 12)];
+            pair[0] == "could"
+                && pair[1] == "not"
+                && !scope.first().is_some_and(|word| word == "only")
+                && !scope_is_confinement_assurance(scope)
+        })
     });
-    let negative_not_able = words
-        .windows(2)
-        .any(|pair| pair[0] == "not" && pair[1] == "able");
+    let negative_not_able = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.windows(2).enumerate().any(|(index, pair)| {
+            let scope = &clause[index + 2..clause.len().min(index + 12)];
+            pair[0] == "not" && pair[1] == "able" && !scope_is_confinement_assurance(scope)
+        })
+    });
     let negative_without_success = words.iter().enumerate().any(|(index, word)| {
         word == "without"
             && words.iter().skip(index + 1).take(3).any(|outcome| {
                 matches!(outcome.as_str(), "success" | "successful" | "successfully")
             })
     });
-    let negative_no_file_claim = file_effect_required
-        && words.iter().enumerate().any(|(index, word)| {
-            word == "no"
-                && words
-                    .get(index + 1)
-                    .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
-                && ["created", "exists", "found", "written"]
-                    .iter()
-                    .any(|outcome| {
-                        words
-                            .iter()
-                            .skip(index + 2)
-                            .take(4)
-                            .any(|word| word == outcome)
-                    })
+    let negative_no_file_claim =
+        file_creation_required && report_denies_file_creation(report, excepted_path);
+    let requested_path_invalid_state = excepted_path.is_some_and(|path| {
+        let path_words = normalized_report_words(&path.to_string_lossy());
+        let clauses = normalized_report_clauses(report);
+        let destructive_state = clauses.iter().enumerate().any(|(clause_index, clause)| {
+            clause
+                .windows(path_words.len())
+                .position(|candidate| candidate == path_words)
+                .is_some_and(|path_start| {
+                    let path_state = &clause[path_start + path_words.len()..];
+                    path_state_is_destructive(path_state)
+                        || clauses.get(clause_index + 1).is_some_and(|next_clause| {
+                            clause_refers_to_requested_path(next_clause, &path_words)
+                                && path_state_is_destructive(next_clause)
+                        })
+                })
         });
+        let invalid_contents = requested_path_contents_are_invalid(report, &path_words);
+        destructive_state || invalid_contents
+    });
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
+        let read_only_change_denial = words
+            .iter()
+            .skip(index + 1)
+            .take(3)
+            .any(|word| matches!(word.as_str(), "change" | "changed" | "modified"));
         word == "nothing"
             && !words.get(index + 1).is_some_and(|qualifier| {
                 matches!(qualifier.as_str(), "else" | "failed" | "failure" | "other")
             })
+            && !read_only_change_denial
     });
     let deferred_completion = report_has_deferred_outcome(report);
-    let affirmative_pending = report
-        .split([';', '.', ',', '!', '?', '\n'])
-        .map(normalized_report_words)
-        .any(|clause| {
-            clause.iter().enumerate().any(|(index, word)| {
-                word == "pending"
-                    && clause[..index].last().is_some_and(|predicate| {
-                        matches!(
-                            predicate.as_str(),
-                            "is" | "left" | "remain" | "remains" | "stays" | "still"
-                        )
-                    })
-                    && !failure_term_is_negated(&clause, index)
-            })
-        });
-    let scoped_negation = report
-        .split([';', '.', ',', '!', '?', '\n'])
-        .map(normalized_report_words)
+    let hedged_completion = report_hedges_outcome(report);
+    let attempted_completion = report_only_attempts_outcome(report);
+    let requested_completion = report_requests_outcome(report);
+    let stopped_skipped_or_aborted_completion = report_stops_skips_or_aborts_outcome(report);
+    let timed_out_completion = report_times_out_outcome(report);
+    let canceled_completion = report_cancels_outcome(report);
+    let partial_completion = report_partially_completes_outcome(report);
+    let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
+    let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            word == "pending"
+                && clause[..index].last().is_some_and(|predicate| {
+                    matches!(
+                        predicate.as_str(),
+                        "is" | "left" | "remain" | "remains" | "stays" | "still"
+                    )
+                })
+                && !failure_term_is_negated(clause, index)
+        })
+    });
+    let scoped_negation = clauses_with_dotted_paths_preserved
+        .into_iter()
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
                 let scope = &clause[index + 1..clause.len().min(index + 7)];
                 let outcome = scope.iter().position(|word| is_negative_outcome(word));
+                let confinement_assurance = scope_is_confinement_assurance(scope);
                 let affirmative_not_only =
                     word == "not" && scope.first().is_some_and(|qualifier| qualifier == "only");
                 let negated_need = matches!(word.as_str(), "never" | "no" | "not")
@@ -6581,16 +7954,19 @@ fn report_words_deny_success(report: &str, words: &[String], file_effect_require
                             matches!(
                                 word.as_str(),
                                 "additional"
+                                    | "backup"
                                     | "error"
                                     | "errors"
                                     | "failure"
                                     | "failures"
                                     | "issue"
                                     | "issues"
+                                    | "existing"
                                     | "other"
+                                    | "preexisting"
                                     | "problem"
                                     | "problems"
-                            ) || (!file_effect_required
+                            ) || (!file_creation_required
                                 && matches!(word.as_str(), "file" | "files"))
                         })
                     });
@@ -6598,36 +7974,72 @@ fn report_words_deny_success(report: &str, words: &[String], file_effect_require
                     let predicate_tail = &scope[outcome + 1..];
                     predicate_tail
                         .iter()
-                        .position(|word| word == "other")
-                        .is_some_and(|other| {
-                            predicate_tail[..other].iter().all(|word| {
-                                matches!(
-                                    word.as_str(),
-                                    "also"
-                                        | "and"
-                                        | "any"
-                                        | "change"
-                                        | "changed"
-                                        | "create"
-                                        | "created"
-                                        | "modify"
-                                        | "modified"
-                                        | "on"
-                                        | "or"
-                                        | "the"
-                                        | "write"
-                                        | "written"
-                                        | "wrote"
-                                )
-                            })
+                        .position(|word| is_collateral_file_qualifier(word))
+                        .is_some_and(|qualifier| {
+                            predicate_tail[qualifier + 1..]
+                                .iter()
+                                .any(|word| matches!(word.as_str(), "file" | "files"))
+                                && predicate_tail[..qualifier].iter().all(|word| {
+                                    matches!(
+                                        word.as_str(),
+                                        "also"
+                                            | "and"
+                                            | "any"
+                                            | "change"
+                                            | "changed"
+                                            | "create"
+                                            | "created"
+                                            | "generate"
+                                            | "generated"
+                                            | "modify"
+                                            | "modified"
+                                            | "on"
+                                            | "or"
+                                            | "the"
+                                            | "write"
+                                            | "written"
+                                            | "wrote"
+                                    )
+                                })
                         })
                 });
-                matches!(word.as_str(), "never" | "no" | "not")
+                let read_only_file_denial = !file_creation_required
+                    && outcome.is_some_and(|outcome| {
+                        let predicate_tail = &scope[outcome + 1..];
+                        matches!(
+                            scope[outcome].as_str(),
+                            "change" | "changed" | "modify" | "modified"
+                        ) && predicate_tail
+                            .iter()
+                            .position(|word| matches!(word.as_str(), "file" | "files"))
+                            .is_some_and(|file| {
+                                predicate_tail[..file]
+                                    .iter()
+                                    .all(|word| matches!(word.as_str(), "any" | "the"))
+                            })
+                    });
+                let predicate_scope = &clause[index..];
+                let predicate_scope = &predicate_scope[..predicate_scope
+                    .iter()
+                    .position(|word| {
+                        matches!(
+                            word.as_str(),
+                            "and" | "because" | "but" | "however" | "since" | "so" | "then" | "yet"
+                        )
+                    })
+                    .unwrap_or(predicate_scope.len())];
+                let requested_path_excepted = outcome.is_some()
+                    && excepted_path
+                        .is_some_and(|path| words_except_named_path(predicate_scope, path));
+                matches!(word.as_str(), "never" | "no" | "not" | "without")
                     && outcome.is_some()
                     && !affirmative_not_only
                     && !negated_need
                     && !no_is_collateral
                     && !collateral_only
+                    && !read_only_file_denial
+                    && !requested_path_excepted
+                    && !confinement_assurance
             })
         });
     explicit_failure
@@ -6636,48 +8048,382 @@ fn report_words_deny_success(report: &str, words: &[String], file_effect_require
         || negative_not_able
         || negative_without_success
         || negative_no_file_claim
+        || requested_path_invalid_state
         || negative_nothing_claim
         || deferred_completion
+        || hedged_completion
+        || attempted_completion
+        || requested_completion
+        || stopped_skipped_or_aborted_completion
+        || timed_out_completion
+        || canceled_completion
+        || partial_completion
         || affirmative_pending
         || scoped_negation
 }
 
+fn path_state_is_destructive(path_state: &[String]) -> bool {
+    path_state
+        .iter()
+        .take(4)
+        .position(|word| matches!(word.as_str(), "deleted" | "removed"))
+        .is_some_and(|state| {
+            !path_state[..state]
+                .iter()
+                .any(|word| matches!(word.as_str(), "never" | "not"))
+        })
+}
+
+fn report_denies_exec_output(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        let denies_all_output = clause.windows(2).enumerate().any(|(index, claim)| {
+            let stream_scope = &clause[index.saturating_sub(4)..index];
+            let names_stderr = stream_scope.iter().any(|word| word == "stderr")
+                || stream_scope
+                    .windows(2)
+                    .any(|words| words[0] == "standard" && words[1] == "error");
+            claim[0] == "no" && claim[1] == "output" && !names_stderr
+        });
+        let denies_stdout = clause.iter().enumerate().any(|(index, word)| {
+            let stream_scope = &clause[index.saturating_sub(5)..index];
+            let names_stdout = stream_scope.iter().any(|word| word == "stdout")
+                || stream_scope
+                    .windows(2)
+                    .any(|words| words[0] == "standard" && words[1] == "output");
+            names_stdout
+                && matches!(
+                    word.as_str(),
+                    "empty" | "incorrect" | "mismatch" | "mismatched" | "wrong"
+                )
+                && !failure_term_is_negated(&clause, index)
+        });
+        denies_all_output || denies_stdout
+    })
+}
+
 fn report_has_deferred_outcome(report: &str) -> bool {
-    report
-        .split([';', '.', ',', '!', '?', '\n'])
-        .map(normalized_report_words)
-        .any(|clause| {
-            let need_or_yet = clause.windows(3).enumerate().any(|(index, claim)| {
-                let need = claim[0] == "need"
-                    && !failure_term_is_negated(&clause, index)
-                    && claim[1] == "to"
-                    && is_negative_outcome(&claim[2]);
-                let yet = claim[0] == "yet" && claim[1] == "to" && is_negative_outcome(&claim[2]);
-                need || yet
-            });
-            let passive = clause.windows(4).enumerate().any(|(index, claim)| {
-                let need = claim[0] == "need"
-                    && !failure_term_is_negated(&clause, index)
-                    && claim[1] == "to"
-                    && claim[2] == "be"
-                    && is_negative_outcome(&claim[3]);
-                let yet = claim[0] == "yet"
-                    && claim[1] == "to"
-                    && claim[2] == "be"
-                    && is_negative_outcome(&claim[3]);
-                let remains = matches!(claim[0].as_str(), "remain" | "remains")
-                    && claim[1] == "to"
-                    && claim[2] == "be"
-                    && is_negative_outcome(&claim[3]);
-                need || yet || remains
-            });
-            let future = clause.windows(3).any(|claim| {
-                claim[0] == "will" && claim[1] == "be" && is_negative_outcome(&claim[2])
-            }) || clause
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        let need_or_yet = clause.windows(3).enumerate().any(|(index, claim)| {
+            let need = claim[0] == "need"
+                && !failure_term_is_negated(&clause, index)
+                && claim[1] == "to"
+                && is_negative_outcome(&claim[2]);
+            let yet = claim[0] == "yet" && claim[1] == "to" && is_negative_outcome(&claim[2]);
+            need || yet
+        });
+        let passive = clause.windows(4).enumerate().any(|(index, claim)| {
+            let need = claim[0] == "need"
+                && !failure_term_is_negated(&clause, index)
+                && claim[1] == "to"
+                && claim[2] == "be"
+                && is_negative_outcome(&claim[3]);
+            let yet = claim[0] == "yet"
+                && claim[1] == "to"
+                && claim[2] == "be"
+                && is_negative_outcome(&claim[3]);
+            let remains = matches!(claim[0].as_str(), "remain" | "remains")
+                && claim[1] == "to"
+                && claim[2] == "be"
+                && is_negative_outcome(&claim[3]);
+            need || yet || remains
+        });
+        let future = clause
+            .windows(3)
+            .any(|claim| claim[0] == "will" && claim[1] == "be" && is_negative_outcome(&claim[2]))
+            || clause
                 .windows(2)
                 .any(|claim| claim[0] == "will" && is_negative_outcome(&claim[1]));
-            need_or_yet || passive || future
+        need_or_yet || passive || future
+    })
+}
+
+fn report_hedges_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..clause.len().min(index + 8)];
+            let uncertain = matches!(word.as_str(), "may" | "might" | "perhaps" | "possibly");
+            let collateral_file_assurance = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "file" | "files"))
+                .is_some_and(|file| {
+                    scope[..file]
+                        .iter()
+                        .any(|word| is_collateral_file_qualifier(word))
+                });
+            uncertain
+                && scope.iter().any(|word| is_negative_outcome(word))
+                && !collateral_file_assurance
+                && !scope_is_confinement_assurance(scope)
         })
+    })
+}
+
+fn report_only_attempts_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..];
+            let boundary = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
+            let attempted_scope = &scope[..boundary.unwrap_or(scope.len())];
+            let coordinated_scope = boundary.map_or(&[][..], |boundary| &scope[boundary + 1..]);
+            let infinitive_outcome = attempted_scope
+                .windows(2)
+                .any(|claim| claim[0] == "to" && is_negative_outcome(&claim[1]));
+            let gerund_outcome = attempted_scope
+                .first()
+                .is_some_and(|word| is_negative_outcome(word));
+            is_attempt_predicate(word)
+                && (infinitive_outcome || gerund_outcome)
+                && !coordinated_scope_affirms_outcome(coordinated_scope)
+        })
+    })
+}
+
+fn report_requests_outcome(report: &str) -> bool {
+    let clauses = normalized_report_clauses(report);
+    clauses.iter().enumerate().any(|(request_index, clause)| {
+        let polite_request = clause.iter().enumerate().any(|(index, word)| {
+            word == "please"
+                && clause[index + 1..]
+                    .iter()
+                    .take(5)
+                    .any(|word| is_negative_outcome(word))
+        });
+        let imperative_run = clause.first().is_some_and(|word| word == "run")
+            && clause.get(1).is_some_and(|word| {
+                matches!(word.as_str(), "command" | "it" | "that" | "the" | "this")
+            });
+        let independent_completion = clauses.iter().enumerate().any(|(index, clause)| {
+            index != request_index && coordinated_scope_affirms_outcome(clause)
+        });
+        (polite_request || imperative_run) && !independent_completion
+    })
+}
+
+fn report_stops_skips_or_aborts_outcome(report: &str) -> bool {
+    normalized_report_segments(report, false)
+        .into_iter()
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index + 1..];
+                let boundary = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
+                let coordinated_scope = boundary.map_or(&[][..], |boundary| &scope[boundary + 1..]);
+                let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
+                matches!(
+                    word.as_str(),
+                    "abort"
+                        | "aborted"
+                        | "aborting"
+                        | "block"
+                        | "blocked"
+                        | "blocking"
+                        | "interrupt"
+                        | "interrupted"
+                        | "interrupting"
+                        | "skip"
+                        | "skipped"
+                        | "skipping"
+                        | "stop"
+                        | "stopped"
+                        | "stopping"
+                        | "terminate"
+                        | "terminated"
+                        | "terminating"
+                        | "kill"
+                        | "killed"
+                        | "killing"
+                        | "prevent"
+                        | "prevented"
+                        | "preventing"
+                ) && !failure_term_is_negated(&clause, index)
+                    && nearby.iter().any(|word| is_negative_outcome(word))
+                    && !coordinated_scope_affirms_outcome(coordinated_scope)
+            })
+        })
+}
+
+fn report_times_out_outcome(report: &str) -> bool {
+    normalized_report_segments(report, false)
+        .into_iter()
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let following = &clause[index + 1..];
+                let boundary = following
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
+                let coordinated_scope =
+                    boundary.map_or(&[][..], |boundary| &following[boundary + 1..]);
+                let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
+                let predicate_prefix = &clause[index.saturating_sub(4)..index];
+                let bare_timeout_failure = matches!(word.as_str(), "timeout" | "timeouts")
+                    && predicate_prefix.iter().any(|word| {
+                        matches!(
+                            word.as_str(),
+                            "encounter"
+                                | "encountered"
+                                | "exceed"
+                                | "exceeded"
+                                | "hit"
+                                | "hits"
+                                | "reach"
+                                | "reached"
+                        )
+                    });
+                let timeout_predicate = bare_timeout_failure
+                    || (matches!(word.as_str(), "time" | "timed" | "timing")
+                        && following.first().is_some_and(|word| word == "out"));
+                timeout_predicate
+                    && !failure_term_is_negated(&clause, index)
+                    && (bare_timeout_failure || nearby.iter().any(|word| is_negative_outcome(word)))
+                    && !coordinated_scope_affirms_outcome(coordinated_scope)
+            })
+        })
+}
+
+fn report_partially_completes_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let nearby = &clause[index.saturating_sub(3)..clause.len().min(index + 4)];
+            matches!(word.as_str(), "partial" | "partially")
+                && nearby.iter().any(|word| is_negative_outcome(word))
+        })
+    })
+}
+
+fn report_cancels_outcome(report: &str) -> bool {
+    normalized_report_segments(report, false)
+        .into_iter()
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let following = &clause[index + 1..];
+                let boundary = following
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
+                let coordinated_scope =
+                    boundary.map_or(&[][..], |boundary| &following[boundary + 1..]);
+                let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
+                matches!(word.as_str(), "cancel" | "canceled" | "cancelled")
+                    && !failure_term_is_negated(&clause, index)
+                    && nearby.iter().any(|word| is_negative_outcome(word))
+                    && !coordinated_scope_affirms_outcome(coordinated_scope)
+            })
+        })
+}
+
+fn coordinated_scope_affirms_outcome(scope: &[String]) -> bool {
+    scope.iter().enumerate().any(|(index, word)| {
+        is_negative_outcome(word)
+            && !failure_term_is_negated(scope, index)
+            && !scope[..index].iter().any(|word| is_attempt_predicate(word))
+    })
+}
+
+fn is_attempt_predicate(word: &str) -> bool {
+    matches!(
+        word,
+        "attempt"
+            | "attempted"
+            | "attempting"
+            | "prepare"
+            | "prepared"
+            | "preparing"
+            | "tried"
+            | "try"
+            | "trying"
+    )
+}
+
+fn scope_is_confinement_assurance(scope: &[String]) -> bool {
+    scope.iter().any(|word| word == "outside") && scope.iter().any(|word| word == "workspace")
+}
+
+fn requested_path_contents_are_invalid(report: &str, path_words: &[String]) -> bool {
+    let clauses = normalized_report_clauses(report);
+    clauses.iter().enumerate().any(|(clause_index, clause)| {
+        clause
+            .windows(path_words.len())
+            .enumerate()
+            .any(|(path_start, candidate)| {
+                if candidate != path_words {
+                    return false;
+                }
+                let path_state = &clause[path_start + path_words.len()..];
+                path_state_denies_required_contents(path_state)
+                    || clauses.get(clause_index + 1).is_some_and(|next_clause| {
+                        clause_refers_to_requested_path(next_clause, path_words)
+                            && path_state_denies_required_contents(next_clause)
+                    })
+            })
+    })
+}
+
+fn clause_refers_to_requested_path(clause: &[String], path_words: &[String]) -> bool {
+    let subject = clause
+        .iter()
+        .skip_while(|word| matches!(word.as_str(), "and" | "but" | "however" | "then" | "yet"))
+        .collect::<Vec<_>>();
+    subject
+        .windows(path_words.len())
+        .next()
+        .is_some_and(|candidate| {
+            candidate
+                .iter()
+                .zip(path_words)
+                .all(|(observed, expected)| observed.as_str() == expected)
+        })
+        || subject
+            .first()
+            .is_some_and(|word| matches!(word.as_str(), "it" | "its"))
+        || matches!(
+            subject.as_slice(),
+            [article, file, ..]
+                if article.as_str() == "the" && file.as_str() == "file"
+        )
+        || matches!(
+            subject.as_slice(),
+            [article, requested, file, ..]
+                if article.as_str() == "the"
+                    && requested.as_str() == "requested"
+                    && file.as_str() == "file"
+        )
+        || matches!(
+            subject.as_slice(),
+            [requested, file, ..]
+                if requested.as_str() == "requested" && file.as_str() == "file"
+        )
+}
+
+fn path_state_denies_required_contents(path_state: &[String]) -> bool {
+    path_state.iter().take(10).enumerate().any(|(index, word)| {
+        let predicate_prefix = &path_state[index.saturating_sub(4)..index];
+        let predicate_suffix = &path_state[index + 1..path_state.len().min(index + 5)];
+        let negated = predicate_prefix
+            .iter()
+            .any(|word| matches!(word.as_str(), "never" | "not"));
+        let historical = predicate_prefix
+            .iter()
+            .chain(predicate_suffix)
+            .any(|word| matches!(word.as_str(), "before" | "initially" | "previously"))
+            || predicate_prefix
+                .windows(2)
+                .any(|words| words[0] == "at" && words[1] == "first");
+        let collateral = predicate_prefix
+            .iter()
+            .any(|word| is_collateral_file_qualifier(word));
+        let invalid_content = matches!(
+            word.as_str(),
+            "empty" | "incorrect" | "mismatch" | "mismatched" | "wrong"
+        );
+        let zero_bytes = matches!(word.as_str(), "0" | "zero")
+            && predicate_suffix
+                .iter()
+                .take(2)
+                .any(|word| matches!(word.as_str(), "byte" | "bytes"));
+        (invalid_content || zero_bytes) && !negated && !historical && !collateral
+    })
 }
 
 fn is_negative_outcome(word: &str) -> bool {
@@ -6700,12 +8446,18 @@ fn is_negative_outcome(word: &str) -> bool {
                 | "finish"
                 | "finished"
                 | "found"
+                | "generate"
+                | "generated"
+                | "generating"
                 | "list"
                 | "match"
                 | "modify"
                 | "modified"
                 | "perform"
                 | "performed"
+                | "ran"
+                | "run"
+                | "running"
                 | "search"
                 | "stage"
                 | "success"
@@ -7098,6 +8850,38 @@ fn final_response_report_accepts_completion_with_no_errors() {
 }
 
 #[test]
+fn final_response_report_accepts_error_free_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ERROR_FREE_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_failure_free_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_FAILURE_FREE_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_not_failure_free() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_FAILURE_FREE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_affirmative_execution_and_existence() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXECUTED_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
 fn final_response_report_accepts_completion_with_zero_errors() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_ZERO_ERRORS_COMPLETION_REPORT, false);
@@ -7111,6 +8895,14 @@ fn final_response_report_accepts_completion_when_no_errors_were_found() {
     tracker.observe_response_text(SYNTHETIC_NO_ERRORS_FOUND_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_negated_error_free_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NEGATED_ERROR_FREE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
 }
 
 #[test]
@@ -7210,6 +9002,14 @@ fn final_response_report_rejects_completion_when_the_model_was_not_able() {
 }
 
 #[test]
+fn final_response_report_accepts_a_not_able_confinement_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_ABLE_CONFINEMENT_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
 fn final_response_report_rejects_completion_when_the_operation_did_not_work() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_DID_NOT_WORK_REPORT, false);
@@ -7231,6 +9031,156 @@ fn final_response_report_rejects_completion_when_the_command_was_not_executed() 
     tracker.observe_response_text(SYNTHETIC_COMMAND_NOT_EXECUTED_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_without_running_the_command() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COMMAND_NOT_RUN_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_an_execution_issue() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXECUTION_ISSUE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_an_execution_problem() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXECUTION_PROBLEM_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_a_resolved_problem() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_RESOLVED_PROBLEM_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_negated_execution_issues() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_EXECUTION_ISSUES_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_negated_execution_problems() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_EXECUTION_PROBLEMS_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn forced_exec_report_rejects_a_denial_of_required_output() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_EXEC_OUTPUT_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_exec_report_accepts_a_truthful_empty_stderr_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EMPTY_STDERR_OUTPUT_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_exec_report_rejects_an_empty_stdout_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EMPTY_STDOUT_OUTPUT_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_exec_report_rejects_an_incorrect_stdout_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_INCORRECT_STDOUT_OUTPUT_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_exec_report_accepts_a_not_empty_stdout_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_EMPTY_STDOUT_OUTPUT_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn natural_exec_report_accepts_a_truthful_no_output_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn natural_exec_report_keeps_requested_contents_within_their_clause() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn natural_exec_report_stops_requested_contents_at_a_collateral_comma_clause() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NATURAL_COMMA_EMPTY_STDERR_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn forced_cargo_completion_accepts_a_successful_check_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CARGO_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        CARGO_DIAGNOSTICS_NAME,
+        true,
+        &tracker,
+    ));
 }
 
 #[test]
@@ -7295,6 +9245,562 @@ fn final_response_report_accepts_completion_with_no_file_changes() {
     tracker.observe_response_text(SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_completion_with_no_file_changes() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_auxiliary_no_file_change() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_plural_no_file_change() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_plural_no_file_creation() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_zero_files_created() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ZERO_FILES_WERE_CREATED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_verb_first_creation_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_outcome_first_creation_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_OUTCOME_FIRST_CREATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_dotted_filename_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_DOTTED_FILE_CREATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_generated_file_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_GENERATED_FILE_DENIAL_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_without_creating_any_files() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WITHOUT_CREATING_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_verb_first_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_without_modifying_any_files() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WITHOUT_MODIFYING_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_collateral_without_modifying() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_WITHOUT_MODIFYING_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_existing_file_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXISTING_FILE_ASSURANCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_preexisting_file_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PREEXISTING_FILE_ASSURANCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_qualifier_first_existing_file_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_QUALIFIER_FIRST_EXISTING_FILE_ASSURANCE_REPORT,
+        false,
+    );
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_nothing_else_changed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_NOTHING_ELSE_CHANGED_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_the_requested_file_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_the_requested_file_predicate_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT, false);
+
+    assert!(report_affirms_completion_excepting_path(
+        SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
+    assert!(!report_denies_file_changes_excepting_path(
+        SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_the_requested_file_creation_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_CREATION_EXCEPTION_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_the_requested_file_besides_scope() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_later_requested_path_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_REQUESTED_FILE_EXCEPTION_WITH_LATER_DENIAL_REPORT,
+        false,
+    );
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_deleted_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_DELETED_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_pronoun_deleted_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_PRONOUN_DELETED_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_removed_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_REMOVED_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_empty_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EMPTY_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_zero_byte_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_ZERO_BYTES_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_not_empty_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_NOT_EMPTY_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_initially_empty_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_INITIALLY_EMPTY_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_empty_at_first_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EMPTY_AT_FIRST_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_incorrect_requested_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_INCORRECT_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_wrong_requested_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_WRONG_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_mismatched_requested_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_MISMATCHED_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_not_incorrect_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_NOT_INCORRECT_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_not_deleted_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_NOT_DELETED_ASSURANCE_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_backup_file_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BACKUP_FILE_ASSURANCE_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_unrelated_file_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new("unrelated.txt"))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_nominalized_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_bare_nominalized_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NOMINALIZED_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_inverted_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_INVERTED_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn final_response_report_accepts_a_read_only_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_additional_file_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_nominalized_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_NOMINALIZED_MODIFICATION_DENIAL_REPORT,
+        false,
+    );
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_inverted_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_INVERTED_MODIFICATION_DENIAL_REPORT,
+        false,
+    );
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_bare_no_changes_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_zero_changes_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ZERO_CHANGES_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_verb_first_change_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_VERB_FIRST_CHANGE_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_verb_first_change_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_VERB_FIRST_CHANGE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_no_changes_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_no_modifications_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_NO_MODIFICATIONS_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn final_response_report_accepts_completion_with_bare_no_changes() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_bare_no_modifications_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_perfect_tense_no_modifications_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT,
+        false,
+    );
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_existential_no_modifications_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_existential_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_EXISTENTIAL_NO_MODIFICATIONS_REPORT,
+        false,
+    );
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_unchanged_file_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_subject_first_missing_file() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SUBJECT_FIRST_MISSING_FILE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_prior_nonexistence() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PRIOR_NONEXISTENCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_previous_nonexistence() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PREVIOUS_NONEXISTENCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_historical_missing_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_HISTORICAL_MISSING_FILE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
 }
 
 #[test]
@@ -7420,6 +9926,22 @@ fn effect_free_final_response_accepts_a_file_creation_denial() {
 }
 
 #[test]
+fn exec_file_creation_report_rejects_completion_when_the_file_does_not_exist() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_completion_when_the_file_is_missing() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_MISSING_FILE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
 fn final_response_report_accepts_an_affirmative_read() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_READ_COMPLETION_REPORT, false);
@@ -7441,6 +9963,452 @@ fn final_response_report_rejects_a_nothing_written_claim() {
     tracker.observe_response_text(SYNTHETIC_NOTHING_WRITTEN_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn forced_read_only_exec_report_accepts_nothing_changed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOTHING_CHANGED_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        UNSANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_RAN_COMPLETION_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_an_explicit_success() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SUCCEEDED_EXEC_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_hedged_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_HEDGED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_attempted_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ATTEMPTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_an_attempt_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ATTEMPTED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_partial_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PARTIAL_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_skipped_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SKIPPED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_skip_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SKIPPED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_aborted_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ABORTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_canceled_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CANCELED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_cancellation_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CANCELED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_interrupted_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_INTERRUPTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_stopped_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_STOPPED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_interrupted_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_INTERRUPTED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_interruption_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_INTERRUPTED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_terminated_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TERMINATED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_killed_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_KILLED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_terminated_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_TERMINATED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_termination_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TERMINATED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_blocked_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BLOCKED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_prevented_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PREVENTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_blocked_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_BLOCKED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_blocking_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BLOCKED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_timed_out_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TIMED_OUT_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_timed_out_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_TIMED_OUT_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_timeout_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_completion_within_the_timeout() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WITHIN_TIMEOUT_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_completion_before_the_timeout() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BEFORE_TIMEOUT_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_bare_timeout_failure() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_HIT_TIMEOUT_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_an_explicit_worked_outcome() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WORKED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_polite_run_request() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PLEASE_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_imperative_run_request() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_IMPERATIVE_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_completion_with_an_ancillary_polite_request() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COMPLETED_RUN_WITH_ANCILLARY_REQUEST_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_unsandboxed_exec_report_accepts_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_RAN_COMPLETION_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        UNSANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_confinement_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_COULD_NOT_REPORT, false);
+
+    assert!(report_affirms_completion_excepting_path(
+        SYNTHETIC_COLLATERAL_COULD_NOT_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
+    assert!(!report_denies_file_changes_excepting_path(
+        SYNTHETIC_COLLATERAL_COULD_NOT_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_nothing_changed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOTHING_CHANGED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
 }
 
 #[test]
@@ -7572,6 +10540,89 @@ impl EvalDatabase {
         };
         Ok((session, turn, *activated))
     }
+
+    async fn decide_pending_unsandboxed_requests(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        approval_state: &mut ExecApprovalState,
+    ) -> EvalResult<bool> {
+        let mut decided_any = false;
+        loop {
+            let repository = PostgresToolLoopRepository::new(self.pool.clone());
+            let Some(batch) = repository.load_active_batch(session, turn).await? else {
+                return Ok(decided_any);
+            };
+            let ToolBatchPhase::AwaitingApproval { request } = batch.phase() else {
+                return Ok(decided_any);
+            };
+            let pending = batch
+                .requests()
+                .iter()
+                .find(|candidate| candidate.id() == request)
+                .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
+            let decision = approval_state.decision(pending.name().as_str(), pending.arguments());
+            let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
+            let prepared = service
+                .execute(
+                    DecideToolRequest::try_new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        request,
+                        decision,
+                    )
+                    .map_err(|_| io::Error::other("the exec eval approval decision is invalid"))?,
+                )
+                .await?;
+            if !matches!(prepared.result(), DecideToolRequestResult::Applied(_)) {
+                return Err(
+                    io::Error::other("the exec eval approval decision was rejected").into(),
+                );
+            }
+            decided_any = true;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExecApprovalMode {
+    DenyAll,
+    ApproveOneExactForced,
+}
+
+#[derive(Clone, Copy)]
+enum ExecApprovalCap {
+    NotReached,
+    Reached,
+}
+
+struct ExecApprovalState {
+    mode: ExecApprovalMode,
+    exact_forced_approved: bool,
+}
+
+impl ExecApprovalState {
+    const fn new(mode: ExecApprovalMode) -> Self {
+        Self {
+            mode,
+            exact_forced_approved: false,
+        }
+    }
+
+    fn decision(
+        &mut self,
+        name: &str,
+        arguments: &NormalizedToolArguments,
+    ) -> ToolApprovalDecision {
+        if matches!(self.mode, ExecApprovalMode::ApproveOneExactForced)
+            && !self.exact_forced_approved
+            && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments)
+        {
+            self.exact_forced_approved = true;
+            ToolApprovalDecision::Approve
+        } else {
+            ToolApprovalDecision::Deny { reason: None }
+        }
+    }
 }
 
 fn eval_session_credential_pin() -> SessionCredentialPin {
@@ -7603,6 +10654,7 @@ struct RequestSnapshot {
     name: String,
     arguments_text: String,
     attempt_succeeded: bool,
+    attempt_denied: bool,
 }
 
 impl RequestSnapshot {
@@ -7612,7 +10664,12 @@ impl RequestSnapshot {
 }
 
 impl CaseSnapshot {
-    async fn read(pool: &PgPool, session: SessionId, turn: TurnId) -> EvalResult<Self> {
+    async fn read(
+        pool: &PgPool,
+        session: SessionId,
+        turn: TurnId,
+        approval_cap: ExecApprovalCap,
+    ) -> EvalResult<Self> {
         let transcript = ProcessReadRepository::new(pool.clone())
             .read_transcript(session)
             .await?
@@ -7623,9 +10680,40 @@ impl CaseSnapshot {
             .find(|candidate| candidate.turn() == turn)
             .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
             .state();
-        let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state);
+        let turn_disposition = match approval_cap {
+            ExecApprovalCap::Reached
+                if matches!(turn_state, ProcessTurnState::ActiveRunning { .. }) =>
+            {
+                SnapshotTurnDisposition::ApprovalCapReached
+            }
+            ExecApprovalCap::NotReached | ExecApprovalCap::Reached => {
+                SnapshotTurnDisposition::from_process_state(turn_state)
+            }
+        };
         let completed_results = completed_tool_result_entry_indices(transcript.entries());
         let successful_requests = completed_results.keys().copied().collect::<BTreeSet<_>>();
+        let denied_requests = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ProcessTranscriptEntry::ToolDenied { request, .. } => Some(request.into_uuid()),
+                ProcessTranscriptEntry::AssistantToolUse { .. }
+                | ProcessTranscriptEntry::DelegatedTask { .. }
+                | ProcessTranscriptEntry::DelegationMessage { .. }
+                | ProcessTranscriptEntry::DelegationResult { .. }
+                | ProcessTranscriptEntry::ModelIdentityChanged { .. }
+                | ProcessTranscriptEntry::ContextSummary { .. }
+                | ProcessTranscriptEntry::User { .. }
+                | ProcessTranscriptEntry::Assistant { .. }
+                | ProcessTranscriptEntry::ToolExecutionResult { .. }
+                | ProcessTranscriptEntry::ToolClosed { .. }
+                | ProcessTranscriptEntry::TurnFailed { .. }
+                | ProcessTranscriptEntry::TurnCompleted { .. }
+                | ProcessTranscriptEntry::TurnCancelled { .. }
+                | ProcessTranscriptEntry::ImportedText { .. }
+                | ProcessTranscriptEntry::Imported { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
         let requests = transcript
             .entries()
             .iter()
@@ -7648,6 +10736,7 @@ impl CaseSnapshot {
                     name: name.clone(),
                     arguments_text: arguments.clone(),
                     attempt_succeeded: successful_requests.contains(&request.into_uuid()),
+                    attempt_denied: denied_requests.contains(&request.into_uuid()),
                 }),
                 ProcessTranscriptEntry::AssistantToolUse { .. }
                 | ProcessTranscriptEntry::DelegatedTask { .. }
@@ -7838,6 +10927,9 @@ impl CaseSnapshot {
                                     arguments == serde_json::json!({"url": WEB_URL})
                                 }))
                     }
+                    EvalFamily::Exec => {
+                        request.name == SANDBOXED_EXEC_NAME && exact_exec_natural_arguments(request)
+                    }
                 }
         })
     }
@@ -8020,6 +11112,9 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotTurnDisposition {
     Completed,
+    /// The eval deliberately stopped after its bounded denied approvals while
+    /// the daemon remained in the post-decision active-running state.
+    ApprovalCapReached,
     /// The turn terminalized on a definitive provider failure, carrying the
     /// closed cause the daemon retained for it when one was recorded.
     ProviderFailure(Option<ProcessProviderModelCallFailureCause>),
@@ -8075,14 +11170,17 @@ impl SnapshotTurnDisposition {
     const fn is_completed(self) -> bool {
         match self {
             Self::Completed => true,
-            Self::ProviderFailure(_) | Self::Infrastructure | Self::Refused => false,
+            Self::ApprovalCapReached
+            | Self::ProviderFailure(_)
+            | Self::Infrastructure
+            | Self::Refused => false,
         }
     }
 
     const fn is_infrastructure(self) -> bool {
         match self {
             Self::ProviderFailure(_) | Self::Infrastructure => true,
-            Self::Completed | Self::Refused => false,
+            Self::Completed | Self::ApprovalCapReached | Self::Refused => false,
         }
     }
 
@@ -8091,6 +11189,7 @@ impl SnapshotTurnDisposition {
     fn label(self) -> String {
         match self {
             Self::Completed => String::from("completed"),
+            Self::ApprovalCapReached => String::from("approval cap reached"),
             Self::ProviderFailure(None) => String::from("provider failure"),
             Self::ProviderFailure(Some(cause)) => {
                 format!("provider failure: {}", provider_failure_cause_label(cause))
@@ -8121,12 +11220,102 @@ struct CaseOutcome {
     target: Option<String>,
     expected_arguments: Option<String>,
     execution_completed: bool,
-    result_round_trips: usize,
-    round_tripped_request_ids: BTreeSet<Uuid>,
+    forced_verification_failed: bool,
+    tool_results: Vec<TrackedToolResult>,
     snapshot: CaseSnapshot,
 }
 
+fn exact_exec_natural_arguments(request: &RequestSnapshot) -> bool {
+    let Some(arguments) = request.arguments() else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(EXEC_NATURAL_ARGUMENTS)
+        .is_ok_and(|expected| arguments == expected)
+}
+
 impl CaseOutcome {
+    fn round_tripped_result_count(&self) -> usize {
+        round_tripped_result_count(&self.tool_results)
+    }
+
+    fn infrastructure_label(&self) -> &'static str {
+        if let Some(label) = self
+            .tool_results
+            .iter()
+            .find_map(exec_result_infrastructure_label)
+        {
+            return label;
+        }
+        if self.exact_forced_exec_result_mismatched() || self.exact_natural_exec_result_mismatched()
+        {
+            return "exact result mismatch";
+        }
+        if self.exact_forced_verification_failed() {
+            return "exact state mismatch";
+        }
+        "—"
+    }
+
+    fn exact_forced_exec_result_mismatched(&self) -> bool {
+        let Some(target) = self.target.as_deref() else {
+            return false;
+        };
+        let Some(expected_arguments) = self.expected_arguments.as_deref() else {
+            return false;
+        };
+        if !is_exec_tool(target) {
+            return false;
+        }
+        self.snapshot.requests.iter().any(|request| {
+            request.name == target
+                && request.arguments_text == expected_arguments
+                && request.attempt_succeeded
+                && self
+                    .tool_results
+                    .iter()
+                    .find(|result| result.request_id == request.request_id)
+                    .is_none_or(|result| !tracked_exec_result_passed(target, result))
+        })
+    }
+
+    fn exact_natural_exec_result_mismatched(&self) -> bool {
+        self.snapshot.requests.iter().any(|request| {
+            request.name == SANDBOXED_EXEC_NAME
+                && exact_exec_natural_arguments(request)
+                && request.attempt_succeeded
+                && self
+                    .tool_results
+                    .iter()
+                    .find(|result| result.request_id == request.request_id)
+                    .is_none_or(|result| !tracked_natural_exec_result_passed(result))
+        })
+    }
+
+    fn exact_natural_exec_state_mismatched(&self, natural_state: EvalDisposition) -> bool {
+        natural_state != EvalDisposition::Pass
+            && self.snapshot.requests.iter().any(|request| {
+                request.name == SANDBOXED_EXEC_NAME
+                    && exact_exec_natural_arguments(request)
+                    && request.attempt_succeeded
+                    && self
+                        .tool_results
+                        .iter()
+                        .find(|result| result.request_id == request.request_id)
+                        .is_some_and(tracked_natural_exec_result_passed)
+            })
+    }
+
+    fn natural_infrastructure_label(
+        &self,
+        family: EvalFamily,
+        natural_state: EvalDisposition,
+    ) -> &'static str {
+        if family == EvalFamily::Exec && self.exact_natural_exec_state_mismatched(natural_state) {
+            return "exact state mismatch";
+        }
+        self.infrastructure_label()
+    }
+
     fn exact_forced_executor_failed(&self) -> bool {
         let Some(target) = self.target.as_deref() else {
             return false;
@@ -8134,10 +11323,48 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return false;
         };
-        self.snapshot.requests.len() == 1
-            && self.snapshot.requests[0].name == target
-            && self.snapshot.requests[0].arguments_text == expected_arguments
-            && !self.snapshot.requests[0].attempt_succeeded
+        let sole_exact_exec_request_denied = is_exec_tool(target)
+            && matches!(
+                self.snapshot.requests.as_slice(),
+                [request]
+                    if request.name == target
+                        && request.arguments_text == expected_arguments
+                        && request.attempt_denied
+            );
+        sole_exact_exec_request_denied
+            || self.snapshot.requests.iter().any(|request| {
+                request.name == target
+                    && request.arguments_text == expected_arguments
+                    && ((!request.attempt_succeeded && !request.attempt_denied)
+                        || (is_exec_tool(target)
+                            && self.tool_results.iter().any(|result| {
+                                result.request_id == request.request_id
+                                    && exec_result_is_infrastructure(result)
+                            })))
+            })
+            || self.exact_forced_exec_result_mismatched()
+            || self.exact_forced_verification_failed()
+    }
+
+    fn exact_forced_verification_failed(&self) -> bool {
+        let Some(target) = self.target.as_deref() else {
+            return false;
+        };
+        let Some(expected_arguments) = self.expected_arguments.as_deref() else {
+            return false;
+        };
+        self.forced_verification_failed
+            && is_exec_tool(target)
+            && self.snapshot.requests.iter().any(|request| {
+                request.name == target
+                    && request.arguments_text == expected_arguments
+                    && request.attempt_succeeded
+                    && self
+                        .tool_results
+                        .iter()
+                        .find(|result| result.request_id == request.request_id)
+                        .is_some_and(|result| tracked_exec_result_passed(target, result))
+            })
     }
 
     fn forced_disposition(&self) -> EvalDisposition {
@@ -8150,6 +11377,13 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return EvalDisposition::Miss;
         };
+        if matches!(
+            target,
+            SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+        ) && self.tool_results.iter().any(exec_result_is_infrastructure)
+        {
+            return EvalDisposition::Infrastructure;
+        }
         if self.exact_forced_executor_failed() {
             return EvalDisposition::Infrastructure;
         }
@@ -8157,10 +11391,11 @@ impl CaseOutcome {
             self.execution_completed
                 && self.snapshot.turn_disposition.is_completed()
                 && self.snapshot.model_calls >= MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP
-                && self.result_round_trips >= 1
-                && self
-                    .round_tripped_request_ids
-                    .contains(&self.snapshot.requests[0].request_id)
+                && self.tool_results.iter().any(|result| {
+                    result.request_id == self.snapshot.requests[0].request_id
+                        && result.round_tripped
+                })
+                && self.forced_result_passed(target)
                 && self.snapshot.requests.len() == 1
                 && self.snapshot.requests[0].name == target
                 && self.snapshot.requests[0].arguments_text == expected_arguments
@@ -8175,21 +11410,40 @@ impl CaseOutcome {
         if self.snapshot.exact_natural_request_failed(family) {
             return EvalDisposition::Infrastructure;
         }
+        if family == EvalFamily::Exec && self.tool_results.iter().any(exec_result_is_infrastructure)
+        {
+            return EvalDisposition::Infrastructure;
+        }
+        if family == EvalFamily::Exec && self.exact_natural_exec_result_mismatched() {
+            return EvalDisposition::Infrastructure;
+        }
+        if family == EvalFamily::Exec
+            && self
+                .snapshot
+                .requests
+                .iter()
+                .filter(|request| request.name == UNSANDBOXED_EXEC_NAME)
+                .count()
+                > MAX_NATURAL_APPROVAL_CONTINUATIONS
+        {
+            return EvalDisposition::Miss;
+        }
         let required_names: &[&str] = match family {
             EvalFamily::Git => &[GIT_STAGE_NAME, GIT_CREATE_COMMIT_NAME],
             EvalFamily::Workspace => &[READ_FILE_NAME, WRITE_FILE_NAME],
             EvalFamily::Web => &[WEB_SEARCH_NAME, WEB_FETCH_NAME],
+            EvalFamily::Exec => &[SANDBOXED_EXEC_NAME],
         };
         EvalDisposition::from_passed(
             self.execution_completed
                 && self.snapshot.turn_disposition.is_completed()
                 && self.snapshot.model_calls <= MAX_NATURAL_MODEL_CALLS
-                && self.result_round_trips >= 1
-                && self
-                    .snapshot
-                    .requests
-                    .iter()
-                    .all(|request| self.round_tripped_request_ids.contains(&request.request_id))
+                && !self.tool_results.is_empty()
+                && self.snapshot.requests.iter().all(|request| {
+                    self.tool_results.iter().any(|result| {
+                        result.request_id == request.request_id && result.round_tripped
+                    })
+                })
                 && required_names.iter().all(|required| {
                     self.snapshot
                         .requests
@@ -8200,9 +11454,310 @@ impl CaseOutcome {
                     .snapshot
                     .requests
                     .iter()
-                    .all(|request| request.attempt_succeeded),
+                    .all(|request| request.attempt_succeeded)
+                && (family != EvalFamily::Exec
+                    || (self.snapshot.requests.len() == 1
+                        && self.snapshot.requests[0].name == SANDBOXED_EXEC_NAME
+                        && self.natural_exec_result_passed())),
         )
     }
+
+    /// Whether the unforced Exec tier's sole result proves a confined process
+    /// that actually ran to a zero exit.
+    ///
+    /// The executor returns completed evidence for a timeout, a nonzero exit,
+    /// and a supervision failure alike, and the workspace file the task writes
+    /// can predate any of them, so requiring only that some result exists would
+    /// report a pass for a failed process.
+    fn natural_exec_result_passed(&self) -> bool {
+        let [result] = self.tool_results.as_slice() else {
+            return false;
+        };
+        tracked_natural_exec_result_passed(result)
+    }
+
+    fn forced_result_passed(&self, target: &str) -> bool {
+        if !matches!(
+            target,
+            SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+        ) {
+            return !self.tool_results.is_empty();
+        }
+        let [result] = self.tool_results.as_slice() else {
+            return false;
+        };
+        if result.is_error {
+            return false;
+        }
+        let Ok(result) = serde_json::from_str::<serde_json::Value>(&result.content) else {
+            return false;
+        };
+        exec_forced_case_passed(target, &result)
+    }
+}
+
+fn is_exec_tool(target: &str) -> bool {
+    matches!(
+        target,
+        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+    )
+}
+
+fn tracked_exec_result_passed(target: &str, result: &TrackedToolResult) -> bool {
+    if result.is_error {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&result.content)
+        .is_ok_and(|result| exec_forced_case_passed(target, &result))
+}
+
+fn tracked_natural_exec_result_passed(result: &TrackedToolResult) -> bool {
+    if result.is_error {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&result.content).is_ok_and(|execution| {
+        direct_exec_result_passed(
+            &execution,
+            DirectExecExpectation {
+                confinement: "filesystem_confined",
+                stdout: EXEC_NATURAL_OUTPUT,
+            },
+        )
+    })
+}
+
+fn round_tripped_result_count(results: &[TrackedToolResult]) -> usize {
+    results.iter().filter(|result| result.round_tripped).count()
+}
+
+/// Whether a serialized direct-command or Cargo result reports a runner failure
+/// before or around execution, rather than evidence about the requested task.
+fn exec_result_is_infrastructure(result: &TrackedToolResult) -> bool {
+    exec_result_infrastructure_label(result).is_some()
+}
+
+fn exec_result_infrastructure_label(result: &TrackedToolResult) -> Option<&'static str> {
+    if result.is_error {
+        return None;
+    }
+    let Ok(result) = serde_json::from_str::<serde_json::Value>(&result.content) else {
+        return None;
+    };
+    let execution = result.get("execution").unwrap_or(&result);
+    if execution
+        .get("preparation_failure")
+        .is_some_and(|failure| !failure.is_null())
+    {
+        return Some("preparation failure");
+    }
+    if execution
+        .get("cargo_failure")
+        .is_some_and(|failure| !failure.is_null())
+    {
+        return Some("Cargo failure");
+    }
+    match execution["confinement"]["kind"].as_str() {
+        Some("sandbox_refused") => return Some("sandbox refused"),
+        Some("sandbox_setup_failed") => return Some("sandbox setup failed"),
+        _ => {}
+    }
+    match execution["outcome"]["kind"].as_str() {
+        Some("spawn_failed") => Some("spawn failed"),
+        Some("supervision_failed") => Some("supervision failed"),
+        Some("timed_out") => Some("timed out"),
+        Some("exited")
+            if execution["outcome"]["code"]
+                .as_i64()
+                .is_some_and(|code| code != 0) =>
+        {
+            Some("nonzero exit")
+        }
+        _ => None,
+    }
+}
+
+/// The closed direct-command result envelope accepted as successful eval
+/// evidence. The receipt is injected by this harness after execution.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalResult {
+    confinement: DirectExecEvalConfinement,
+    outcome: DirectExecEvalOutcome,
+    stdout: DirectExecEvalStream,
+    stderr: DirectExecEvalStream,
+    eval_receipt: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalConfinement {
+    kind: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalOutcome {
+    kind: String,
+    code: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalStream {
+    text: String,
+    completeness: String,
+    encoding: String,
+}
+
+struct DirectExecExpectation<'a> {
+    confinement: &'a str,
+    stdout: &'a str,
+}
+
+fn direct_exec_result_passed(
+    result: &serde_json::Value,
+    expectation: DirectExecExpectation<'_>,
+) -> bool {
+    let Ok(result) = serde_json::from_value::<DirectExecEvalResult>(result.clone()) else {
+        return false;
+    };
+    result.confinement.kind == expectation.confinement
+        && result.outcome.kind == "exited"
+        && result.outcome.code == Some(0)
+        && !result.eval_receipt.is_empty()
+        && direct_exec_stream_is(&result.stdout, expectation.stdout)
+        && direct_exec_stream_is(&result.stderr, "")
+}
+
+fn direct_exec_stream_is(stream: &DirectExecEvalStream, expected: &str) -> bool {
+    stream.text == expected && stream.completeness == "complete" && stream.encoding == "utf8"
+}
+
+/// The complete result shape needed before one successful Cargo diagnostics
+/// exchange can count as forced-tier evidence.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalResult {
+    command: String,
+    execution: CargoDiagnosticsEvalExecution,
+    diagnostics: CargoDiagnosticsEvalRecords,
+    tests: CargoDiagnosticsEvalRecords,
+    eval_receipt: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalExecution {
+    confinement: CargoDiagnosticsEvalConfinement,
+    outcome: CargoDiagnosticsEvalOutcome,
+    stdout: CargoDiagnosticsEvalStream,
+    stderr: CargoDiagnosticsEvalStream,
+    cargo_failure: serde_json::Value,
+    preparation_failure: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalConfinement {
+    kind: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalOutcome {
+    kind: String,
+    code: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalStream {
+    completeness: String,
+    encoding: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalRecords {
+    #[serde(rename = "values")]
+    values: Vec<serde_json::Value>,
+    limit_reached: bool,
+    provenance: String,
+    known_truncated: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalDiagnostic {
+    file: serde_json::Value,
+    file_completeness: String,
+    span: serde_json::Value,
+    level: String,
+    level_completeness: String,
+    message: String,
+    message_completeness: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoDiagnosticsEvalSpan {
+    line_start: u64,
+    column_start: u64,
+    line_end: u64,
+    column_end: u64,
+}
+
+/// Whether Cargo diagnostics returned the requested successful pass together
+/// with every execution and record envelope the tool promises.
+fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
+    let Ok(result) = serde_json::from_value::<CargoDiagnosticsEvalResult>(result.clone()) else {
+        return false;
+    };
+    result.command == "check"
+        && !result.eval_receipt.is_empty()
+        && result.execution.confinement.kind == "filesystem_confined"
+        && result.execution.outcome.kind == "exited"
+        && result.execution.outcome.code == Some(0)
+        && cargo_diagnostics_stream_is_valid(&result.execution.stdout)
+        && cargo_diagnostics_stream_is_valid(&result.execution.stderr)
+        && result.execution.cargo_failure.is_null()
+        && result.execution.preparation_failure.is_null()
+        && result.diagnostics.provenance == "workspace_influenced"
+        && !result.diagnostics.limit_reached
+        && !result.diagnostics.known_truncated
+        && cargo_diagnostics_are_exact_live_fixture_evidence(&result.diagnostics.values)
+        && result.tests.provenance == "workspace_influenced"
+        && result.tests.values.is_empty()
+        && !result.tests.limit_reached
+        && !result.tests.known_truncated
+}
+
+fn cargo_diagnostics_are_exact_live_fixture_evidence(records: &[serde_json::Value]) -> bool {
+    let [record] = records else {
+        return false;
+    };
+    let Ok(diagnostic) = serde_json::from_value::<CargoDiagnosticsEvalDiagnostic>(record.clone())
+    else {
+        return false;
+    };
+    let Ok(span) = serde_json::from_value::<CargoDiagnosticsEvalSpan>(diagnostic.span.clone())
+    else {
+        return false;
+    };
+    diagnostic.file.as_str() == Some(SYNTHETIC_CARGO_DIAGNOSTIC_FILE)
+        && diagnostic.file_completeness == "complete"
+        && span.line_start == SYNTHETIC_CARGO_DIAGNOSTIC_LINE
+        && span.column_start == SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN
+        && span.line_end == SYNTHETIC_CARGO_DIAGNOSTIC_LINE
+        && span.column_end == SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN
+        && diagnostic.level == CARGO_WARNING_DIAGNOSTIC_LEVEL
+        && diagnostic.level_completeness == "complete"
+        && diagnostic.message == LIVE_CARGO_DIAGNOSTIC_MESSAGE
+        && diagnostic.message_completeness == "complete"
+}
+
+fn cargo_diagnostics_stream_is_valid(stream: &CargoDiagnosticsEvalStream) -> bool {
+    stream.completeness == "complete" && stream.encoding == "utf8"
 }
 
 fn reject_forced_executor_failures(outcomes: &[CaseOutcome]) -> EvalResult {
@@ -8236,8 +11791,21 @@ fn reject_credential_rejections(report: &FamilyReport) -> EvalResult {
     Ok(())
 }
 
-fn reject_natural_executor_failure(outcome: &CaseOutcome, family: EvalFamily) -> EvalResult {
-    if outcome.snapshot.exact_natural_request_failed(family) {
+fn reject_natural_executor_failure(
+    outcome: &CaseOutcome,
+    family: EvalFamily,
+    natural_state: EvalDisposition,
+) -> EvalResult {
+    if outcome.snapshot.exact_natural_request_failed(family)
+        || (family == EvalFamily::Exec
+            && outcome
+                .tool_results
+                .iter()
+                .any(exec_result_is_infrastructure))
+        || (family == EvalFamily::Exec && outcome.exact_natural_exec_result_mismatched())
+        || (family == EvalFamily::Exec
+            && outcome.exact_natural_exec_state_mismatched(natural_state))
+    {
         return Err(io::Error::other(EXACT_EXECUTOR_FAILURE).into());
     }
     Ok(())
@@ -8297,6 +11865,22 @@ fn turn_snapshot_reports_runner_recovery_as_infrastructure() {
         runner: RunnerId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_SESSION_ID)),
         placement_revision: RunnerGeneration::one(),
         interrupted_tool_attempt: None,
+    };
+
+    assert_eq!(
+        SnapshotTurnDisposition::from_process_state(&state),
+        SnapshotTurnDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn turn_snapshot_reports_target_resolution_failure_as_infrastructure() {
+    let state = ProcessTurnState::Failed {
+        terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(
+            ARBITRARY_EVAL_FRONTIER_ID,
+        )),
+        terminal_attempt: None,
+        terminal_model_call: None,
     };
 
     assert_eq!(
@@ -8382,8 +11966,8 @@ fn provider_failure_is_reported_as_infrastructure_not_a_model_miss() {
         target: Some(String::from(GIT_STATUS_NAME)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
-        result_round_trips: 0,
-        round_tripped_request_ids: BTreeSet::new(),
+        forced_verification_failed: false,
+        tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::ProviderFailure(Some(
                 ProcessProviderModelCallFailureCause::TargetNotFound,
@@ -8408,8 +11992,8 @@ fn synthetic_case_outcome(turn_disposition: SnapshotTurnDisposition) -> CaseOutc
         target: None,
         expected_arguments: None,
         execution_completed: false,
-        result_round_trips: 0,
-        round_tripped_request_ids: BTreeSet::new(),
+        forced_verification_failed: false,
+        tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition,
             requests: Vec::new(),
@@ -8465,8 +12049,13 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -8477,6 +12066,7 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8492,8 +12082,8 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
-        result_round_trips: 0,
-        round_tripped_request_ids: BTreeSet::new(),
+        forced_verification_failed: false,
+        tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -8504,6 +12094,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8519,8 +12110,13 @@ fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -8531,6 +12127,7 @@ fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8544,13 +12141,98 @@ fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
 }
 
 #[test]
+fn forced_tier_rejects_an_exact_failure_before_a_follow_up_call() {
+    let target = GIT_STATUS_NAME;
+    let outcome = CaseOutcome {
+        target: Some(String::from(target)),
+        expected_arguments: Some(String::from("{}")),
+        execution_completed: false,
+        forced_verification_failed: false,
+        tool_results: Vec::new(),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(target),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: None,
+                    attempt_succeeded: false,
+                    attempt_denied: false,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_FOLLOW_UP_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(GIT_LOG_NAME),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
+                    completed_result_entry_index: None,
+                    attempt_succeeded: false,
+                    attempt_denied: false,
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn unforced_exec_tier_reports_a_normalized_exact_failure_as_infrastructure() -> EvalResult {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: true,
+            round_tripped: true,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(SANDBOXED_EXEC_NAME),
+                arguments_text: normalized_arguments_text(EXEC_NATURAL_ARGUMENTS)?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: None,
+                attempt_succeeded: false,
+                attempt_denied: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+    Ok(())
+}
+
+#[test]
 fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
     let outcome = CaseOutcome {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: true,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -8561,6 +12243,7 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8578,8 +12261,13 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: true,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -8590,6 +12278,7 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8599,7 +12288,9 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         outcome.natural_loop_disposition(EvalFamily::Git),
         EvalDisposition::Infrastructure
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Git).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Git, EvalDisposition::Pass).is_err()
+    );
 }
 
 #[test]
@@ -8608,8 +12299,13 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: true,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -8620,6 +12316,7 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8637,8 +12334,13 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: true,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
@@ -8650,6 +12352,7 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -8659,6 +12362,7 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: None,
                     attempt_succeeded: false,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8684,6 +12388,7 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -8693,15 +12398,17 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
+                request_id: Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
                 arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8716,8 +12423,13 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: true,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -8732,6 +12444,7 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8749,8 +12462,13 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
@@ -8766,6 +12484,7 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -8775,6 +12494,7 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: None,
                     attempt_succeeded: false,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8785,7 +12505,10 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
         outcome.natural_loop_disposition(EvalFamily::Workspace),
         EvalDisposition::Miss
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Workspace).is_ok());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Workspace, EvalDisposition::Pass)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -8794,8 +12517,13 @@ fn unforced_workspace_tier_reports_read_failure_after_an_unrelated_mutation_as_i
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
@@ -8811,6 +12539,7 @@ fn unforced_workspace_tier_reports_read_failure_after_an_unrelated_mutation_as_i
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -8820,6 +12549,7 @@ fn unforced_workspace_tier_reports_read_failure_after_an_unrelated_mutation_as_i
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: None,
                     attempt_succeeded: false,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8830,7 +12560,10 @@ fn unforced_workspace_tier_reports_read_failure_after_an_unrelated_mutation_as_i
         outcome.natural_loop_disposition(EvalFamily::Workspace),
         EvalDisposition::Infrastructure
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Workspace).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Workspace, EvalDisposition::Pass)
+            .is_err()
+    );
 }
 
 #[test]
@@ -8843,8 +12576,13 @@ fn unforced_workspace_tier_rejects_more_than_the_bounded_model_calls() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: MAX_NATURAL_TOOL_EXCHANGES + 1,
-        round_tripped_request_ids: BTreeSet::from([first, second, third, fourth]),
+        forced_verification_failed: false,
+        tool_results: vec![
+            round_tripped_fixture_result(first),
+            round_tripped_fixture_result(second),
+            round_tripped_fixture_result(third),
+            round_tripped_fixture_result(fourth),
+        ],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
@@ -8874,6 +12612,15 @@ fn unforced_workspace_tier_rejects_more_than_the_bounded_model_calls() {
     );
 }
 
+fn round_tripped_fixture_result(request_id: Uuid) -> TrackedToolResult {
+    TrackedToolResult {
+        request_id,
+        content: String::from("fixture result"),
+        is_error: false,
+        round_tripped: true,
+    }
+}
+
 fn successful_request(
     request_id: Uuid,
     name: &str,
@@ -8887,6 +12634,20 @@ fn successful_request(
         entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
         completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
         attempt_succeeded: true,
+        attempt_denied: false,
+    }
+}
+
+fn denied_unsandboxed_request(request_id: Uuid) -> RequestSnapshot {
+    RequestSnapshot {
+        request_id,
+        producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+        name: String::from(UNSANDBOXED_EXEC_NAME),
+        arguments_text: String::from("{}"),
+        entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+        completed_result_entry_index: None,
+        attempt_succeeded: false,
+        attempt_denied: true,
     }
 }
 
@@ -8901,6 +12662,7 @@ fn failed_request_snapshot(name: &str, arguments: serde_json::Value) -> CaseSnap
             entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
             completed_result_entry_index: None,
             attempt_succeeded: false,
+            attempt_denied: false,
         }],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
     }
@@ -8992,8 +12754,13 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
@@ -9005,6 +12772,7 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -9018,6 +12786,7 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -9036,8 +12805,13 @@ fn unforced_git_tier_requires_both_task_tools() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -9048,6 +12822,7 @@ fn unforced_git_tier_requires_both_task_tools() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -9755,7 +13530,7 @@ fn forced_case_validation_rejects_schema_drift() -> EvalResult {
 }
 
 #[test]
-fn forced_case_inventory_matches_every_family_catalog() -> EvalResult {
+fn forced_case_inventory_matches_each_catalog_available_offline() -> EvalResult {
     let git = FamilySuite::git()?;
     let workspace = FamilySuite::workspace()?;
     let web = FamilySuite::web()?;
@@ -13976,8 +17751,13 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
-        result_round_trips: 1,
-        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -13988,6 +17768,7 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -13998,13 +17779,1335 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
 
 #[test]
 fn forced_tool_sequence_allows_only_one_forced_exchange() {
-    let sequence = ForcedToolSequence::new(Some(GIT_STATUS_NAME));
+    let sequence = ForcedToolSequence::new(Some(SANDBOXED_EXEC_NAME));
 
     assert_eq!(
         sequence.next(),
-        ForcedToolOperation::Force(RuntimeToolName::new(GIT_STATUS_NAME))
+        ForcedToolOperation::Force(RuntimeToolName::new(SANDBOXED_EXEC_NAME))
     );
     assert_eq!(sequence.next(), ForcedToolOperation::Continuation);
+}
+
+#[test]
+fn exec_eval_rejects_program_drift_before_dispatch() {
+    let fixture = forced_exec_fixture(SANDBOXED_EXEC_NAME);
+    let mut drifted: serde_json::Value = serde_json::from_str(fixture.expected_arguments)
+        .expect("the sandboxed fixture arguments decode");
+    drifted["program"] = serde_json::json!("curl");
+    let drifted = NormalizedToolArguments::try_from_provider_text(drifted.to_string())
+        .expect("drifted fixture arguments normalize");
+
+    assert!(!ExecEvalCase::ForcedSandboxed.admits(SANDBOXED_EXEC_NAME, &drifted));
+}
+
+#[test]
+fn exec_eval_rejects_argument_drift_before_dispatch() {
+    let fixture = forced_exec_fixture(SANDBOXED_EXEC_NAME);
+    let mut drifted: serde_json::Value = serde_json::from_str(fixture.expected_arguments)
+        .expect("the sandboxed fixture arguments decode");
+    drifted["arguments"] = serde_json::json!(["different output\n"]);
+    let drifted = NormalizedToolArguments::try_from_provider_text(drifted.to_string())
+        .expect("drifted fixture arguments normalize");
+
+    assert!(!ExecEvalCase::ForcedSandboxed.admits(SANDBOXED_EXEC_NAME, &drifted));
+}
+
+#[test]
+fn forced_unsandboxed_eval_denies_model_argument_drift() {
+    let drifted = NormalizedToolArguments::try_from_provider_text(
+        serde_json::json!({
+            "program": "/usr/bin/printf",
+            "arguments": ["different output\n"],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+        })
+        .to_string(),
+    )
+    .expect("drifted unsandboxed fixture arguments normalize");
+
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::ApproveOneExactForced);
+
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &drifted),
+        ToolApprovalDecision::Deny { reason: None }
+    );
+}
+
+#[test]
+fn unforced_exec_eval_denies_the_exact_forced_unsandboxed_fixture() {
+    let unsandboxed = forced_exec_fixture(UNSANDBOXED_EXEC_NAME);
+    let exact_forced = NormalizedToolArguments::try_from_provider_text(String::from(
+        unsandboxed.expected_arguments,
+    ))
+    .expect("the exact forced unsandboxed fixture arguments normalize");
+
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::DenyAll);
+
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
+        ToolApprovalDecision::Deny { reason: None }
+    );
+}
+
+#[test]
+fn forced_exec_eval_approves_only_one_exact_unsandboxed_fixture() {
+    let unsandboxed = forced_exec_fixture(UNSANDBOXED_EXEC_NAME);
+    let exact_forced = NormalizedToolArguments::try_from_provider_text(String::from(
+        unsandboxed.expected_arguments,
+    ))
+    .expect("the exact forced unsandboxed fixture arguments normalize");
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::ApproveOneExactForced);
+
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
+        ToolApprovalDecision::Approve
+    );
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
+        ToolApprovalDecision::Deny { reason: None }
+    );
+}
+
+#[test]
+fn operation_tracker_records_each_cumulative_tool_result_once() {
+    let tracker = OperationTracker::default();
+    let tool_call_id = String::from("synthetic-tool-call");
+    let content = synthetic_result_with_receipt();
+    let result = TrackedToolResult {
+        request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        content: content.clone(),
+        is_error: false,
+        round_tripped: false,
+    };
+    tracker.record_new_results([(tool_call_id.clone(), result.clone())]);
+    tracker.record_new_results([(tool_call_id, result.clone())]);
+
+    assert_eq!(tracker.tool_results(), vec![result]);
+    assert_eq!(
+        tracker.result_content(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
+        Some(content)
+    );
+}
+
+#[test]
+fn report_round_trip_count_excludes_an_unacknowledged_result() {
+    let results = [
+        TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("acknowledged"),
+            is_error: false,
+            round_tripped: true,
+        },
+        TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+            content: String::from("unacknowledged"),
+            is_error: false,
+            round_tripped: false,
+        },
+    ];
+
+    assert_eq!(round_tripped_result_count(&results), 1);
+}
+
+#[test]
+fn forced_exec_tier_reports_a_nonzero_process_result_as_infrastructure() {
+    let mut execution = confined_exit(EXEC_FORCED_SANDBOXED_OUTPUT);
+    execution["outcome"]["code"] = serde_json::json!(1);
+    let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, execution);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "nonzero exit");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_exec_tier_reports_a_timeout_as_infrastructure() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        direct_exec_result(DirectExecEvidence::timed_out()),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "timed out");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn unforced_exec_tier_rejects_an_additional_tool_call() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        forced_verification_failed: false,
+        tool_results: vec![
+            TrackedToolResult {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                content: confined_exit("").to_string(),
+                is_error: false,
+                round_tripped: true,
+            },
+            TrackedToolResult {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                content: confined_exit("").to_string(),
+                is_error: false,
+                round_tripped: true,
+            },
+        ],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(SANDBOXED_EXEC_NAME),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                    attempt_succeeded: true,
+                    attempt_denied: false,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(CARGO_DIAGNOSTICS_NAME),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                    attempt_succeeded: true,
+                    attempt_denied: false,
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+/// One forced Exec outcome whose sole result carries the supplied execution.
+fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> CaseOutcome {
+    let fixture = forced_exec_fixture(target);
+    CaseOutcome {
+        target: Some(String::from(fixture.name)),
+        expected_arguments: Some(String::from(fixture.expected_arguments)),
+        execution_completed: true,
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: execution.to_string(),
+            is_error: false,
+            round_tripped: true,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(fixture.name),
+                arguments_text: String::from(fixture.expected_arguments),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                attempt_succeeded: true,
+                attempt_denied: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    }
+}
+
+struct ZeroExitEvidence<'a> {
+    confinement: ExecutionConfinement,
+    stdout: &'a str,
+}
+
+/// One serialized execution with the selected confinement and zero exit.
+fn zero_exit_with_confinement(evidence: ZeroExitEvidence<'_>) -> serde_json::Value {
+    direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        evidence.confinement,
+        evidence.stdout,
+    ))
+}
+
+struct DirectExecEvidence<'a> {
+    confinement: ExecutionConfinement,
+    outcome: ProcessOutcome,
+    stdout: &'a str,
+    completeness: CaptureCompleteness,
+}
+
+impl<'a> DirectExecEvidence<'a> {
+    fn confined_success(stdout: &'a str) -> Self {
+        Self::successful_with_confinement(ExecutionConfinement::FilesystemConfined, stdout)
+    }
+
+    fn successful_with_confinement(confinement: ExecutionConfinement, stdout: &'a str) -> Self {
+        Self {
+            confinement,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout,
+            completeness: CaptureCompleteness::Complete,
+        }
+    }
+
+    fn unsandboxed_truncated(stdout: &'a str) -> Self {
+        Self {
+            confinement: ExecutionConfinement::Unsandboxed,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout,
+            completeness: CaptureCompleteness::Truncated,
+        }
+    }
+
+    fn timed_out() -> Self {
+        Self {
+            outcome: ProcessOutcome::TimedOut,
+            ..Self::confined_success("")
+        }
+    }
+
+    fn nonzero_exit() -> Self {
+        Self {
+            outcome: ProcessOutcome::Exited { code: Some(1) },
+            ..Self::confined_success("")
+        }
+    }
+
+    fn supervision_failure() -> Self {
+        Self {
+            outcome: ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            },
+            ..Self::confined_success("")
+        }
+    }
+
+    fn sandbox_refusal() -> Self {
+        Self {
+            confinement: ExecutionConfinement::SandboxRefused {
+                availability: BwrapAvailability::Unusable,
+            },
+            outcome: ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxUnavailable,
+            },
+            stdout: "",
+            completeness: CaptureCompleteness::Complete,
+        }
+    }
+
+    fn sandbox_setup_failure() -> Self {
+        Self {
+            confinement: ExecutionConfinement::SandboxSetupFailed,
+            outcome: ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            },
+            stdout: "",
+            completeness: CaptureCompleteness::Complete,
+        }
+    }
+}
+
+fn direct_exec_result(evidence: DirectExecEvidence<'_>) -> serde_json::Value {
+    let mut result = serde_json::to_value(ExecResult {
+        confinement: evidence.confinement,
+        outcome: evidence.outcome,
+        stdout: OutputCapture {
+            text: evidence.stdout.to_owned(),
+            completeness: evidence.completeness,
+            encoding: OutputEncoding::Utf8,
+        },
+        stderr: OutputCapture {
+            text: String::new(),
+            completeness: CaptureCompleteness::Complete,
+            encoding: OutputEncoding::Utf8,
+        },
+    })
+    .expect("producer direct-exec result serializes");
+    result[EVAL_RECEIPT_FIELD] = serde_json::json!(SYNTHETIC_EVAL_RECEIPT);
+    result
+}
+
+/// One serialized confined execution that exited zero with the given output.
+fn confined_exit(stdout: &str) -> serde_json::Value {
+    zero_exit_with_confinement(ZeroExitEvidence {
+        confinement: ExecutionConfinement::FilesystemConfined,
+        stdout,
+    })
+}
+
+/// One complete, successful Cargo check result in the eval workspace.
+fn successful_cargo_diagnostics_result() -> serde_json::Value {
+    let stream = CargoDiagnosticsStream {
+        completeness: CaptureCompleteness::Complete,
+        encoding: OutputEncoding::Utf8,
+    };
+    let mut result = cargo_diagnostics_result(CargoDiagnosticsExecution {
+        confinement: ExecutionConfinement::FilesystemConfined,
+        outcome: ProcessOutcome::Exited { code: Some(0) },
+        stdout: stream,
+        stderr: stream,
+        cargo_failure: None,
+        preparation_failure: None,
+    });
+    result["diagnostics"]["values"] = serde_json::json!([live_cargo_diagnostic()]);
+    result[EVAL_RECEIPT_FIELD] = serde_json::json!(SYNTHETIC_EVAL_RECEIPT);
+    result
+}
+
+/// One serialized Cargo check result carrying the supplied execution evidence.
+fn cargo_diagnostics_result(execution: CargoDiagnosticsExecution) -> serde_json::Value {
+    let records = CargoDiagnosticRecords {
+        values: Vec::new(),
+        limit_reached: false,
+        provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+        known_truncated: false,
+    };
+    let tests = CargoTestRecords {
+        values: Vec::new(),
+        limit_reached: false,
+        provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+        known_truncated: false,
+    };
+    serde_json::to_value(CargoDiagnosticsResult {
+        command: CargoDiagnosticsCommand::Check,
+        execution,
+        diagnostics: records,
+        tests,
+    })
+    .expect("producer Cargo diagnostics result serializes")
+}
+
+fn synthetic_cargo_diagnostic(level: &str) -> CargoDiagnostic {
+    CargoDiagnostic {
+        file: None,
+        file_completeness: CaptureCompleteness::Complete,
+        span: None,
+        level: String::from(level),
+        level_completeness: CaptureCompleteness::Complete,
+        message: String::from(SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE),
+        message_completeness: CaptureCompleteness::Complete,
+    }
+}
+
+fn live_cargo_diagnostic() -> CargoDiagnostic {
+    CargoDiagnostic {
+        file: Some(String::from(SYNTHETIC_CARGO_DIAGNOSTIC_FILE)),
+        file_completeness: CaptureCompleteness::Complete,
+        span: Some(CargoDiagnosticSpan {
+            line_start: SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+            column_start: SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN,
+            line_end: SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+            column_end: SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN,
+        }),
+        level: String::from(CARGO_WARNING_DIAGNOSTIC_LEVEL),
+        level_completeness: CaptureCompleteness::Complete,
+        message: String::from(LIVE_CARGO_DIAGNOSTIC_MESSAGE),
+        message_completeness: CaptureCompleteness::Complete,
+    }
+}
+
+fn synthetic_cargo_diagnostic_span() -> serde_json::Value {
+    serde_json::json!({
+        "line_start": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_start": SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN,
+        "line_end": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_end": SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN,
+    })
+}
+
+#[test]
+fn forced_exec_tier_passes_the_exact_captured_output() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        confined_exit(EXEC_FORCED_SANDBOXED_OUTPUT),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_zero_exit_that_captured_nothing() {
+    let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, confined_exit(""));
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_exec_tier_rejects_the_other_case_s_output() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        confined_exit(EXEC_FORCED_READ_ONLY_OUTPUT),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_direct_exec_rejects_an_unknown_top_level_field() {
+    let mut result = confined_exit(EXEC_FORCED_SANDBOXED_OUTPUT);
+    result["unexpected"] = serde_json::json!("synthetic contradictory field");
+    let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn natural_direct_exec_rejects_an_unknown_stream_field() {
+    let mut result = confined_exit(EXEC_NATURAL_OUTPUT);
+    result["stdout"]["unexpected"] = serde_json::json!("synthetic contradictory field");
+    let outcome = natural_exec_outcome(result);
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_sandboxed_exec_rejects_an_unconfined_zero_exit() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        zero_exit_with_confinement(ZeroExitEvidence {
+            confinement: ExecutionConfinement::Unsandboxed,
+            stdout: EXEC_FORCED_SANDBOXED_OUTPUT,
+        }),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_unsandboxed_exec_rejects_a_confined_zero_exit() {
+    let outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        confined_exit(EXEC_FORCED_READ_ONLY_OUTPUT),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_unconfined_zero_exit() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["confinement"]["kind"] = serde_json::json!("unsandboxed");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
+    let result = successful_cargo_diagnostics_result();
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_accepts_correlated_file_and_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic = serde_json::to_value(live_cargo_diagnostic())
+        .expect("producer Cargo diagnostics serialize");
+    diagnostic["span"] = synthetic_cargo_diagnostic_span();
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_requires_the_live_fixture_warning() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] = serde_json::json!([]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_duplicated_fixture_warning() {
+    let mut result = successful_cargo_diagnostics_result();
+    let diagnostic = serde_json::to_value(live_cargo_diagnostic())
+        .expect("producer Cargo diagnostics serialize");
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic, diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_extra_recognized_diagnostic() {
+    let mut result = successful_cargo_diagnostics_result();
+    let fixture = serde_json::to_value(live_cargo_diagnostic())
+        .expect("producer Cargo diagnostics serialize");
+    let extra = serde_json::to_value(synthetic_cargo_diagnostic("note"))
+        .expect("producer Cargo diagnostics serialize");
+    result["diagnostics"]["values"] = serde_json::json!([fixture, extra]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_different_valid_fixture_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"][0]["span"]["column_end"] =
+        serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN + 1);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_marker_bearing_wrong_message() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"][0]["message"] =
+        serde_json::json!("synthetic prefix: tool eval fixture diagnostic");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_error_diagnostics_from_a_successful_check() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] = serde_json::to_value(vec![synthetic_cargo_diagnostic(
+        CARGO_ERROR_DIAGNOSTIC_LEVEL,
+    )])
+    .expect("producer Cargo diagnostics serialize");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_unknown_diagnostic_level() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] =
+        serde_json::to_value(vec![synthetic_cargo_diagnostic("fatal")])
+            .expect("producer Cargo diagnostics serialize");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_unknown_top_level_field() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["unexpected"] = serde_json::json!("synthetic field");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_unknown_span_field() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    let mut span = synthetic_cargo_diagnostic_span();
+    span["unexpected"] = serde_json::json!("synthetic field");
+    diagnostic["span"] = span;
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_malformed_diagnostics() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] = serde_json::json!([{}]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_backwards_same_line_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    diagnostic["span"] = serde_json::json!({
+        "line_start": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_start": SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN,
+        "line_end": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_end": SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN,
+    });
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_span_without_its_file() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["span"] = synthetic_cargo_diagnostic_span();
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_file_without_its_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_requires_complete_absent_location_evidence() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file_completeness"] = serde_json::json!("truncated");
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_truncated_present_file() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    diagnostic["file_completeness"] = serde_json::json!("truncated");
+    diagnostic["span"] = synthetic_cargo_diagnostic_span();
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_truncated_message() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["message_completeness"] = serde_json::json!("truncated");
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_truncated_stdout_capture() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["stdout"]["completeness"] = serde_json::json!("truncated");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_lossy_stderr_capture() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_capped_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["limit_reached"] = serde_json::json!(true);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_workspace_verification_failure_is_infrastructure() {
+    let mut outcome = forced_exec_outcome(
+        CARGO_DIAGNOSTICS_NAME,
+        successful_cargo_diagnostics_result(),
+    );
+    outcome.execution_completed = false;
+    outcome.forced_verification_failed = true;
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "exact state mismatch");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_known_truncated_test_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["tests"]["known_truncated"] = serde_json::json!(true);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_unexpected_test_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["tests"]["values"] = serde_json::to_value(vec![CargoTestResult {
+        executable: String::from(SYNTHETIC_CARGO_TEST_EXECUTABLE),
+        executable_completeness: CaptureCompleteness::Complete,
+        name: String::from(SYNTHETIC_CARGO_TEST_NAME),
+        name_completeness: CaptureCompleteness::Complete,
+        outcome: CargoTestOutcome::Passed,
+    }])
+    .expect("producer Cargo test records serialize");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_reports_sandbox_setup_failure_as_infrastructure() {
+    let stream = CargoDiagnosticsStream {
+        completeness: CaptureCompleteness::Complete,
+        encoding: OutputEncoding::Utf8,
+    };
+    let result = cargo_diagnostics_result(CargoDiagnosticsExecution {
+        confinement: ExecutionConfinement::SandboxSetupFailed,
+        outcome: ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::SandboxSetup,
+        },
+        stdout: stream,
+        stderr: stream,
+        cargo_failure: None,
+        preparation_failure: None,
+    });
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_cargo_diagnostics_reports_a_cargo_failure_as_infrastructure() {
+    let stream = CargoDiagnosticsStream {
+        completeness: CaptureCompleteness::Complete,
+        encoding: OutputEncoding::Utf8,
+    };
+    let result = cargo_diagnostics_result(CargoDiagnosticsExecution {
+        confinement: ExecutionConfinement::FilesystemConfined,
+        outcome: ProcessOutcome::Exited { code: Some(1) },
+        stdout: stream,
+        stderr: stream,
+        cargo_failure: Some(CargoFailureDetail {
+            message: String::from(SYNTHETIC_CARGO_FAILURE),
+            message_completeness: CaptureCompleteness::Complete,
+        }),
+        preparation_failure: None,
+    });
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "Cargo failure");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_incomplete_result_shape() {
+    let outcome = forced_exec_outcome(
+        CARGO_DIAGNOSTICS_NAME,
+        serde_json::json!({
+            "execution": confined_exit(""),
+        }),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_truncated_output_capture() {
+    let outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        direct_exec_result(DirectExecEvidence::unsandboxed_truncated(
+            EXEC_FORCED_READ_ONLY_OUTPUT,
+        )),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_missing_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result
+        .as_object_mut()
+        .expect("the direct-exec fixture is an object")
+        .remove("stderr");
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_truncated_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result["stderr"]["completeness"] = serde_json::json!("truncated");
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_lossy_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_nonempty_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result["stderr"]["text"] = serde_json::json!(SYNTHETIC_EXECUTOR_FAILURE);
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+/// One unforced Exec outcome whose sole request carries the supplied execution.
+fn natural_exec_outcome(execution: serde_json::Value) -> CaseOutcome {
+    CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        forced_verification_failed: false,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: execution.to_string(),
+            is_error: false,
+            round_tripped: true,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(SANDBOXED_EXEC_NAME),
+                arguments_text: String::from(EXEC_NATURAL_ARGUMENTS),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                attempt_succeeded: true,
+                attempt_denied: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    }
+}
+
+#[test]
+fn unforced_exec_tier_passes_a_confined_zero_exit() {
+    let outcome = natural_exec_outcome(confined_exit(EXEC_NATURAL_OUTPUT));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Pass
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_an_exact_state_mismatch_as_infrastructure() {
+    let outcome = natural_exec_outcome(confined_exit(EXEC_NATURAL_OUTPUT));
+
+    assert_eq!(
+        outcome.natural_infrastructure_label(EvalFamily::Exec, EvalDisposition::Miss),
+        "exact state mismatch"
+    );
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Miss).is_err()
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_a_truncated_capture() {
+    let mut execution = confined_exit(EXEC_NATURAL_OUTPUT);
+    execution["stdout"]["completeness"] = serde_json::json!("truncated");
+    let outcome = natural_exec_outcome(execution);
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_a_lossy_capture() {
+    let mut execution = confined_exit(EXEC_NATURAL_OUTPUT);
+    execution["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
+    let outcome = natural_exec_outcome(execution);
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_exec_tier_reports_a_timed_out_process_as_infrastructure() {
+    let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::timed_out()));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
+}
+
+#[test]
+fn unforced_exec_tier_reports_a_nonzero_exit_as_infrastructure() {
+    let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::nonzero_exit()));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
+}
+
+#[test]
+fn unforced_exec_tier_reports_a_supervision_failure_as_infrastructure() {
+    let outcome =
+        natural_exec_outcome(direct_exec_result(DirectExecEvidence::supervision_failure()));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_exec_structured_infrastructure_fails_the_job() {
+    let outcome =
+        natural_exec_outcome(direct_exec_result(DirectExecEvidence::supervision_failure()));
+
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
+}
+
+#[test]
+fn unforced_exec_tier_reports_sandbox_refusal_as_infrastructure() {
+    let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::sandbox_refusal()));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_exec_tier_scores_the_explicit_approval_cap_as_a_miss() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        forced_verification_failed: false,
+        tool_results: Vec::new(),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::ApprovalCapReached,
+            requests: vec![
+                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
+                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID)),
+                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID)),
+            ],
+            model_calls: MAX_NATURAL_MODEL_CALLS,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_exec_tier_keeps_setup_failure_above_the_approval_cap() {
+    let mut outcome = natural_exec_outcome(direct_exec_result(
+        DirectExecEvidence::sandbox_setup_failure(),
+    ));
+    outcome.snapshot.requests.push(successful_request(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        UNSANDBOXED_EXEC_NAME,
+        serde_json::json!({}),
+    ));
+    outcome.snapshot.requests.push(successful_request(
+        Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID),
+        UNSANDBOXED_EXEC_NAME,
+        serde_json::json!({}),
+    ));
+    outcome.snapshot.requests.push(successful_request(
+        Uuid::from_u128(ARBITRARY_FOURTH_EVAL_REQUEST_ID),
+        UNSANDBOXED_EXEC_NAME,
+        serde_json::json!({}),
+    ));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_sandboxed_exec_tier_reports_setup_failure_as_infrastructure() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        direct_exec_result(DirectExecEvidence::sandbox_setup_failure()),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "sandbox setup failed");
+}
+
+#[test]
+fn forced_sandboxed_exec_setup_failure_fails_the_job() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        direct_exec_result(DirectExecEvidence::sandbox_setup_failure()),
+    );
+
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_exec_denied_sole_exact_request_is_infrastructure() {
+    let mut outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        zero_exit_with_confinement(ZeroExitEvidence {
+            confinement: ExecutionConfinement::Unsandboxed,
+            stdout: EXEC_FORCED_READ_ONLY_OUTPUT,
+        }),
+    );
+    outcome.snapshot.requests[0].completed_result_entry_index = None;
+    outcome.snapshot.requests[0].attempt_succeeded = false;
+    outcome.snapshot.requests[0].attempt_denied = true;
+    outcome.tool_results.clear();
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_exec_denied_exact_retry_remains_a_report_only_miss() {
+    let mut outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        zero_exit_with_confinement(ZeroExitEvidence {
+            confinement: ExecutionConfinement::Unsandboxed,
+            stdout: EXEC_FORCED_READ_ONLY_OUTPUT,
+        }),
+    );
+    let fixture = forced_exec_fixture(UNSANDBOXED_EXEC_NAME);
+    outcome.snapshot.requests.push(RequestSnapshot {
+        request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+        name: String::from(UNSANDBOXED_EXEC_NAME),
+        arguments_text: String::from(fixture.expected_arguments),
+        entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
+        completed_result_entry_index: None,
+        attempt_succeeded: false,
+        attempt_denied: true,
+    });
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert!(reject_forced_executor_failures(&[outcome]).is_ok());
+}
+
+#[test]
+fn unforced_exec_tier_rejects_an_unconfined_execution() {
+    let outcome = natural_exec_outcome(zero_exit_with_confinement(ZeroExitEvidence {
+        confinement: ExecutionConfinement::Unsandboxed,
+        stdout: "",
+    }));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
+}
+
+#[test]
+fn every_forced_exec_fixture_is_admitted_by_its_own_dispatch_case() -> EvalResult {
+    let [sandboxed, unsandboxed, diagnostics] = EXEC_CASES;
+
+    assert_forced_exec_fixture_is_admitted(sandboxed)?;
+    assert_forced_exec_fixture_is_admitted(unsandboxed)?;
+    assert_forced_exec_fixture_is_admitted(diagnostics)?;
+    Ok(())
+}
+
+#[track_caller]
+fn assert_forced_exec_fixture_is_admitted(case: &ForcedCase) -> EvalResult {
+    let arguments =
+        NormalizedToolArguments::try_from_provider_text(case.expected_arguments.to_owned())
+            .map_err(|_| io::Error::other("a forced exec fixture does not normalize"))?;
+
+    assert!(
+        ExecEvalCase::for_forced_tool(case.name)?.admits(case.name, &arguments),
+        "the dispatch allowlist rejects the reported fixture for {}",
+        case.name
+    );
+    Ok(())
 }
 
 #[test]
@@ -14029,6 +19132,7 @@ fn successful_workspace_natural_snapshot() -> CaseSnapshot {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14042,6 +19146,7 @@ fn successful_workspace_natural_snapshot() -> CaseSnapshot {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14098,6 +19203,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -14107,6 +19213,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14132,6 +19239,7 @@ fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14145,6 +19253,7 @@ fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14166,6 +19275,7 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -14179,6 +19289,7 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14208,6 +19319,7 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14221,9 +19333,10 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
+                request_id: Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(EDIT_FILE_NAME),
                 arguments_text: serde_json::json!({
@@ -14235,6 +19348,7 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14531,6 +19645,7 @@ fn successful_git_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: GIT_NATURAL_STAGE_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(GIT_NATURAL_STAGE_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14542,6 +19657,7 @@ fn successful_git_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: GIT_NATURAL_COMMIT_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(GIT_NATURAL_COMMIT_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14701,6 +19817,970 @@ fn git_natural_result_payloads_require_cleanup() -> EvalResult {
     Ok(())
 }
 
+type PreparedExecWorkspace = (
+    TempDir,
+    BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    BTreeMap<PathBuf, SystemTime>,
+    BTreeMap<PathBuf, FilesystemIdentity>,
+);
+
+type PreparedExecNaturalWorkspace = (
+    TempDir,
+    BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    BTreeMap<PathBuf, SystemTime>,
+    BTreeMap<PathBuf, FilesystemIdentity>,
+    BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    BTreeMap<PathBuf, u32>,
+    FilesystemExecutionTimeWindow,
+);
+
+fn prepared_exec_seed_workspace() -> EvalResult<PreparedExecWorkspace> {
+    let workspace = tempfile::tempdir()?;
+    seed_exec_workspace(workspace.path())?;
+    let seed_entries = workspace_entries(workspace.path())?;
+    let seed_modified_times = workspace_modified_times(workspace.path())?;
+    let seed_entry_identities = workspace_entry_identities(workspace.path())?;
+    Ok((
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+    ))
+}
+
+fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace> {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let seed_inode_flags = workspace_inode_flags(workspace.path())?;
+    let result = workspace.path().join(EXEC_RESULT_PATH);
+    let started = current_filesystem_recorded_time()?;
+    fs::write(&result, EXEC_RESULT)?;
+    #[cfg(unix)]
+    fs::set_permissions(
+        result,
+        fs::Permissions::from_mode(WORKSPACE_PRIVATE_CREATION_MODE),
+    )?;
+    let finished = current_filesystem_recorded_time()?;
+    Ok((
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        FilesystemExecutionTimeWindow { started, finished },
+    ))
+}
+
+fn create_cargo_target_directory(root: &Path) -> EvalResult<FilesystemExecutionTimeWindow> {
+    let started = current_filesystem_recorded_time()?;
+    let target = root.join("target");
+    fs::create_dir(&target)?;
+    #[cfg(unix)]
+    fs::set_permissions(
+        target,
+        fs::Permissions::from_mode(CARGO_TARGET_DIRECTORY_MODE),
+    )?;
+    Ok(FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_natural_created_file_gate_rejects_changed_ownership() -> EvalResult {
+    let (
+        workspace,
+        _entries,
+        _times,
+        expected_identities,
+        _attributes,
+        _inode_flags,
+        _execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let target = Path::new(EXEC_RESULT_PATH);
+    let mut actual_identities = workspace_entry_identities(workspace.path())?;
+    let changed_group_id = actual_identities[target].group_id.wrapping_add(1);
+    actual_identities
+        .get_mut(target)
+        .expect("the Exec result has a filesystem identity")
+        .group_id = changed_group_id;
+
+    assert!(!created_entry_identity_matches_workspace(
+        &actual_identities,
+        &expected_identities,
+        target,
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_natural_created_file_gate_rejects_a_different_device() -> EvalResult {
+    let (
+        workspace,
+        _entries,
+        _times,
+        expected_identities,
+        _attributes,
+        _inode_flags,
+        _execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let target = Path::new(EXEC_RESULT_PATH);
+    let mut actual_identities = workspace_entry_identities(workspace.path())?;
+    actual_identities
+        .get_mut(target)
+        .expect("the Exec result has a filesystem identity")
+        .device = expected_identities[Path::new("")].device.wrapping_add(1);
+
+    assert!(!created_entry_identity_matches_workspace(
+        &actual_identities,
+        &expected_identities,
+        target,
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_natural_created_file_gate_rejects_collateral_write_permissions() -> EvalResult {
+    let (workspace, entries, times, identities, attributes, inode_flags, execution_window) =
+        prepared_exec_natural_workspace()?;
+    fs::set_permissions(
+        workspace.path().join(EXEC_RESULT_PATH),
+        fs::Permissions::from_mode(EXEC_PERMISSIVE_CREATION_MODE),
+    )?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &entries,
+        &times,
+        &identities,
+        &attributes,
+        &inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_exec_seed_file_byte_identically(
+    root: &Path,
+    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+) -> EvalResult {
+    let relative = Path::new("Cargo.toml");
+    let target = root.join(relative);
+    let replacement = root.join("replacement-fixture");
+    let content = fs::read(&target)?;
+    let permissions = fs::metadata(&target)?.permissions();
+    let target_modified = *seed_modified_times
+        .get(relative)
+        .expect("the Exec fixture has a captured target modified time");
+    let root_modified = *seed_modified_times
+        .get(Path::new(""))
+        .expect("the Exec fixture has a captured root modified time");
+    fs::write(&replacement, content)?;
+    fs::set_permissions(&replacement, permissions)?;
+    fs::rename(&replacement, &target)?;
+    fs::File::open(&target)?.set_times(fs::FileTimes::new().set_modified(target_modified))?;
+    fs::File::open(root)?.set_times(fs::FileTimes::new().set_modified(root_modified))?;
+    Ok(())
+}
+
+#[test]
+fn forced_direct_exec_workspace_accepts_the_unchanged_seed() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+
+    assert!(exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_direct_exec_workspace_rejects_inode_flag_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let seed_inode_flags = workspace_inode_flags(workspace.path())?;
+    let seed = fs::File::open(workspace.path().join("Cargo.toml"))?;
+    let flags = rustix::fs::ioctl_getflags(&seed)?;
+    rustix::fs::ioctl_setflags(&seed, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_direct_exec_workspace_rejects_a_mutated_seed_file() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    fs::write(
+        workspace.path().join("collateral.txt"),
+        "collateral fixture\n",
+    )?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_direct_exec_workspace_rejects_byte_identical_seed_replacement() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
+
+    assert_eq!(workspace_entries(workspace.path())?, seed_entries);
+    assert_eq!(
+        workspace_modified_times(workspace.path())?,
+        seed_modified_times
+    );
+    assert_ne!(
+        workspace_entry_identities(workspace.path())?,
+        seed_entry_identities
+    );
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_direct_exec_workspace_rejects_extended_attribute_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    rustix::fs::setxattr(
+        workspace.path().join("Cargo.toml"),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_cargo_diagnostics_workspace_accepts_the_exact_target_directory() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+
+    assert!(cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_target_inode_flag_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let seed_inode_flags = workspace_inode_flags(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    let target = fs::File::open(workspace.path().join("target"))?;
+    let flags = rustix::fs::ioctl_getflags(&target)?;
+    rustix::fs::ioctl_setflags(&target, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_an_unexpected_target_descendant() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    fs::write(
+        workspace.path().join("target/unexpected"),
+        "synthetic unexpected target descendant\n",
+    )?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_a_writable_target_directory() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let started = current_filesystem_recorded_time()?;
+    fs::create_dir(workspace.path().join("target"))?;
+    fs::set_permissions(
+        workspace.path().join("target"),
+        fs::Permissions::from_mode(WORKSPACE_INSECURE_CREATION_MODE),
+    )?;
+    let execution_window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_a_hard_linked_target_artifact() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let support = tempfile::tempdir()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let artifact = workspace.path().join("target/artifact");
+    let started = current_filesystem_recorded_time()?;
+    fs::create_dir(workspace.path().join("target"))?;
+    fs::write(&artifact, "synthetic target artifact\n")?;
+    fs::hard_link(&artifact, support.path().join("artifact-link"))?;
+    let execution_window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_a_symlinked_target_artifact() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    symlink(
+        workspace.path().join("Cargo.toml"),
+        workspace.path().join("target/escape"),
+    )?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    fs::remove_file(workspace.path().join("Cargo.toml"))?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_cargo_diagnostics_rejects_root_extended_attribute_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    rustix::fs::setxattr(
+        workspace.path(),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_cargo_diagnostics_rejects_target_extended_attributes() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let started = current_filesystem_recorded_time()?;
+    fs::create_dir(workspace.path().join("target"))?;
+    rustix::fs::setxattr(
+        workspace.path().join("target"),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+    let execution_window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_target_identity_gate_rejects_changed_identity() -> EvalResult {
+    let (workspace, _seed_entries, _seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let _execution_window = create_cargo_target_directory(workspace.path())?;
+    let entries = workspace_entries(workspace.path())?;
+    let mut identities = workspace_entry_identities(workspace.path())?;
+    identities
+        .get_mut(Path::new("target"))
+        .expect("the Cargo target fixture has a filesystem identity")
+        .user_id = seed_entry_identities[Path::new("")].user_id.wrapping_add(1);
+
+    assert!(!cargo_target_identities_match(
+        &entries,
+        &identities,
+        seed_entry_identities.get(Path::new("")),
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_target_identity_gate_rejects_a_different_device() -> EvalResult {
+    let (workspace, _seed_entries, _seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let _execution_window = create_cargo_target_directory(workspace.path())?;
+    let entries = workspace_entries(workspace.path())?;
+    let mut identities = workspace_entry_identities(workspace.path())?;
+    identities
+        .get_mut(Path::new("target"))
+        .expect("the Cargo target fixture has a filesystem identity")
+        .device = seed_entry_identities[Path::new("")].device.wrapping_add(1);
+
+    assert!(!cargo_target_identities_match(
+        &entries,
+        &identities,
+        seed_entry_identities.get(Path::new("")),
+    ));
+    Ok(())
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_out_of_window_target_times() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    fs::File::open(workspace.path().join("target"))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_accepts_only_the_requested_output_addition() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+
+    assert!(exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_natural_state_rejects_output_inode_flag_drift() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let output = fs::File::open(workspace.path().join(EXEC_RESULT_PATH))?;
+    let flags = rustix::fs::ioctl_getflags(&output)?;
+    rustix::fs::ioctl_setflags(&output, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_natural_state_rejects_seed_inode_flag_drift() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let seed = fs::File::open(workspace.path().join("Cargo.toml"))?;
+    let flags = rustix::fs::ioctl_getflags(&seed)?;
+    rustix::fs::ioctl_setflags(&seed, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_rejects_out_of_window_output_times() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::File::open(workspace.path().join(EXEC_RESULT_PATH))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_rejects_out_of_window_parent_times() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::File::open(workspace.path())?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_rejects_a_mutated_seed_file() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"collateral-mutation\"\n",
+    )?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::write(
+        workspace.path().join("collateral.txt"),
+        "collateral fixture\n",
+    )?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_rejects_an_oversized_sparse_collateral_file() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::File::create(workspace.path().join("oversized-collateral.txt"))?
+        .set_len((MAX_WORKSPACE_READ_BYTES + 1) as u64)?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_natural_state_rejects_root_extended_attribute_drift() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let root = Path::new("");
+    rustix::fs::setxattr(
+        workspace.path(),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert_ne!(
+        workspace_extended_attributes(workspace.path())?[root],
+        seed_extended_attributes[root]
+    );
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_natural_state_rejects_byte_identical_seed_replacement() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_result_inspection_rejects_a_directory() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::remove_file(workspace.path().join(EXEC_RESULT_PATH))?;
+    fs::create_dir(workspace.path().join(EXEC_RESULT_PATH))?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_result_inspection_rejects_a_fifo_without_opening_it() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    let result = workspace.path().join(EXEC_RESULT_PATH);
+    fs::remove_file(&result)?;
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &result,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
 #[test]
 fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult {
     let snapshot = CaseSnapshot {
@@ -14716,6 +20796,7 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -14727,6 +20808,7 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14751,6 +20833,7 @@ fn git_natural_state_requires_the_stage_result_before_the_commit_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14762,6 +20845,7 @@ fn git_natural_state_requires_the_stage_result_before_the_commit_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14786,6 +20870,7 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14797,6 +20882,7 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -14808,6 +20894,7 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14831,6 +20918,7 @@ fn successful_web_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14842,6 +20930,7 @@ fn successful_web_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX + 1),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14948,6 +21037,7 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -14959,6 +21049,7 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14983,6 +21074,7 @@ fn web_natural_state_requires_the_search_result_before_the_fetch_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14994,6 +21086,7 @@ fn web_natural_state_requires_the_search_result_before_the_fetch_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15016,6 +21109,7 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -15025,6 +21119,7 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15049,6 +21144,7 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -15060,6 +21156,7 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -15071,6 +21168,7 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15122,33 +21220,50 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("the tool-eval summary path is missing"))?;
     let mut markdown = format!(
-        "## {} daemon tool eval — `{}`\n\n### Forced tier\n\n| Tool | Result | Calls observed | Tool result round-trips | Turn |\n| --- | --- | --- | ---: | --- |\n",
+        "## {} daemon tool eval — `{}`\n\n### Forced tier\n\n| Tool | Result | Infrastructure | Calls observed | Tool result round-trips | Turn |\n| --- | --- | --- | --- | ---: | --- |\n",
         report.family.as_str(),
         report.family.model(),
     );
     for outcome in &report.forced {
+        log_exec_infrastructure_evidence(outcome);
         let target = outcome.target.as_deref().unwrap_or("missing target");
         let result = outcome.forced_disposition().label();
         let turn = outcome.snapshot.turn_disposition.label();
         markdown.push_str(&format!(
-            "| `{target}` | {result} | {} | {} | `{turn}` |\n",
+            "| `{target}` | {result} | {} | {} | {} | `{turn}` |\n",
+            outcome.infrastructure_label(),
             outcome.snapshot.called_names(),
-            outcome.result_round_trips,
+            outcome.round_tripped_result_count(),
         ));
     }
     let natural = report
         .natural
         .natural_loop_disposition(report.family)
         .and(report.natural_state);
+    log_exec_infrastructure_evidence(&report.natural);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact executor failure or rejected model credential fails after this summary is written.\n",
+        "\n### Unforced tier\n\n| Result | Infrastructure | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure or rejected model credential fails after this summary is written.\n",
         natural.label(),
+        report
+            .natural
+            .natural_infrastructure_label(report.family, report.natural_state),
         report.natural.snapshot.called_names(),
-        report.natural.result_round_trips,
+        report.natural.round_tripped_result_count(),
         report.natural_state.label(),
         report.natural.snapshot.turn_disposition.label(),
     ));
     fs::write(summary_path, &markdown)?;
     print!("{markdown}");
     Ok(())
+}
+
+fn log_exec_infrastructure_evidence(outcome: &CaseOutcome) {
+    for result in &outcome.tool_results {
+        if exec_result_is_infrastructure(result) {
+            eprintln!(
+                "structured Exec infrastructure evidence: {}",
+                result.content
+            );
+        }
+    }
 }
