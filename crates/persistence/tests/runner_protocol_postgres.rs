@@ -5229,7 +5229,7 @@ async fn s30_inv009_inv042_initial_pin_locks_scheduler_before_placement()
                 offer_request(),
             )
             .expect("the validated registration pins the placement");
-        let mut scheduler_owner = pool.begin().await?;
+        let mut scheduler_lock_holder = pool.begin().await?;
         sqlx::query(
             "SELECT session_id
                FROM session_scheduler
@@ -5237,7 +5237,7 @@ async fn s30_inv009_inv042_initial_pin_locks_scheduler_before_placement()
               FOR UPDATE",
         )
         .bind(session.into_uuid())
-        .fetch_one(&mut *scheduler_owner)
+        .fetch_one(&mut *scheduler_lock_holder)
         .await?;
         let pin_store = tokio::spawn(async move {
             tokio::time::timeout(
@@ -5259,11 +5259,11 @@ async fn s30_inv009_inv042_initial_pin_locks_scheduler_before_placement()
                   FOR UPDATE",
             )
             .bind(session.into_uuid())
-            .fetch_one(&mut *scheduler_owner),
+            .fetch_one(&mut *scheduler_lock_holder),
         )
         .await
-        .expect("the scheduler owner must acquire placement before the queued pin")?;
-        scheduler_owner.commit().await?;
+        .expect("the scheduler lock holder must acquire placement before the queued pin")?;
+        scheduler_lock_holder.commit().await?;
         pin_store
             .await
             .expect("the initial pin task must remain joinable")
@@ -5302,7 +5302,7 @@ async fn s32_inv009_inv045_placement_projection_locks_scheduler_before_placement
             .expect("the active predecessor permits profile replacement");
         let replacement_grant =
             duplicate_grant(&replacement.grant.grant, registration.registration());
-        let mut scheduler_owner = pool.begin().await?;
+        let mut scheduler_lock_holder = pool.begin().await?;
         sqlx::query(
             "SELECT session_id
                FROM session_scheduler
@@ -5310,7 +5310,7 @@ async fn s32_inv009_inv045_placement_projection_locks_scheduler_before_placement
               FOR UPDATE",
         )
         .bind(session.into_uuid())
-        .fetch_one(&mut *scheduler_owner)
+        .fetch_one(&mut *scheduler_lock_holder)
         .await?;
         let replacement_store = tokio::spawn(async move {
             tokio::time::timeout(
@@ -5336,11 +5336,11 @@ async fn s32_inv009_inv045_placement_projection_locks_scheduler_before_placement
                   FOR UPDATE",
             )
             .bind(session.into_uuid())
-            .fetch_one(&mut *scheduler_owner),
+            .fetch_one(&mut *scheduler_lock_holder),
         )
         .await
-        .expect("the scheduler owner must acquire placement before the queued projection")?;
-        scheduler_owner.commit().await?;
+        .expect("the scheduler lock holder must acquire placement before the queued projection")?;
+        scheduler_lock_holder.commit().await?;
         replacement_store
             .await
             .expect("the placement projection task must remain joinable")
