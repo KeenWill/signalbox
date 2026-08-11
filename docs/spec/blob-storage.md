@@ -85,20 +85,18 @@ store's key layout can evolve without reinterpreting history.
 ## Stores, routing, and configuration
 
 The daemon configuration catalog gains an optional `[blob_storage]` table. Its
-absence preserves startup compatibility only while both the blob catalog and the
-legacy imported-raw-source backlog are empty; blob and conversation-import
-operations are then unavailable rather than inventing a storage location. Once
-either durable inventory is nonempty, omission is a startup error because every
-recorded store must remain resolvable and every legacy source must be
-convergeable. When present, the table requires an absolute `staging_directory`,
-a positive decimal-u64 `max_blob_bytes`, one through 32
-`[[blob_storage.stores]]` entries with distinct validated `name` values and
-distinct canonical UUID `namespace_id` values, and a `[blob_storage.routes]`
-table containing exactly `user_attachment`, `tool_artifact`, `imported_source`,
-and `generated_artifact`. Every route names a declared store. When conversation
-import is enabled, `max_blob_bytes` must be at least
-`conversation_import.max_source_bytes`, including that table's default. The
-table follows the version-one catalog grammar and rejects unknown or
+absence preserves startup compatibility only while the blob catalog is empty;
+blob and conversation-import operations are then unavailable rather than
+inventing a storage location. Once the catalog is nonempty, omission is a
+startup error because every recorded store must remain resolvable. When present,
+the table requires an absolute `staging_directory`, a positive decimal-u64
+`max_blob_bytes`, one through 32 `[[blob_storage.stores]]` entries with distinct
+validated `name` values and distinct canonical UUID `namespace_id` values, and a
+`[blob_storage.routes]` table containing exactly `user_attachment`,
+`tool_artifact`, `imported_source`, and `generated_artifact`. Every route names
+a declared store. When conversation import is enabled, `max_blob_bytes` must be
+at least `conversation_import.max_source_bytes`, including that table's default.
+The table follows the version-one catalog grammar and rejects unknown or
 kind-inapplicable fields.
 
 Configured store entries must also name distinct physical namespaces. After
@@ -423,22 +421,9 @@ bytes living in a routed store rather than a relational column. Import semantics
 — record identity, conversion digests, snapshot immutability — are unchanged and
 remain owned by [conversation-import](conversation-import.md).
 
-The schema transition first admits exactly one of legacy `raw_bytes` or a blob
-digest on each `imported_raw_source_record`. Before accepting socket work, a
-restart-safe barrier processes one legacy row at a time: it checks the stored
-content hash and configured blob-size bound, publishes and registers the bytes
-under the `imported_source` route without an open database transaction, then
-locks and rechecks the row before atomically recording the digest and clearing
-`raw_bytes`. Publication without registration may leave the ordinary orphan;
-failure before the row transition leaves legacy authority intact. Restart skips
-transitioned rows without reading or re-verifying their blobs and resumes only
-rows that still carry legacy `raw_bytes`; ordinary reads perform transitioned
-blob verification. A legacy row larger than `max_blob_bytes` makes startup fail
-until the operator raises that ceiling; changing the current new-import
-admission bound never invalidates acknowledged legacy bytes. Startup fails
-closed until no legacy row remains, after which all reads use the blob reference
-and the nullable legacy column contains no bytes. New imports write only blob
-references.
+The one-time storage-layer SQL migration produces the final blob-reference-only
+`imported_raw_source_record` schema. Runtime code accepts only that shape, and
+new imports write only blob references.
 
 ## Open edges
 

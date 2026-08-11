@@ -668,17 +668,11 @@ exact agreement in entry count, order, content, speaker, and source metadata. It
 also reapplies the 128-container bound to complete records and entry-carried
 structured values (INV-002).
 
-The migration initially admits exactly one of legacy `raw_bytes` or the blob
-reference. Before socket admission, a restart-safe barrier verifies one legacy
-row's hash, publishes and registers it without an open database transaction,
-then locks and rechecks the row before replacing its bytes with the digest.
-Restart re-verifies the routed replica for a transitioned row before skipping
-it. This barrier is governed only by `blob_storage.max_blob_bytes`, not the
-current new-import admission limit: an oversized acknowledged legacy row makes
-startup fail until the blob ceiling is raised. The owning
+The one-time storage-layer SQL migration produces the final blob-reference-only
+raw-source schema. The runtime repository accepts only that shape, and new
+imports write only blob references. The owning
 [blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration)
-defines when omitted configuration is compatible with both durable inventories.
-After the barrier, new imports write only blob references.
+defines when omitted configuration is valid.
 
 ## Derived display titles
 
