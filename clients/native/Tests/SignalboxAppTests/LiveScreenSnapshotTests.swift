@@ -835,7 +835,11 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// it, no snapshot had to exist, and the suite went on reporting exhaustive
     /// coverage — the same failure the count had, one level along. The cheapest
     /// way to discharge the decision is now writing the test.
-    func testEveryRenderedScenarioNamesASnapshotProducingTest() {
+    func testEveryRenderedScenarioNamesASnapshotProducingTest() throws {
+        try XCTSkipIf(
+            liveScreenSnapshotRecordMode() != .never,
+            "The committed snapshot inventory is verified after the recording run."
+        )
         XCTAssertEqual(
             Self.claimedNamesMissingFromTheSuite,
             [],
