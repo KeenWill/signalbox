@@ -13492,6 +13492,61 @@ async fn s32_inv002_inv045_profile_replacement_rejects_revoked_predecessor_grant
     Ok(())
 }
 
+/// INV-002 / INV-045: a profile replacement cannot derive credential
+/// authority from a predecessor grant whose canonical issuance is absent.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv045_profile_replacement_requires_predecessor_issuance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant_audit DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM runner_credential_grant_audit
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3
+            AND audit_ordinal = 1",
+    )
+    .bind(original_grant.session().into_uuid())
+    .bind(original_grant.runner().into_uuid())
+    .bind(Decimal::from(original_grant.revision().get()))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant_audit ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted = store
+        .load_placement(replacement.placement.session())
+        .await
+        .expect_err("a predecessor grant without issuance cannot source a replacement");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::MissingCanonicalGrant);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
@@ -14327,6 +14382,12 @@ async fn s32_inv002_inv045_grant_policy_rejects_missing_base_predecessor()
     sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant_audit DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_current_credential_grant_audit DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
     sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
@@ -14342,6 +14403,24 @@ async fn s32_inv002_inv045_grant_policy_rejects_missing_base_predecessor()
     .execute(&pool)
     .await?;
     sqlx::query(
+        "UPDATE runner_credential_grant_audit
+            SET grant_revision = 2,
+                event_kind = 'replaced'
+          WHERE session_id = $1 AND grant_revision = 1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_credential_grant_audit
+            SET grant_revision = 2,
+                event_kind = 'replaced'
+          WHERE session_id = $1 AND grant_revision = 1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "UPDATE runner_session_placement_record
             SET credential_grant_revision = 2
           WHERE session_id = $1 AND event_kind = 'pinned'",
@@ -14350,6 +14429,12 @@ async fn s32_inv002_inv045_grant_policy_rejects_missing_base_predecessor()
     .execute(&pool)
     .await?;
     sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_current_credential_grant_audit ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant_audit ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
     sqlx::query("ALTER TABLE runner_credential_grant ENABLE TRIGGER ALL")
