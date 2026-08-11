@@ -5391,7 +5391,23 @@ async fn load_grant_policy_index(
                 policy_placement.event_ordinal IS NOT NULL
                     AS has_policy_placement,
                 policy_placement.pinned_credential_profile_name IS NOT NULL
-                    AS defines_policy
+                    AS defines_policy,
+                EXISTS (
+                    SELECT 1
+                      FROM runner_credential_grant_audit AS issuance
+                     WHERE issuance.session_id = grant_line.session_id
+                       AND issuance.lineage_origin_event_ordinal =
+                            grant_line.lineage_origin_event_ordinal
+                       AND issuance.runner_id = grant_line.runner_id
+                       AND issuance.grant_revision = grant_line.grant_revision
+                       AND issuance.audit_ordinal = 1
+                       AND issuance.credential_profile_name =
+                            grant_line.credential_profile_name
+                       AND issuance.event_kind = CASE
+                           WHEN grant_line.grant_revision = 1 THEN 'issued'
+                           ELSE 'replaced'
+                       END
+                ) AS has_canonical_issuance
            FROM grant_line
            LEFT JOIN runner_session_placement_record AS policy_placement
              ON policy_placement.session_id = grant_line.session_id
@@ -5415,6 +5431,9 @@ async fn load_grant_policy_index(
         let revision = validate_grant_predecessor_shape(&row)?;
         reached_base |= revision == RunnerGeneration::one();
         if !row.decode_column::<bool>("has_policy_placement")? {
+            return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into());
+        }
+        if !row.decode_column::<bool>("has_canonical_issuance")? {
             return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into());
         }
         let identity = StoredGrantIdentity {
