@@ -749,13 +749,20 @@ impl RunnerProtocolStore {
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
         let prior = load_connection_head_in(transaction.as_mut(), enrollment).await?;
-        let prior_was_suspect = matches!(
-            prior,
+        let prior_was_suspect = match prior {
             Some(RunnerConnectionSnapshot {
                 state: RunnerConnectionState::Suspect,
                 ..
-            })
-        );
+            }) => true,
+            None
+            | Some(RunnerConnectionSnapshot {
+                state:
+                    RunnerConnectionState::Connected
+                    | RunnerConnectionState::Shutdown
+                    | RunnerConnectionState::Lost,
+                ..
+            }) => false,
+        };
         let epoch = match prior {
             Some(prior) => prior
                 .epoch()
