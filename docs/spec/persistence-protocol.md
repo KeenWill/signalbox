@@ -119,8 +119,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-four files, `202607180001` through
-`202608100001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty-five files, `202607180001` through
+`202608110002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -223,7 +223,10 @@ Implemented table families (across the forward-only migrations):
   records dedicated approval-judge calls in the global model-call identity
   namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale;
+  recommendation, and rationale; migration `202608110002` supersedes its
+  decision-shape constraint so a delegate denial stores the checked reason
+  derived from its rationale (rows written earlier keep their absent reason,
+  which readers accept as the legacy shape);
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly

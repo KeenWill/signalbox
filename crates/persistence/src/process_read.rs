@@ -4765,17 +4765,27 @@ fn decode_process_tool_approval(
             Some(model),
             Some(call),
             Some(rationale),
-        ) => Ok(Some(ProcessToolApproval {
-            decision,
-            decider: ToolApprovalDecider::Delegate {
-                model: DirectModelSelection::from_uuid(model),
-                call: ModelCallId::from_uuid(call),
-            },
-            rationale: Some(
-                ToolDecisionRationale::try_new(rationale)
-                    .map_err(|_| ProcessReadCorruption::Inconsistent("tool decision rationale"))?,
-            ),
-        })),
+        ) => {
+            let rationale = ToolDecisionRationale::try_new(rationale)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("tool decision rationale"))?;
+            // A delegate denial's stored reason is derived from its rationale;
+            // rows written before that derivation existed carry none.
+            if let ToolApprovalDecision::Deny { ref reason } = decision {
+                if reason.is_some() && *reason != ToolDenialReason::from_rationale(&rationale) {
+                    return Err(
+                        ProcessReadCorruption::Inconsistent("delegate denial payload").into()
+                    );
+                }
+            }
+            Ok(Some(ProcessToolApproval {
+                decision,
+                decider: ToolApprovalDecider::Delegate {
+                    model: DirectModelSelection::from_uuid(model),
+                    call: ModelCallId::from_uuid(call),
+                },
+                rationale: Some(rationale),
+            }))
+        }
         (
             ToolApprovalDecisionSourceStorageKind::PolicyAuto
             | ToolApprovalDecisionSourceStorageKind::SessionBlanket

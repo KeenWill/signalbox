@@ -4353,6 +4353,7 @@ pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
     pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
+    pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
 }

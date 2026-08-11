@@ -813,24 +813,26 @@ impl ToolDenialReason {
     ///
     /// A rationale admits control characters and up to
     /// [`ToolDecisionRationale::MAX_UTF8_BYTES`] bytes, so this conversion is
-    /// lossy where the two bounds disagree: control characters become spaces,
-    /// surrounding whitespace is trimmed, and the text is cut to
-    /// [`Self::MAX_UTF8_BYTES`] on a character boundary. A rationale that is
-    /// entirely whitespace derives no reason.
+    /// lossy exactly where the two bounds disagree: control characters become
+    /// spaces, edge characters the reason validator forbids are trimmed, and
+    /// the text is cut to [`Self::MAX_UTF8_BYTES`] on a character boundary.
+    /// After control mapping the only forbidden edge character left is the
+    /// space itself, so admissible non-POSIX edge whitespace such as NBSP is
+    /// preserved verbatim. A rationale that is entirely control characters
+    /// and spaces derives no reason.
     pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self> {
-        let mut sanitized = rationale
+        let sanitized = rationale
             .as_str()
             .chars()
             .map(|character| if character.is_control() { ' ' } else { character })
             .collect::<String>();
-        sanitized.truncate(sanitized.trim_end().len());
-        let mut trimmed = sanitized.trim_start();
+        let mut trimmed = sanitized.trim_matches(' ');
         while trimmed.len() > Self::MAX_UTF8_BYTES {
             let mut cut = Self::MAX_UTF8_BYTES;
             while !trimmed.is_char_boundary(cut) {
                 cut -= 1;
             }
-            trimmed = trimmed[..cut].trim_end();
+            trimmed = trimmed[..cut].trim_end_matches(' ');
         }
         (!trimmed.is_empty()).then(|| Self(String::from(trimmed)))
     }
@@ -1786,11 +1788,21 @@ mod tests {
             .expect("fixture rationale is admitted");
         assert_eq!(ToolDenialReason::from_rationale(&whitespace_only), None);
 
-        let oversized = ToolDecisionRationale::try_new(format!("{}é", "a".repeat(1023)))
+        let admitted_edge_nbsp =
+            ToolDecisionRationale::try_new(String::from("\u{00a0}denied\u{00a0}"))
+                .expect("fixture rationale is admitted");
+        assert_eq!(
+            ToolDenialReason::from_rationale(&admitted_edge_nbsp)
+                .map(ToolDenialReason::into_string),
+            Some(String::from("\u{00a0}denied\u{00a0}"))
+        );
+
+        let truncation_prefix = "a".repeat(1023);
+        let oversized = ToolDecisionRationale::try_new(format!("{truncation_prefix}é"))
             .expect("fixture rationale is admitted");
         let truncated = ToolDenialReason::from_rationale(&oversized)
             .expect("nonempty text derives a reason");
-        assert_eq!(truncated.as_str(), "a".repeat(1023));
+        assert_eq!(truncated.as_str(), truncation_prefix);
 
         let derived = ToolDenialReason::from_rationale(&control_and_padding)
             .expect("nonempty text derives a reason");
