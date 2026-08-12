@@ -4020,13 +4020,12 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
-    store
-        .transition_connection(
-            expected_enrollment.enrollment(),
-            connection.epoch(),
-            RunnerConnectionTransition::TransportClosed,
-        )
-        .await?;
+    insert_terminal_connection_loss_before_cursor_migration(
+        &pool,
+        expected_enrollment.enrollment(),
+        connection.epoch(),
+    )
+    .await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("legacy placement history has no exact loss baseline");
