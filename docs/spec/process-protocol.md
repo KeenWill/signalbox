@@ -1420,7 +1420,7 @@ admits `no_pending_runner_enrollment {}`,
 `pending_request_mismatch { pending_request_id }`,
 `pending_request_disconnected { pending_request_id }`, and
 `active_runner_not_lost { runner_id, connection_state }` for a daemon whose
-active runner is connected, suspect, or orderly-shutdown but not durably lost.
+active runner is connected, suspect, or orderly shut down but not durably lost.
 Every admitted runner rejection is a recorded durable result; equal replay
 returns it even after runner state changes.
 
