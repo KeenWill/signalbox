@@ -237,7 +237,7 @@ const GENERAL_BUFFERED_INBOUND_FRAMES: usize =
     MAX_BUFFERED_INBOUND_FRAMES - RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES;
 const MAX_IMPORT_ADMISSION_WAITERS: usize = GENERAL_BUFFERED_INBOUND_FRAMES;
 const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
-const MAX_CONCURRENT_BLOB_READS: usize = 16;
+const MAX_CONCURRENT_BLOB_READS: usize = crate::blob_storage_runtime::MAX_CONCURRENT_BLOB_READS;
 const BULK_INGEST_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
@@ -616,6 +616,10 @@ async fn serve_connections(
     let snapshot_reader_capacity =
         snapshot_reader_capacity(dependencies.pool.options().get_max_connections())
             .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
+    let blob_read_budget = dependencies.blob_store_registry.as_ref().map_or_else(
+        || Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
+        |registry| registry.read_budget(),
+    );
     let services = ConnectionServices {
         recovery_reporter: dependencies.recovery_reporter,
         pool: dependencies.pool,
@@ -628,7 +632,7 @@ async fn serve_connections(
         inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
-        blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
+        blob_read_budget,
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
         blob_store_registry: dependencies.blob_store_registry,

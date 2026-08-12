@@ -18,11 +18,13 @@ use signalbox_persistence::blob::{
     BlobCatalogRepository, BlobCatalogRepositoryError, BlobStoreBindingRecord,
 };
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::{BlobStorageClass, BlobStorageConfiguration};
 
 const S3_STARTUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+pub(crate) const MAX_CONCURRENT_BLOB_READS: usize = 16;
 
 /// Configured stores, semantic write routes, and private upload staging.
 pub struct BlobStoreRegistry {
@@ -31,6 +33,7 @@ pub struct BlobStoreRegistry {
     routes: BTreeMap<BlobStorageClass, BlobStoreName>,
     staging: FilesystemBlobStaging,
     max_blob_bytes: u64,
+    read_budget: Arc<Semaphore>,
 }
 
 impl fmt::Debug for BlobStoreRegistry {
@@ -187,6 +190,7 @@ impl BlobStoreRegistry {
             routes,
             staging,
             max_blob_bytes: configuration.max_blob_bytes(),
+            read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
         }))
     }
 
@@ -209,6 +213,11 @@ impl BlobStoreRegistry {
     /// Returns the deployment ceiling for one stored object.
     pub const fn max_blob_bytes(&self) -> u64 {
         self.max_blob_bytes
+    }
+
+    /// Shares the deployment-wide bound for store-backed read traversals.
+    pub fn read_budget(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.read_budget)
     }
 
     /// Returns the private upload staging namespace.

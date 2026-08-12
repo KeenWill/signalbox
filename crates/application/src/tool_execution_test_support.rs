@@ -283,6 +283,7 @@ where
     ) -> Result<ToolAttemptAuthorizationOutcome, Self::Error> {
         self.batch
             .authorize_dispatch(attempt)
+            .map(Box::new)
             .map(ToolAttemptAuthorizationOutcome::Authorized)
             .map_err(|_| self.failures.domain_rejection.clone())
     }
