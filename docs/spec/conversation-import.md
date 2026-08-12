@@ -629,19 +629,23 @@ Raw source bytes live in the blob store under their existing SHA-256 content
 hash; the relational record stores that ordinary blob digest and never a second
 copy. New ingestion publishes and verifies every raw blob before the aggregate
 transaction, then registers all blob and replica rows in the same transaction
-that first references them. A failed import can therefore leave deterministic
-unregistered store orphans but no unreachable catalog rows. Loading first reads
-the complete append-only relational projection and releases its transaction,
-then reads and verifies the referenced blobs, so no database transaction spans
-store I/O. The current converter and reconstitution surfaces retain their
-configured bounded whole-source behavior; future streaming conversion remains
-the committed unimplemented seam above. Each checked aggregate load — including
-ordinary read, replay comparison, and imported-frontier reconstitution — has one
-non-resetting 24-hour monotonic deadline shared across every referenced digest
-and replica candidate. It performs at most one referenced-blob store operation
-at a time; digest or candidate changes never restart the deadline. Every checked
-load acquires the blob contract's shared 16-slot read-traversal admission
-without waiting; when no slot is immediately available, it returns the ordinary
+that first references them. One admitted import starts and awaits at most one
+raw blob publication or verification operation at a time; the process-wide
+bulk-ingest permit remains held across that sequential traversal, so one import
+cannot fan out a record inventory into concurrent store operations. A failed
+import can therefore leave deterministic unregistered store orphans but no
+unreachable catalog rows. Loading first reads the complete append-only
+relational projection and releases its transaction, then reads and verifies the
+referenced blobs, so no database transaction spans store I/O. The current
+converter and reconstitution surfaces retain their configured bounded
+whole-source behavior; future streaming conversion remains the committed
+unimplemented seam above. Each checked aggregate load — including ordinary read,
+replay comparison, and imported-frontier reconstitution — has one non-resetting
+24-hour monotonic deadline shared across every referenced digest and replica
+candidate. It performs at most one referenced-blob store operation at a time;
+digest or candidate changes never restart the deadline. Every checked load
+acquires the blob contract's shared 16-slot read-traversal admission without
+waiting; when no slot is immediately available, it returns the ordinary
 unavailable outcome and retains no queued connection task.
 
 One transaction resolves or inserts a complete aggregate:
@@ -735,17 +739,18 @@ state.
 
 Insertion always resolves the title, so the transitional `pending` state names
 only rows inserted before the column existed. The daemon resolves every pending
-row once at startup — after migration and before serving — by loading each
-complete aggregate through the checked reconstitution seam, re-deriving, and
-applying the one guarded update the header's append-only trigger admits: a
-`pending` row resolving to `derived` or `underivable` with every other column
-unchanged. The backfill is a pure derivation from durably stored raw bytes; it
-fails closed rather than guessing, and a serving unified-listing read that
-observes a pending row fails closed as corruption because startup owns that
-transition. Checked complete loads re-derive and reject a resolved title that
-disagrees with the records; exact reingestion continues to resolve through the
-digest and conversion-equivalence check unchanged, since the deterministic
-derivation adds no new degree of freedom.
+row once at startup — after migration, generic recovery, and blob namespace
+initialization, and before serving — by loading each complete aggregate through
+the checked reconstitution seam, re-deriving, and applying the one guarded
+update the header's append-only trigger admits: a `pending` row resolving to
+`derived` or `underivable` with every other column unchanged. The backfill is a
+pure derivation from durably stored raw bytes; it fails closed rather than
+guessing, and a serving unified-listing read that observes a pending row fails
+closed as corruption because startup owns that transition. Checked complete
+loads re-derive and reject a resolved title that disagrees with the records;
+exact reingestion continues to resolve through the digest and
+conversion-equivalence check unchanged, since the deterministic derivation adds
+no new degree of freedom.
 
 ## Test data and local validation
 

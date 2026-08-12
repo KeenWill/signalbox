@@ -474,8 +474,12 @@ command. This proposal is accepted with the implementing stack's merge.
    structurally impossible rather than a review convention. Preparation races
    the shared cancellation signal above. A trustworthy ordinary failure here
    commits the accepted `Prepared -> KnownFailed` closure with attempt and turn
-   failure in a separate guarded transaction; an adapter defect is an operator
-   failure and commits no provider-failure closure.
+   failure in a separate guarded transaction. A deterministic adapter defect is
+   not provider evidence, but before raising its fatal operator signal the
+   application commits the same guarded unsent known-failure closure as an
+   infrastructure preparation failure. Only failure or ambiguity of that closure
+   leaves `Prepared` for startup to validate and retry; a successfully recorded
+   defect cannot terminate every later incarnation on the same call.
 3. **Attachment preparation (no transaction).** Before send authorization, the
    application checked-sums the catalogued lengths of every distinct attachment
    represented across the complete rendered request. A sum above
@@ -986,7 +990,11 @@ handler holds no prepared record to terminalize, replay of the command finds it
 pending, and a fresh command finds the nonterminal call, so the restart is the
 only remedy and nothing else would ask for it. Attachment unavailability is not
 a stage failure under this paragraph: it carries no ambiguous durable effect,
-returns the nonfatal deferred result above, and leaves the scheduler running.
+returns the nonfatal deferred result above, and leaves the scheduler running. A
+deterministic capability-preparation defect first attempts the guarded unsent
+known-failure closure above and raises the fatal signal only after that closure
+commits or fails; therefore a successful closure leaves no `Prepared` call for
+restart to repeat.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):
