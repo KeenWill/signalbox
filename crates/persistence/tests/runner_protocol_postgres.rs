@@ -3117,7 +3117,7 @@ async fn make_accepted_turn_direct_root(
     transaction.commit().await
 }
 
-async fn append_runner_registration_loss_projection(
+async fn complete_runner_lease_projection(
     store: &RunnerProtocolStore,
     registration: &StoredValidatedRunnerRegistration,
     pin: &SessionRunnerPin,
@@ -3130,6 +3130,13 @@ async fn append_runner_registration_loss_projection(
         .complete(pin.lease.correlation())
         .expect("the exact claimed fixture lease correlation completes");
     store.store_lease(&completed).await?;
+    Ok(())
+}
+
+async fn append_runner_registration_loss_after_completed_lease_projection(
+    store: &RunnerProtocolStore,
+    pin: &SessionRunnerPin,
+) -> Result<(), Box<dyn Error>> {
     let pending = store.load_pending_registration_reconciliations().await?;
     store
         .reconcile_registration_session(pending[0], pin.placement.session())
@@ -3138,6 +3145,15 @@ async fn append_runner_registration_loss_projection(
         .complete_registration_reconciliation(pending[0])
         .await?;
     Ok(())
+}
+
+async fn append_runner_registration_loss_projection(
+    store: &RunnerProtocolStore,
+    registration: &StoredValidatedRunnerRegistration,
+    pin: &SessionRunnerPin,
+) -> Result<(), Box<dyn Error>> {
+    complete_runner_lease_projection(store, registration, pin).await?;
+    append_runner_registration_loss_after_completed_lease_projection(store, pin).await
 }
 
 async fn append_same_runner_replacement_projection(
@@ -19155,6 +19171,7 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     let session = pin.placement.session();
     let (placement_event_ordinal, placement_revision) =
         placement_outbox_facts(&pool, session, "pinned").await?;
+    complete_runner_lease_projection(&store, &registration, &pin).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
@@ -19175,7 +19192,7 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     store
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
-    append_runner_registration_loss_projection(&store, &registration, &pin).await?;
+    append_runner_registration_loss_after_completed_lease_projection(&store, &pin).await?;
     let mut replacement = pool.begin().await?;
     append_same_runner_replacement_projection(&mut replacement, session, None).await?;
     replacement.commit().await?;
