@@ -2,7 +2,9 @@
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
-(`agent/runner-event-outbox-persistence`).
+(`agent/runner-event-outbox-persistence`). The established-successor outbox
+source check was re-verified against this PR
+(`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
@@ -126,8 +128,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-four files, `202607180001` through
-`202608100001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty-nine files, `202607180001` through
+`202608110003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency

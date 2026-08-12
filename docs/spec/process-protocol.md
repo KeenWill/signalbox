@@ -3,7 +3,8 @@
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner
 request/projection implementation boundary were verified against this PR
-(`agent/runner-event-outbox-persistence`).
+(`agent/runner-event-outbox-persistence`). Fresh-epoch connected recovery is
+re-verified through this PR (`agent/daemon-runner-health-events`).
 
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
@@ -2039,18 +2040,18 @@ where `working_directory` is the placement's bounded directory or JSON null for
 the runner default and state is `pinned`, `suspect`, `connected`,
 `runner_lost_before_pin`, `runner_lost`, `replaced`,
 `working_directory_changed`, or `abandoned`. `suspect` is emitted on the first
-missed heartbeat and `connected` exactly when a later acknowledgement clears
-that same suspect epoch before durable loss. `replaced` and
-`working_directory_changed` are the relocation states, and this family is the
-only surface on which a follower learns that its session lost, changed, or moved
-on its runner — a client that cannot hear loss and replacement here cannot hear
-them at all. The family is also the extension point for later runner facts: a
-further relocation shape, or runner metadata and attributes, adds a state and
-its members to this one event kind rather than a second kind. The event carries
-no runner-discovered host path, credential fact, or arbitrary runner text; the
-working directory is the user-selected placement value the client itself
-supplied. The runner proposal includes its own representability gate before a
-runner-aware client subscribes.
+missed heartbeat. `connected` is emitted when a later acknowledgement clears
+that same suspect epoch before durable loss and when a newly established epoch
+supersedes a suspect predecessor. `replaced` and `working_directory_changed` are
+the relocation states, and this family is the only surface on which a follower
+learns that its session lost, changed, or moved on its runner — a client that
+cannot hear loss and replacement here cannot hear them at all. The family is
+also the extension point for later runner facts: a further relocation shape, or
+runner metadata and attributes, adds a state and its members to this one event
+kind rather than a second kind. The event carries no runner-discovered host
+path, credential fact, or arbitrary runner text; the working directory is the
+user-selected placement value the client itself supplied. The runner proposal
+includes its own representability gate before a runner-aware client subscribes.
 
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is
