@@ -567,6 +567,8 @@ pub(crate) enum DurableCommandKind {
     PromotePendingRunner,
     /// Session-scoped lost-runner abandonment.
     AbandonLostRunner,
+    /// Session-scoped lost-runner replacement.
+    ReplaceLostRunner,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -590,6 +592,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
         DurableCommandKind::PromotePendingRunner => "promote_pending_runner",
         DurableCommandKind::AbandonLostRunner => "abandon_lost_runner",
+        DurableCommandKind::ReplaceLostRunner => "replace_lost_runner",
     }
 }
 
@@ -614,6 +617,85 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
         "promote_pending_runner" => Some(DurableCommandKind::PromotePendingRunner),
         "abandon_lost_runner" => Some(DurableCommandKind::AbandonLostRunner),
+        "replace_lost_runner" => Some(DurableCommandKind::ReplaceLostRunner),
+        _ => None,
+    }
+}
+
+/// Closed stored result kinds for pre-pin runner replacement commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReplaceLostRunnerResultStorageKind {
+    Applied,
+    Rejected,
+}
+
+pub(crate) const fn replace_lost_runner_result_to_str(
+    value: ReplaceLostRunnerResultStorageKind,
+) -> &'static str {
+    match value {
+        ReplaceLostRunnerResultStorageKind::Applied => "applied",
+        ReplaceLostRunnerResultStorageKind::Rejected => "rejected",
+    }
+}
+
+pub(crate) fn replace_lost_runner_result_from_str(
+    value: &str,
+) -> Option<ReplaceLostRunnerResultStorageKind> {
+    match value {
+        "applied" => Some(ReplaceLostRunnerResultStorageKind::Applied),
+        "rejected" => Some(ReplaceLostRunnerResultStorageKind::Rejected),
+        _ => None,
+    }
+}
+
+/// Closed stored rejection kinds for pre-pin runner replacement commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReplaceLostRunnerRejectionStorageKind {
+    SessionNotFound,
+    RunnerPlacementNotFound,
+    PlacementRevisionMismatch,
+    PlacementNotLost,
+    ReplacementSameRunner,
+    ReplacementTargetUnavailable,
+}
+
+pub(crate) const fn replace_lost_runner_rejection_to_str(
+    value: ReplaceLostRunnerRejectionStorageKind,
+) -> &'static str {
+    match value {
+        ReplaceLostRunnerRejectionStorageKind::SessionNotFound => "session_not_found",
+        ReplaceLostRunnerRejectionStorageKind::RunnerPlacementNotFound => {
+            "runner_placement_not_found"
+        }
+        ReplaceLostRunnerRejectionStorageKind::PlacementRevisionMismatch => {
+            "placement_revision_mismatch"
+        }
+        ReplaceLostRunnerRejectionStorageKind::PlacementNotLost => "placement_not_lost",
+        ReplaceLostRunnerRejectionStorageKind::ReplacementSameRunner => "replacement_same_runner",
+        ReplaceLostRunnerRejectionStorageKind::ReplacementTargetUnavailable => {
+            "replacement_target_unavailable"
+        }
+    }
+}
+
+pub(crate) fn replace_lost_runner_rejection_from_str(
+    value: &str,
+) -> Option<ReplaceLostRunnerRejectionStorageKind> {
+    match value {
+        "session_not_found" => Some(ReplaceLostRunnerRejectionStorageKind::SessionNotFound),
+        "runner_placement_not_found" => {
+            Some(ReplaceLostRunnerRejectionStorageKind::RunnerPlacementNotFound)
+        }
+        "placement_revision_mismatch" => {
+            Some(ReplaceLostRunnerRejectionStorageKind::PlacementRevisionMismatch)
+        }
+        "placement_not_lost" => Some(ReplaceLostRunnerRejectionStorageKind::PlacementNotLost),
+        "replacement_same_runner" => {
+            Some(ReplaceLostRunnerRejectionStorageKind::ReplacementSameRunner)
+        }
+        "replacement_target_unavailable" => {
+            Some(ReplaceLostRunnerRejectionStorageKind::ReplacementTargetUnavailable)
+        }
         _ => None,
     }
 }
@@ -2149,6 +2231,7 @@ mod tests {
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         PlanEventStorageKind, PositiveOrdinalMappingError,
         PromotePendingRunnerRejectionStorageKind, PromotePendingRunnerResultStorageKind,
+        ReplaceLostRunnerRejectionStorageKind, ReplaceLostRunnerResultStorageKind,
         RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
         StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
@@ -2174,6 +2257,8 @@ mod tests {
         plan_event_kind_from_str, plan_event_kind_to_str,
         promote_pending_runner_rejection_from_str, promote_pending_runner_rejection_to_str,
         promote_pending_runner_result_from_str, promote_pending_runner_result_to_str,
+        replace_lost_runner_rejection_from_str, replace_lost_runner_rejection_to_str,
+        replace_lost_runner_result_from_str, replace_lost_runner_result_to_str,
         repo_watch_check_conclusion_from_str, repo_watch_check_conclusion_to_str,
         repo_watch_checks_outcome_from_str, repo_watch_checks_outcome_to_str,
         repo_watch_event_kind_from_str, repo_watch_event_kind_to_str,
@@ -3180,6 +3265,77 @@ mod tests {
             Some(PromotePendingRunnerRejectionStorageKind::ActiveRunnerNotLost)
         );
         assert_eq!(promote_pending_runner_rejection_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn replace_lost_runner_command_kind_mapping_is_closed() {
+        assert_eq!(
+            durable_command_kind_to_str(DurableCommandKind::ReplaceLostRunner),
+            "replace_lost_runner"
+        );
+        assert_eq!(
+            durable_command_kind_from_str("replace_lost_runner"),
+            Some(DurableCommandKind::ReplaceLostRunner)
+        );
+        assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn pre_pin_runner_replacement_result_mapping_is_closed() {
+        assert_eq!(
+            replace_lost_runner_result_from_str(replace_lost_runner_result_to_str(
+                ReplaceLostRunnerResultStorageKind::Applied,
+            )),
+            Some(ReplaceLostRunnerResultStorageKind::Applied)
+        );
+        assert_eq!(
+            replace_lost_runner_result_from_str(replace_lost_runner_result_to_str(
+                ReplaceLostRunnerResultStorageKind::Rejected,
+            )),
+            Some(ReplaceLostRunnerResultStorageKind::Rejected)
+        );
+        assert_eq!(replace_lost_runner_result_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn pre_pin_runner_replacement_rejection_mapping_is_closed() {
+        assert_eq!(
+            replace_lost_runner_rejection_from_str(replace_lost_runner_rejection_to_str(
+                ReplaceLostRunnerRejectionStorageKind::SessionNotFound,
+            )),
+            Some(ReplaceLostRunnerRejectionStorageKind::SessionNotFound)
+        );
+        assert_eq!(
+            replace_lost_runner_rejection_from_str(replace_lost_runner_rejection_to_str(
+                ReplaceLostRunnerRejectionStorageKind::RunnerPlacementNotFound,
+            )),
+            Some(ReplaceLostRunnerRejectionStorageKind::RunnerPlacementNotFound)
+        );
+        assert_eq!(
+            replace_lost_runner_rejection_from_str(replace_lost_runner_rejection_to_str(
+                ReplaceLostRunnerRejectionStorageKind::PlacementRevisionMismatch,
+            )),
+            Some(ReplaceLostRunnerRejectionStorageKind::PlacementRevisionMismatch)
+        );
+        assert_eq!(
+            replace_lost_runner_rejection_from_str(replace_lost_runner_rejection_to_str(
+                ReplaceLostRunnerRejectionStorageKind::PlacementNotLost,
+            )),
+            Some(ReplaceLostRunnerRejectionStorageKind::PlacementNotLost)
+        );
+        assert_eq!(
+            replace_lost_runner_rejection_from_str(replace_lost_runner_rejection_to_str(
+                ReplaceLostRunnerRejectionStorageKind::ReplacementSameRunner,
+            )),
+            Some(ReplaceLostRunnerRejectionStorageKind::ReplacementSameRunner)
+        );
+        assert_eq!(
+            replace_lost_runner_rejection_from_str(replace_lost_runner_rejection_to_str(
+                ReplaceLostRunnerRejectionStorageKind::ReplacementTargetUnavailable,
+            )),
+            Some(ReplaceLostRunnerRejectionStorageKind::ReplacementTargetUnavailable)
+        );
+        assert_eq!(replace_lost_runner_rejection_from_str("unknown"), None);
     }
 
     #[test]

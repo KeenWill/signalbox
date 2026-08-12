@@ -168,7 +168,8 @@ async fn inspect_existing(
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
             | CommandKind::PromotePendingRunner
-            | CommandKind::AbandonLostRunner,
+            | CommandKind::AbandonLostRunner
+            | CommandKind::ReplaceLostRunner,
         ) => Ok(ClaimInspection::Conflicting),
     }
 }

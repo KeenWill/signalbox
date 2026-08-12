@@ -449,7 +449,8 @@ impl PostgresToolLoopRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::PromotePendingRunner
-                | CommandKind::AbandonLostRunner,
+                | CommandKind::AbandonLostRunner
+                | CommandKind::ReplaceLostRunner,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
