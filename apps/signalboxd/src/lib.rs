@@ -38,6 +38,7 @@ use tokio::sync::watch;
 use tracing::Instrument;
 mod blob_storage_configuration;
 mod blob_storage_runtime;
+mod blob_upload_runtime;
 mod configuration;
 mod context_guard;
 mod conversation_introspection;

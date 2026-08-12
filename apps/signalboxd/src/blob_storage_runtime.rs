@@ -17,12 +17,14 @@ use signalbox_persistence::blob::{
     BlobCatalogRepository, BlobCatalogRepositoryError, BlobStoreBindingRecord,
 };
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::{BlobStorageClass, BlobStorageConfiguration};
 
 /// Configured stores, semantic write routes, and private upload staging.
 pub struct BlobStoreRegistry {
     stores: BTreeMap<BlobStoreName, Arc<dyn BlobStore>>,
+    namespace_ids: BTreeMap<BlobStoreName, Uuid>,
     routes: BTreeMap<BlobStorageClass, BlobStoreName>,
     staging: FilesystemBlobStaging,
     max_blob_bytes: u64,
@@ -45,6 +47,24 @@ impl BlobStoreRegistry {
         configuration: Option<&BlobStorageConfiguration>,
         pool: PgPool,
     ) -> Result<Option<Self>, BlobStoreRegistryError> {
+        Self::initialize_with_locality_policy(configuration, pool, true).await
+    }
+
+    /// Initializes a composed conformance fixture without relying on the test
+    /// host's backing-device classification.
+    #[cfg(feature = "test-support")]
+    pub async fn initialize_for_conformance(
+        configuration: Option<&BlobStorageConfiguration>,
+        pool: PgPool,
+    ) -> Result<Option<Self>, BlobStoreRegistryError> {
+        Self::initialize_with_locality_policy(configuration, pool, false).await
+    }
+
+    async fn initialize_with_locality_policy(
+        configuration: Option<&BlobStorageConfiguration>,
+        pool: PgPool,
+        require_local_backing: bool,
+    ) -> Result<Option<Self>, BlobStoreRegistryError> {
         let repository = BlobCatalogRepository::new(pool);
         let recorded = repository.recorded_store_bindings().await?;
         let Some(configuration) = configuration else {
@@ -61,10 +81,21 @@ impl BlobStoreRegistry {
             return Err(BlobStoreRegistryError::UnsupportedStoreKind);
         }
 
-        let staging =
-            FilesystemBlobStaging::try_new(configuration.staging_directory().to_path_buf())?;
+        let staging = if require_local_backing {
+            FilesystemBlobStaging::try_new(configuration.staging_directory().to_path_buf())?
+        } else {
+            #[cfg(feature = "test-support")]
+            {
+                FilesystemBlobStaging::try_new_without_locality_check_for_test(
+                    configuration.staging_directory().to_path_buf(),
+                )?
+            }
+            #[cfg(not(feature = "test-support"))]
+            unreachable!("production initialization always requires local backing")
+        };
         let mut identities = Vec::new();
         let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
+        let mut namespace_ids = BTreeMap::new();
         for (name, configured) in configuration.stores() {
             let root = configured
                 .filesystem_root()
@@ -74,16 +105,30 @@ impl BlobStoreRegistry {
             } else {
                 NamespaceBindingState::New
             };
-            let (store, identity) = FilesystemBlobStore::try_new_bound(
-                root.to_path_buf(),
-                configured.namespace_id(),
-                state,
-            )?;
+            let (store, identity) = if require_local_backing {
+                FilesystemBlobStore::try_new_bound(
+                    root.to_path_buf(),
+                    configured.namespace_id(),
+                    state,
+                )?
+            } else {
+                #[cfg(feature = "test-support")]
+                {
+                    FilesystemBlobStore::try_new_bound_for_conformance(
+                        root.to_path_buf(),
+                        configured.namespace_id(),
+                        state,
+                    )?
+                }
+                #[cfg(not(feature = "test-support"))]
+                unreachable!("production initialization always requires local backing")
+            };
             identities.push(OpenedNamespace {
                 canonical_path: identity.canonical_path().to_path_buf(),
                 device_inode: identity.device_inode(),
             });
             stores.insert(name.clone(), Arc::new(store));
+            namespace_ids.insert(name.clone(), configured.namespace_id());
         }
         let staging_identity = OpenedNamespace::from(staging.identity());
         validate_physical_namespaces(&staging_identity, &identities)?;
@@ -108,6 +153,7 @@ impl BlobStoreRegistry {
         .collect();
         Ok(Some(Self {
             stores,
+            namespace_ids,
             routes,
             staging,
             max_blob_bytes: configuration.max_blob_bytes(),
@@ -118,6 +164,11 @@ impl BlobStoreRegistry {
     pub fn routed_store(&self, class: BlobStorageClass) -> (&BlobStoreName, Arc<dyn BlobStore>) {
         let name = &self.routes[&class];
         (name, self.stores[name].clone())
+    }
+
+    /// Returns the durable namespace identity bound to one configured store.
+    pub fn namespace_id(&self, name: &BlobStoreName) -> Uuid {
+        self.namespace_ids[name]
     }
 
     /// Resolves one already-recorded durable store identity.

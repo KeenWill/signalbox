@@ -1304,7 +1304,7 @@ async fn run_hub(
         return Err(error);
     }
 
-    let _blob_store_registry =
+    let blob_store_registry =
         match BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()).await
         {
             Ok(registry) => registry,
@@ -1435,6 +1435,10 @@ async fn run_hub(
     .with_context_compaction_model(Arc::clone(&context_compaction_model));
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
+        None => process_runtime,
+    };
+    let process_runtime = match blob_store_registry {
+        Some(registry) => process_runtime.with_blob_store_registry(Arc::new(registry)),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());

@@ -47,9 +47,11 @@ The session-metadata last-writer actor inventory, its native and terminal-client
 projections, and the totality of the daemon projection that produces it are
 verified against this PR (`fix/review-read-snapshot-permit`).
 
-The blob lifecycle messages and multipart content arrays below are the
-foundation proposal from PR #553 (`agent/blob-storage-foundation`) and become
-verified with its implementing child stack.
+The blob upload lifecycle messages below are verified against this implementing
+change (`agent/blob-storage-upload`). The blob read messages and multipart
+content arrays remain the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and become verified with their implementing
+children.
 
 The coherent review-orchestration snapshot's single-transaction construction,
 the pool capacity it draws, and the writer independence that follows from both

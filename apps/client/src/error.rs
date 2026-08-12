@@ -622,6 +622,53 @@ impl fmt::Display for RejectionDisplay {
                 conversation_import_rejection_class_name(class),
                 record_ordinal.value()
             ),
+            RejectionDetail::BulkIngestAlreadyInProgress { active_kind } => write!(
+                formatter,
+                "bulk_ingest_already_in_progress active_kind={}",
+                active_kind.as_str()
+            ),
+            RejectionDetail::BlobUploadAlreadyInProgress {} => {
+                formatter.write_str("blob_upload_already_in_progress")
+            }
+            RejectionDetail::BlobUploadNotInProgress {} => {
+                formatter.write_str("blob_upload_not_in_progress")
+            }
+            RejectionDetail::BlobUploadLengthOutOfRange {
+                min_length_bytes,
+                max_length_bytes,
+                declared_length_bytes,
+            } => write!(
+                formatter,
+                "blob_upload_length_out_of_range min_length_bytes={} max_length_bytes={} declared_length_bytes={}",
+                min_length_bytes.value(),
+                max_length_bytes.value(),
+                declared_length_bytes.value()
+            ),
+            RejectionDetail::BlobUploadSizeExceeded {
+                expected_length_bytes,
+                actual_length_bytes,
+            } => write!(
+                formatter,
+                "blob_upload_size_exceeded expected_length_bytes={} actual_length_bytes={}",
+                expected_length_bytes.value(),
+                actual_length_bytes.value()
+            ),
+            RejectionDetail::BlobUploadLengthMismatch {
+                expected_length_bytes,
+                actual_length_bytes,
+            } => write!(
+                formatter,
+                "blob_upload_length_mismatch expected_length_bytes={} actual_length_bytes={}",
+                expected_length_bytes.value(),
+                actual_length_bytes.value()
+            ),
+            RejectionDetail::BlobUploadDigestMismatch {
+                expected_digest,
+                actual_digest,
+            } => write!(
+                formatter,
+                "blob_upload_digest_mismatch expected_digest={expected_digest} actual_digest={actual_digest}"
+            ),
         }
     }
 }
