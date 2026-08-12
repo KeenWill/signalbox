@@ -2,7 +2,7 @@
 //!
 //! The normative specification is `docs/spec/blob-storage.md`.
 
-use std::fmt;
+use std::{fmt, num::NonZeroU64};
 
 use crate::BlobDigest;
 
@@ -91,6 +91,33 @@ pub enum AttachmentKind {
     Document,
     /// Other file content.
     File,
+}
+
+/// Immutable catalog fact needed to render and verify one referenced blob.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttachmentBlobFact {
+    digest: BlobDigest,
+    byte_length: NonZeroU64,
+}
+
+impl AttachmentBlobFact {
+    /// Associates one global blob identity with its positive byte length.
+    pub const fn new(digest: BlobDigest, byte_length: NonZeroU64) -> Self {
+        Self {
+            digest,
+            byte_length,
+        }
+    }
+
+    /// Returns the referenced global blob identity.
+    pub const fn digest(self) -> BlobDigest {
+        self.digest
+    }
+
+    /// Returns the immutable positive byte length.
+    pub const fn byte_length(self) -> NonZeroU64 {
+        self.byte_length
+    }
 }
 
 /// Exact checked visible-ASCII media-type declaration.

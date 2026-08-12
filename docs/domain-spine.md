@@ -2127,6 +2127,12 @@ pub enum AttachmentKind {
     File,
 }
 
+pub struct AttachmentBlobFact { /* private */ }
+impl AttachmentBlobFact {
+    pub const fn new(digest: BlobDigest, byte_length: NonZeroU64) -> Self;
+    // accessors: digest(), byte_length()
+}
+
 pub struct DeclaredMediaType(/* private String */);
 impl DeclaredMediaType {
     pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
@@ -3816,6 +3822,7 @@ impl ModelCallExecutionReconstitutionInput {
         pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
         calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self;
+    pub fn with_attachment_blob_facts(self, facts: Vec<AttachmentBlobFact>) -> Self;
     pub fn with_call_snapshot(
         self,
         call_snapshot: ResolvedContextFrontierReconstitutionInput,
@@ -3863,6 +3870,7 @@ pub enum ModelCallExecutionReconstitutionFailure {
     DuplicateOriginContent,
     MissingOriginContent,
     UnreferencedOriginContent,
+    AttachmentBlobFactMismatch,
     ConsumedSteeringMismatch,
     CallOwnershipMismatch,
     CallSelectionMismatch,
@@ -3972,7 +3980,7 @@ impl PreparedSteeringConsumption {
 }
 pub struct PreparedModelCallRequest { /* private */ }
 // accessors: session(), turn(), attempt(), dangerous_tool_auto_approval(),
-// model_settings(), call(), frontier_entries(), origin_content()
+// model_settings(), call(), frontier_entries(), origin_content(), attachment_byte_length()
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
@@ -6086,6 +6094,25 @@ impl ModelCallCredentialReference {
     pub fn as_str(&self) -> &str;
 }
 
+pub enum ModelUserContentPart {
+    Text(NonEmptyUnicodeText),
+    AttachmentStub(ModelAttachmentStub),
+}
+impl ModelUserContentPart {
+    pub fn as_str(&self) -> &str;
+}
+
+pub struct ModelUserContent { /* private */ }
+impl ModelUserContent {
+    pub fn parts(&self) -> &[ModelUserContentPart];
+    pub fn single_text(&self) -> Option<&NonEmptyUnicodeText>;
+}
+
+pub struct ModelAttachmentStub { /* private */ }
+impl ModelAttachmentStub {
+    pub fn as_str(&self) -> &str;
+}
+
 pub enum ModelConversationMessage {
     ModelIdentityChanged {
         source: SemanticTranscriptEntryRef,
@@ -6101,7 +6128,7 @@ pub enum ModelConversationMessage {
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
-        content: UserContent,
+        content: ModelUserContent,
     },
     DelegatedTask {
         source: SemanticTranscriptEntryRef,
@@ -6179,6 +6206,9 @@ pub enum ModelFrontierRenderingError {
         entry: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
     },
+    MissingAttachmentBlobFact { digest: BlobDigest },
+    AttachmentStubSerialization,
+    AttachmentStubBoundExceeded,
     DuplicateToolEvidence { entry: SemanticTranscriptEntryRef },
     MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
@@ -10386,7 +10416,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_settings                             | 25                    |
 | domain: accepted_input                             | 5                     |
 | domain: delivery_request                           | 2                     |
-| domain: user_content                               | 13                    |
+| domain: user_content                               | 14                    |
 | domain: submit_input                               | 35                    |
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
@@ -10411,7 +10441,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **785 (+12 free fn)** |
+| **signalbox-domain total**                         | **786 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10419,7 +10449,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 32 (incl. 8 traits)   |
+| application: model_execution                       | 35 (incl. 8 traits)   |
 | application: tool_loop                             | 26 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
@@ -10435,4 +10465,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **250 (+1 free fn)**  |
+| **signalbox-application total**                    | **253 (+1 free fn)**  |
