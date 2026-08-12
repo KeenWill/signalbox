@@ -6696,9 +6696,19 @@ pub enum RepoWatchSingletonKey {
     Repository { repository: RepositorySlug },
 }
 
+pub struct RepoWatchDispatchGoal { /* private */ }
+impl RepoWatchDispatchGoal {
+    pub const fn new(
+        command: GoalUserCommand,
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+    ) -> Self;
+    // accessors: command(), accepted_input(), turn()
+}
+
 pub struct RepoWatchPreparedDispatchAction { /* private */ }
 impl RepoWatchPreparedDispatchAction {
-    // accessors: action(), prepared_session()
+    // accessors: action(), prepared_session(), goal()
     pub fn into_parts(
         self,
     ) -> (
@@ -6709,6 +6719,7 @@ impl RepoWatchPreparedDispatchAction {
         TurnId,
         SemanticTranscriptEntryId,
         ContextFrontierId,
+        RepoWatchDispatchGoal,
     );
 }
 
@@ -6769,6 +6780,7 @@ pub enum RepoWatchDispatchPreparationError {
     UnknownTemplate(SessionTemplateName),
     SessionPreparation,
     InvalidSingletonTarget,
+    GoalStatement(GoalTextError),
 }
 
 pub struct RepoWatchDispatchService<Ids, Transaction> { /* private */ }
@@ -8699,6 +8711,9 @@ pub enum GoalState {
     UserStopped,
     Superseded { by_generation: GoalGeneration },
 }
+impl GoalState {
+    pub const fn is_open(&self) -> bool;
+}
 pub struct GoalGenerationSnapshot { /* private generation + statement + state */ }
 impl GoalGenerationSnapshot {
     // accessors: generation(), statement(), state()
@@ -9158,7 +9173,8 @@ pub enum RepoWatchTemplateContextDeclarationError {
 
 pub struct PullRequestContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
-// accessors: repository(), number(), head_sha(), event()
+// accessors: repository(), number(), head_sha(), head_repository(), head_branch(),
+//            base_branch(), event()
 
 pub struct BranchContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
@@ -9193,6 +9209,10 @@ impl DispatchSessionAction {
         template: SessionTemplateName,
         params: DispatchSessionParameters,
     ) -> Self;
+    pub fn synthesized_goal_statement(
+        &self,
+        rule: &RepoWatchRuleId,
+    ) -> Result<GoalStatement, GoalTextError>;
     // accessors: template(), params()
 }
 
@@ -10095,7 +10115,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 33 (incl. 4 traits)   |
+| application: repo_watch                            | 34 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10106,4 +10126,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **249 (+1 free fn)**  |
+| **signalbox-application total**                    | **250 (+1 free fn)**  |

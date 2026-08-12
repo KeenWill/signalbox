@@ -1,6 +1,6 @@
 //! Durable lifecycle for delegated tool-approval judge calls.
 
-use std::{collections::HashSet, error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -9,10 +9,10 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     ActiveTurnPhase, DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
-    FrozenModelSelection, GoalStatement, ModelCallId, ModelTargetCatalog, ProviderModelIdentity,
-    ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId, SessionSystemPrompt,
-    SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale, ToolRequest, ToolRequestId,
-    TurnAttemptId, TurnId,
+    FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalStatement, ModelCallId,
+    ModelTargetCatalog, ProviderModelIdentity, ProviderReportedTokenUsage, ResolvedProviderTarget,
+    SessionId, SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture,
+    ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -24,7 +24,7 @@ use crate::{
         ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
         approval_judge_recommendation_to_str, approval_judge_state_from_str,
         approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
-        approval_judge_terminal_disposition_to_str, session_id_to_uuid,
+        approval_judge_terminal_disposition_to_str, positive_u64_from_numeric, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_request_id_to_uuid, turn_id_to_uuid,
     },
     model_execution::{lock_session, resolve_session_credential},
@@ -768,14 +768,41 @@ async fn load_session_authority_context(
 /// parked for delegated approval. Reading the session's current generation
 /// would then show the judge a broadened replacement and let it authorize a
 /// request the originating goal never covered, defeating the narrow-only
-/// guarantee. The generation recorded for the turn is the only sound binding,
-/// and a turn that no goal drives carries no goal authority to show.
+/// guarantee. The generation recorded for the turn is therefore the binding
+/// whenever the turn has one.
+///
+/// A turn the goal machinery did not schedule has no such record, and a goal
+/// session runs those too: repository-watch dispatch commissions a goal and
+/// delivers its tagged context as an ordinary input, so the turn doing the
+/// dispatched work is not itself a goal turn. Refusing every such turn would
+/// leave the judge deciding a dispatched session's requests with no statement
+/// of the authority that session was created under, so such a turn resolves
+/// against the lineage under two conditions, both of which must hold.
+///
+/// The lineage has exactly one generation, so no supersession can have
+/// broadened what the judge reads. And that generation is still open, so a goal
+/// already stopped or achieved supplies no statement. Anything else resolves to
+/// no statement and the judge escalates.
+///
+/// A goal attached after the judged turn already existed still resolves here.
+/// Ordering the commission before the turn would prove it did not, but under
+/// this schema a turn's acceptance position is also its execution order, so
+/// commissioning first makes a dispatched session act on the statement before
+/// its triggering event arrives. Binding the dispatched work turn to the
+/// generation is the structural answer and is committed unimplemented
+/// functionality.
+///
+/// This runs while the judge is prepared, and the statement it yields is
+/// carried on the prepared binding rather than re-read at completion. A
+/// generation closed after preparation is therefore not seen by the decision
+/// that preparation feeds; rechecking under the completion lock is committed
+/// unimplemented functionality.
 async fn load_judged_turn_goal(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
 ) -> Result<Option<GoalStatement>, ApprovalJudgeRepositoryError> {
-    let Some(generation) = sqlx::query_scalar::<_, Decimal>(
+    let recorded = sqlx::query_scalar::<_, Decimal>(
         "SELECT goal_generation
            FROM goal_turn
           WHERE session_id = $1
@@ -784,20 +811,51 @@ async fn load_judged_turn_goal(
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .fetch_optional(&mut *connection)
-    .await?
-    else {
-        return Ok(None);
-    };
+    .await?;
+    let recorded = recorded
+        .map(|value| {
+            positive_u64_from_numeric(value)
+                .map(NonZeroU64::new)
+                .map_err(|_| ApprovalJudgeCorruption::Inconsistent("judged turn goal generation"))
+        })
+        .transpose()?
+        .flatten()
+        .map(GoalGeneration::new);
     let goal = load_goal_from_connection(&mut *connection, session)
         .await
-        .map_err(map_goal_error)?
-        .ok_or(ApprovalJudgeCorruption::Missing("judged turn goal"))?;
-    goal.generations()
-        .iter()
-        .find(|snapshot| Decimal::from(snapshot.generation().get()) == generation)
-        .map(|snapshot| snapshot.statement().clone())
-        .ok_or_else(|| ApprovalJudgeCorruption::Inconsistent("judged turn goal generation").into())
-        .map(Some)
+        .map_err(map_goal_error)?;
+    match goal {
+        None if recorded.is_some() => {
+            Err(ApprovalJudgeCorruption::Missing("judged turn goal").into())
+        }
+        None => Ok(None),
+        Some(goal) => Ok(judged_turn_goal_statement(goal.generations(), recorded)?),
+    }
+}
+
+/// Selects which generation's statement states the judged turn's authority.
+///
+/// A recorded generation binds exactly. Its absence admits a lineage only when
+/// both conditions hold together: one generation, and that generation still
+/// open. Every other shape resolves to no statement, which the judge renders as
+/// absent and escalates on.
+fn judged_turn_goal_statement(
+    generations: &[GoalGenerationSnapshot],
+    recorded: Option<GoalGeneration>,
+) -> Result<Option<GoalStatement>, ApprovalJudgeCorruption> {
+    match recorded {
+        Some(generation) => generations
+            .iter()
+            .find(|snapshot| snapshot.generation() == generation)
+            .map(|snapshot| Some(snapshot.statement().clone()))
+            .ok_or(ApprovalJudgeCorruption::Inconsistent(
+                "judged turn goal generation",
+            )),
+        None => Ok(match generations {
+            [only] if only.state().is_open() => Some(only.statement().clone()),
+            _ => None,
+        }),
+    }
 }
 
 fn decode_prepared(
@@ -1220,7 +1278,133 @@ impl From<ApprovalJudgeCorruption> for ApprovalJudgeRepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::ApprovalJudgeRepositoryError;
+    use std::num::NonZeroU64;
+
+    use signalbox_domain::{
+        DurableCommandId, Goal, GoalGeneration, GoalModelProvenance, GoalReport, GoalStatement,
+        GoalUserProvenance, SessionId, ToolRequestId, TurnId,
+    };
+    use sqlx::types::Uuid;
+
+    use super::{
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, judged_turn_goal_statement,
+    };
+
+    /// A goal commissioned with the given statement, as dispatch commissions it.
+    fn commissioned(statement: &str) -> Goal {
+        Goal::commission(
+            SessionId::from_uuid(Uuid::from_u128(1)),
+            goal_statement(statement),
+            GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(2))),
+        )
+    }
+
+    fn goal_statement(text: &str) -> GoalStatement {
+        GoalStatement::try_new(String::from(text)).expect("the fixture statement is admitted")
+    }
+
+    fn generation(value: u64) -> GoalGeneration {
+        GoalGeneration::new(NonZeroU64::new(value).expect("the fixture generation is positive"))
+    }
+
+    /// The dispatch shape: the turn doing dispatched work is not a goal turn,
+    /// and the one commissioned generation is what that turn runs under.
+    #[test]
+    fn an_unrecorded_turn_reads_a_lineage_that_was_never_superseded() {
+        let dispatched = "Dispatched by rule watch-forward: template merge-forward";
+        let goal = commissioned(dispatched);
+
+        let resolved = judged_turn_goal_statement(goal.generations(), None);
+
+        assert_eq!(resolved, Ok(Some(goal_statement(dispatched))));
+    }
+
+    /// The hazard the turn binding exists for: with a supersession in the
+    /// lineage an unrecorded turn resolves to nothing, so the judge escalates
+    /// instead of reading a replacement that may have broadened authority.
+    #[test]
+    fn an_unrecorded_turn_refuses_a_superseded_lineage() {
+        let superseded = commissioned("land the reviewer fixes")
+            .supersede(
+                goal_statement("land anything at all"),
+                GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(3))),
+            )
+            .expect("a pursuing generation admits supersession");
+
+        let resolved = judged_turn_goal_statement(superseded.generations(), None);
+
+        assert_eq!(resolved, Ok(None));
+    }
+
+    /// A recorded turn keeps reading its own generation even once a broader
+    /// successor exists.
+    #[test]
+    fn a_recorded_turn_reads_its_own_generation_not_the_replacement() {
+        let original = "land the reviewer fixes";
+        let replacement = "land anything at all";
+        let superseded = commissioned(original)
+            .supersede(
+                goal_statement(replacement),
+                GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(3))),
+            )
+            .expect("a pursuing generation admits supersession");
+
+        let resolved = judged_turn_goal_statement(superseded.generations(), Some(generation(1)));
+
+        assert_eq!(resolved, Ok(Some(goal_statement(original))));
+    }
+
+    #[test]
+    fn a_recorded_generation_absent_from_the_lineage_is_inconsistent() {
+        let goal = commissioned("land the reviewer fixes");
+
+        let resolved = judged_turn_goal_statement(goal.generations(), Some(generation(2)));
+
+        assert_eq!(
+            resolved,
+            Err(ApprovalJudgeCorruption::Inconsistent(
+                "judged turn goal generation"
+            ))
+        );
+    }
+
+    /// A goal stopped by the time the judge reads it has had its authority
+    /// withdrawn, so the read yields no statement and the judge escalates.
+    /// This pins the read, not the commit: a stop landing after preparation is
+    /// not seen by the decision that preparation feeds.
+    #[test]
+    fn an_unrecorded_turn_refuses_a_stopped_goal() {
+        let stopped = commissioned("land the reviewer fixes")
+            .stop(GoalUserProvenance::new(DurableCommandId::from_uuid(
+                Uuid::from_u128(4),
+            )))
+            .expect("a pursuing generation admits stopping");
+
+        let resolved = judged_turn_goal_statement(stopped.generations(), None);
+
+        assert_eq!(resolved, Ok(None));
+    }
+
+    /// An achieved generation is discharged rather than withdrawn, and a
+    /// discharged authority states nothing about a request still parked under
+    /// it, so it resolves to no statement exactly as a stopped one does.
+    #[test]
+    fn an_unrecorded_turn_refuses_an_achieved_goal() {
+        let achieved = commissioned("land the reviewer fixes")
+            .declare_achieved(
+                GoalReport::try_new(String::from("the fixes are landed"))
+                    .expect("the fixture report is admitted"),
+                GoalModelProvenance::new(
+                    TurnId::from_uuid(Uuid::from_u128(5)),
+                    ToolRequestId::from_uuid(Uuid::from_u128(6)),
+                ),
+            )
+            .expect("a pursuing generation admits achievement");
+
+        let resolved = judged_turn_goal_statement(achieved.generations(), None);
+
+        assert_eq!(resolved, Ok(None));
+    }
 
     #[test]
     fn repository_errors_display_distinct_failure_classes() {
