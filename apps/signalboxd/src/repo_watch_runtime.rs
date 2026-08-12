@@ -2606,6 +2606,10 @@ mod tests {
     // Longer than any await this module's tests perform, so a child parked in
     // a response carrying it can only stop by being aborted and joined.
     const CANCELLED_FETCH_DELAY: Duration = Duration::from_secs(60);
+    // Arbitrary: any open pull request exercises cancellation. The constant
+    // keeps the scripted response target, the generated detail, the listing,
+    // and the fetch set on the same pull request.
+    const CANCELLED_FETCH_PULL_NUMBER: u64 = 7;
     const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
     const POLL_INTERVAL: Duration = Duration::from_secs(300);
     const SHORT_CYCLE: Duration = Duration::from_secs(75);
@@ -4563,18 +4567,20 @@ mod tests {
     async fn draining_after_a_cancelled_fetch_joins_every_child() {
         let server = ConcurrentScriptedServer::start(vec![
             ScriptedResponse::ok(
-                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
-                ResponseBody(minimal_pull_detail(7)),
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{CANCELLED_FETCH_PULL_NUMBER}"
+                )),
+                ResponseBody(minimal_pull_detail(CANCELLED_FETCH_PULL_NUMBER)),
             )
             .delayed(CANCELLED_FETCH_DELAY),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let poller = Arc::clone(&fixture.poller);
-        let listed = BTreeMap::from([(7_u64, PULL_UPDATED_AT.to_owned())]);
+        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
         let fetch = tokio::spawn(async move {
             poller
-                .fetch_pull_requests(BTreeSet::from([7_u64]), &listed, None)
+                .fetch_pull_requests(BTreeSet::from([CANCELLED_FETCH_PULL_NUMBER]), &listed, None)
                 .await
         });
         server.request_in_flight().await;
