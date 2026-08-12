@@ -2808,24 +2808,40 @@ mod tests {
         page.to_string()
     }
 
+    /// The check-suites page once every suite has settled: the completed suite
+    /// from [`check_suites`] alone, stated directly so the settled payload is
+    /// inspectable rather than recalculated by the completion filter the
+    /// poller itself applies.
     fn settled_check_suites() -> String {
-        let mut suites = serde_json::from_str::<serde_json::Value>(&check_suites())
-            .expect("fixture check suites are JSON");
-        suites["check_suites"]
-            .as_array_mut()
-            .expect("fixture check suites are an array")
-            .retain(|suite| suite["status"] == "completed");
-        suites.to_string()
+        serde_json::json!({
+            "check_suites": [
+                {
+                    "id": COMPLETED_CHECK_SUITE_IDS[0],
+                    "status": "completed",
+                    "conclusion": "success",
+                    "updated_at": CHECK_SUITE_COMPLETION_GENERATION
+                }
+            ]
+        })
+        .to_string()
     }
 
+    /// The check-runs page once every run has settled: the completed run from
+    /// [`check_runs`] alone, stated directly for the same reason as
+    /// [`settled_check_suites`].
     fn settled_check_runs() -> String {
-        let mut runs = serde_json::from_str::<serde_json::Value>(&check_runs())
-            .expect("fixture check runs are JSON");
-        runs["check_runs"]
-            .as_array_mut()
-            .expect("fixture check runs are an array")
-            .retain(|run| run["status"] == "completed");
-        runs.to_string()
+        serde_json::json!({
+            "check_runs": [
+                {
+                    "id": COMPLETED_CHECK_RUN_IDS[0],
+                    "status": "completed",
+                    "name": CHECK_RUN_NAME,
+                    "conclusion": "failure",
+                    "completed_at": CHECK_RUN_COMPLETION_GENERATION
+                }
+            ]
+        })
+        .to_string()
     }
 
     fn empty_check_runs() -> &'static str {
