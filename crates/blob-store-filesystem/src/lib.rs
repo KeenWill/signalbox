@@ -3,18 +3,21 @@
 //! The normative specification is `docs/spec/blob-storage.md`.
 
 use std::{
+    ffi::{CString, OsStr, OsString},
+    fmt::Write as _,
     fs, io,
+    mem::MaybeUninit,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 #[cfg(unix)]
-use std::{
-    os::fd::AsRawFd,
-    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
-};
+use std::os::unix::fs::MetadataExt;
 
-use rustix::fs::{AtFlags, Mode, OFlags, chmodat, mkdirat, open};
+use rustix::fs::{
+    AtFlags, Mode, OFlags, RawDir, RenameFlags, chmodat, fchmod, mkdirat, open, openat, renameat,
+    renameat_with, unlinkat,
+};
 #[cfg(target_os = "linux")]
 use rustix::fs::{ResolveFlags, openat2};
 #[cfg(unix)]
@@ -25,7 +28,6 @@ use signalbox_blob_store::{
     BlobVerificationFailure, ExpectedBlob, MAX_BLOB_RANGE_BYTES, OpenedBlob,
 };
 use signalbox_domain::BlobDigest;
-use tempfile::NamedTempFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
@@ -34,13 +36,72 @@ const FILE_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const PUBLICATION_DIRECTORY: &str = ".publish-v1";
 const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
+const TEMPORARY_NAME_ATTEMPTS: usize = 16;
+
+struct TemporaryBlobFile {
+    directory: Arc<fs::File>,
+    name: OsString,
+    linked: bool,
+}
+
+impl TemporaryBlobFile {
+    fn publish_noclobber(
+        mut self,
+        destination_directory: &fs::File,
+        destination_name: &OsStr,
+    ) -> io::Result<Option<Self>> {
+        match renameat_with(
+            &self.directory,
+            &self.name,
+            destination_directory,
+            destination_name,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {
+                self.linked = false;
+                Ok(None)
+            }
+            Err(source) if source == rustix::io::Errno::EXIST => Ok(Some(self)),
+            Err(source) => Err(io::Error::from(source)),
+        }
+    }
+
+    fn replace(
+        mut self,
+        destination_directory: &fs::File,
+        destination_name: &OsStr,
+    ) -> io::Result<()> {
+        renameat(
+            &self.directory,
+            &self.name,
+            destination_directory,
+            destination_name,
+        )
+        .map_err(io::Error::from)?;
+        self.linked = false;
+        Ok(())
+    }
+
+    fn remove(mut self) -> io::Result<()> {
+        unlinkat(&self.directory, &self.name, AtFlags::empty()).map_err(io::Error::from)?;
+        self.linked = false;
+        Ok(())
+    }
+}
+
+impl Drop for TemporaryBlobFile {
+    fn drop(&mut self) {
+        if self.linked {
+            let _ = unlinkat(&self.directory, &self.name, AtFlags::empty());
+        }
+    }
+}
 
 /// Filesystem store rooted at one deployment-owned storage namespace.
 #[derive(Clone)]
 pub struct FilesystemBlobStore {
     root: Arc<fs::File>,
-    root_directory: PathBuf,
-    publication_directory: PathBuf,
+    publication_directory: Arc<fs::File>,
 }
 
 impl std::fmt::Debug for FilesystemBlobStore {
@@ -87,24 +148,18 @@ impl FilesystemBlobStore {
             return Err(FilesystemBlobStoreConstructionError::UnclassifiedFilesystem { root });
         }
         let root_descriptor = Arc::new(root_descriptor);
-        let root_directory = pinned_directory_path(&root_descriptor);
-        let publication_directory = root_directory.join(PUBLICATION_DIRECTORY);
-        prepare_publication_directory(&root_descriptor, &root_directory, &publication_directory)
-            .map_err(|source| {
+        let publication_directory = Arc::new(
+            prepare_publication_directory(&root_descriptor).map_err(|source| {
                 FilesystemBlobStoreConstructionError::PreparePublicationDirectory {
                     root: root.clone(),
                     source,
                 }
-            })?;
+            })?,
+        );
         Ok(Self {
             root: root_descriptor,
-            root_directory,
             publication_directory,
         })
-    }
-
-    fn path(&self, key: &BlobObjectKey) -> Option<PathBuf> {
-        filesystem_key_is_admitted(key).then(|| self.root_directory.join(key.as_str()))
     }
 
     async fn put_inner(
@@ -113,47 +168,44 @@ impl FilesystemBlobStore {
         mut source: BlobReader,
     ) -> Result<BlobPutOutcome, BlobStoreError> {
         let key = BlobObjectKey::for_digest(expected.digest());
-        let destination = self
-            .path(&key)
-            .ok_or_else(|| BlobStoreError::unavailable("reject reserved object key"))?;
-        let repair_destination = if private_regular_file_exists(self.root.clone(), &key).await? {
-            match verify_file(&self.root, &key, expected).await {
-                Ok(()) => {
-                    let parent = self.ensure_destination_parent(&key).await?;
-                    sync_open_directory(parent).await?;
-                    return Ok(BlobPutOutcome::AlreadyPresent { key });
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        signalbox_blob_store::BlobStoreFailureKind::NotFound
-                            | signalbox_blob_store::BlobStoreFailureKind::VerificationFailed
-                    ) =>
-                {
-                    true
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            false
-        };
-
+        if !filesystem_key_is_admitted(&key) {
+            return Err(BlobStoreError::unavailable("reject reserved object key"));
+        }
+        let destination_name = object_file_name(&key)
+            .ok_or_else(|| BlobStoreError::unavailable("derive destination object name"))?;
         let parent = self.ensure_destination_parent(&key).await?;
+        let repair_destination =
+            if private_regular_file_exists_in_directory(parent.clone(), destination_name.clone())
+                .await?
+            {
+                match verify_file_in_parent(parent.clone(), destination_name.clone(), expected)
+                    .await
+                {
+                    Ok(()) => {
+                        sync_open_directory(parent).await?;
+                        return Ok(BlobPutOutcome::AlreadyPresent { key });
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            signalbox_blob_store::BlobStoreFailureKind::NotFound
+                                | signalbox_blob_store::BlobStoreFailureKind::VerificationFailed
+                        ) =>
+                    {
+                        true
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                false
+            };
+
         let publication_directory = self.publication_directory.clone();
-        let (temporary, standard_file) = tokio::task::spawn_blocking(move || {
-            let temporary = NamedTempFile::new_in(publication_directory)?;
-            if !private_regular_file_metadata(&temporary.as_file().metadata()?) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "temporary blob object is not a private regular file",
-                ));
-            }
-            let standard_file = temporary.reopen()?;
-            Ok::<_, io::Error>((temporary, standard_file))
-        })
-        .await
-        .map_err(|source| BlobStoreError::io("join temporary object creation", source))?
-        .map_err(|source| BlobStoreError::io("create temporary object", source))?;
+        let (temporary, standard_file) =
+            tokio::task::spawn_blocking(move || create_temporary_blob_file(publication_directory))
+                .await
+                .map_err(|source| BlobStoreError::io("join temporary object creation", source))?
+                .map_err(|source| BlobStoreError::io("create temporary object", source))?;
         let mut output = tokio::fs::File::from_std(standard_file);
         let mut digest = Sha256::new();
         let mut observed_length = 0_u64;
@@ -206,35 +258,36 @@ impl FilesystemBlobStore {
         if repair_destination {
             return replace_corrupt_destination(
                 temporary,
-                destination,
-                parent,
                 self.publication_directory.clone(),
-                self.root.clone(),
+                parent,
+                destination_name,
                 key,
                 expected,
             )
             .await;
         }
 
-        let destination_for_publish = destination.clone();
+        let parent_for_publish = parent.clone();
+        let destination_for_publish = destination_name.clone();
         let publication = tokio::task::spawn_blocking(move || {
-            temporary.persist_noclobber(&destination_for_publish)
+            temporary.publish_noclobber(&parent_for_publish, &destination_for_publish)
         })
         .await
         .map_err(|source| BlobStoreError::io("join atomic publication", source))?;
         match publication {
-            Ok(persisted) => {
-                drop(persisted);
-                sync_directory(self.publication_directory.clone()).await?;
-                sync_open_directory(parent).await?;
-                verify_file(&self.root, &key, expected).await?;
+            Ok(None) => {
+                sync_open_directory(self.publication_directory.clone()).await?;
+                sync_open_directory(parent.clone()).await?;
+                verify_file_in_parent(parent, destination_name, expected).await?;
                 Ok(BlobPutOutcome::Published { key })
             }
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                match verify_file(&self.root, &key, expected).await {
+            Ok(Some(temporary)) => {
+                match verify_file_in_parent(parent.clone(), destination_name.clone(), expected)
+                    .await
+                {
                     Ok(()) => {
-                        remove_temporary_file(error.file).await?;
-                        sync_directory(self.publication_directory.clone()).await?;
+                        remove_temporary_file(temporary).await?;
+                        sync_open_directory(self.publication_directory.clone()).await?;
                         sync_open_directory(parent).await?;
                         Ok(BlobPutOutcome::AlreadyPresent { key })
                     }
@@ -246,11 +299,10 @@ impl FilesystemBlobStore {
                         ) =>
                     {
                         replace_corrupt_destination(
-                            error.file,
-                            destination,
-                            parent,
+                            temporary,
                             self.publication_directory.clone(),
-                            self.root.clone(),
+                            parent,
+                            destination_name,
                             key,
                             expected,
                         )
@@ -259,7 +311,7 @@ impl FilesystemBlobStore {
                     Err(verification) => Err(verification),
                 }
             }
-            Err(error) => Err(BlobStoreError::io("atomically publish object", error.error)),
+            Err(error) => Err(BlobStoreError::io("atomically publish object", error)),
         }
     }
 
@@ -344,33 +396,43 @@ impl BlobStore for FilesystemBlobStore {
 }
 
 async fn replace_corrupt_destination(
-    temporary: NamedTempFile,
-    destination: PathBuf,
+    temporary: TemporaryBlobFile,
+    publication_directory: Arc<fs::File>,
     parent: Arc<fs::File>,
-    publication_directory: PathBuf,
-    root: Arc<fs::File>,
+    destination_name: OsString,
     key: BlobObjectKey,
     expected: ExpectedBlob,
 ) -> Result<BlobPutOutcome, BlobStoreError> {
-    let destination_for_publish = destination.clone();
-    let persisted = tokio::task::spawn_blocking(move || temporary.persist(destination_for_publish))
-        .await
-        .map_err(|source| BlobStoreError::io("join atomic repair", source))?
-        .map_err(|error| BlobStoreError::io("atomically repair object", error.error))?;
-    drop(persisted);
-    sync_directory(publication_directory).await?;
-    sync_open_directory(parent).await?;
-    verify_file(&root, &key, expected).await?;
+    let parent_for_publish = parent.clone();
+    let destination_for_publish = destination_name.clone();
+    tokio::task::spawn_blocking(move || {
+        temporary.replace(&parent_for_publish, &destination_for_publish)
+    })
+    .await
+    .map_err(|source| BlobStoreError::io("join atomic repair", source))?
+    .map_err(|source| BlobStoreError::io("atomically repair object", source))?;
+    sync_open_directory(publication_directory).await?;
+    sync_open_directory(parent.clone()).await?;
+    verify_file_in_parent(parent, destination_name, expected).await?;
     Ok(BlobPutOutcome::Repaired { key })
 }
 
-async fn verify_file(
-    root: &Arc<fs::File>,
-    key: &BlobObjectKey,
+async fn verify_file_in_parent(
+    parent: Arc<fs::File>,
+    destination_name: OsString,
     expected: ExpectedBlob,
 ) -> Result<(), BlobStoreError> {
     let (mut file, _) =
-        open_private_regular_file(root.clone(), key.clone(), "verify object").await?;
+        open_private_regular_file_in_directory(parent, destination_name, "verify published object")
+            .await?;
+    verify_opened_file(&mut file, expected, "verify published object").await
+}
+
+async fn verify_opened_file(
+    file: &mut tokio::fs::File,
+    expected: ExpectedBlob,
+    operation: &'static str,
+) -> Result<(), BlobStoreError> {
     let mut digest = Sha256::new();
     let mut observed_length = 0_u64;
     let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
@@ -378,7 +440,7 @@ async fn verify_file(
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(|source| BlobStoreError::io("read object for verification", source))?;
+            .map_err(|source| BlobStoreError::io(operation, source))?;
         if read == 0 {
             break;
         }
@@ -392,7 +454,7 @@ async fn verify_file(
             })?;
         if observed_length > expected.byte_length() {
             return Err(BlobStoreError::verification(
-                "verify object",
+                operation,
                 BlobVerificationFailure::new(expected, None, observed_length),
             ));
         }
@@ -403,7 +465,7 @@ async fn verify_file(
         Ok(())
     } else {
         Err(BlobStoreError::verification(
-            "verify object",
+            operation,
             BlobVerificationFailure::new(expected, Some(observed_digest), observed_length),
         ))
     }
@@ -480,23 +542,6 @@ async fn verify_and_retain_range(
     ))
 }
 
-async fn sync_directory(path: PathBuf) -> Result<(), BlobStoreError> {
-    tokio::task::spawn_blocking(move || {
-        let directory = fs::File::from(
-            open(
-                &path,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(io::Error::from)?,
-        );
-        directory.sync_all()
-    })
-    .await
-    .map_err(|source| BlobStoreError::io("join directory sync", source))?
-    .map_err(|source| BlobStoreError::io("sync destination directory", source))
-}
-
 async fn sync_open_directory(directory: Arc<fs::File>) -> Result<(), BlobStoreError> {
     tokio::task::spawn_blocking(move || directory.sync_all())
         .await
@@ -504,18 +549,20 @@ async fn sync_open_directory(directory: Arc<fs::File>) -> Result<(), BlobStoreEr
         .map_err(|source| BlobStoreError::io("sync destination directory", source))
 }
 
-async fn remove_temporary_file(temporary: NamedTempFile) -> Result<(), BlobStoreError> {
-    tokio::task::spawn_blocking(move || temporary.close())
+async fn remove_temporary_file(temporary: TemporaryBlobFile) -> Result<(), BlobStoreError> {
+    tokio::task::spawn_blocking(move || temporary.remove())
         .await
         .map_err(|source| BlobStoreError::io("join temporary object cleanup", source))?
         .map_err(|source| BlobStoreError::io("remove temporary object", source))
 }
 
-async fn private_regular_file_exists(
-    root: Arc<fs::File>,
-    key: &BlobObjectKey,
+async fn private_regular_file_exists_in_directory(
+    directory: Arc<fs::File>,
+    name: OsString,
 ) -> Result<bool, BlobStoreError> {
-    match open_private_regular_file(root, key.clone(), "inspect destination object").await {
+    match open_private_regular_file_in_directory(directory, name, "inspect destination object")
+        .await
+    {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == signalbox_blob_store::BlobStoreFailureKind::NotFound => {
             Ok(false)
@@ -551,6 +598,33 @@ async fn open_private_regular_file(
     })
 }
 
+async fn open_private_regular_file_in_directory(
+    directory: Arc<fs::File>,
+    name: OsString,
+    operation: &'static str,
+) -> Result<(tokio::fs::File, u64), BlobStoreError> {
+    tokio::task::spawn_blocking(move || {
+        let file = open_relative_regular_name(&directory, &name)?;
+        let metadata = file.metadata()?;
+        if !private_regular_file_metadata(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "blob object is not a private regular file",
+            ));
+        }
+        Ok((tokio::fs::File::from_std(file), metadata.len()))
+    })
+    .await
+    .map_err(|source| BlobStoreError::io("join private object open", source))?
+    .map_err(|source| {
+        if source.kind() == io::ErrorKind::NotFound {
+            BlobStoreError::not_found(operation)
+        } else {
+            BlobStoreError::io(operation, source)
+        }
+    })
+}
+
 fn filesystem_key_is_admitted(key: &BlobObjectKey) -> bool {
     !Path::new(key.as_str())
         .components()
@@ -559,6 +633,69 @@ fn filesystem_key_is_admitted(key: &BlobObjectKey) -> bool {
             component == std::path::Component::Normal(std::ffi::OsStr::new(PUBLICATION_DIRECTORY))
                 || component == std::path::Component::Normal(std::ffi::OsStr::new(NAMESPACE_MARKER))
         })
+}
+
+fn object_file_name(key: &BlobObjectKey) -> Option<OsString> {
+    Path::new(key.as_str()).file_name().map(OsStr::to_os_string)
+}
+
+fn create_temporary_blob_file(
+    directory: Arc<fs::File>,
+) -> io::Result<(TemporaryBlobFile, fs::File)> {
+    for _attempt in 0..TEMPORARY_NAME_ATTEMPTS {
+        let name = random_temporary_name()?;
+        let file = match openat(
+            &directory,
+            &name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        ) {
+            Ok(file) => fs::File::from(file),
+            Err(source) if source == rustix::io::Errno::EXIST => continue,
+            Err(source) => return Err(io::Error::from(source)),
+        };
+        let temporary = TemporaryBlobFile {
+            directory,
+            name,
+            linked: true,
+        };
+        fchmod(&file, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
+        if !private_regular_file_metadata(&file.metadata()?) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "temporary blob object is not a private regular file",
+            ));
+        }
+        let output = file.try_clone()?;
+        return Ok((temporary, output));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "temporary blob object names collided",
+    ))
+}
+
+fn random_temporary_name() -> io::Result<OsString> {
+    let mut random = [0_u8; 16];
+    let mut filled = 0;
+    while filled < random.len() {
+        let byte_count =
+            rustix::rand::getrandom(&mut random[filled..], rustix::rand::GetRandomFlags::empty())
+                .map_err(io::Error::from)?;
+        if byte_count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "random source returned no temporary-name bytes",
+            ));
+        }
+        filled += byte_count;
+    }
+    let mut name = String::with_capacity(37);
+    name.push_str(".tmp-");
+    for byte in random {
+        write!(&mut name, "{byte:02x}").map_err(io::Error::other)?;
+    }
+    Ok(OsString::from(name))
 }
 
 #[cfg(target_os = "linux")]
@@ -622,11 +759,25 @@ fn open_relative_regular_candidate(root: &fs::File, key: &BlobObjectKey) -> io::
     Ok(fs::File::from(object))
 }
 
+#[cfg(target_os = "linux")]
+fn open_relative_regular_name(directory: &fs::File, name: &OsStr) -> io::Result<fs::File> {
+    let object = openat2(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+    )
+    .map_err(io::Error::from)?;
+    Ok(fs::File::from(object))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn open_relative_regular_candidate(root: &fs::File, key: &BlobObjectKey) -> io::Result<fs::File> {
     Ok(fs::File::from(
-        open(
-            pinned_directory_path(root).join(key.as_str()),
+        openat(
+            root,
+            key.as_str(),
             OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
@@ -634,96 +785,97 @@ fn open_relative_regular_candidate(root: &fs::File, key: &BlobObjectKey) -> io::
     ))
 }
 
-fn prepare_publication_directory(
-    root: &fs::File,
-    root_directory: &Path,
-    publication_directory: &Path,
-) -> io::Result<()> {
-    create_or_validate_private_directory(publication_directory)?;
+#[cfg(not(target_os = "linux"))]
+fn open_relative_regular_name(directory: &fs::File, name: &OsStr) -> io::Result<fs::File> {
+    Ok(fs::File::from(
+        openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_publication_directory(root: &fs::File) -> io::Result<fs::File> {
+    let created = match mkdirat(
+        root,
+        PUBLICATION_DIRECTORY,
+        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+    ) {
+        Ok(()) => true,
+        Err(source) if source == rustix::io::Errno::EXIST => false,
+        Err(source) => return Err(io::Error::from(source)),
+    };
+    if created {
+        chmodat(
+            root,
+            PUBLICATION_DIRECTORY,
+            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+            AtFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
+    }
+    let publication = fs::File::from(
+        openat2(
+            root,
+            PUBLICATION_DIRECTORY,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .map_err(io::Error::from)?,
+    );
+    if !private_directory_metadata(&publication.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "blob publication directory is not private",
+        ));
+    }
     root.sync_all()?;
-    validate_publication_directory_mount(root, root_directory)?;
-    for entry in fs::read_dir(publication_directory)? {
-        let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if !private_regular_file_metadata(&metadata) {
+    sweep_publication_directory(&publication)?;
+    publication.sync_all()?;
+    Ok(publication)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prepare_publication_directory(_root: &fs::File) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob storage requires Linux descriptor-relative publication",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn sweep_publication_directory(directory: &fs::File) -> io::Result<()> {
+    let mut buffer = [MaybeUninit::<u8>::uninit(); 8192];
+    let mut entries = RawDir::new(directory, &mut buffer);
+    while let Some(entry) = entries.next() {
+        let name = CString::from(entry.map_err(io::Error::from)?.file_name());
+        if name.as_bytes() == b"." || name.as_bytes() == b".." {
+            continue;
+        }
+        let file = fs::File::from(
+            openat2(
+                directory,
+                &name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+            )
+            .map_err(io::Error::from)?,
+        );
+        if !private_regular_file_metadata(&file.metadata()?) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "publication directory contains an unowned or non-regular entry",
             ));
         }
-        fs::remove_file(entry.path())?;
+        unlinkat(directory, &name, AtFlags::empty()).map_err(io::Error::from)?;
     }
-    sync_directory_blocking(publication_directory)
-}
-
-fn create_or_validate_private_directory(path: &Path) -> io::Result<bool> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    builder.mode(DIRECTORY_MODE);
-    let created = match builder.create(path) {
-        Ok(()) => true,
-        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => false,
-        Err(source) => return Err(source),
-    };
-    #[cfg(unix)]
-    if created {
-        fs::set_permissions(path, fs::Permissions::from_mode(DIRECTORY_MODE))?;
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    if !private_directory_metadata(&metadata) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "blob directory is not private",
-        ));
-    }
-    Ok(created)
-}
-
-#[cfg(target_os = "linux")]
-fn validate_publication_directory_mount(root: &fs::File, _root_path: &Path) -> io::Result<()> {
-    let publication = openat2(
-        root,
-        PUBLICATION_DIRECTORY,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-    )
-    .map_err(io::Error::from)?;
-    drop(publication);
     Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn validate_publication_directory_mount(root: &fs::File, root_path: &Path) -> io::Result<()> {
-    let publication_directory = root_path.join(PUBLICATION_DIRECTORY);
-    if root.metadata()?.dev() == fs::symlink_metadata(publication_directory)?.dev() {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "publication directory is on another filesystem",
-        ))
-    }
-}
-
-#[cfg(not(unix))]
-fn validate_publication_directory_mount(_root: &fs::File, _root_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "filesystem blob storage requires Unix mount identity",
-    ))
-}
-
-fn sync_directory_blocking(path: &Path) -> io::Result<()> {
-    let directory = fs::File::from(
-        open(
-            path,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io::Error::from)?,
-    );
-    directory.sync_all()
 }
 
 #[cfg(unix)]
@@ -768,16 +920,6 @@ fn positively_classified_local_filesystem(root: &fs::File) -> io::Result<bool> {
 #[cfg(not(target_os = "linux"))]
 fn positively_classified_local_filesystem(_root: &fs::File) -> io::Result<bool> {
     Ok(false)
-}
-
-#[cfg(unix)]
-fn pinned_directory_path(directory: &fs::File) -> PathBuf {
-    PathBuf::from("/proc/self/fd").join(directory.as_raw_fd().to_string())
-}
-
-#[cfg(not(unix))]
-fn pinned_directory_path(_directory: &fs::File) -> PathBuf {
-    PathBuf::new()
 }
 
 /// Why a filesystem store root was rejected.
@@ -869,5 +1011,64 @@ mod tests {
             .expect_err("the procfs mount must not be admitted below its parent mount");
 
         assert_eq!(error.kind(), io::ErrorKind::CrossesDevices);
+    }
+
+    #[test]
+    fn inv059_filesystem_publishes_through_the_retained_parent_descriptor() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        let publication_path = root.path().join("publication");
+        let destination_path = root.path().join("destination");
+        let moved_destination = root.path().join("moved-destination");
+        fs::create_dir(&publication_path).expect("the fixture creates a publication directory");
+        fs::create_dir(&destination_path).expect("the fixture creates a destination directory");
+        fs::set_permissions(
+            &publication_path,
+            fs::Permissions::from_mode(DIRECTORY_MODE),
+        )
+        .expect("the publication directory is private");
+        fs::set_permissions(
+            &destination_path,
+            fs::Permissions::from_mode(DIRECTORY_MODE),
+        )
+        .expect("the destination directory is private");
+        let publication = Arc::new(
+            open(
+                &publication_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(fs::File::from)
+            .expect("the publication descriptor opens"),
+        );
+        let destination = fs::File::from(
+            open(
+                &destination_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("the destination descriptor opens"),
+        );
+        let (temporary, mut output) = create_temporary_blob_file(publication)
+            .expect("the fixture creates a descriptor-relative temporary file");
+        output
+            .write_all(b"descriptor-bound bytes")
+            .expect("the fixture writes the temporary bytes");
+        output
+            .sync_all()
+            .expect("the fixture synchronizes the temporary bytes");
+        fs::rename(&destination_path, &moved_destination)
+            .expect("the destination generation is renamed");
+        fs::create_dir(&destination_path).expect("a replacement destination path is created");
+
+        let outcome = temporary
+            .publish_noclobber(&destination, OsStr::new("object"))
+            .expect("publication through the retained descriptor succeeds");
+
+        assert!(outcome.is_none());
+        assert!(moved_destination.join("object").is_file());
+        assert!(!destination_path.join("object").exists());
     }
 }
