@@ -564,7 +564,10 @@ private actor MockProcessProtocolState {
   ) throws {
     guard
       request["command_id"] is String,
-      request["content"] is String,
+      let content = request["content"] as? [[String: Any]],
+      content.count == 1,
+      content[0]["type"] as? String == "text",
+      content[0]["text"] is String,
       request["expected_defaults_version"] as? String == session.defaultsVersion
     else {
       throw MockProcessProtocolError.invalidRequest
