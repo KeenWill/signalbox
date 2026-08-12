@@ -2303,7 +2303,8 @@ impl RunnerProtocolStore {
         // snapshot writer must not fabricate the multi-aggregate transaction.
         if matches!(
             event_kind,
-            "runner_lost_before_pin"
+            "pinned"
+                | "runner_lost_before_pin"
                 | "pre_pin_replaced"
                 | "runner_lost"
                 | "runner_replaced"
@@ -7131,6 +7132,26 @@ async fn insert_lease_generation(
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    let observed_enrollment: Uuid = sqlx::query_scalar(
+        "SELECT record.registration_enrollment_id
+           FROM runner_current_session_placement AS current_placement
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = current_placement.session_id
+            AND record.event_ordinal = current_placement.event_ordinal
+          WHERE current_placement.session_id = $1",
+    )
+    .bind(lease.session().into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .flatten()
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let enrollment_state: Option<String> = sqlx::query_scalar(RUNNER_LEASE_ENROLLMENT_AUTHORITY)
+        .bind(observed_enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if enrollment_state.is_none() {
+        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    }
     let placement = sqlx::query(RUNNER_LEASE_PLACEMENT)
         .bind(lease.session().into_uuid())
         .fetch_optional(&mut **transaction)
@@ -7145,12 +7166,8 @@ async fn insert_lease_generation(
     let enrollment = placement
         .decode_column::<Option<Uuid>>("registration_enrollment_id")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
-    let enrollment_state: Option<String> = sqlx::query_scalar(RUNNER_LEASE_ENROLLMENT_AUTHORITY)
-        .bind(enrollment)
-        .fetch_optional(&mut **transaction)
-        .await?;
-    if enrollment_state.is_none() {
-        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    if enrollment != observed_enrollment {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     let authorization = lease.credential_authorization();
     let authorization_origin = match authorization {
