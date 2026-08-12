@@ -1235,13 +1235,13 @@ fn sweep_private_temporary_directory(directory: &fs::File) -> io::Result<()> {
             openat2(
                 directory,
                 &name,
-                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
                 ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
             )
             .map_err(io::Error::from)?,
         );
-        if !private_regular_file_metadata(&file.metadata()?) {
+        if !recoverable_temporary_file_metadata(&file.metadata()?) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "publication directory contains an unowned or non-regular entry",
@@ -1277,6 +1277,15 @@ fn private_regular_file_metadata(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
         && metadata.uid() == geteuid().as_raw()
         && metadata.mode() & PERMISSION_MASK == FILE_MODE
+        && metadata.nlink() == 1
+}
+
+#[cfg(unix)]
+fn recoverable_temporary_file_metadata(metadata: &fs::Metadata) -> bool {
+    let permission_bits = metadata.mode() & PERMISSION_MASK;
+    metadata.is_file()
+        && metadata.uid() == geteuid().as_raw()
+        && permission_bits & !FILE_MODE == 0
         && metadata.nlink() == 1
 }
 
@@ -1342,6 +1351,14 @@ fn positively_classified_local_backing_devices(device: u64) -> io::Result<bool> 
 #[cfg(target_os = "linux")]
 fn local_block_transport_leaf(path: &Path) -> bool {
     if !path.starts_with("/sys/devices") || path.starts_with("/sys/devices/virtual") {
+        return false;
+    }
+    if path.components().any(|component| {
+        let std::path::Component::Normal(component) = component else {
+            return false;
+        };
+        component.as_encoded_bytes().starts_with(b"vhci_hcd")
+    }) {
         return false;
     }
     path.components().any(|component| {
@@ -1696,13 +1713,42 @@ mod tests {
     #[test]
     fn inv059_filesystem_accepts_only_explicitly_local_block_transport_leaves() {
         let local = Path::new("/sys/devices/pci0000:00/0000:00:01.0/nvme/nvme0/nvme0n1");
+        let usb_ip = Path::new(
+            "/sys/devices/platform/vhci_hcd.0/usb2/2-1/2-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb",
+        );
         let virtio = Path::new("/sys/devices/pci0000:00/0000:00:02.0/virtio1/block/vda");
         let network_block = Path::new("/sys/devices/virtual/block/nbd0");
         let iscsi = Path::new("/sys/devices/platform/host2/session1/target2:0:0/2:0:0:0/block/sdb");
 
         assert!(local_block_transport_leaf(local));
+        assert!(!local_block_transport_leaf(usb_ip));
         assert!(!local_block_transport_leaf(virtio));
         assert!(!local_block_transport_leaf(network_block));
         assert!(!local_block_transport_leaf(iscsi));
+    }
+
+    #[test]
+    fn inv059_filesystem_sweeps_an_interrupted_mode_zero_temporary_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        let temporary_path = root.path().join(".tmp-interrupted");
+        fs::write(&temporary_path, b"unpublished bytes")
+            .expect("the fixture writes an interrupted temporary file");
+        fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o000))
+            .expect("the fixture reproduces an umask-masked creation mode");
+        let directory = fs::File::from(
+            open(
+                root.path(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("the publication directory opens"),
+        );
+
+        sweep_publication_directory(&directory)
+            .expect("the interrupted private temporary file is recoverable");
+
+        assert!(!temporary_path.exists());
     }
 }
