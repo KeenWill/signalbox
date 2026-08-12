@@ -3587,8 +3587,15 @@ mod tests {
         ]
     }
 
+    /// Descends as the pull number ascends, so an implementation that
+    /// accidentally orders fetched pull requests by head identity or head
+    /// branch reverses the expected number order instead of matching it.
+    fn minimal_pull_head_seed(number: u64) -> u64 {
+        u64::MAX - number
+    }
+
     fn minimal_pull_head_sha(number: u64) -> String {
-        format!("{number:040x}")
+        format!("{:040x}", minimal_pull_head_seed(number))
     }
 
     fn minimal_pull_detail(number: u64) -> String {
@@ -3599,7 +3606,7 @@ mod tests {
             "mergeable": true,
             "head": {
                 "sha": minimal_pull_head_sha(number),
-                "ref": format!("{HEAD_BRANCH}-{number}"),
+                "ref": format!("{HEAD_BRANCH}-{}", minimal_pull_head_seed(number)),
                 "repo": { "full_name": PROVIDER_HEAD_REPOSITORY }
             },
             "base": {
