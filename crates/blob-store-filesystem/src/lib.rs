@@ -3,25 +3,30 @@
 //! The normative specification is `docs/spec/blob-storage.md`.
 
 use std::{
-    collections::BTreeSet,
-    ffi::{CString, OsStr, OsString},
+    ffi::{OsStr, OsString},
     fmt::Write as _,
     fs,
-    io::{self, Read as _, Seek as _, SeekFrom, Write as _},
-    mem::MaybeUninit,
+    io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
+};
+
+#[cfg(target_os = "linux")]
+use std::{
+    collections::BTreeSet,
+    ffi::CString,
+    io::{Seek as _, SeekFrom},
+    mem::MaybeUninit,
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{
-    AtFlags, Mode, OFlags, RawDir, RenameFlags, chmodat, fchmod, mkdirat, open, openat, renameat,
-    renameat_with, unlinkat,
+    AtFlags, Mode, OFlags, RenameFlags, fchmod, open, openat, renameat, renameat_with, unlinkat,
 };
 #[cfg(target_os = "linux")]
-use rustix::fs::{ResolveFlags, openat2};
+use rustix::fs::{RawDir, ResolveFlags, chmodat, mkdirat, openat2};
 #[cfg(unix)]
 use rustix::process::geteuid;
 use sha2::{Digest, Sha256};
@@ -978,6 +983,7 @@ fn create_temporary_blob_file(
     ))
 }
 
+#[cfg(target_os = "linux")]
 fn random_temporary_name() -> io::Result<OsString> {
     let mut random = [0_u8; 16];
     let mut filled = 0;
@@ -999,6 +1005,14 @@ fn random_temporary_name() -> io::Result<OsString> {
         write!(&mut name, "{byte:02x}").map_err(io::Error::other)?;
     }
     Ok(OsString::from(name))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn random_temporary_name() -> io::Result<OsString> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob staging requires Linux descriptor-relative directories",
+    ))
 }
 
 #[cfg(target_os = "linux")]
