@@ -15554,7 +15554,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_runner_promotion_request_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_pending_runner_promotion_request_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::PromotePendingRunner {
@@ -15567,7 +15568,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_runner_promotion_receipt_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_pending_runner_promotion_receipt_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::RunnerPromoted {
@@ -15582,8 +15584,8 @@ mod tests {
     }
 
     #[test]
-    fn no_pending_runner_enrollment_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn inv033_no_pending_runner_enrollment_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -15597,7 +15599,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_request_mismatch_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_pending_request_mismatch_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -15613,8 +15616,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_request_disconnected_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn inv033_pending_request_disconnected_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -15630,7 +15633,8 @@ mod tests {
     }
 
     #[test]
-    fn active_runner_not_lost_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_active_runner_not_lost_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -15647,7 +15651,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_runner_promotion_receipt_rejects_zero_registration_revision() {
+    fn inv033_pending_runner_promotion_receipt_rejects_zero_registration_revision() {
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
             ServerMessage::RunnerPromoted {
