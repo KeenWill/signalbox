@@ -4203,53 +4203,83 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         .fetch_one(&mut *blocker)
         .await?;
         let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
-        let replacement = tokio::spawn(async move {
+        let replacement = async move {
             tokio::time::timeout(
                 LOCK_COMPLETION_TIMEOUT,
                 replacement_store.register(&expected_enrollment, narrowed_advertisement()),
             )
             .await
-        });
-        let replacement_observation =
-            tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
-        let lease_store = tokio::spawn(async move {
-            tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
-        });
-        let lease_observation =
-            tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
-        let blocker_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocker.commit()).await;
-        let replacement_result = replacement.await;
-        let lease_result = lease_store.await;
-        let replacement_blocked = replacement_observation
-            .expect("registration replacement lock observation must remain bounded")?;
-        let lease_blocked =
-            lease_observation.expect("lease admission lock observation must remain bounded")?;
-        blocker_commit.expect("registration-head blocker commit must remain bounded")?;
-        replacement_result
-            .expect("registration replacement task must remain joinable")
-            .expect("registration replacement must finish within its task-owned timeout")?;
-        let rejected = lease_result
-            .expect("lease admission task must remain joinable")
-            .expect("lease admission must finish within its task-owned timeout")
-            .expect_err("withdrawn current availability cannot authorize the later lease");
-
-        assert!(
-            replacement_blocked,
-            "registration replacement must reach registration-head authority"
-        );
-        assert!(
-            lease_blocked,
-            "lease admission must wait behind registration replacement"
-        );
-        assert_store_check_violation(rejected);
-        Ok::<_, Box<dyn Error>>(())
+        };
+        let lease_admission = async {
+            let replacement_observation =
+                tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+                    .await;
+            let lease_store = async move {
+                tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
+            };
+            let release_blocker = async {
+                let lease_observation = tokio::time::timeout(
+                    LOCK_COMPLETION_TIMEOUT,
+                    blocked_backends_reached(&pool, 2),
+                )
+                .await;
+                let blocker_commit =
+                    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocker.commit()).await;
+                (lease_observation, blocker_commit)
+            };
+            let (lease_result, (lease_observation, blocker_commit)) =
+                tokio::join!(lease_store, release_blocker);
+            (
+                replacement_observation,
+                lease_observation,
+                blocker_commit,
+                lease_result,
+            )
+        };
+        let (
+            replacement_result,
+            (replacement_observation, lease_observation, blocker_commit, lease_result),
+        ) = tokio::join!(replacement, lease_admission);
+        Ok::<_, Box<dyn Error>>((
+            replacement_result,
+            replacement_observation,
+            lease_observation,
+            blocker_commit,
+            lease_result,
+        ))
     })
     .await;
     let pool_close = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, pool.close()).await;
-    let serialization = serialization
-        .expect("registration replacement serialization must finish within its test deadline");
+    let (
+        replacement_result,
+        replacement_observation,
+        lease_observation,
+        blocker_commit,
+        lease_result,
+    ) = serialization
+        .expect("registration replacement serialization must finish within its test deadline")?;
     pool_close.expect("registration replacement pool cleanup must remain bounded");
-    serialization
+    let replacement_blocked = replacement_observation
+        .expect("registration replacement lock observation must remain bounded")?;
+    let lease_blocked =
+        lease_observation.expect("lease admission lock observation must remain bounded")?;
+    blocker_commit.expect("registration-head blocker commit must remain bounded")?;
+    replacement_result
+        .expect("registration replacement must finish within its operation timeout")?;
+    let rejected = lease_result
+        .expect("lease admission must finish within its operation timeout")
+        .expect_err("withdrawn current availability cannot authorize the later lease");
+
+    assert!(
+        replacement_blocked,
+        "registration replacement must reach registration-head authority"
+    );
+    assert!(
+        lease_blocked,
+        "lease admission must wait behind registration replacement"
+    );
+    assert_store_check_violation(rejected);
+    Ok(())
 }
 
 /// INV-009 / INV-042: the atomic initial pin takes the session scheduler
