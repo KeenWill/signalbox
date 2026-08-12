@@ -556,9 +556,13 @@ generated_artifact = "primary"
     }
 
     #[test]
-    fn path_overlap_is_symmetric_and_component_aware() {
+    fn path_overlap_is_symmetric() {
         assert!(paths_overlap(Path::new("/blob"), Path::new("/blob/child")));
         assert!(paths_overlap(Path::new("/blob/child"), Path::new("/blob")));
+    }
+
+    #[test]
+    fn path_overlap_observes_component_boundaries() {
         assert!(!paths_overlap(
             Path::new("/blob"),
             Path::new("/blob-sibling")
