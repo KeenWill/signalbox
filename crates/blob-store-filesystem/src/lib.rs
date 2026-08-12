@@ -33,6 +33,7 @@ const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const PUBLICATION_DIRECTORY: &str = ".publish-v1";
+const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
 
 /// Filesystem store rooted at one deployment-owned storage namespace.
 #[derive(Clone)]
@@ -232,7 +233,7 @@ impl FilesystemBlobStore {
             Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
                 match verify_file(&self.root, &key, expected).await {
                     Ok(()) => {
-                        drop(error.file);
+                        remove_temporary_file(error.file).await?;
                         sync_directory(self.publication_directory.clone()).await?;
                         sync_open_directory(parent).await?;
                         Ok(BlobPutOutcome::AlreadyPresent { key })
@@ -503,6 +504,13 @@ async fn sync_open_directory(directory: Arc<fs::File>) -> Result<(), BlobStoreEr
         .map_err(|source| BlobStoreError::io("sync destination directory", source))
 }
 
+async fn remove_temporary_file(temporary: NamedTempFile) -> Result<(), BlobStoreError> {
+    tokio::task::spawn_blocking(move || temporary.close())
+        .await
+        .map_err(|source| BlobStoreError::io("join temporary object cleanup", source))?
+        .map_err(|source| BlobStoreError::io("remove temporary object", source))
+}
+
 async fn private_regular_file_exists(
     root: Arc<fs::File>,
     key: &BlobObjectKey,
@@ -549,6 +557,7 @@ fn filesystem_key_is_admitted(key: &BlobObjectKey) -> bool {
         .next()
         .is_some_and(|component| {
             component == std::path::Component::Normal(std::ffi::OsStr::new(PUBLICATION_DIRECTORY))
+                || component == std::path::Component::Normal(std::ffi::OsStr::new(NAMESPACE_MARKER))
         })
 }
 
@@ -734,6 +743,7 @@ fn private_regular_file_metadata(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
         && metadata.uid() == geteuid().as_raw()
         && metadata.mode() & PERMISSION_MASK == FILE_MODE
+        && metadata.nlink() == 1
 }
 
 #[cfg(not(unix))]

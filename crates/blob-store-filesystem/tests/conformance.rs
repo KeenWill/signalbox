@@ -171,6 +171,53 @@ async fn filesystem_rejects_reserved_publication_keys() {
     assert_eq!(error.kind(), BlobStoreFailureKind::Unavailable);
 }
 
+#[tokio::test]
+async fn inv059_filesystem_rejects_reserved_namespace_marker_key() {
+    let (root, store) = fixture();
+    let marker = root.path().join(".signalbox-blob-namespace-v1");
+    std::fs::write(&marker, b"namespace marker").expect("the namespace marker fixture is created");
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600))
+        .expect("the namespace marker fixture is private");
+    let key = BlobObjectKey::try_from_recorded(".signalbox-blob-namespace-v1")
+        .expect("the backend-reserved fixture key is lexically safe");
+
+    let error = store
+        .open(&key)
+        .await
+        .expect_err("the reserved namespace marker must not be readable");
+
+    assert_eq!(error.kind(), BlobStoreFailureKind::Unavailable);
+}
+
+#[tokio::test]
+async fn inv059_filesystem_rejects_multiply_linked_blob_candidates() {
+    let (root, store) = fixture();
+    let outside = tempfile::NamedTempFile::new_in(
+        root.path()
+            .parent()
+            .expect("the store root has a parent directory"),
+    )
+    .expect("the outside fixture file is created on the same filesystem");
+    std::fs::write(
+        outside.path(),
+        signalbox_blob_store::conformance::fixture_content(),
+    )
+    .expect("the outside fixture contains valid blob bytes");
+    std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o600))
+        .expect("the outside fixture is private");
+    let key = BlobObjectKey::try_from_recorded("recorded-hard-link")
+        .expect("the hard-link fixture key is lexically safe");
+    std::fs::hard_link(outside.path(), root.path().join(key.as_str()))
+        .expect("the fixture links the external inode into the store");
+
+    let error = store
+        .open(&key)
+        .await
+        .expect_err("a multiply linked blob candidate must not be readable");
+
+    assert_eq!(error.kind(), BlobStoreFailureKind::Unavailable);
+}
+
 #[cfg(not(target_vendor = "apple"))]
 #[tokio::test]
 async fn filesystem_rejects_fifo_candidates_without_waiting_for_a_writer() {
