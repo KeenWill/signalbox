@@ -4025,7 +4025,7 @@ async fn load_tool_denial_correlations(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id,
+                approval.user_command_id,
                 approval.delegate_model_selection_id,
                 approval.delegate_model_call_id, approval.rationale
            FROM tool_approval_decision AS approval
@@ -5603,7 +5603,7 @@ async fn persist_tool_round(
         sqlx::query(
             "INSERT INTO tool_approval_decision
                 (request_id, decision_kind, decision_source, denial_reason,
-                 owner_command_id)
+                 user_command_id)
              VALUES ($1, $2, $3, $4, NULL)",
         )
         .bind(tool_request_id_to_uuid(approval.request()))
