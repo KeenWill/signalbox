@@ -10,6 +10,12 @@
 CREATE TABLE approval_judge_eval_run (
     eval_run_id uuid PRIMARY KEY,
     direct_model_selection_id uuid NOT NULL,
+    -- The exact resolved target the calls were sent to. A selection is a
+    -- mutable configuration mapping and provider_model spellings are not
+    -- unique across targets, so neither can identify the invoked target
+    -- after a configuration change; mirrors the column of the same name on
+    -- tool_approval_judge_model_call.
+    resolved_provider_model_identity_id uuid NOT NULL,
     provider_model text NOT NULL,
     -- Whether the resolved adapter's reported input total includes the cache
     -- axes, resolved once for the run's single frozen binding. Without it the
@@ -104,3 +110,27 @@ CREATE TABLE approval_judge_eval_call (
             )
         )
 );
+
+-- Recorded runs are measurement evidence: a rewrite or removal after commit
+-- would let a stored run stop carrying the complete verdict evidence the
+-- recording API promises, so both tables refuse every change but insertion,
+-- truncation included.
+CREATE TRIGGER approval_judge_eval_run_is_append_only
+BEFORE UPDATE OR DELETE ON approval_judge_eval_run
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER approval_judge_eval_run_cannot_be_truncated
+BEFORE TRUNCATE ON approval_judge_eval_run
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER approval_judge_eval_call_is_append_only
+BEFORE UPDATE OR DELETE ON approval_judge_eval_call
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER approval_judge_eval_call_cannot_be_truncated
+BEFORE TRUNCATE ON approval_judge_eval_call
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();

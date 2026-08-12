@@ -12,6 +12,7 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     DelegateApprovalRecommendation, DirectModelSelection, ProviderReportedTokenUsage,
+    ResolvedProviderTarget,
 };
 use sqlx::{
     PgPool,
@@ -45,6 +46,11 @@ pub struct ApprovalJudgeEvalRunRecord {
     pub run: ApprovalJudgeEvalRunId,
     /// Direct judge selection frozen for every replayed call.
     pub selection: DirectModelSelection,
+    /// Exact resolved target every call was sent to. The selection is a
+    /// mutable configuration mapping and provider-model spellings are not
+    /// unique across targets, so only this identifies the invoked target
+    /// after a configuration change.
+    pub target: ResolvedProviderTarget,
     /// Provider model the selection resolved to.
     pub provider_model: String,
     /// Whether the resolved adapter's reported input total includes the cache
@@ -80,10 +86,11 @@ pub struct ApprovalJudgeEvalCallRecord {
     pub usage: ProviderReportedTokenUsage,
 }
 
-/// Reports whether both eval recording tables exist in the connected
-/// database, so a caller can refuse to start work whose recording would
-/// predictably fail against a database the daemon has not migrated yet.
-/// Schema application stays with the daemon; this only observes it.
+/// Reports whether both eval recording tables exist in the connected database
+/// and admit inserts for the connected role, so a caller can refuse to start
+/// work whose recording would predictably fail against a database the daemon
+/// has not migrated yet or a role that can only read. Schema application
+/// stays with the daemon; this only observes it.
 pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeEvalRecordingError> {
     let present: bool = sqlx::query_scalar(
         "SELECT to_regclass('approval_judge_eval_run') IS NOT NULL
@@ -91,25 +98,83 @@ pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeE
     )
     .fetch_one(pool)
     .await?;
-    if present {
+    if !present {
+        return Err(ApprovalJudgeEvalRecordingError::TablesAbsent);
+    }
+    let insertable: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege('approval_judge_eval_run', 'INSERT')
+            AND has_table_privilege('approval_judge_eval_call', 'INSERT')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if insertable {
         Ok(())
     } else {
-        Err(ApprovalJudgeEvalRecordingError::TablesAbsent)
+        Err(ApprovalJudgeEvalRecordingError::TablesUnwritable)
     }
+}
+
+/// Requires the scorecard's own header fields to agree with the typed run
+/// columns they duplicate.
+///
+/// The typed columns exist for indexed queries while the scorecard is the
+/// primary artifact; letting them disagree would attribute one run to two
+/// different experiment inputs depending on which representation a reader
+/// consults, so a divergent or headerless scorecard is rejected before
+/// anything commits.
+fn require_scorecard_header_agreement(
+    run: &ApprovalJudgeEvalRunRecord,
+) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let header = |field: &str| run.scorecard.get(field);
+    let selection = run.selection.into_uuid().to_string();
+    if header("judge_selection").and_then(serde_json::Value::as_str) != Some(selection.as_str()) {
+        return Err(header_mismatch("judge_selection"));
+    }
+    if header("provider_model").and_then(serde_json::Value::as_str)
+        != Some(run.provider_model.as_str())
+    {
+        return Err(header_mismatch("provider_model"));
+    }
+    if header("corpus_digest").and_then(serde_json::Value::as_str)
+        != Some(run.corpus_digest.as_str())
+    {
+        return Err(header_mismatch("corpus_digest"));
+    }
+    if header("contract_digest").and_then(serde_json::Value::as_str)
+        != Some(run.contract_digest.as_str())
+    {
+        return Err(header_mismatch("contract_digest"));
+    }
+    if header("rendered_digest").and_then(serde_json::Value::as_str)
+        != Some(run.rendered_digest.as_str())
+    {
+        return Err(header_mismatch("rendered_digest"));
+    }
+    if header("repeats").and_then(serde_json::Value::as_u64) != Some(u64::from(run.repeats)) {
+        return Err(header_mismatch("repeats"));
+    }
+    Ok(())
+}
+
+const fn header_mismatch(field: &'static str) -> ApprovalJudgeEvalRecordingError {
+    ApprovalJudgeEvalRecordingError::ScorecardHeaderMismatch { field }
 }
 
 /// Records one run and its per-call verdicts in one transaction.
 ///
 /// Either the run row and every call row commit together or nothing is
 /// recorded, so a stored run always carries its complete verdict evidence.
-/// Every call ordinal must fall inside the run's configured repeats; a call
+/// Every call ordinal must fall inside the run's configured repeats — a call
 /// outside that range would be durable evidence for an attempt the run
-/// claims was never configured, so it is rejected before anything commits.
+/// claims was never configured — and the scorecard's header fields must
+/// agree with the typed columns they duplicate; either violation is rejected
+/// before anything commits.
 pub async fn record_eval_run(
     pool: &PgPool,
     run: &ApprovalJudgeEvalRunRecord,
     calls: &[ApprovalJudgeEvalCallRecord],
 ) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    require_scorecard_header_agreement(run)?;
     for call in calls {
         if call.repeat_ordinal < 1 || call.repeat_ordinal > run.repeats {
             return Err(ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats);
@@ -118,13 +183,15 @@ pub async fn record_eval_run(
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO approval_judge_eval_run
-            (eval_run_id, direct_model_selection_id, provider_model,
+            (eval_run_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, provider_model,
              usage_input_includes_cache_tokens, corpus_digest,
              contract_digest, rendered_digest, repeats, scorecard)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(run.run.into_uuid())
     .bind(run.selection.into_uuid())
+    .bind(run.target.identity().into_uuid())
     .bind(run.provider_model.as_str())
     .bind(run.usage_input_includes_cache_tokens)
     .bind(run.corpus_digest.as_str())
@@ -172,8 +239,15 @@ pub enum ApprovalJudgeEvalRecordingError {
     },
     /// The connected database has no eval recording tables.
     TablesAbsent,
+    /// The connected role cannot insert into the eval recording tables.
+    TablesUnwritable,
     /// A call's repeat ordinal falls outside the run's configured repeats.
     CallOutsideConfiguredRepeats,
+    /// A scorecard header field disagrees with the typed column it duplicates.
+    ScorecardHeaderMismatch {
+        /// The scorecard field that diverged or was absent.
+        field: &'static str,
+    },
 }
 
 impl ApprovalJudgeEvalRecordingError {
@@ -199,8 +273,15 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
             Self::TablesAbsent => formatter.write_str(
                 "eval recording tables are absent; the daemon has not applied this migration set",
             ),
+            Self::TablesUnwritable => {
+                formatter.write_str("eval recording tables refuse inserts for the connected role")
+            }
             Self::CallOutsideConfiguredRepeats => formatter
                 .write_str("eval call repeat ordinal is outside the run's configured repeats"),
+            Self::ScorecardHeaderMismatch { field } => write!(
+                formatter,
+                "eval scorecard header disagrees with the typed run record: {field}"
+            ),
         }
     }
 }
@@ -209,7 +290,10 @@ impl Error for ApprovalJudgeEvalRecordingError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database { source, .. } => Some(source),
-            Self::TablesAbsent | Self::CallOutsideConfiguredRepeats => None,
+            Self::TablesAbsent
+            | Self::TablesUnwritable
+            | Self::CallOutsideConfiguredRepeats
+            | Self::ScorecardHeaderMismatch { .. } => None,
         }
     }
 }
@@ -225,6 +309,8 @@ impl From<sqlx::Error> for ApprovalJudgeEvalRecordingError {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+
     use super::ApprovalJudgeEvalRecordingError;
 
     #[test]
@@ -237,25 +323,22 @@ mod tests {
             source: sqlx::Error::PoolClosed,
             commit_ambiguous: true,
         };
-        assert_eq!(
-            ordinary.to_string(),
-            "eval recording database operation failed"
-        );
-        assert_eq!(
-            ambiguous.to_string(),
-            "eval recording database commit outcome is ambiguous"
-        );
+        expect!["eval recording database operation failed"].assert_eq(&ordinary.to_string());
+        expect!["eval recording database commit outcome is ambiguous"]
+            .assert_eq(&ambiguous.to_string());
     }
 
     #[test]
     fn recording_rejections_render_their_causes() {
-        assert_eq!(
-            ApprovalJudgeEvalRecordingError::TablesAbsent.to_string(),
-            "eval recording tables are absent; the daemon has not applied this migration set"
-        );
-        assert_eq!(
-            ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats.to_string(),
-            "eval call repeat ordinal is outside the run's configured repeats"
+        expect!["eval recording tables are absent; the daemon has not applied this migration set"]
+            .assert_eq(&ApprovalJudgeEvalRecordingError::TablesAbsent.to_string());
+        expect!["eval recording tables refuse inserts for the connected role"]
+            .assert_eq(&ApprovalJudgeEvalRecordingError::TablesUnwritable.to_string());
+        expect!["eval call repeat ordinal is outside the run's configured repeats"]
+            .assert_eq(&ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats.to_string());
+        expect!["eval scorecard header disagrees with the typed run record: repeats"].assert_eq(
+            &ApprovalJudgeEvalRecordingError::ScorecardHeaderMismatch { field: "repeats" }
+                .to_string(),
         );
     }
 }

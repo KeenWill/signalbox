@@ -367,15 +367,27 @@ async fn run(options: RunOptions) -> Result<(), String> {
         {
             continue;
         }
-        // The recording schema stores case names non-empty, so a selected
-        // case recording cannot store must fail here, before any paid call,
-        // rather than after the whole run's quota is spent. Without
-        // --database-url the corpus admission is unchanged.
-        if recording.is_some() && case.name.is_empty() {
-            return Err(format!(
-                "corpus line {} has an empty case name, which --database-url recording cannot store",
-                index + 1
-            ));
+        // The recording schema stores case names non-empty, and PostgreSQL
+        // text and jsonb admit no U+0000, so a selected case recording
+        // cannot store must fail here, before any paid call, rather than
+        // after the whole run's quota is spent. Name and notes are the only
+        // persisted case fields this can reach: category and expected are
+        // closed sets, tool names admit no control characters, and the other
+        // fields are persisted only as digests. Without --database-url the
+        // corpus admission is unchanged.
+        if recording.is_some() {
+            let name_storable = !case.name.is_empty() && !case.name.contains('\u{0}');
+            let notes_storable = case
+                .notes
+                .as_deref()
+                .is_none_or(|notes| !notes.contains('\u{0}'));
+            if !name_storable || !notes_storable {
+                return Err(format!(
+                    "corpus line {} carries a name or notes --database-url recording cannot \
+                     store: names are non-empty and neither field may contain U+0000",
+                    index + 1
+                ));
+            }
         }
         cases.push(case);
     }
@@ -589,6 +601,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
         let run = ApprovalJudgeEvalRunRecord {
             run: ApprovalJudgeEvalRunId::from_uuid(uuid::Uuid::now_v7()),
             selection,
+            target: binding.target,
             provider_model,
             usage_input_includes_cache_tokens: recording.usage_input_includes_cache_tokens,
             corpus_digest: digest,

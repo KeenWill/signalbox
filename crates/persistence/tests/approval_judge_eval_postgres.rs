@@ -10,7 +10,8 @@ use std::error::Error;
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DelegateApprovalRecommendation, DirectModelSelection, ProviderReportedTokenUsage,
+    DelegateApprovalRecommendation, DirectModelSelection, ProviderModelIdentity,
+    ProviderReportedTokenUsage, ResolvedProviderTarget,
 };
 use signalbox_persistence::{
     approval_judge_eval::{
@@ -36,8 +37,15 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 const RUN_IDENTITY: u128 = 0xae10;
 const SELECTION_IDENTITY: u128 = 0xae20;
+const TARGET_IDENTITY: u128 = 0xae21;
 const ABSENT_RUN_IDENTITY: u128 = 0xae30;
 const PROVIDER_MODEL: &str = "fixture-judge-model";
+// A spelling the recorded run never carries, for contradiction fixtures.
+const FOREIGN_PROVIDER_MODEL: &str = "some-other-model";
+// The login role granted SELECT but not INSERT on the eval tables.
+const RESTRICTED_ROLE: &str = "eval_reader";
+// The ERRCODE reject_immutable_record_change raises for every refused change.
+const CHECK_VIOLATION_CODE: &str = "23514";
 const CORPUS_DIGEST: &str = "fnv1a128:00000000000000000000000000000001";
 const CONTRACT_DIGEST: &str = "fnv1a128:00000000000000000000000000000002";
 const RENDERED_DIGEST: &str = "fnv1a128:00000000000000000000000000000003";
@@ -89,8 +97,17 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
     Ok((container, pool))
 }
 
+// The scorecard restates the run headers exactly as the binary prints them;
+// record_eval_run rejects a scorecard whose headers disagree with the typed
+// fields, so the fixture derives both from the same constants.
 fn scorecard() -> serde_json::Value {
     serde_json::json!({
+        "judge_selection": Uuid::from_u128(SELECTION_IDENTITY).to_string(),
+        "provider_model": PROVIDER_MODEL,
+        "corpus_digest": CORPUS_DIGEST,
+        "contract_digest": CONTRACT_DIGEST,
+        "rendered_digest": RENDERED_DIGEST,
+        "repeats": REPEATS,
         "total_cases": 2,
         "correct_majorities": 1,
     })
@@ -100,6 +117,9 @@ fn run_record() -> ApprovalJudgeEvalRunRecord {
     ApprovalJudgeEvalRunRecord {
         run: ApprovalJudgeEvalRunId::from_uuid(Uuid::from_u128(RUN_IDENTITY)),
         selection: DirectModelSelection::from_uuid(Uuid::from_u128(SELECTION_IDENTITY)),
+        target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            TARGET_IDENTITY,
+        ))),
         provider_model: String::from(PROVIDER_MODEL),
         usage_input_includes_cache_tokens: CACHE_INCLUSIVE_INPUT,
         corpus_digest: String::from(CORPUS_DIGEST),
@@ -134,19 +154,18 @@ fn second_call() -> ApprovalJudgeEvalCallRecord {
     }
 }
 
+#[track_caller]
 fn constraint_name(error: &ApprovalJudgeEvalRecordingError) -> Option<String> {
     match error {
         ApprovalJudgeEvalRecordingError::Database { source, .. } => source
             .as_database_error()
             .and_then(|database| database.constraint())
             .map(ToOwned::to_owned),
-        ApprovalJudgeEvalRecordingError::TablesAbsent
-        | ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats => {
-            panic!("expected a database constraint failure, found {error:?}")
-        }
+        other => panic!("expected a database constraint failure, found {other:?}"),
     }
 }
 
+#[track_caller]
 fn expect_tables_absent(error: &ApprovalJudgeEvalRecordingError) {
     match error {
         ApprovalJudgeEvalRecordingError::TablesAbsent => (),
@@ -154,6 +173,15 @@ fn expect_tables_absent(error: &ApprovalJudgeEvalRecordingError) {
     }
 }
 
+#[track_caller]
+fn expect_tables_unwritable(error: &ApprovalJudgeEvalRecordingError) {
+    match error {
+        ApprovalJudgeEvalRecordingError::TablesUnwritable => (),
+        other => panic!("expected unwritable recording tables, found {other:?}"),
+    }
+}
+
+#[track_caller]
 fn expect_call_outside_configured_repeats(error: &ApprovalJudgeEvalRecordingError) {
     match error {
         ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats => (),
@@ -161,10 +189,27 @@ fn expect_call_outside_configured_repeats(error: &ApprovalJudgeEvalRecordingErro
     }
 }
 
+#[track_caller]
+fn expect_scorecard_header_mismatch(error: &ApprovalJudgeEvalRecordingError, field: &str) {
+    match error {
+        ApprovalJudgeEvalRecordingError::ScorecardHeaderMismatch { field: diverged } => {
+            assert_eq!(*diverged, field);
+        }
+        other => panic!("expected a scorecard header mismatch, found {other:?}"),
+    }
+}
+
 fn raw_constraint_name(error: &sqlx::Error) -> Option<&str> {
     error
         .as_database_error()
         .and_then(|database| database.constraint())
+}
+
+fn raw_error_code(error: &sqlx::Error) -> Option<String> {
+    error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .map(|code| code.into_owned())
 }
 
 #[tokio::test]
@@ -175,9 +220,10 @@ async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
     record_eval_run(&pool, &run, &[first_call(), second_call()]).await?;
 
     let stored_run = sqlx::query(
-        "SELECT direct_model_selection_id, provider_model,
-                usage_input_includes_cache_tokens, corpus_digest,
-                contract_digest, rendered_digest, repeats, scorecard
+        "SELECT direct_model_selection_id, resolved_provider_model_identity_id,
+                provider_model, usage_input_includes_cache_tokens,
+                corpus_digest, contract_digest, rendered_digest, repeats,
+                scorecard
            FROM approval_judge_eval_run WHERE eval_run_id = $1",
     )
     .bind(run.run.into_uuid())
@@ -186,6 +232,10 @@ async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         stored_run.try_get::<Uuid, _>("direct_model_selection_id")?,
         run.selection.into_uuid()
+    );
+    assert_eq!(
+        stored_run.try_get::<Uuid, _>("resolved_provider_model_identity_id")?,
+        run.target.identity().into_uuid()
     );
     assert_eq!(
         stored_run.try_get::<String, _>("provider_model")?,
@@ -376,6 +426,130 @@ async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<
             .fetch_one(&pool)
             .await?;
     assert_eq!(stored_runs, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recording_requires_insert_privileges() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    // Fixture DDL interpolates only this file's constants, never external
+    // input, so asserting SQL safety is sound here.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {RESTRICTED_ROLE} LOGIN PASSWORD '{DATABASE_PASSWORD}'"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT SELECT ON approval_judge_eval_run, approval_judge_eval_call TO {RESTRICTED_ROLE}"
+    )))
+    .execute(&pool)
+    .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let restricted_url =
+        format!("postgres://{RESTRICTED_ROLE}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let restricted = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(local_test_connection_options(&restricted_url)?)
+        .await?;
+    let unwritable = verify_recording_schema(&restricted)
+        .await
+        .expect_err("a role without INSERT cannot claim a recordable schema");
+    expect_tables_unwritable(&unwritable);
+    verify_recording_schema(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn contradictory_scorecard_headers_are_rejected() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut run = run_record();
+    run.scorecard["provider_model"] = serde_json::json!(FOREIGN_PROVIDER_MODEL);
+    let error = record_eval_run(&pool, &run, &[])
+        .await
+        .expect_err("a scorecard contradicting the typed record is rejected");
+    expect_scorecard_header_mismatch(&error, "provider_model");
+    let stored_runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_run WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored_runs, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recorded_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let run = run_record();
+    record_eval_run(&pool, &run, &[first_call()]).await?;
+
+    let updated_run = sqlx::query("UPDATE approval_judge_eval_run SET provider_model = $1")
+        .bind(FOREIGN_PROVIDER_MODEL)
+        .execute(&pool)
+        .await
+        .expect_err("a recorded run refuses updates");
+    assert_eq!(
+        raw_error_code(&updated_run).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
+    );
+    let deleted_run = sqlx::query("DELETE FROM approval_judge_eval_run")
+        .execute(&pool)
+        .await
+        .expect_err("a recorded run refuses deletion");
+    assert_eq!(
+        raw_error_code(&deleted_run).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
+    );
+    let truncated_run = sqlx::query("TRUNCATE approval_judge_eval_run CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("a recorded run refuses truncation");
+    assert_eq!(
+        raw_error_code(&truncated_run).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
+    );
+    let updated_call = sqlx::query("UPDATE approval_judge_eval_call SET rationale = $1")
+        .bind(SECOND_RATIONALE)
+        .execute(&pool)
+        .await
+        .expect_err("a recorded call refuses updates");
+    assert_eq!(
+        raw_error_code(&updated_call).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
+    );
+    let deleted_call = sqlx::query("DELETE FROM approval_judge_eval_call")
+        .execute(&pool)
+        .await
+        .expect_err("a recorded call refuses deletion");
+    assert_eq!(
+        raw_error_code(&deleted_call).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
+    );
+    let truncated_call = sqlx::query("TRUNCATE approval_judge_eval_call")
+        .execute(&pool)
+        .await
+        .expect_err("a recorded call refuses truncation");
+    assert_eq!(
+        raw_error_code(&truncated_call).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
+    );
+
+    let surviving_runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_run WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(surviving_runs, 1);
+    let surviving_calls: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_call WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(surviving_calls, 1);
     Ok(())
 }
 
