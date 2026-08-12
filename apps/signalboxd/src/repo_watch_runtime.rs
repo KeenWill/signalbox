@@ -285,6 +285,7 @@ impl RepositoryWatchTask {
                 return;
             }
             let cycle_started = Instant::now();
+            let mut attempt_cancelled = false;
             select! {
                 result = self.run_attempt() => {
                     match result {
@@ -304,9 +305,17 @@ impl RepositoryWatchTask {
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        return;
+                        attempt_cancelled = true;
                     }
                 }
+            }
+            if attempt_cancelled {
+                // Winning this race dropped the attempt future, which aborts
+                // its spawned pull-request fetches without joining them. Join
+                // them before returning, so the supervisor's clean stop means
+                // every child has actually finished.
+                self.poller.drain_fetches().await;
+                return;
             }
             select! {
                 () = sleep(remaining_interval(PollCycleTiming {
@@ -717,6 +726,12 @@ struct GitHubRepositoryPoller {
     graphql_url: Url,
     cache: Mutex<PollCache>,
     freshness: Mutex<HashMap<u64, PullRequestFreshness>>,
+    // The child fetches one attempt spawns. Owned here rather than by the
+    // attempt future so that cancelling an attempt cannot orphan its children:
+    // dropping the future aborts them and releases the lock, but they stay
+    // joinable, and whoever runs next — the following attempt, or the
+    // repository task on its way out — joins them before proceeding.
+    fetches: tokio::sync::Mutex<JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>>,
 }
 
 struct PullRequestFreshness {
@@ -786,6 +801,7 @@ impl GitHubRepositoryPoller {
             graphql_url,
             cache: Mutex::new(PollCache::default()),
             freshness: Mutex::new(HashMap::new()),
+            fetches: tokio::sync::Mutex::new(JoinSet::new()),
         })
     }
 
@@ -852,7 +868,12 @@ impl GitHubRepositoryPoller {
         previous: Option<&RepoWatchObservation>,
     ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
         self.forget_unlisted_freshness(&pull_numbers);
-        let mut fetches = JoinSet::new();
+        let mut fetches = self.fetches.lock().await;
+        // A cancelled attempt drops this future mid-collection, which aborts
+        // the children without joining them; they stay behind in the shared
+        // set. Join any such survivor before spawning, so no child of an
+        // earlier attempt can interleave with this one.
+        fetches.shutdown().await;
         let collected = self
             .collect_pull_request_fetches(pull_numbers, listed, previous, &mut fetches)
             .await;
@@ -865,6 +886,14 @@ impl GitHubRepositoryPoller {
         let mut pull_requests = collected?;
         pull_requests.sort_by_key(|pull_request| pull_request.context().number().get());
         Ok(pull_requests)
+    }
+
+    /// Joins every child fetch a cancelled attempt left behind. The repository
+    /// task calls this after cancelling an in-flight attempt, so a reported
+    /// stop means no child is still resolving credentials, holding a
+    /// connection, or touching shared state.
+    async fn drain_fetches(&self) {
+        self.fetches.lock().await.shutdown().await;
     }
 
     async fn collect_pull_request_fetches(
@@ -2557,6 +2586,9 @@ mod tests {
     const EMPTY_CHECK_SUITE_LIST: &str = "{\"check_suites\":[]}";
     const CONCURRENT_FETCH_PULL_NUMBERS: std::ops::RangeInclusive<u64> = 1..=9;
     const CONCURRENT_FETCH_DELAY: Duration = Duration::from_millis(20);
+    // Longer than any await this module's tests perform, so a child parked in
+    // a response carrying it can only stop by being aborted and joined.
+    const CANCELLED_FETCH_DELAY: Duration = Duration::from_secs(60);
     const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
     const POLL_INTERVAL: Duration = Duration::from_secs(300);
     const SHORT_CYCLE: Duration = Duration::from_secs(75);
@@ -3213,6 +3245,14 @@ mod tests {
                 base_url,
                 state,
                 task,
+            }
+        }
+
+        /// Waits until the server holds a request in flight, so a caller can
+        /// cancel a fetch that is demonstrably mid-request.
+        async fn request_in_flight(&self) {
+            while self.state.in_flight.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(1)).await;
             }
         }
 
@@ -4207,6 +4247,49 @@ mod tests {
         let (fetched, _) = concurrently_fetched_pull_requests().await;
 
         assert_eq!(fetched, CONCURRENT_FETCH_PULL_NUMBERS.collect::<Vec<u64>>());
+    }
+
+    /// Cancelling an attempt drops the fetch future, which aborts the spawned
+    /// children without joining them. Whether a child is still running is read
+    /// from the poller's reference count: the child parked in the delayed
+    /// response owns a clone, so the count stays raised until a join actually
+    /// retires it.
+    #[tokio::test]
+    async fn draining_after_a_cancelled_fetch_joins_every_child() {
+        let server = ConcurrentScriptedServer::start(vec![
+            ScriptedResponse::ok(PULL_DETAIL_TARGET, minimal_pull_detail(7))
+                .delayed(CANCELLED_FETCH_DELAY),
+        ])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let poller = Arc::clone(&fixture.poller);
+        let listed = BTreeMap::from([(7_u64, PULL_UPDATED_AT.to_owned())]);
+        let fetch = tokio::spawn(async move {
+            poller
+                .fetch_pull_requests(BTreeSet::from([7_u64]), &listed, None)
+                .await
+        });
+        server.request_in_flight().await;
+
+        fetch.abort();
+        let cancelled = fetch.await;
+
+        assert!(
+            cancelled
+                .expect_err("the mid-request fetch must not have completed")
+                .is_cancelled()
+        );
+        assert_eq!(
+            Arc::strong_count(&fixture.poller),
+            2,
+            "the aborted attempt leaves its child running"
+        );
+        fixture.poller.drain_fetches().await;
+        assert_eq!(
+            Arc::strong_count(&fixture.poller),
+            1,
+            "a drained poller has no child still holding it"
+        );
     }
 
     #[tokio::test]
