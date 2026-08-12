@@ -1,4 +1,13 @@
 //! Reviewed SQL statements that acquire explicit persistence row locks.
+//!
+//! Session/scheduler pair order: every transaction that locks both a
+//! `session` row and a `session_scheduler` row acquires the `session` row
+//! first. Submit-input, applied goal commands, the delegated endpoint
+//! prefixes, and approval-judge completion all take that order; goal
+//! transitions hold only the session row and the remaining scheduler-family
+//! transactions hold only the scheduler row, so no two transactions wait on
+//! this pair in opposite orders. A scheduler-first acquisition of the pair
+//! would deadlock against every path above and must not be introduced.
 
 use signalbox_domain::SessionId;
 

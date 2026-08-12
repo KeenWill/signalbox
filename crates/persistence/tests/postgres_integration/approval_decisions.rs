@@ -779,6 +779,211 @@ async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
     Ok(())
 }
 
+/// Inserts the durable `goal_declare` shape `declare_achieved` authenticates:
+/// one producing call whose response is exactly one assistant-text part
+/// carrying the report followed by the final `goal_declare` tool-use part.
+///
+/// Triggers are disabled around the inserts exactly as the goal suite's
+/// declaration fixture does: the queued goal turn has no lifecycle or
+/// model-call rows, and this fixture states correlation facts, not lifecycle
+/// history.
+async fn insert_goal_declaration_request(
+    pool: &PgPool,
+    session: SessionId,
+    goal_turn: TurnId,
+    request: ToolRequestId,
+    report_text: &str,
+) -> Result<(), Box<dyn Error>> {
+    let producing_call = Uuid::from_u128(request.into_uuid().as_u128() + 0x1000);
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 0, 'goal_declare', 'json', $5)",
+    )
+    .bind(request.into_uuid())
+    .bind(session.into_uuid())
+    .bind(goal_turn.into_uuid())
+    .bind(producing_call)
+    .bind(r#"{"transition":"achieved"}"#)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             assistant_text_value, producing_model_call_id,
+             assistant_response_part_ordinal, assistant_tool_request_id)
+         VALUES ($1, $2, 'assistant_text', $4, $3, 0, NULL),
+                ($1, $5, 'assistant_tool_use', NULL, $3, 1, $6)",
+    )
+    .bind(session.into_uuid())
+    .bind(Uuid::from_u128(request.into_uuid().as_u128() + 0x2000))
+    .bind(producing_call)
+    .bind(report_text)
+    .bind(Uuid::from_u128(request.into_uuid().as_u128() + 0x3000))
+    .bind(request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// A goal can close by model declaration while the judge's provider
+/// round-trip is outstanding, and `declare_achieved` serializes on the
+/// session row without ever taking the scheduler row, so the completion
+/// recheck excludes it only by holding the session row from before its
+/// authority read until commit. This holds the session row the way every
+/// goal transition's first statement does, proves the achievement and then
+/// the completion queue behind it in that order, shows completion holds no
+/// scheduler lock while it waits — a scheduler-first completion would
+/// deadlock the holder's own scheduler acquisition — and requires the
+/// completion released after the achievement commits to escalate instead of
+/// committing the approval it formed under the discharged statement.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7f80;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let request = requests[0];
+    let statement = commission_fixture_session_goal(&pool, fixture.session, seed + 0xf0).await?;
+    // `commission_fixture_session_goal` schedules its queued goal turn as
+    // `seed + 2` of the seed it is given.
+    let goal_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0xf2));
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+    repository.authorize(&prepared).await?;
+    let report_text = String::from("the approval fixture goal is achieved");
+    let declaration_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0xd0));
+    insert_goal_declaration_request(
+        &pool,
+        fixture.session,
+        goal_turn,
+        declaration_request,
+        &report_text,
+    )
+    .await?;
+
+    let mut goal_lock_holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.session.into_uuid())
+        .fetch_one(&mut *goal_lock_holder)
+        .await?;
+    let achievement_repository = GoalRepository::new(pool.clone());
+    let achievement_session = fixture.session;
+    let achievement_report =
+        GoalReport::try_new(report_text.clone()).expect("the fixture report is admitted");
+    let achievement_provenance = GoalModelProvenance::new(goal_turn, declaration_request);
+    let achievement = tokio::spawn(async move {
+        achievement_repository
+            .declare_achieved(
+                achievement_session,
+                achievement_report,
+                achievement_provenance,
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the achievement must wait on the held session row"
+    );
+    let completion_repository = model_repository.approval_judge_repository();
+    let completion_prepared = prepared.clone();
+    let completion_rationale =
+        ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    let completion = tokio::spawn(async move {
+        completion_repository
+            .complete(
+                &completion_prepared,
+                DelegateApprovalRecommendation::Approve,
+                completion_rationale,
+                ProviderReportedTokenUsage::unreported(),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "completion must queue on the session row behind the achievement"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+            .bind(fixture.session.into_uuid())
+            .fetch_one(&mut *goal_lock_holder),
+    )
+    .await
+    .expect("the session-row holder must acquire the scheduler while completion waits")?;
+    goal_lock_holder.commit().await?;
+
+    let achieved = tokio::time::timeout(std::time::Duration::from_secs(20), achievement)
+        .await
+        .expect("the released achievement must finish")??;
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), completion)
+        .await
+        .expect("the released completion must finish")??;
+    let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
+        "SELECT judge.state_kind AS judge_state,
+                judge.recommendation_kind AS recommendation,
+                EXISTS (
+                    SELECT 1 FROM tool_approval_decision
+                     WHERE request_id = judge.request_id
+                ) AS decision_exists,
+                lifecycle.active_phase_kind AS active_phase,
+                lifecycle.approval_tool_request_id
+           FROM tool_approval_judge_model_call AS judge
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = judge.turn_id
+            AND lifecycle.session_id = judge.session_id
+          WHERE judge.model_call_id = $1",
+    )
+    .bind(prepared.call().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(prepared.session_context().goal(), Some(&statement));
+    let GoalTransitionOutcome::Applied(_) = achieved else {
+        panic!("the concurrent achievement must apply: {achieved:?}")
+    };
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(parked.judge_state, "terminal");
+    assert_eq!(parked.recommendation, "escalate_to_human");
+    assert!(!parked.decision_exists);
+    assert_eq!(parked.active_phase, "awaiting_tool_approval");
+    assert_eq!(parked.approval_tool_request_id, request.into_uuid());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_prepared_insert_rejects_estimated_usage_provenance()

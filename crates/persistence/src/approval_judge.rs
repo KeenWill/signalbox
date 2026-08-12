@@ -18,7 +18,7 @@ use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     ModelCredentialFamilyCatalog, commit_failure_is_ambiguous,
-    goal::{GoalRepositoryError, load_goal_from_connection},
+    goal::{self, GoalRepositoryError, load_goal_from_connection},
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
@@ -416,6 +416,17 @@ impl PostgresApprovalJudgeRepository {
         continuation_attempt: TurnAttemptId,
     ) -> Result<CompleteApprovalJudgeOutcome, ApprovalJudgeRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        // Completion rechecks the goal authority in force, and goal
+        // transitions serialize on the session row without ever taking the
+        // scheduler row (`goal::handle_system_transition`), so excluding a
+        // concurrent `declare_achieved` requires holding the session row
+        // from before that read until this commit. It is taken before the
+        // scheduler lock below because every transaction locking both rows
+        // acquires the session row first (see `lock_inventory`); acquiring
+        // it after would deadlock against every applied goal command.
+        if !goal::lock_session(&mut transaction, prepared.request.session()).await? {
+            return Err(ApprovalJudgeCorruption::Missing("judge completion session").into());
+        }
         lock_session(&mut transaction, prepared.request.session())
             .await
             .map_err(map_model_error)?;

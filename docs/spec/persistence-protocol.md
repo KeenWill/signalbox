@@ -764,17 +764,24 @@ Locks per transaction, in acquisition order:
   authority trigger takes the `tool_request` row `FOR UPDATE` after the
   scheduler lock and before checking that no nonterminal judge remains.
 
-- **Approval-judge transactions** (prepare, authorize, complete, and fail): the
-  `session_scheduler` row `FOR UPDATE` is always the first Rust-issued explicit
-  lock. Preparation then inserts the call; its schema guard takes the exact
-  `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
-  `FOR UPDATE`, before checking for an existing decision and validating the
-  prepared call. Completion performs its guarded lifecycle transition under the
-  scheduler lock; at commit, the deferred decision-authority trigger then takes
-  the `tool_request` row `FOR UPDATE`. Authorization and failure need no
-  additional explicit lock. The shared scheduler-first prefix prevents
-  approval-judge, tool-loop, and lifecycle-transition transactions from holding
-  these rows in reverse order.
+- **Approval-judge transactions** (prepare, authorize, complete, and fail):
+  preparation, authorization, and failure take the `session_scheduler` row
+  `FOR UPDATE` as their first Rust-issued explicit lock. Preparation then
+  inserts the call; its schema guard takes the exact `tool_request` row
+  `FOR UPDATE`, followed by the active `turn_lifecycle` row `FOR UPDATE`,
+  before checking for an existing decision and validating the prepared call.
+  Completion first locks the session row `FOR NO KEY UPDATE` and only then the
+  scheduler row: it resolves the goal authority in force before committing a
+  decision, and goal transitions serialize on the session row without taking
+  the scheduler row, so holding the session row from before that read until
+  commit is what makes a goal-closing transition and the completion recheck
+  mutually exclusive. The session row precedes the scheduler row because every
+  transaction that locks both acquires them in that order. Completion performs
+  its guarded lifecycle transition under the scheduler lock; at commit, the
+  deferred decision-authority trigger then takes the `tool_request` row
+  `FOR UPDATE`. Authorization and failure need no additional explicit lock.
+  The shared scheduler-lock position prevents approval-judge, tool-loop, and
+  lifecycle-transition transactions from holding these rows in reverse order.
 
 - **Delegated terminal-observation transactions**: after nonlocking reads of the
   call's turn and delegation identity, observation commit and authoritative
