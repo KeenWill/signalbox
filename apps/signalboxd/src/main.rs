@@ -49,11 +49,11 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, BaseDaemonCredentialInputs, CODE_HOST_CREDENTIAL_REFERENCE,
-    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
-    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
-    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
-    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
+    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, DaemonToolCatalog,
+    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
+    HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
@@ -1303,6 +1303,20 @@ async fn run_hub(
         let _ = database.close().await;
         return Err(error);
     }
+
+    let _blob_store_registry =
+        match BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()).await
+        {
+            Ok(registry) => registry,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("blob_storage_startup_reconciliation_failed"),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
 
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,

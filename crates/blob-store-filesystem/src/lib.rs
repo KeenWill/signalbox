@@ -6,7 +6,8 @@ use std::{
     collections::BTreeSet,
     ffi::{CString, OsStr, OsString},
     fmt::Write as _,
-    fs, io,
+    fs,
+    io::{self, Read as _, Seek as _, SeekFrom, Write as _},
     mem::MaybeUninit,
     path::{Path, PathBuf},
     sync::Arc,
@@ -30,13 +31,16 @@ use signalbox_blob_store::{
 };
 use signalbox_domain::BlobDigest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use uuid::Uuid;
 
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const PUBLICATION_DIRECTORY: &str = ".publish-v1";
+const UPLOADS_DIRECTORY: &str = "uploads-v1";
 const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
+const MAX_NAMESPACE_MARKER_BYTES: u64 = 128;
 const TEMPORARY_NAME_ATTEMPTS: usize = 16;
 const MAX_BACKING_DEVICE_NODES: usize = 64;
 
@@ -116,6 +120,86 @@ pub struct FilesystemBlobStore {
     publication_directory: Arc<fs::File>,
 }
 
+/// Whether startup already has a durable binding for one configured namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamespaceBindingState {
+    /// The database binding exists, so the backend marker must already exist.
+    Recorded,
+    /// No database binding exists, so startup may create the marker once.
+    New,
+}
+
+/// Descriptor-authenticated identity of one opened filesystem namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilesystemNamespaceIdentity {
+    canonical_path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+/// Private crash-recovered staging namespace for connection-local uploads.
+pub struct FilesystemBlobStaging {
+    uploads_directory: fs::File,
+    identity: FilesystemNamespaceIdentity,
+}
+
+impl std::fmt::Debug for FilesystemBlobStaging {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FilesystemBlobStaging { root: <redacted> }")
+    }
+}
+
+impl FilesystemBlobStaging {
+    /// Opens the configured staging root and removes proven crash leftovers.
+    pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::try_new_with_locality_policy(root, true)
+    }
+
+    fn try_new_with_locality_policy(
+        root: PathBuf,
+        require_local_backing: bool,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        let (root_descriptor, identity) = open_validated_root(&root, require_local_backing)?;
+        let uploads_directory = prepare_staging_directory(&root_descriptor).map_err(|source| {
+            FilesystemBlobStoreConstructionError::PrepareStagingDirectory { root, source }
+        })?;
+        Ok(Self {
+            uploads_directory,
+            identity,
+        })
+    }
+
+    /// Returns the descriptor-authenticated staging namespace identity.
+    pub const fn identity(&self) -> &FilesystemNamespaceIdentity {
+        &self.identity
+    }
+
+    /// Removes every proven regular upload spool before clean shutdown.
+    pub fn sweep(&self) -> io::Result<()> {
+        sweep_private_temporary_directory(&self.uploads_directory)?;
+        self.uploads_directory.sync_all()
+    }
+}
+
+impl Drop for FilesystemBlobStaging {
+    fn drop(&mut self) {
+        let _ = sweep_private_temporary_directory(&self.uploads_directory);
+        let _ = self.uploads_directory.sync_all();
+    }
+}
+
+impl FilesystemNamespaceIdentity {
+    /// Returns the canonical path resolving to the opened directory generation.
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    /// Returns the opened directory's device and inode identity.
+    pub const fn device_inode(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+}
+
 impl std::fmt::Debug for FilesystemBlobStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("FilesystemBlobStore { root: <redacted> }")
@@ -126,6 +210,15 @@ impl FilesystemBlobStore {
     /// Constructs a store at an absolute existing directory.
     pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
         Self::try_new_with_locality_policy(root, true)
+    }
+
+    /// Opens one configured store and establishes or verifies its namespace marker.
+    pub fn try_new_bound(
+        root: PathBuf,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        Self::try_new_bound_with_locality_policy(root, namespace_id, binding_state, true)
     }
 
     /// Constructs a conformance fixture while retaining every check except
@@ -141,42 +234,7 @@ impl FilesystemBlobStore {
         root: PathBuf,
         require_local_backing: bool,
     ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        if !root.is_absolute() {
-            return Err(FilesystemBlobStoreConstructionError::NotAbsolute { root });
-        }
-        let root_descriptor = open(
-            &root,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map(fs::File::from)
-        .map_err(io::Error::from)
-        .map_err(|source| FilesystemBlobStoreConstructionError::Inspect {
-            root: root.clone(),
-            source,
-        })?;
-        let metadata = root_descriptor.metadata().map_err(|source| {
-            FilesystemBlobStoreConstructionError::Inspect {
-                root: root.clone(),
-                source,
-            }
-        })?;
-        if !metadata.is_dir() {
-            return Err(FilesystemBlobStoreConstructionError::NotDirectory { root });
-        }
-        if !private_directory_metadata(&metadata) {
-            return Err(FilesystemBlobStoreConstructionError::NotPrivate { root });
-        }
-        let positively_local = !require_local_backing
-            || positively_classified_local_filesystem(&root_descriptor).map_err(|source| {
-                FilesystemBlobStoreConstructionError::Inspect {
-                    root: root.clone(),
-                    source,
-                }
-            })?;
-        if !positively_local {
-            return Err(FilesystemBlobStoreConstructionError::UnclassifiedFilesystem { root });
-        }
+        let (root_descriptor, _) = open_validated_root(&root, require_local_backing)?;
         let root_descriptor = Arc::new(root_descriptor);
         let publication_directory = Arc::new(
             prepare_publication_directory(&root_descriptor).map_err(|source| {
@@ -190,6 +248,34 @@ impl FilesystemBlobStore {
             root: root_descriptor,
             publication_directory,
         })
+    }
+
+    fn try_new_bound_with_locality_policy(
+        root: PathBuf,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+        require_local_backing: bool,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        let (root_descriptor, identity) = open_validated_root(&root, require_local_backing)?;
+        initialize_namespace_marker(&root_descriptor, namespace_id, binding_state).map_err(
+            |source| FilesystemBlobStoreConstructionError::PrepareNamespaceMarker {
+                root: root.clone(),
+                source,
+            },
+        )?;
+        let root_descriptor = Arc::new(root_descriptor);
+        let publication_directory = Arc::new(
+            prepare_publication_directory(&root_descriptor).map_err(|source| {
+                FilesystemBlobStoreConstructionError::PreparePublicationDirectory { root, source }
+            })?,
+        );
+        Ok((
+            Self {
+                root: root_descriptor,
+                publication_directory,
+            },
+            identity,
+        ))
     }
 
     async fn put_inner(
@@ -713,6 +799,149 @@ fn object_file_name(key: &BlobObjectKey) -> Option<OsString> {
     Path::new(key.as_str()).file_name().map(OsStr::to_os_string)
 }
 
+fn open_validated_root(
+    root: &Path,
+    require_local_backing: bool,
+) -> Result<(fs::File, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+    if !root.is_absolute() {
+        return Err(FilesystemBlobStoreConstructionError::NotAbsolute {
+            root: root.to_path_buf(),
+        });
+    }
+    let inspect = |source| FilesystemBlobStoreConstructionError::Inspect {
+        root: root.to_path_buf(),
+        source,
+    };
+    let root_descriptor = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(io::Error::from)
+    .map_err(inspect)?;
+    let metadata = root_descriptor.metadata().map_err(inspect)?;
+    if !metadata.is_dir() {
+        return Err(FilesystemBlobStoreConstructionError::NotDirectory {
+            root: root.to_path_buf(),
+        });
+    }
+    if !private_directory_metadata(&metadata) {
+        return Err(FilesystemBlobStoreConstructionError::NotPrivate {
+            root: root.to_path_buf(),
+        });
+    }
+    let positively_local = !require_local_backing
+        || positively_classified_local_filesystem(&root_descriptor).map_err(inspect)?;
+    if !positively_local {
+        return Err(
+            FilesystemBlobStoreConstructionError::UnclassifiedFilesystem {
+                root: root.to_path_buf(),
+            },
+        );
+    }
+    let canonical_path = fs::canonicalize(root).map_err(inspect)?;
+    let canonical_descriptor = open(
+        &canonical_path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(io::Error::from)
+    .map_err(inspect)?;
+    let canonical_metadata = canonical_descriptor.metadata().map_err(inspect)?;
+    let (device, inode) = metadata_device_inode(&metadata);
+    if metadata_device_inode(&canonical_metadata) != (device, inode) {
+        return Err(FilesystemBlobStoreConstructionError::UnstableIdentity {
+            root: root.to_path_buf(),
+        });
+    }
+    Ok((
+        root_descriptor,
+        FilesystemNamespaceIdentity {
+            canonical_path,
+            device,
+            inode,
+        },
+    ))
+}
+
+#[cfg(unix)]
+fn metadata_device_inode(metadata: &fs::Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn metadata_device_inode(_metadata: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+fn initialize_namespace_marker(
+    root: &fs::File,
+    namespace_id: Uuid,
+    binding_state: NamespaceBindingState,
+) -> io::Result<()> {
+    let expected = format!("{}\n", namespace_id.hyphenated());
+    if binding_state == NamespaceBindingState::New {
+        match create_namespace_marker(root, expected.as_bytes()) {
+            Ok(()) => return Ok(()),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(source),
+        }
+    }
+    verify_namespace_marker(root, expected.as_bytes())
+}
+
+fn create_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
+    let mut marker = match openat(
+        root,
+        NAMESPACE_MARKER,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    ) {
+        Ok(marker) => fs::File::from(marker),
+        Err(source) if source == rustix::io::Errno::EXIST => {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        Err(source) => return Err(io::Error::from(source)),
+    };
+    let outcome = (|| {
+        fchmod(&marker, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
+        if !private_regular_file_metadata(&marker.metadata()?) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "namespace marker is not a private regular file",
+            ));
+        }
+        marker.write_all(expected)?;
+        marker.sync_all()?;
+        root.sync_all()
+    })();
+    if outcome.is_err() {
+        let _ = unlinkat(root, NAMESPACE_MARKER, AtFlags::empty());
+    }
+    outcome
+}
+
+fn verify_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
+    let mut marker = open_relative_regular_name(root, OsStr::new(NAMESPACE_MARKER))?;
+    if !private_regular_file_metadata(&marker.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "namespace marker is not a private regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::take(&mut marker, MAX_NAMESPACE_MARKER_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "namespace marker disagrees with the configured identity",
+        ));
+    }
+    Ok(())
+}
+
 fn create_temporary_blob_file(
     directory: Arc<fs::File>,
 ) -> io::Result<(TemporaryBlobFile, fs::File)> {
@@ -914,6 +1143,56 @@ fn prepare_publication_directory(root: &fs::File) -> io::Result<fs::File> {
     Ok(publication)
 }
 
+#[cfg(target_os = "linux")]
+fn prepare_staging_directory(root: &fs::File) -> io::Result<fs::File> {
+    let created = match mkdirat(
+        root,
+        UPLOADS_DIRECTORY,
+        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+    ) {
+        Ok(()) => true,
+        Err(source) if source == rustix::io::Errno::EXIST => false,
+        Err(source) => return Err(io::Error::from(source)),
+    };
+    if created {
+        chmodat(
+            root,
+            UPLOADS_DIRECTORY,
+            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+            AtFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
+    }
+    let uploads = fs::File::from(
+        openat2(
+            root,
+            UPLOADS_DIRECTORY,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .map_err(io::Error::from)?,
+    );
+    if !private_directory_metadata(&uploads.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "blob upload directory is not private",
+        ));
+    }
+    root.sync_all()?;
+    sweep_private_temporary_directory(&uploads)?;
+    uploads.sync_all()?;
+    Ok(uploads)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prepare_staging_directory(_root: &fs::File) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob staging requires Linux descriptor-relative directories",
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn prepare_publication_directory(_root: &fs::File) -> io::Result<fs::File> {
     Err(io::Error::new(
@@ -924,6 +1203,13 @@ fn prepare_publication_directory(_root: &fs::File) -> io::Result<fs::File> {
 
 #[cfg(target_os = "linux")]
 fn sweep_publication_directory(directory: &fs::File) -> io::Result<()> {
+    sweep_private_temporary_directory(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn sweep_private_temporary_directory(directory: &fs::File) -> io::Result<()> {
+    let mut directory_offset = directory;
+    directory_offset.seek(SeekFrom::Start(0))?;
     let mut buffer = [MaybeUninit::<u8>::uninit(); 8192];
     let mut entries = RawDir::new(directory, &mut buffer);
     while let Some(entry) = entries.next() {
@@ -950,6 +1236,14 @@ fn sweep_publication_directory(directory: &fs::File) -> io::Result<()> {
         unlinkat(directory, &name, AtFlags::empty()).map_err(io::Error::from)?;
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sweep_private_temporary_directory(_directory: &fs::File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob staging requires Linux descriptor-relative directories",
+    ))
 }
 
 #[cfg(unix)]
@@ -1065,6 +1359,12 @@ pub enum FilesystemBlobStoreConstructionError {
     NotPrivate { root: PathBuf },
     /// The host could not positively classify the root as local kernel storage.
     UnclassifiedFilesystem { root: PathBuf },
+    /// The configured path changed generations while startup authenticated it.
+    UnstableIdentity { root: PathBuf },
+    /// The backend namespace marker could not be established or authenticated.
+    PrepareNamespaceMarker { root: PathBuf, source: io::Error },
+    /// The private crash-recovery upload directory could not be prepared.
+    PrepareStagingDirectory { root: PathBuf, source: io::Error },
     /// The private crash-recovery publication directory could not be prepared.
     PreparePublicationDirectory { root: PathBuf, source: io::Error },
 }
@@ -1078,6 +1378,15 @@ impl std::fmt::Debug for FilesystemBlobStoreConstructionError {
             Self::NotPrivate { .. } => "FilesystemBlobStoreConstructionError::NotPrivate",
             Self::UnclassifiedFilesystem { .. } => {
                 "FilesystemBlobStoreConstructionError::UnclassifiedFilesystem"
+            }
+            Self::UnstableIdentity { .. } => {
+                "FilesystemBlobStoreConstructionError::UnstableIdentity"
+            }
+            Self::PrepareNamespaceMarker { .. } => {
+                "FilesystemBlobStoreConstructionError::PrepareNamespaceMarker"
+            }
+            Self::PrepareStagingDirectory { .. } => {
+                "FilesystemBlobStoreConstructionError::PrepareStagingDirectory"
             }
             Self::PreparePublicationDirectory { .. } => {
                 "FilesystemBlobStoreConstructionError::PreparePublicationDirectory"
@@ -1103,6 +1412,15 @@ impl std::fmt::Display for FilesystemBlobStoreConstructionError {
             }
             Self::UnclassifiedFilesystem { .. } => formatter
                 .write_str("filesystem blob-store root is not positively classified as local"),
+            Self::UnstableIdentity { .. } => {
+                formatter.write_str("filesystem blob-store root identity changed during startup")
+            }
+            Self::PrepareNamespaceMarker { .. } => {
+                formatter.write_str("filesystem blob-store namespace marker cannot be prepared")
+            }
+            Self::PrepareStagingDirectory { .. } => {
+                formatter.write_str("filesystem blob staging directory cannot be prepared")
+            }
             Self::PreparePublicationDirectory { .. } => formatter
                 .write_str("filesystem blob-store publication directory cannot be prepared"),
         }
@@ -1112,13 +1430,15 @@ impl std::fmt::Display for FilesystemBlobStoreConstructionError {
 impl std::error::Error for FilesystemBlobStoreConstructionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Inspect { source, .. } | Self::PreparePublicationDirectory { source, .. } => {
-                Some(source)
-            }
+            Self::Inspect { source, .. }
+            | Self::PrepareNamespaceMarker { source, .. }
+            | Self::PrepareStagingDirectory { source, .. }
+            | Self::PreparePublicationDirectory { source, .. } => Some(source),
             Self::NotAbsolute { .. }
             | Self::NotDirectory { .. }
             | Self::NotPrivate { .. }
-            | Self::UnclassifiedFilesystem { .. } => None,
+            | Self::UnclassifiedFilesystem { .. }
+            | Self::UnstableIdentity { .. } => None,
         }
     }
 }
@@ -1126,6 +1446,127 @@ impl std::error::Error for FilesystemBlobStoreConstructionError {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const PRIMARY_NAMESPACE: u128 = 0x5a10_0001;
+    const SECONDARY_NAMESPACE: u128 = 0x5a10_0002;
+
+    fn open_bound_fixture(
+        root: &Path,
+        namespace: u128,
+        state: NamespaceBindingState,
+    ) -> Result<
+        (FilesystemBlobStore, FilesystemNamespaceIdentity),
+        FilesystemBlobStoreConstructionError,
+    > {
+        FilesystemBlobStore::try_new_bound_with_locality_policy(
+            root.to_path_buf(),
+            Uuid::from_u128(namespace),
+            state,
+            false,
+        )
+    }
+
+    #[test]
+    fn new_namespace_marker_is_durable_and_reopens_as_recorded() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+
+        let (_, created_identity) =
+            open_bound_fixture(root.path(), PRIMARY_NAMESPACE, NamespaceBindingState::New)
+                .expect("a new namespace marker is established");
+        let marker =
+            fs::read(root.path().join(NAMESPACE_MARKER)).expect("the namespace marker is readable");
+        let (_, recorded_identity) = open_bound_fixture(
+            root.path(),
+            PRIMARY_NAMESPACE,
+            NamespaceBindingState::Recorded,
+        )
+        .expect("the exact recorded namespace reopens");
+        let expected_marker = format!("{}\n", Uuid::from_u128(PRIMARY_NAMESPACE));
+
+        assert_eq!(marker, expected_marker.as_bytes());
+        assert_eq!(recorded_identity, created_identity);
+    }
+
+    #[test]
+    fn recorded_namespace_requires_an_existing_marker() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+
+        let error = open_bound_fixture(
+            root.path(),
+            PRIMARY_NAMESPACE,
+            NamespaceBindingState::Recorded,
+        )
+        .expect_err("a recorded namespace cannot create its missing marker");
+
+        assert!(matches!(
+            error,
+            FilesystemBlobStoreConstructionError::PrepareNamespaceMarker { .. }
+        ));
+        assert!(!root.path().join(NAMESPACE_MARKER).exists());
+    }
+
+    #[test]
+    fn namespace_marker_rejects_another_configured_identity() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        open_bound_fixture(root.path(), PRIMARY_NAMESPACE, NamespaceBindingState::New)
+            .expect("the first namespace marker is established");
+
+        let error =
+            open_bound_fixture(root.path(), SECONDARY_NAMESPACE, NamespaceBindingState::New)
+                .expect_err("an existing marker cannot be clobbered");
+
+        assert!(matches!(
+            error,
+            FilesystemBlobStoreConstructionError::PrepareNamespaceMarker { .. }
+        ));
+    }
+
+    #[test]
+    fn staging_startup_sweeps_proven_regular_spools() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let uploads = root.path().join(UPLOADS_DIRECTORY);
+        fs::create_dir(&uploads).expect("the fixture creates the upload directory");
+        fs::set_permissions(&uploads, fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the upload directory is private");
+        let spool = uploads.join("orphan");
+        fs::write(&spool, b"partial upload").expect("the fixture creates an orphan spool");
+        fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the orphan spool is private");
+
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+
+        assert!(!spool.exists());
+        assert_eq!(staging.identity().canonical_path(), root.path());
+    }
+
+    #[test]
+    fn staging_drop_sweeps_proven_regular_spools() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let spool = root.path().join(UPLOADS_DIRECTORY).join("active-upload");
+        fs::write(&spool, b"partial upload").expect("the fixture creates an active spool");
+        fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the active spool is private");
+
+        drop(staging);
+
+        assert!(!spool.exists());
+    }
 
     #[test]
     fn inv059_filesystem_rejects_mounted_child_directories() {
