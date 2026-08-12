@@ -244,6 +244,15 @@ outcome; it never occupies a connection task while queued. Thus even 16 reads
 that retain their complete 24-hour allowance leave 112 of the process protocol's
 128 connection tasks available to control traffic.
 
+A model-originated `blob_read` that acquires one of those permits releases its
+scheduler-pass slot before store traversal while its physical attempt and
+per-session dispatch gate remain in flight. It reacquires scheduler capacity
+before committing either the correlated result evidence or a crash-loss
+classification. A request that cannot acquire a direct-read permit returns the
+ordinary unavailable result without relinquishing its pass. At most 16 such
+tasks can wait to reacquire scheduler capacity, so slow reads cannot occupy all
+16 scheduler-pass slots and the handoff creates no unbounded waiter inventory.
+
 Attachment-preparation store traversal is bounded independently from scheduler
 passes: at most eight such traversals are active process-wide. A model-call pass
 tries to acquire this permit without waiting. If none is immediately available,

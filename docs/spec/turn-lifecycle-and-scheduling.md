@@ -407,7 +407,11 @@ the sweep (INV-007).
   task remains in flight for per-session deduplication but relinquishes the
   scheduler-pass slot during store I/O; after successful verification it
   reacquires a slot before send authorization and its guarded transaction
-  revalidates authority.
+  revalidates authority. A model-originated `blob_read` uses the same slot
+  handoff after it acquires the blob contract's non-waiting direct-read permit:
+  its physical attempt remains in flight during store traversal, and it
+  reacquires a slot before committing correlated result evidence or crash-loss
+  classification. At most 16 direct reads can wait at that reacquisition point.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
@@ -514,17 +518,16 @@ end (INV-034):
   so a scheduler pass projects its results and prepares the next call without
   relying on a lost local wake.
 
-In the three failing branches only, one `TurnFailed` semantic entry is appended.
-The evidence-free branch extends the starting frontier; the prepared-call branch
-extends that call's exact source frontier, which already contains every steering
-entry consumed when the call was prepared; and the prepared/effect-free tool
-branch extends the yielded tool-use frontier by exactly one correlated result
-entry per request in proposal order before the failure marker. The turn
-terminalizes `Failed`, releasing the slot via one guarded attempt-end update and
-one guarded lifecycle update, each required to match exactly one row; and a
-`turn_failed` outbox record is appended in the same transaction (entry payloads
-are [sessions-and-transcript](sessions-and-transcript.md) scope; outbox
-mechanics are [persistence-protocol](persistence-protocol.md) scope).
+In the two failing branches only, one `TurnFailed` semantic entry is appended.
+The evidence-free branch extends the starting frontier, and the
+prepared/effect-free tool branch extends the yielded tool-use frontier by
+exactly one correlated result entry per request in proposal order before the
+failure marker. The turn terminalizes `Failed`, releasing the slot via one
+guarded attempt-end update and one guarded lifecycle update, each required to
+match exactly one row; and a `turn_failed` outbox record is appended in the same
+transaction (entry payloads are
+[sessions-and-transcript](sessions-and-transcript.md) scope; outbox mechanics
+are [persistence-protocol](persistence-protocol.md) scope).
 
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or

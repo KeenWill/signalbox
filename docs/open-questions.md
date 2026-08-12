@@ -238,18 +238,18 @@ https://github.com/KeenWill/signalbox/pull/562#discussion_r3760635157
 
 ## Codex CLI image capability features
 
-- **Whether the pinned CLI's image features return once accepted input carries
-  images.** The adapter hard-disables `image_generation` and `view_image`. Each
-  adds a model-visible tool that the adapter's structured-output envelope does
-  not carry, and `view_image` — which loads a local image file into the
+- **Whether the pinned CLI's image features return once provider input carries
+  image bytes.** The adapter hard-disables `image_generation` and `view_image`.
+  Each adds a model-visible tool that the adapter's structured-output envelope
+  does not carry, and `view_image` — which loads a local image file into the
   conversation context — is enabled by default in the pinned inventory, so
   classifying it as non-capability would leave it live rather than merely
-  acknowledged. Accepted input is text-only today, so neither feature has
-  anything to act on. When the content extensions recorded under accepted-input
-  content above carry image and file content, decide whether either name is
-  re-enabled and how the bytes reach the spawned CLI. Blocks re-enabling either
-  name; it does not block the present disables, which stand on the capability
-  rule alone.
+  acknowledged. Accepted input can carry blob-backed attachment parts, but the
+  model sees only their text stubs: no present provider input carries attachment
+  bytes as image or file media. If provider-native image or file delivery is
+  added, decide whether either CLI feature is re-enabled and how the bytes reach
+  the spawned CLI. Blocks re-enabling either name; it does not block attachment
+  parts or the present disables, which stand on the capability rule alone.
 
 ## Model fallback and provenance
 

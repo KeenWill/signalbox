@@ -838,7 +838,10 @@ tools:
   padded `bytes_base64`. Its permission default is `Auto` and its effect class
   is conservatively `ExternalEffect`: recorded failover can issue an
   authenticated S3 GET observable to the object-store operator even when the
-  selected replica for another execution is local.
+  selected replica for another execution is local. After its non-waiting
+  direct-read admission, the scheduler releases pass capacity during store
+  traversal and reacquires it before correlated result commit or crash-loss
+  classification, as owned by the blob contract.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
   invalid. Before dispatch, its canonical origin must satisfy the
