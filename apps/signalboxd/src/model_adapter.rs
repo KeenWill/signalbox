@@ -291,6 +291,7 @@ mod tests {
         ProviderReportedModel, ReasoningLevel, RequestedTarget, ResolvedTarget, Script,
         ScriptedModel, ServiceTier, TerminalEvidence, TokenUsage,
     };
+    use signalbox_model_runtime_claude_cli::SUPPORTED_CLAUDE_CLI_VERSION;
 
     use crate::configuration::HubModelConfiguration;
 
@@ -352,12 +353,21 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize."
@@ -410,12 +420,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize."
@@ -471,21 +491,39 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
 
 [[credential_profiles]]
 name = "openai-primary"
+adapter = "openai"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/openai-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
+[[credential_pools]]
+name = "openai-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{ profile = "openai-primary", priority = 1 }]
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [[adapter_mappings]]
 model_family = "openai"
 adapter = "openai"
-credential_profile = "openai-primary"
+credential_pool = "openai-main"
 
 [compaction]
 prompt = "Summarize."
@@ -592,18 +630,27 @@ service_tiers = ["priority"]
         let temporary = tempfile::tempdir().expect("temporary working directory is available");
         let executable = temporary.path().join("fake-claude");
         let bridge = temporary.path().join("fake-claude-mcp-bridge");
+        let credential_file = temporary.path().join("claude-api-primary");
         let expected_completion = "routed through Claude";
         let provider_model = "claude-cli-offline-exact";
+        let file_credential = "synthetic-claude-file-value";
+        std::fs::write(&credential_file, file_credential)
+            .expect("the Claude credential fixture is writable");
         std::fs::write(
             &executable,
             r#"#!/bin/sh
+test -z "${ANTHROPIC_API_KEY+x}" || exit 41
+grep -q '"apiKeyHelper"' "${CLAUDE_CONFIG_DIR}/settings.json" || exit 42
+test "$(cat "${CLAUDE_CONFIG_DIR}/credential")" = '<file-credential>' || exit 43
 cat >/dev/null
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"019c0000-0000-7000-8000-000000000002","tools":[],"mcp_servers":[{"name":"signalbox_tools","status":"connected"}],"model":"<provider-model>","slash_commands":[],"skills":[],"plugins":[],"claude_code_version":"2.1.220"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"019c0000-0000-7000-8000-000000000002","tools":[],"mcp_servers":[{"name":"signalbox_tools","status":"connected"}],"model":"<provider-model>","slash_commands":[],"skills":[],"plugins":[],"claude_code_version":"<claude-cli-version>"}'
 printf '%s\n' '{"type":"assistant","parent_tool_use_id":null,"message":{"model":"<provider-model>","id":"message-1","role":"assistant","content":[{"type":"text","text":"<completion-text>"}],"usage":{"input_tokens":8,"output_tokens":4}}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"019c0000-0000-7000-8000-000000000002","stop_reason":"end_turn","terminal_reason":"completed","result":"<completion-text>","errors":[],"usage":{"input_tokens":8,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'
 "#
             .replace("<completion-text>", expected_completion)
-            .replace("<provider-model>", provider_model),
+            .replace("<file-credential>", file_credential)
+            .replace("<provider-model>", provider_model)
+            .replace("<claude-cli-version>", SUPPORTED_CLAUDE_CLI_VERSION),
         )
         .expect("fake Claude executable is writable");
         let mut permissions = std::fs::metadata(&executable)
@@ -619,21 +666,40 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
 
 [[credential_profiles]]
-name = "claude-subscription-primary"
-billing_kind = "subscription"
+name = "claude-api-primary"
+adapter = "claude_cli"
+billing_kind = "api_metered"
+delivery = "file"
+file = "{}"
+env_key = "ANTHROPIC_API_KEY"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
+[[credential_pools]]
+name = "claude-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{{ profile = "claude-api-primary", priority = 1 }}]
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [[adapter_mappings]]
 model_family = "claude_code"
 adapter = "claude_cli"
-credential_profile = "claude-subscription-primary"
+credential_pool = "claude-main"
 
 [claude_cli]
 executable = "{}"
@@ -661,6 +727,7 @@ context_window_tokens = 200000
 reasoning_levels = ["high"]
 fast_mode = "request_control"
 "#,
+            credential_file.display(),
             executable.display(),
             bridge.display(),
             temporary.path().display(),
@@ -678,7 +745,7 @@ fast_mode = "request_control"
         settings.fast_mode = FastMode::Enabled;
         let operation = ModelOperation::new(
             String::from("claude-route"),
-            CredentialReference::new("claude-subscription-primary"),
+            CredentialReference::new("claude-api-primary"),
             RequestedTarget::new("claude-cli-selection"),
             ResolvedTarget::new(provider_model),
             vec![ConversationMessage::user_text("respond")],
@@ -729,21 +796,40 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "codex-subscription-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "{}"

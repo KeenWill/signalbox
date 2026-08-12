@@ -86,23 +86,26 @@ space-separated `xcodebuild` test identifiers and select which suites
 ## Snapshot tests
 
 `Tests/SignalboxAppTests/LiveScreenSnapshotTests.swift` renders the screens
-`RootView` reaches and compares each against a committed golden under
-`Tests/SignalboxAppTests/__Snapshots__`. Rendering is in process — one screen
-hosted in one window, at a fixed canvas size, display scale, and safe area — so
-it sees no scene lifecycle, no window chrome, and no sheet presentation; sheet
-content is snapshotted as its own screen. `ScreenshotScenario` selects the
-fixtures.
+`RootView` reaches, and its `+LegacyScreens` companion renders the kept screens
+that it no longer reaches. The 129 committed goldens under
+`Tests/SignalboxAppTests/__Snapshots__` cover four fixed screen canvases —
+iPhone and iPad, each in portrait and landscape — plus standalone sheet
+content. Rendering is in process, with one screen hosted in one window at a
+fixed canvas size, display scale, and safe area, so it sees no scene lifecycle
+or window chrome. A sheet presented by the hosted screen does reach its golden;
+sheet content is also snapshotted alone on its own canvas.
+`ScreenshotScenario` selects the fixtures.
 
-Record and verify through the two scripts below and nothing else:
+The canonical record and verification entry points are the two scripts below:
 `scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
 the simulator from `scripts/lib/snapshots.sh`, which is what CI runs, while a
-bare `scripts/test-xcode.sh` resolves whichever compatible phone is booted. Ten
-of the twelve goldens are byte-identical across iPhone simulators. The two
-recorded on the regular canvas are the exception, and for one reason: it is
-wider than a phone screen, so the window's corner mask and the glass materials
-composite against the device. Those two can fail on a destination other than
-CI's, and re-recording them there would commit a rendering the pinned simulator
-then rejects.
+bare `scripts/test-xcode.sh` resolves whichever compatible phone is booted.
+The phone-canvas goldens are byte-identical across the iPhone simulator models
+on which they were checked. The two iPad canvases and the sheet canvas are wider
+than the host phone's screen, so the window's corner mask and glass materials
+composite against the destination. Those wide-canvas goldens can legitimately
+fail on a destination other than CI's, and re-recording them there would commit
+a rendering the pinned simulator then rejects.
 
 Reduce Transparency is refused rather than pinned. Every other appearance input
 these goldens depend on is a trait the canvas overrides, but that one is not a

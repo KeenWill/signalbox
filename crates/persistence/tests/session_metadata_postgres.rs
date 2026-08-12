@@ -20,7 +20,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     MIGRATOR,
     create_session::CreateSessionRepository,
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     session_metadata::{
         ReplaceSessionMetadataHandlingOutcome, SessionMetadataCorruption,
         SessionMetadataRepository, SessionMetadataRepositoryError,
@@ -57,6 +57,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -79,6 +80,7 @@ async fn postgres_before_metadata_issuer()
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -163,7 +165,7 @@ async fn inv012_metadata_issuer_migration_preserves_legacy_user_agency()
     let session_id = Uuid::from_u128(0x701);
     let tool_request_id = Uuid::from_u128(0xa01);
     let actor_kind = "tool";
-    let expected_issuer = ("owner".to_owned(), None);
+    let expected_issuer = ("user".to_owned(), None);
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
@@ -961,7 +963,7 @@ async fn inv012_metadata_installation_authenticates_snapshot_before_supersession
         "INSERT INTO session_metadata
             (session_id, source_command_id, title, archived, updated_at,
              actor_kind)
-         VALUES ($1, $2, 'current title', false, to_timestamp(1), 'owner')",
+         VALUES ($1, $2, 'current title', false, to_timestamp(1), 'user')",
     )
     .bind(Uuid::from_u128(0x701))
     .bind(Uuid::from_u128(0x905))
@@ -976,8 +978,8 @@ async fn inv012_metadata_installation_authenticates_snapshot_before_supersession
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', 'owner', 'receipt title', false,
-             'applied', $2, $2, to_timestamp(1), 'owner')",
+             'user', 'user', 'receipt title', false,
+             'applied', $2, $2, to_timestamp(1), 'user')",
     )
     .bind(Uuid::from_u128(0x905))
     .bind(Uuid::from_u128(0x701))
@@ -1285,7 +1287,7 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', 'owner', false, 'applied', $2, $2,
+             'user', 'user', false, 'applied', $2, $2,
              statement_timestamp(), NULL)",
     )
     .bind(Uuid::from_u128(0x907))
@@ -1347,8 +1349,8 @@ async fn inv002_metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dy
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', 'owner', false, 'applied', $2, $2,
-             '-infinity'::timestamptz, 'owner')",
+             'user', 'user', false, 'applied', $2, $2,
+             '-infinity'::timestamptz, 'user')",
     )
     .bind(Uuid::from_u128(0x908))
     .bind(Uuid::from_u128(0x701))
@@ -1388,8 +1390,8 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', 'owner', false, 'applied', $2, $2,
-             statement_timestamp(), 'owner')",
+             'user', 'user', false, 'applied', $2, $2,
+             statement_timestamp(), 'user')",
     )
     .bind(Uuid::from_u128(0x908))
     .bind(Uuid::from_u128(0x701))

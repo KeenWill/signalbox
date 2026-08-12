@@ -1,3 +1,12 @@
+//! Integration coverage for `SandboxedCommandRunner` / `TokioProcessRunner`
+//! driving the real compiled `signalbox-exec-supervisor` binary.
+//!
+//! Exercises supervisor-executable identity pinning, spawn-failure
+//! propagation at each stage, capture-byte limits, ambient-environment
+//! clearing, dispatch-marker and exit/signal reporting, target stderr
+//! forwarding, and descendant process-tree cleanup on both leader
+//! completion and timeout.
+
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -22,6 +31,16 @@ const EXPLICIT_ENVIRONMENT_NAME: &str = "SIGNALBOX_EXEC_FIXTURE";
 const EXPLICIT_ENVIRONMENT_VALUE: &str = "visible";
 const SUCCESSFUL_EXIT_CODE: i32 = 0;
 const LEGITIMATE_TARGET_EXIT_CODE: i32 = 127;
+const TARGET_STDERR_OUTPUT: &str = "target-stderr";
+/// Complete stderr expected when a dispatched target writes
+/// `TARGET_STDERR_OUTPUT`: the dispatch marker, then the forwarded bytes.
+const EXPECTED_MARKER_THEN_TARGET_STDERR: &[u8] = b"signalbox-exec:dispatched\ntarget-stderr";
+/// Bounds the stderr-forwarding regression so a deadlocked supervisor fails
+/// that test as `TimedOut` instead of hanging the suite; otherwise arbitrary.
+const DEADLOCK_BOUNDING_TIMEOUT: Duration = Duration::from_secs(5);
+/// Arbitrary capture budget comfortably above the marker-plus-payload length,
+/// so a `Complete` capture reflects forwarding rather than budget truncation.
+const FORWARDED_STDERR_CAPTURE_BUDGET: usize = 1024;
 const TARGET_TERMINATION_SIGNAL: &str = "PIPE";
 const REPLACEMENT_SUPERVISOR_EXIT_CODE: i32 = 99;
 const SUPERVISOR_PIN_DIRECTORY: &str = "signalbox-exec-supervisor-pin";
@@ -337,6 +356,50 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
             }
         );
         assert_eq!(result.stderr.bytes, EXPECTED_DISPATCH_MARKER);
+        Ok(())
+    })
+    .await
+}
+
+/// A dispatched target that writes to stderr must still be reaped and reported.
+///
+/// The supervisor writes its dispatch marker under `std::io::stderr().lock()`.
+/// Holding that guard across the target run deadlocks the helper thread that
+/// copies the target's stderr, because that helper writes through
+/// `&mut std::io::stderr()` and `ReentrantLock` re-enters only for the thread
+/// that already owns it. No other dispatch test runs a target that writes to
+/// stderr, so none of them can reach the deadlock; this one does.
+#[tokio::test]
+async fn production_dispatcher_forwards_target_stderr_without_deadlocking()
+-> Result<(), Box<dyn std::error::Error>> {
+    with_procfs_supervision(async {
+        let supervisor = test_bin_path!("signalbox-exec-supervisor");
+        let request = ProcessRequest {
+            program: supervisor.into_os_string(),
+            arguments: vec![
+                OsString::from(DISPATCH_MODE),
+                fixture_program("sh")?.into_os_string(),
+                OsString::from("-c"),
+                OsString::from(format!("printf %s {TARGET_STDERR_OUTPUT} 1>&2")),
+            ],
+            working_directory: std::env::current_dir()?,
+            timeout: DEADLOCK_BOUNDING_TIMEOUT,
+            capture_bytes: FORWARDED_STDERR_CAPTURE_BUDGET,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
+        };
+
+        let result = production_runner()?.run(request).await;
+
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::Exited {
+                code: Some(SUCCESSFUL_EXIT_CODE),
+            }
+        );
+        assert_eq!(result.stderr.bytes, EXPECTED_MARKER_THEN_TARGET_STDERR);
+        assert_eq!(result.stderr.completeness, CaptureCompleteness::Complete);
         Ok(())
     })
     .await

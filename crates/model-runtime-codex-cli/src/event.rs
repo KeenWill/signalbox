@@ -11,13 +11,26 @@
 //! in whole through `extend_dropped_context`; fields it does not model go
 //! through `fold_uninterpreted`, which weighs them as independent units.
 //!
-//! Interpreted fields are outside the rule even where they are also dropped.
-//! `validate_item_identity` reads `item.id` and `item.type` on every item
-//! event, so every item arm excludes both from the fold; where the arm drops
-//! the item as well — an unsupported item, a bare lifecycle event — nothing
-//! carries their bytes to the lookbehind, and a marker one of them ends in
-//! arms nothing. Widening the fold to the identity, not a broader claim here,
-//! is what would close that.
+//! Interpreted fields are outside the rule even where they are also dropped,
+//! and merely reading a field does not interpret it. `validate_item_identity`
+//! checks that `item.id` and `item.type` are nonempty, which leaves both
+//! arbitrary provider text; an arm that then drops them folds them like any
+//! other dropped field, so a credential marker one of them ends in governs the
+//! text that follows. Two identity fields stay outside the fold, each because
+//! something else already governs it: an item `type` that selected a *known*
+//! arm was matched against the adapter's own literal (`agent_message`,
+//! `reasoning`, `error`) and carries no provider bytes at all, and the agent
+//! message's `id` is retained rather than dropped — `completed` sanitizes it
+//! against the held lookbehind and against the final text it precedes, which
+//! breaks the marker in the field that carries it instead of suppressing the
+//! text.
+//!
+//! The identity weighs in the fold as ordinary units, which is also its cost:
+//! an id or type whose trailing bytes are a credential candidate can be the
+//! second live marker that makes `fold_dropped_units` fail closed for the rest
+//! of the stream. That is the direction to err in — the alternative is bytes
+//! that arm nothing — but it is why the identity is folded only where the arm
+//! actually drops it.
 //!
 //! Each arm of `EventDecoder::push` cites this rule and adds only what is
 //! local to it.
@@ -32,8 +45,8 @@ use signalbox_model_runtime::{
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
     ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, TerminalEvidence, TokenUsage,
-    ToolCallId, ToolCallProposal, ToolName, provider_json_has_duplicate_members, redact_text,
-    trailing_credential_context, validate_provider_json_nesting,
+    ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members,
+    redact_text, trailing_credential_context, validate_provider_json_nesting,
 };
 
 use crate::status::classify_error;
@@ -198,12 +211,13 @@ impl<C: Clone> EventDecoder<C> {
             "item.started" | "item.updated" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
                 validate_item_identity(&identity.item)?;
-                // The adapter interprets only the identity of a lifecycle
-                // event, but an additively-tolerated one may carry
-                // provider-controlled string fields — beside the item or inside
-                // it — whose credential marker would otherwise seed nothing;
-                // fold them into the lookbehind.
-                fold_uninterpreted(sink, &value, &["type"], Some(("item", &["id", "type"])));
+                // A lifecycle event is dropped whole. Its identity is only
+                // validated as nonempty, never matched against anything the
+                // adapter chose, so `id` and `item.type` are provider text the
+                // adapter drops — they fold with the additively-tolerated
+                // fields beside and inside the item, and a marker ending any
+                // of them governs the text that follows.
+                fold_uninterpreted(sink, &value, &["type"], Some(("item", &[])));
             }
             "item.completed" => {
                 let identity: ItemLifecycleEvent = decode(value.clone())?;
@@ -223,9 +237,10 @@ impl<C: Clone> EventDecoder<C> {
                         // sibling fields serde accepts and discards; fold them
                         // before the interpreted id and text are retained, so a
                         // marker one of them ends in still governs the text that
-                        // follows. Only `id` and `text` are interpreted here:
-                        // both are retained and separately sanitized in
-                        // `completed`.
+                        // follows. The item's `id` and `text` are retained and
+                        // separately sanitized in `completed`, and its `type`
+                        // matched the adapter's own `agent_message` literal, so
+                        // none of the three is dropped content.
                         fold_uninterpreted(
                             sink,
                             &value,
@@ -241,13 +256,16 @@ impl<C: Clone> EventDecoder<C> {
                     }
                     ItemDetails::Reasoning { text } => {
                         // Additive siblings serde accepted and discarded are
-                        // dropped content; fold them before the modeled text is
-                        // emitted or held.
+                        // dropped content, and so is the item id this arm
+                        // never retains; fold them before the modeled text is
+                        // emitted or held. The item `type` matched the
+                        // adapter's own `reasoning` literal and is the only
+                        // interpreted field left inside the item.
                         fold_uninterpreted(
                             sink,
                             &value,
                             &["type"],
-                            Some(("item", &["id", "type", "text"])),
+                            Some(("item", &["type", "text"])),
                         );
                         if self.delivery == DeliveryMode::Streamed {
                             let index = self.take_part_index()?;
@@ -263,28 +281,26 @@ impl<C: Clone> EventDecoder<C> {
                     }
                     ItemDetails::Error { message } => {
                         // An error item is dropped in both delivery modes:
-                        // additive siblings fold, then the modeled message
-                        // extends the lookbehind (dropped-content rule).
+                        // additive siblings and the unretained item id fold,
+                        // then the modeled message extends the lookbehind
+                        // (dropped-content rule). The item `type` matched the
+                        // adapter's own `error` literal.
                         fold_uninterpreted(
                             sink,
                             &value,
                             &["type"],
-                            Some(("item", &["id", "type", "message"])),
+                            Some(("item", &["type", "message"])),
                         );
                         sink.extend_dropped_context(&message);
                     }
                     ItemDetails::Other => {
                         // An unsupported item is dropped from the output. Its
                         // shape is unmodeled — provider text can live in any
-                        // field or nested within one — so every field outside
-                        // the validated item identity folds as an independent
-                        // unit (dropped-content rule).
-                        fold_uninterpreted(
-                            sink,
-                            &value,
-                            &["type"],
-                            Some(("item", &["id", "type"])),
-                        );
+                        // field or nested within one, and its `type` matched no
+                        // literal of the adapter's — so every field of the item,
+                        // its merely-validated identity included, folds as an
+                        // independent unit (dropped-content rule).
+                        fold_uninterpreted(sink, &value, &["type"], Some(("item", &[])));
                     }
                 }
             }
@@ -340,7 +356,7 @@ impl<C: Clone> EventDecoder<C> {
                 provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) => self.completed(sink),
-            None => boundary_loss(
+            None => boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::StreamEndedWithoutTerminalMarker {
@@ -371,7 +387,7 @@ impl<C: Clone> EventDecoder<C> {
     }
 
     pub(crate) fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
-        boundary_loss(self.exchange, self.usage, cause)
+        boundary_loss_before_envelope(self.exchange, self.usage, cause)
     }
 
     pub(crate) fn boundary_loss_unless_provider_failure(
@@ -383,7 +399,9 @@ impl<C: Clone> EventDecoder<C> {
             Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
                 provider_failure(self.exchange, self.usage, &message, sink)
             }
-            Some(CliTerminal::Completed) | None => boundary_loss(self.exchange, self.usage, cause),
+            Some(CliTerminal::Completed) | None => {
+                boundary_loss_before_envelope(self.exchange, self.usage, cause)
+            }
         }
     }
 
@@ -411,7 +429,7 @@ impl<C: Clone> EventDecoder<C> {
 
     fn completed(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         let Some(agent_message) = self.agent_message.take() else {
-            return boundary_loss(
+            return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::ResponseUnintelligible {
@@ -420,7 +438,7 @@ impl<C: Clone> EventDecoder<C> {
             );
         };
         if let Err(error) = validate_provider_json_nesting(agent_message.as_bytes()) {
-            return boundary_loss(
+            return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::ResponseUnintelligible {
@@ -429,7 +447,7 @@ impl<C: Clone> EventDecoder<C> {
             );
         }
         if let Err(error) = reject_duplicate_json_members(&agent_message) {
-            return boundary_loss(
+            return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::StreamProtocolViolation {
@@ -443,7 +461,7 @@ impl<C: Clone> EventDecoder<C> {
         let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
             Ok(envelope) => envelope,
             Err(_) => {
-                return boundary_loss(
+                return boundary_loss_before_envelope(
                     self.exchange,
                     self.usage,
                     LossCause::ResponseUnintelligible {
@@ -453,12 +471,23 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
+        // Derived from the parsed envelope alone, so it is a fact from here on
+        // and every loss below retains it — a finish observed before a loss is
+        // retained per docs/spec/runtime-substrate.md, and these losses were
+        // discarding one the adapter had already decoded.
+        let reported_finish = match envelope.outcome {
+            EnvelopeOutcome::Refused => FinishReason::Refusal,
+            EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
+            EnvelopeOutcome::Completed => FinishReason::ToolUse,
+        };
         let mut content = match self.decode_content(&envelope, &mut *sink) {
             Ok(content) => content,
             Err(detail) => {
-                return boundary_loss(
+                return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
+                    Some(reported_finish.clone()),
+                    &envelope,
                     LossCause::ResponseUnintelligible { detail },
                 );
             }
@@ -485,11 +514,6 @@ impl<C: Clone> EventDecoder<C> {
                 sanitized
             }
         });
-        let reported_finish = match envelope.outcome {
-            EnvelopeOutcome::Refused => FinishReason::Refusal,
-            EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
-            EnvelopeOutcome::Completed => FinishReason::ToolUse,
-        };
         if self.delivery == DeliveryMode::Streamed {
             sink.begin_streaming_terminal_text_capture();
         }
@@ -499,9 +523,11 @@ impl<C: Clone> EventDecoder<C> {
             &envelope.text,
             reported_finish.clone(),
         ) {
-            return boundary_loss(
+            return boundary_loss_after_envelope(
                 self.exchange,
                 self.usage,
+                Some(reported_finish.clone()),
+                &envelope,
                 LossCause::ResponseUnintelligible { detail },
             );
         }
@@ -540,10 +566,11 @@ impl<C: Clone> EventDecoder<C> {
                 && self.output_contract_name.is_none()
                 && envelope.outcome != EnvelopeOutcome::Refused
             {
-                return boundary_loss_with_finish(
+                return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
                     Some(reported_finish),
+                    &envelope,
                     LossCause::ResponseUnintelligible {
                         detail: "streamed response envelope carries no completion material"
                             .to_string(),
@@ -1016,14 +1043,44 @@ fn provider_failure_classified<C: Clone>(
     })
 }
 
-fn boundary_loss(exchange: ExchangeFacts, usage: TokenUsage, cause: LossCause) -> TerminalEvidence {
-    boundary_loss_with_finish(exchange, usage, None, cause)
+/// Boundary loss raised before the response envelope was parsed.
+///
+/// This adapter cannot answer whether a tool call had opened at such a loss.
+/// The CLI's item lifecycle carries no tool item — `ItemDetails` has no tool
+/// variant — and a turn's tool calls exist only inside the agent-message
+/// envelope, which stays unparsed JSON text in `agent_message` until the
+/// terminal event. The fact is therefore [`ToolCallsAtLoss::Unobserved`], not
+/// a claim that none opened.
+fn boundary_loss_before_envelope(
+    exchange: ExchangeFacts,
+    usage: TokenUsage,
+    cause: LossCause,
+) -> TerminalEvidence {
+    boundary_loss_with_finish(exchange, usage, None, ToolCallsAtLoss::Unobserved, cause)
+}
+
+/// Boundary loss raised once the response envelope parsed, so the turn's tool
+/// announcements are in hand and the fact is stated rather than withheld.
+fn boundary_loss_after_envelope(
+    exchange: ExchangeFacts,
+    usage: TokenUsage,
+    finish_reported: Option<FinishReason>,
+    envelope: &ModelEnvelope,
+    cause: LossCause,
+) -> TerminalEvidence {
+    let tool_calls = if envelope.tool_calls.is_empty() {
+        ToolCallsAtLoss::NoneOpened
+    } else {
+        ToolCallsAtLoss::Opened
+    };
+    boundary_loss_with_finish(exchange, usage, finish_reported, tool_calls, cause)
 }
 
 fn boundary_loss_with_finish(
     exchange: ExchangeFacts,
     usage: TokenUsage,
     finish_reported: Option<FinishReason>,
+    tool_calls: ToolCallsAtLoss,
     cause: LossCause,
 ) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
@@ -1031,6 +1088,7 @@ fn boundary_loss_with_finish(
         exchange,
         reported_model: None,
         finish_reported,
+        tool_calls,
         usage,
     })
 }

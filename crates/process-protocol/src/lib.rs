@@ -16,7 +16,12 @@ use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
-use signalbox_domain::{ToolDecisionRationale, ToolDenialReason};
+use signalbox_domain::{
+    CredentialProfileName as DomainCredentialProfileName,
+    RunnerCapabilityClass as DomainRunnerCapabilityClass,
+    RunnerWorkingDirectory as DomainRunnerWorkingDirectory, ToolDecisionRationale,
+    ToolDenialReason, WorkspaceRepositoryKey as DomainWorkspaceRepositoryKey,
+};
 use uuid::Uuid;
 
 /// The single admitted process-protocol version.
@@ -246,6 +251,46 @@ impl TryFrom<String> for CanonicalU64 {
 impl From<CanonicalU64> for String {
     fn from(value: CanonicalU64) -> Self {
         value.0.to_string()
+    }
+}
+
+/// A positive unsigned 64-bit value encoded as its shortest decimal string.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PositiveCanonicalU64(u64);
+
+impl PositiveCanonicalU64 {
+    /// Checks that the represented wire integer is positive.
+    pub const fn try_new(value: u64) -> Result<Self, CanonicalValueError> {
+        if value == 0 {
+            return Err(CanonicalValueError::Decimal);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the positive numeric value.
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<String> for PositiveCanonicalU64 {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(parse_decimal_u64(&value)?)
+    }
+}
+
+impl From<PositiveCanonicalU64> for String {
+    fn from(value: PositiveCanonicalU64) -> Self {
+        value.0.to_string()
+    }
+}
+
+impl From<signalbox_domain::RunnerGeneration> for PositiveCanonicalU64 {
+    fn from(value: signalbox_domain::RunnerGeneration) -> Self {
+        Self(value.get())
     }
 }
 
@@ -1188,6 +1233,12 @@ pub enum CanonicalValueError {
     SystemPrompt,
     /// A dotted session placement or root-global-read decision was invalid.
     Placement,
+    /// Runner working-directory text was empty, NUL-bearing, or oversized.
+    RunnerWorkingDirectory,
+    /// Runner capability, credential-profile, or repository name was invalid.
+    RunnerCatalogName,
+    /// Runner projection state and exact-runner evidence were inconsistent.
+    RunnerProjection,
     /// Dollar amount was not canonical bounded nonnegative decimal text.
     DollarAmount,
     /// Billing rate version was empty, padded, NUL-bearing, or oversized.
@@ -1206,6 +1257,9 @@ impl fmt::Display for CanonicalValueError {
             Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
             Self::Placement => "session placement is invalid",
+            Self::RunnerWorkingDirectory => "runner working directory is invalid",
+            Self::RunnerCatalogName => "runner catalog name is invalid",
+            Self::RunnerProjection => "runner projection state is invalid",
             Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
             Self::RateVersion => "billing rate version is invalid",
         })
@@ -2264,11 +2318,28 @@ where
 }
 
 /// Closed actor provenance carried by a metadata last-writer stamp.
+///
+/// The variants mirror the domain actor inventory exactly, because durable
+/// metadata already records every one of them: the tool-facing replacement
+/// constructor stamps a tool writer, and a narrower wire enum would leave a
+/// readable durable snapshot with no wire projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetadataActor {
     /// The user wrote the snapshot.
     User {},
+    /// Model output from one exact turn wrote the snapshot.
+    Model {
+        /// The turn whose model output acted.
+        turn_id: CanonicalUuid,
+    },
+    /// The startup recovery scan wrote the snapshot.
+    Recovery {},
+    /// Execution of one exact tool request wrote the snapshot.
+    Tool {
+        /// The tool request whose execution acted.
+        tool_request_id: CanonicalUuid,
+    },
 }
 
 /// The post-lock database statement time and actor of the latest replacement.
@@ -4505,6 +4576,16 @@ pub enum TurnState {
         /// Ambiguous tool attempt awaiting recovery.
         recovery_tool_attempt_id: CanonicalUuid,
     },
+    /// The turn is parked on replacement of one exact lost runner placement.
+    ActiveAwaitingRunnerRecovery {
+        /// Runner whose durable loss owns this wait.
+        runner_id: CanonicalUuid,
+        /// Positive placement revision against which loss was projected.
+        placement_revision: PositiveCanonicalU64,
+        /// Physical tool attempt interrupted by loss, or null when none exists.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_attempt_id: Option<CanonicalUuid>,
+    },
     /// The turn terminalized as failed.
     Failed {
         /// Exact terminal frontier.
@@ -4605,6 +4686,12 @@ enum RawTurnState {
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_tool_attempt_id: CanonicalUuid,
+    },
+    ActiveAwaitingRunnerRecovery {
+        runner_id: CanonicalUuid,
+        placement_revision: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_attempt_id: Option<CanonicalUuid>,
     },
     Failed {
         terminal_frontier_id: CanonicalUuid,
@@ -4733,6 +4820,20 @@ impl<'de> Deserialize<'de> for TurnState {
             } => Self::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
+            },
+            RawTurnState::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision,
+                tool_attempt_id,
+            } => Self::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision: PositiveCanonicalU64::try_new(placement_revision.value())
+                    .map_err(|_| {
+                        serde::de::Error::custom(
+                            "runner recovery requires a positive placement revision",
+                        )
+                    })?,
+                tool_attempt_id,
             },
             RawTurnState::Failed {
                 terminal_frontier_id,
@@ -5200,6 +5301,414 @@ pub enum ToolBatchState {
     },
 }
 
+/// Sandbox profile selected by one runner placement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RunnerSandboxProfile {
+    /// Supervised execution with the invoking user's ambient filesystem and network access.
+    #[serde(rename = "ambient")]
+    Ambient,
+    /// Execution restricted to the placement-owned writable root.
+    #[serde(rename = "workspace-restricted")]
+    WorkspaceRestricted,
+}
+
+/// Checked runner capability-class name carried by a session projection.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunnerCapabilityClass(String);
+
+impl RunnerCapabilityClass {
+    /// Applies the runner domain's portable catalog-name validation.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        DomainRunnerCapabilityClass::try_new(value.clone())
+            .map(|_| Self(value))
+            .map_err(|_| CanonicalValueError::RunnerCatalogName)
+    }
+
+    /// Borrows the validated capability-class name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RunnerCapabilityClass {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<RunnerCapabilityClass> for String {
+    fn from(value: RunnerCapabilityClass) -> Self {
+        value.0
+    }
+}
+
+/// Checked runner credential-profile name carried by a session projection.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunnerCredentialProfileName(String);
+
+impl RunnerCredentialProfileName {
+    /// Applies the runner domain's portable catalog-name validation.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        DomainCredentialProfileName::try_new(value.clone())
+            .map(|_| Self(value))
+            .map_err(|_| CanonicalValueError::RunnerCatalogName)
+    }
+
+    /// Borrows the validated credential-profile name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RunnerCredentialProfileName {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<RunnerCredentialProfileName> for String {
+    fn from(value: RunnerCredentialProfileName) -> Self {
+        value.0
+    }
+}
+
+/// Checked runner repository key carried by a session projection.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunnerRepositoryKey(String);
+
+impl RunnerRepositoryKey {
+    /// Applies the runner domain's portable repository-key validation.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        DomainWorkspaceRepositoryKey::try_new(value.clone())
+            .map(|_| Self(value))
+            .map_err(|_| CanonicalValueError::RunnerCatalogName)
+    }
+
+    /// Borrows the validated repository key.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RunnerRepositoryKey {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<RunnerRepositoryKey> for String {
+    fn from(value: RunnerRepositoryKey) -> Self {
+        value.0
+    }
+}
+
+/// Complete selector carried by an authoritative runner projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunnerProjectionSelector {
+    /// Selects one exact runner identity.
+    Runner { runner_id: CanonicalUuid },
+    /// Selects a runner advertising one exact capability class.
+    CapabilityClass { name: RunnerCapabilityClass },
+}
+
+/// Closed current connection health carried for a pinned runner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerConnectionHealth {
+    /// The runner connection is currently healthy.
+    Connected,
+    /// The connection missed a heartbeat and remains within its recovery window.
+    Suspect,
+    /// The connection closed through an orderly daemon or runner shutdown.
+    Shutdown,
+    /// The connection reached a terminal loss transition.
+    Lost,
+}
+
+/// Closed current state carried by an authoritative runner projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerProjectionState {
+    /// No runner has been pinned yet.
+    Unpinned,
+    /// The current placement is pinned.
+    Pinned,
+    /// The exact selected runner was lost before pinning.
+    RunnerLostBeforePin,
+    /// The pinned runner was lost.
+    RunnerLost,
+    /// The lost placement was explicitly abandoned.
+    RunnerAbandoned,
+}
+
+/// Authoritative current runner placement projected in a transcript snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawRunnerProjection")]
+pub struct RunnerProjection {
+    /// Immutable selector requested by this placement revision.
+    selector: RunnerProjectionSelector,
+    /// Current or lost exact runner when the state names one.
+    runner_id: Option<CanonicalUuid>,
+    /// Positive current placement revision.
+    placement_revision: RunnerPlacementRevision,
+    /// Explicit sandbox profile selected by the placement.
+    sandbox_profile: RunnerSandboxProfile,
+    /// Independently nullable requested credential profile.
+    credential_profile: Option<RunnerCredentialProfileName>,
+    /// Independently nullable requested repository key.
+    repository: Option<RunnerRepositoryKey>,
+    /// Independently nullable exact requested working directory.
+    working_directory: Option<RunnerWorkingDirectory>,
+    /// Current connection health, present exactly while the placement is pinned.
+    connection_health: Option<RunnerConnectionHealth>,
+    /// Exact current placement state.
+    state: RunnerProjectionState,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRunnerProjection {
+    selector: RunnerProjectionSelector,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    runner_id: Option<CanonicalUuid>,
+    placement_revision: RunnerPlacementRevision,
+    sandbox_profile: RunnerSandboxProfile,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    credential_profile: Option<RunnerCredentialProfileName>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    repository: Option<RunnerRepositoryKey>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    working_directory: Option<RunnerWorkingDirectory>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    connection_health: Option<RunnerConnectionHealth>,
+    state: RunnerProjectionState,
+}
+
+impl RunnerProjection {
+    /// Constructs one complete internally coherent current placement projection.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the constructor names every independent session-composition axis"
+    )]
+    pub fn try_new(
+        selector: RunnerProjectionSelector,
+        runner_id: Option<CanonicalUuid>,
+        placement_revision: RunnerPlacementRevision,
+        sandbox_profile: RunnerSandboxProfile,
+        credential_profile: Option<RunnerCredentialProfileName>,
+        repository: Option<RunnerRepositoryKey>,
+        working_directory: Option<RunnerWorkingDirectory>,
+        connection_health: Option<RunnerConnectionHealth>,
+        state: RunnerProjectionState,
+    ) -> Result<Self, CanonicalValueError> {
+        let runner_shape_valid =
+            matches!(state, RunnerProjectionState::Unpinned) == runner_id.is_none();
+        let selector_valid = match (&selector, runner_id, state) {
+            (
+                RunnerProjectionSelector::Runner {
+                    runner_id: selected,
+                },
+                Some(current),
+                _,
+            ) => *selected == current,
+            (RunnerProjectionSelector::Runner { .. }, None, RunnerProjectionState::Unpinned)
+            | (
+                RunnerProjectionSelector::CapabilityClass { .. },
+                _,
+                RunnerProjectionState::Unpinned
+                | RunnerProjectionState::Pinned
+                | RunnerProjectionState::RunnerLost
+                | RunnerProjectionState::RunnerAbandoned,
+            ) => true,
+            (RunnerProjectionSelector::Runner { .. }, None, _)
+            | (
+                RunnerProjectionSelector::CapabilityClass { .. },
+                _,
+                RunnerProjectionState::RunnerLostBeforePin,
+            ) => false,
+        };
+        let connection_shape_valid =
+            matches!(state, RunnerProjectionState::Pinned) == connection_health.is_some();
+        if !runner_shape_valid || !selector_valid || !connection_shape_valid {
+            return Err(CanonicalValueError::RunnerProjection);
+        }
+        Ok(Self {
+            selector,
+            runner_id,
+            placement_revision,
+            sandbox_profile,
+            credential_profile,
+            repository,
+            working_directory,
+            connection_health,
+            state,
+        })
+    }
+
+    /// Borrows the immutable requested selector.
+    pub const fn selector(&self) -> &RunnerProjectionSelector {
+        &self.selector
+    }
+
+    /// Returns the current or lost exact runner when the state names one.
+    pub const fn runner_id(&self) -> Option<CanonicalUuid> {
+        self.runner_id
+    }
+
+    /// Returns the positive current placement revision.
+    pub const fn placement_revision(&self) -> RunnerPlacementRevision {
+        self.placement_revision
+    }
+
+    /// Returns the explicitly selected sandbox profile.
+    pub const fn sandbox_profile(&self) -> RunnerSandboxProfile {
+        self.sandbox_profile
+    }
+
+    /// Borrows the independently nullable requested credential profile.
+    pub const fn credential_profile(&self) -> Option<&RunnerCredentialProfileName> {
+        self.credential_profile.as_ref()
+    }
+
+    /// Borrows the independently nullable requested repository key.
+    pub const fn repository(&self) -> Option<&RunnerRepositoryKey> {
+        self.repository.as_ref()
+    }
+
+    /// Borrows the independently nullable exact requested working directory.
+    pub const fn working_directory(&self) -> Option<&RunnerWorkingDirectory> {
+        self.working_directory.as_ref()
+    }
+
+    /// Returns current connection health exactly while the placement is pinned.
+    pub const fn connection_health(&self) -> Option<RunnerConnectionHealth> {
+        self.connection_health
+    }
+
+    /// Returns the exact current placement state.
+    pub const fn state(&self) -> RunnerProjectionState {
+        self.state
+    }
+}
+
+impl TryFrom<RawRunnerProjection> for RunnerProjection {
+    type Error = CanonicalValueError;
+
+    fn try_from(raw: RawRunnerProjection) -> Result<Self, Self::Error> {
+        Self::try_new(
+            raw.selector,
+            raw.runner_id,
+            raw.placement_revision,
+            raw.sandbox_profile,
+            raw.credential_profile,
+            raw.repository,
+            raw.working_directory,
+            raw.connection_health,
+            raw.state,
+        )
+    }
+}
+
+/// Exact bounded runner working-directory text carried on the process wire.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunnerWorkingDirectory(String);
+
+impl RunnerWorkingDirectory {
+    /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
+    pub const MAX_UTF8_BYTES: usize = DomainRunnerWorkingDirectory::MAX_BYTES;
+
+    /// Admits nonempty, NUL-free text within the exact byte bound.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        DomainRunnerWorkingDirectory::try_new(value.clone())
+            .map_err(|_| CanonicalValueError::RunnerWorkingDirectory)?;
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact validated directory text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RunnerWorkingDirectory {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<RunnerWorkingDirectory> for String {
+    fn from(value: RunnerWorkingDirectory) -> Self {
+        value.0
+    }
+}
+
+/// Positive runner placement revision carried by follower-visible wire facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct RunnerPlacementRevision(CanonicalU64);
+
+impl RunnerPlacementRevision {
+    /// Admits one positive placement revision.
+    pub const fn try_new(value: u64) -> Option<Self> {
+        if value == 0 {
+            None
+        } else {
+            Some(Self(CanonicalU64::new(value)))
+        }
+    }
+
+    /// Returns the positive integer carried by this placement revision.
+    pub const fn value(self) -> u64 {
+        self.0.value()
+    }
+}
+
+impl<'de> Deserialize<'de> for RunnerPlacementRevision {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let value = CanonicalU64::deserialize(deserializer)?;
+        Self::try_new(value.value())
+            .ok_or_else(|| serde::de::Error::custom("runner placement revision must be positive"))
+    }
+}
+
+/// Closed runner state carried by one session update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerStateTransitionState {
+    /// Initial dispatch pinned the selected runner.
+    Pinned,
+    /// The current runner connection missed its first heartbeat.
+    Suspect,
+    /// A heartbeat acknowledgement recovered that same suspect connection.
+    Connected,
+    /// An exact runner selection was lost before initial pinning.
+    RunnerLostBeforePin,
+    /// A pinned runner became unavailable.
+    RunnerLost,
+    /// A checked successor runner replaced the prior placement.
+    Replaced,
+    /// Checked recovery retained the runner but changed the selected directory.
+    WorkingDirectoryChanged,
+    /// The user abandoned a lost runner placement.
+    Abandoned,
+}
+
 /// Action chosen for one bound child when its parent reaches a terminal state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5465,6 +5974,20 @@ pub enum SessionEvent {
         model_call_id: CanonicalUuid,
         /// Exact committed batch state.
         state: ToolBatchState,
+    },
+    /// A runner placement or its exact connection changed follower-visible state.
+    RunnerStateTransition {
+        /// Exact runner named by the transition.
+        runner_id: CanonicalUuid,
+        /// Positive placement revision whose immutable facts are projected.
+        placement_revision: RunnerPlacementRevision,
+        /// Placement-selected sandbox profile.
+        sandbox_profile: RunnerSandboxProfile,
+        /// Caller-selected directory, null when the runner default was selected.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        working_directory: Option<RunnerWorkingDirectory>,
+        /// Exact closed transition state.
+        state: RunnerStateTransitionState,
     },
     /// One explicit tool approval decision committed with full provenance.
     ToolApprovalDecided {
@@ -6036,6 +6559,7 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::RunnerStateTransition { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::TurnCompleted { .. }
         | SessionEvent::TurnFailed { .. }
@@ -6229,6 +6753,9 @@ pub enum ServerMessage {
         placement_version: CanonicalU64,
         /// Current opt-in placement decision.
         placement: SessionPlacement,
+        /// Complete current runner projection, null for daemon-only sessions.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        runner: Option<RunnerProjection>,
     },
     /// Completes a session-summary sequence.
     SessionsEnd {
@@ -6454,6 +6981,9 @@ pub enum ServerMessage {
         session_id: CanonicalUuid,
         /// Snapshot outbox cursor.
         cursor: CanonicalU64,
+        /// Complete current runner placement, or null for a daemon-only session.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        runner: Option<RunnerProjection>,
     },
     /// One authoritative turn projection.
     TranscriptTurn {
@@ -7721,39 +8251,44 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 mod tests {
     use super::{
         BillingRateVersion, CanonicalDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
-        ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
-        ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
-        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, DelegationMessageDirection, DelegationOutcome, DelegationPolicy,
-        DelegationProvenance, DelegationReason, DelegationToolRequestState, DelegationWaitMode,
-        DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail,
-        FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
-        FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
-        GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
-        ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
-        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-        ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
-        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
-        PROTOCOL_VERSION, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
-        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
-        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        CanonicalValueError, ClientFrame, ClientRequest, CommandId, ContentFragment,
+        ConversationCursor, ConversationImportFormat, ConversationImportRejectionClass,
+        ConversationImportSource, ConversationOrigin, ConversationOriginFilter,
+        ConversationSummary, CurrentModelCall, CurrentModelCallState, DelegationMessageDirection,
+        DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
+        DelegationToolRequestState, DelegationWaitMode, DescendantTerminationScope,
+        EffectiveModelSettings, ErrorCode, ErrorDetail, FailedModelCallCause,
+        FailedModelCallDisposition, FailedTerminalModelCall, FastMode, FastModeOverlay,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, GoalBlockedProvenance,
+        GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
+        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
+        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
+        ModelCallState, ModelCallTokenUsage, ModelCapabilities, ModelChangeAdjustment,
+        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+        ModelSettingsSnapshot, OpenAiServiceTier, PROTOCOL_VERSION, PositiveCanonicalU64,
+        ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-        ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
-        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
-        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
-        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
-        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
+        ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject,
+        RunnerCapabilityClass, RunnerConnectionHealth, RunnerCredentialProfileName,
+        RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
+        RunnerRepositoryKey, RunnerSandboxProfile, RunnerStateTransitionState,
+        RunnerWorkingDirectory, ServerFrame, ServerMessage, ServiceTier, SessionEvent,
+        SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
+        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -8564,6 +9099,100 @@ mod tests {
         assert_delegation_terminal_state_rejected("stopped", "child_completed");
         assert_delegation_terminal_state_rejected("already_terminal", "parent_cancelled");
         Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_round_trips_interrupted_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: uuid(2),
+            placement_revision: PositiveCanonicalU64::try_new(3)
+                .expect("the fixture revision is positive"),
+            tool_attempt_id: Some(uuid(4)),
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_runner_recovery",
+                "runner_id": "00000000-0000-0000-0000-000000000002",
+                "placement_revision": "3",
+                "tool_attempt_id": "00000000-0000-0000-0000-000000000004"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_revision_rejects_zero_before_state_construction() {
+        assert_eq!(
+            PositiveCanonicalU64::try_new(0),
+            Err(CanonicalValueError::Decimal),
+        );
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_round_trips_explicit_absent_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: uuid(2),
+            placement_revision: PositiveCanonicalU64::try_new(3)
+                .expect("the fixture revision is positive"),
+            tool_attempt_id: None,
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_runner_recovery",
+                "runner_id": "00000000-0000-0000-0000-000000000002",
+                "placement_revision": "3",
+                "tool_attempt_id": null
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_requires_nullable_attempt_member() {
+        let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "active_awaiting_runner_recovery",
+            "runner_id": "00000000-0000-0000-0000-000000000002",
+            "placement_revision": "3"
+        }))
+        .expect_err("the nullable tool attempt remains a required wire member");
+
+        assert!(rejected.to_string().contains("tool_attempt_id"));
+    }
+
+    /// INV-044: runner-recovery wire state preserves the positive placement
+    /// revision required by its relational source.
+    #[test]
+    fn inv044_runner_recovery_turn_state_rejects_zero_placement_revision() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","model_settings":null,"state":{"type":"active_awaiting_runner_recovery","runner_id":"00000000-0000-0000-0000-000000000003","placement_revision":"0","tool_attempt_id":null}}}"#,
+        );
+    }
+
+    /// INV-044: the public state type cannot be inhabited with the zero
+    /// placement revision rejected by its enclosing frame.
+    #[test]
+    fn inv044_runner_recovery_turn_state_direct_decode_rejects_zero_revision() {
+        let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "active_awaiting_runner_recovery",
+            "runner_id": "00000000-0000-0000-0000-000000000003",
+            "placement_revision": "0",
+            "tool_attempt_id": null
+        }))
+        .expect_err("the public runner-recovery state requires a positive revision");
+
+        assert!(rejected.to_string().contains("positive placement revision"));
     }
 
     #[test]
@@ -11424,6 +12053,7 @@ mod tests {
                 placement: super::SessionPlacement::Scoped {
                     path: maximum_structural_path,
                 },
+                runner: None,
             },
         )
         .expect("legacy structural placement remains response-encodable");
@@ -12086,10 +12716,72 @@ mod tests {
         Ok(())
     }
 
+    /// Pins one actor's exact bytes on both frames that carry a last writer.
+    /// A failure names the actor at the call site rather than a loop position.
+    #[track_caller]
+    fn assert_metadata_actor_round_trips(
+        actor: MetadataActor,
+        expected_actor_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let writer = MetadataLastWriter::new(CanonicalU64::new(1), actor);
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::SessionMetadataReplaced {
+                session_id: uuid(1),
+                metadata: SessionMetadata::empty(),
+                last_writer: writer,
+            },
+            &format!(
+                r#"{{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{expected_actor_json}}}}}"#
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::SessionMetadata {
+                session_id: uuid(1),
+                metadata: SessionMetadata::empty(),
+                last_writer: Some(writer),
+            },
+            &format!(
+                r#"{{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{expected_actor_json}}}}}"#
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// INV-033: the last-writer actor projects every agency durable metadata can
+    /// record. The domain projection this pins is total by type, so a later
+    /// agency reaches the wire only through a variant added here.
     #[test]
-    fn inv033_metadata_writer_actor_is_user_only() {
+    fn inv033_metadata_writer_actor_round_trips_every_agency()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_metadata_actor_round_trips(MetadataActor::User {}, r#"{"type":"user"}"#)?;
+        assert_metadata_actor_round_trips(
+            MetadataActor::Model { turn_id: uuid(2) },
+            r#"{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}"#,
+        )?;
+        assert_metadata_actor_round_trips(MetadataActor::Recovery {}, r#"{"type":"recovery"}"#)?;
+        assert_metadata_actor_round_trips(
+            MetadataActor::Tool {
+                tool_request_id: uuid(3),
+            },
+            r#"{"type":"tool","tool_request_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        Ok(())
+    }
+
+    /// INV-033: the actor vocabulary stays closed — an unadmitted spelling and a
+    /// variant carrying the wrong reference are both malformed frames.
+    #[test]
+    fn inv033_metadata_writer_actor_rejects_unadmitted_shapes() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"operator"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"tool","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"recovery","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
         );
     }
 
@@ -13497,8 +14189,9 @@ mod tests {
                 model_selection: ModelSelection::Alias { alias_id: uuid(4) },
                 placement_version: CanonicalU64::new(1),
                 placement: super::SessionPlacement::Pathless {},
+                runner: None,
             },
-            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"},"placement_version":"1","placement":{"kind":"pathless"}}"#,
+            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"},"placement_version":"1","placement":{"kind":"pathless"},"runner":null}"#,
         )?;
         assert_server_message_round_trip(
             request(5)?,
@@ -13560,8 +14253,9 @@ mod tests {
             ServerMessage::TranscriptSnapshotStart {
                 session_id: uuid(1),
                 cursor: CanonicalU64::new(5),
+                runner: None,
             },
-            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"5"}"#,
+            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"5","runner":null}"#,
         )?;
         assert_server_message_round_trip(
             request(7)?,
@@ -13947,6 +14641,130 @@ mod tests {
             r#"{"type":"model_capability_item","selection_id":"00000000-0000-0000-0000-000000000004","capabilities":{"reasoning_levels":["low","xhigh"],"fast_mode_supported":true,"service_tiers":[{"provider":"open_ai","value":"priority"}]}}"#,
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn runner_projection_round_trips_complete_current_loss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptSnapshotStart {
+                session_id: uuid(1),
+                cursor: CanonicalU64::new(9),
+                runner: Some(RunnerProjection::try_new(
+                    RunnerProjectionSelector::CapabilityClass {
+                        name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))?,
+                    },
+                    Some(uuid(2)),
+                    RunnerPlacementRevision::try_new(3).expect("the fixture revision is positive"),
+                    RunnerSandboxProfile::WorkspaceRestricted,
+                    Some(RunnerCredentialProfileName::try_new(String::from(
+                        "readonly",
+                    ))?),
+                    Some(RunnerRepositoryKey::try_new(String::from("signalbox"))?),
+                    Some(RunnerWorkingDirectory::try_new(String::from(
+                        "workspace/project",
+                    ))?),
+                    None,
+                    RunnerProjectionState::RunnerLost,
+                )?),
+            },
+            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"capability_class","name":"linux.workspace"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":"readonly","repository":"signalbox","working_directory":"workspace/project","connection_health":null,"state":"runner_lost"}}"#,
+        )
+    }
+
+    #[test]
+    fn runner_projection_round_trips_pinned_suspect_health()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptSnapshotStart {
+                session_id: uuid(1),
+                cursor: CanonicalU64::new(9),
+                runner: Some(RunnerProjection::try_new(
+                    RunnerProjectionSelector::Runner { runner_id: uuid(2) },
+                    Some(uuid(2)),
+                    RunnerPlacementRevision::try_new(3).expect("the fixture revision is positive"),
+                    RunnerSandboxProfile::WorkspaceRestricted,
+                    None,
+                    None,
+                    None,
+                    Some(RunnerConnectionHealth::Suspect),
+                    RunnerProjectionState::Pinned,
+                )?),
+            },
+            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"runner","runner_id":"00000000-0000-0000-0000-000000000002"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":null,"repository":null,"working_directory":null,"connection_health":"suspect","state":"pinned"}}"#,
+        )
+    }
+
+    #[test]
+    fn runner_projection_rejects_cross_wired_exact_runner() {
+        let selected = uuid(1);
+        let current = uuid(2);
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::Runner {
+                runner_id: selected,
+            },
+            Some(current),
+            RunnerPlacementRevision::try_new(1).expect("the fixture revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            None,
+            None,
+            None,
+            None,
+            RunnerProjectionState::RunnerLostBeforePin,
+        );
+
+        assert_eq!(
+            projection,
+            Err(super::CanonicalValueError::RunnerProjection)
+        );
+    }
+
+    #[test]
+    fn runner_projection_rejects_loss_without_exact_runner() {
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                    .expect("the fixture capability is valid"),
+            },
+            None,
+            RunnerPlacementRevision::try_new(1).expect("the fixture revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            None,
+            None,
+            None,
+            None,
+            RunnerProjectionState::RunnerLost,
+        );
+
+        assert_eq!(
+            projection,
+            Err(super::CanonicalValueError::RunnerProjection)
+        );
+    }
+
+    #[test]
+    fn runner_projection_rejects_capability_selector_for_pre_pin_loss() {
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                    .expect("the fixture capability is valid"),
+            },
+            Some(uuid(1)),
+            RunnerPlacementRevision::try_new(1).expect("the fixture revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            None,
+            None,
+            None,
+            None,
+            RunnerProjectionState::RunnerLostBeforePin,
+        );
+
+        assert_eq!(
+            projection,
+            Err(super::CanonicalValueError::RunnerProjection)
+        );
     }
 
     #[test]
@@ -14602,5 +15420,98 @@ mod tests {
             validate_adjustments(&excessive),
             Err(FrameValidationError::ModelSettingsShape)
         );
+    }
+
+    #[test]
+    fn runner_state_transition_round_trips_complete_placement_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(3),
+                event: SessionEvent::RunnerStateTransition {
+                    runner_id: uuid(4),
+                    placement_revision: RunnerPlacementRevision::try_new(5)
+                        .expect("the fixture placement revision is positive"),
+                    sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+                    working_directory: Some(
+                        RunnerWorkingDirectory::try_new(String::from("workspace/project"))
+                            .expect("the fixture working directory is valid"),
+                    ),
+                    state: RunnerStateTransitionState::WorkingDirectoryChanged,
+                },
+            },
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"runner_state_transition","runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","sandbox_profile":"workspace-restricted","working_directory":"workspace/project","state":"working_directory_changed"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_inv044_runner_placed_session_summary_round_trips_complete_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runner = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))?,
+            },
+            Some(uuid(4)),
+            RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            Some(RunnerCredentialProfileName::try_new(String::from(
+                "readonly",
+            ))?),
+            Some(RunnerRepositoryKey::try_new(String::from("primary"))?),
+            Some(RunnerWorkingDirectory::try_new(String::from(
+                "workspace/project",
+            ))?),
+            None,
+            RunnerProjectionState::RunnerLost,
+        )?;
+
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::SessionSummary {
+                session_id: uuid(2),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Alias { alias_id: uuid(3) },
+                placement_version: CanonicalU64::new(1),
+                placement: super::SessionPlacement::Pathless {},
+                runner: Some(runner),
+            },
+            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000003"},"placement_version":"1","placement":{"kind":"pathless"},"runner":{"selector":{"type":"capability_class","name":"linux.workspace"},"runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":"readonly","repository":"primary","working_directory":"workspace/project","connection_health":null,"state":"runner_lost"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_session_summary_rejects_an_omitted_required_nullable_runner() {
+        let encoded = br#"{"version":1,"request_id":"1","message":{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000003"},"placement_version":"1","placement":{"kind":"pathless"}}}
+"#;
+
+        assert!(decode_server_line(encoded).is_err());
+    }
+
+    #[test]
+    fn runner_state_transition_revision_rejects_zero_at_construction_and_decode() {
+        assert_eq!(RunnerPlacementRevision::try_new(0), None);
+        assert!(serde_json::from_str::<RunnerPlacementRevision>(r#""0""#).is_err());
+    }
+
+    #[test]
+    fn runner_working_directory_rejects_every_invalid_wire_shape() {
+        assert_eq!(
+            RunnerWorkingDirectory::try_new(String::new()),
+            Err(super::CanonicalValueError::RunnerWorkingDirectory)
+        );
+        assert_eq!(
+            RunnerWorkingDirectory::try_new(String::from("bad\0path")),
+            Err(super::CanonicalValueError::RunnerWorkingDirectory)
+        );
+        assert_eq!(
+            RunnerWorkingDirectory::try_new("x".repeat(RunnerWorkingDirectory::MAX_UTF8_BYTES + 1)),
+            Err(super::CanonicalValueError::RunnerWorkingDirectory)
+        );
+        assert!(serde_json::from_str::<RunnerWorkingDirectory>(r#"""#).is_err());
     }
 }

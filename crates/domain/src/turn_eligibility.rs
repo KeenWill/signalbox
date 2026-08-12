@@ -386,6 +386,17 @@ impl TerminalAttemptEndReconstitutionInput {
         }
     }
 
+    /// Supplies an attempt yielded to a runner-recovery wait together with
+    /// the exact interrupt that later consumed that wait.
+    pub const fn yielded_to_runner_recovery(interrupt: AppliedInterruptCommandResult) -> Self {
+        Self {
+            end: AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+            },
+            interrupt: Some(interrupt),
+        }
+    }
+
     /// Borrows the stored typed attempt end.
     pub const fn end(&self) -> &AttemptEnd {
         &self.end
@@ -530,6 +541,11 @@ enum StoredActiveTurnPhase {
     AwaitingModelCallRecovery {
         call: crate::ModelCallId,
         attempt_end: TerminalAttemptEndReconstitutionInput,
+    },
+    AwaitingRunnerRecovery {
+        runner: crate::RunnerId,
+        placement_revision: crate::RunnerGeneration,
+        interrupted_tool_attempt: Option<crate::ToolAttemptId>,
     },
 }
 
@@ -809,6 +825,26 @@ impl ActiveTurnSchedulingReconstitutionInput {
         }
     }
 
+    /// Supplies facts for a stored runner-loss wait whose relational evidence
+    /// has already been checked by the persistence boundary.
+    pub const fn awaiting_runner_recovery(
+        owning_turn: TurnId,
+        runner: crate::RunnerId,
+        placement_revision: crate::RunnerGeneration,
+        interrupted_tool_attempt: Option<crate::ToolAttemptId>,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: None,
+            state: StoredActiveTurnPhase::AwaitingRunnerRecovery {
+                runner,
+                placement_revision,
+                interrupted_tool_attempt,
+            },
+            executing_tool_batch: None,
+        }
+    }
+
     /// Returns the turn named as owner by the active-phase record.
     pub const fn owning_turn(&self) -> TurnId {
         self.owning_turn
@@ -828,6 +864,20 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 .is_none()
                 .then_some(ActiveTurnPhase::AwaitingChild { wait: *wait });
         }
+        if let StoredActiveTurnPhase::AwaitingRunnerRecovery {
+            runner,
+            placement_revision,
+            interrupted_tool_attempt,
+        } = self.state
+        {
+            return self.current_attempt.is_none().then_some(
+                ActiveTurnPhase::AwaitingRunnerRecovery {
+                    runner,
+                    placement_revision,
+                    optional_tool_attempt: interrupted_tool_attempt,
+                },
+            );
+        }
         let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt?);
         let current_attempt = match &self.state {
             StoredActiveTurnPhase::Prepared => current_attempt,
@@ -839,7 +889,8 @@ impl ActiveTurnSchedulingReconstitutionInput {
             StoredActiveTurnPhase::AwaitingApproval { .. }
             | StoredActiveTurnPhase::AwaitingChild { .. }
             | StoredActiveTurnPhase::AwaitingToolRecovery { .. }
-            | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. } => return None,
+            | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. }
+            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => return None,
         };
         Some(ActiveTurnPhase::Running { current_attempt })
     }
@@ -1397,8 +1448,13 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
     continuation_rounds: Vec<ContinuationRoundReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
-    preceding_non_accepted_terminal:
-        Option<(SessionId, TurnId, ContextFrontierId, DirectModelSelection)>,
+    preceding_non_accepted_terminals: Vec<(
+        SessionId,
+        TurnId,
+        TurnId,
+        ContextFrontierId,
+        DirectModelSelection,
+    )>,
 }
 
 impl AcceptedInputSchedulingReconstitutionInput {
@@ -1426,21 +1482,29 @@ impl AcceptedInputSchedulingReconstitutionInput {
             steering_continuation_rounds: Vec::new(),
             continuation_rounds: Vec::new(),
             active_acceptance_tail,
-            preceding_non_accepted_terminal: None,
+            preceding_non_accepted_terminals: Vec::new(),
         }
     }
 
-    /// Supplies the immediate terminal predecessor when it is not an
-    /// accepted-input-origin turn, together with the retained terminal
-    /// frontier and its selected model identity.
+    /// Supplies one immediate terminal predecessor that is not an
+    /// accepted-input-origin turn, its exact accepted-input successor, and its
+    /// retained terminal frontier and selected model identity. Repeated calls
+    /// retain distinct predecessor chains.
     pub fn with_preceding_non_accepted_terminal(
         mut self,
         session: SessionId,
-        turn: TurnId,
+        predecessor: TurnId,
+        successor: TurnId,
         terminal_frontier: ContextFrontierId,
         selected: DirectModelSelection,
     ) -> Self {
-        self.preceding_non_accepted_terminal = Some((session, turn, terminal_frontier, selected));
+        self.preceding_non_accepted_terminals.push((
+            session,
+            predecessor,
+            successor,
+            terminal_frontier,
+            selected,
+        ));
         self
     }
 
@@ -2260,11 +2324,9 @@ pub struct AcceptedInputSchedulingProjection {
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
     active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
-    preceding_non_accepted_terminal: Option<(
-        TurnId,
-        ResolvedContextFrontierSnapshot,
-        DirectModelSelection,
-    )>,
+    preceding_non_accepted_successors: BTreeMap<TurnId, TurnId>,
+    preceding_non_accepted_terminals:
+        BTreeMap<TurnId, (ResolvedContextFrontierSnapshot, DirectModelSelection)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2390,6 +2452,85 @@ impl AcceptedInputSchedulingProjection {
             recovery.call,
             recovery.attempt,
             recovery.source_snapshot,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Cancels a turn parked on runner loss without claiming that any retained
+    /// runner effect failed. The supplied source is the latest already-durable
+    /// semantic boundary; runner-loss evidence remains on the placement.
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<crate::PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let starting_snapshot = self
+            .snapshots
+            .get(&active_turn.start().frontier().snapshot())
+            .cloned()
+            .ok_or(crate::ModelCallClosureError::FrontierDerivationFailed)?;
+        ActivatedTurn::from(active_turn).apply_interrupt_to_runner_recovery(
+            starting_snapshot,
+            source_snapshot,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Closes a runner-loss wait that retained one ambiguous physical tool
+    /// attempt, preserving that ambiguity as reconciliation-required.
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_interrupt_to_runner_tool_recovery_wait(
+            active_turn.into(),
+            wait,
+            tool_attempt,
+            yielded_attempt,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Cancels a runner-loss wait after its retryable physical attempt has
+    /// been retired as a known crash loss.
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        batch: crate::ToolBatch,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let starting_snapshot = self
+            .snapshots
+            .get(&active_turn.start().frontier().snapshot())
+            .cloned()
+            .ok_or(crate::ModelCallClosureError::FrontierDerivationFailed)?;
+        crate::model_execution::apply_interrupt_to_retryable_runner_tool_recovery_wait(
+            active_turn.into(),
+            starting_snapshot,
+            batch,
+            result_projection,
             interrupt,
             identities,
         )
@@ -2976,6 +3117,67 @@ impl ActivatedTurn {
             Self::Accepted(turn) => turn.consumed_steering(),
             Self::Delegated(turn) => turn.consumed_steering(),
         }
+    }
+
+    /// Cancels this turn while it is parked on exact runner-loss evidence.
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<crate::PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_runner_recovery_wait(
+            self,
+            starting_snapshot,
+            source_snapshot,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Closes a delegated runner-loss wait that retained one ambiguous
+    /// physical tool attempt without erasing that ambiguity.
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_runner_tool_recovery_wait(
+            self,
+            wait,
+            tool_attempt,
+            yielded_attempt,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Cancels a delegated runner-loss wait after its retryable physical
+    /// attempt has been retired as a known crash loss.
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        batch: crate::ToolBatch,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_retryable_runner_tool_recovery_wait(
+            self,
+            starting_snapshot,
+            batch,
+            result_projection,
+            interrupt,
+            identities,
+        )
     }
 
     #[cfg(test)]
@@ -3739,17 +3941,80 @@ fn reconstitute_inner(
         }
     }
 
-    let queue_work = input.turns.iter().map(|record| {
-        AcceptedInputQueueWork::new(record.queue_session, record.queue_turn, record.order)
-    });
-    let total_order = derive_accepted_input_total_order(queue_work).map_err(|error| {
-        AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder { error }
-    })?;
     let records_by_turn = input
         .turns
         .iter()
         .map(|record| (record.turn, record))
         .collect::<BTreeMap<_, _>>();
+    let mut preceding_non_accepted_terminal_turns = BTreeSet::new();
+    let mut preceding_non_accepted_successors = BTreeMap::new();
+    for (stored_session, predecessor, successor, _, _) in &input.preceding_non_accepted_terminals {
+        if *stored_session != session
+            || records_by_turn.contains_key(predecessor)
+            || !records_by_turn.contains_key(successor)
+            || !preceding_non_accepted_terminal_turns.insert(*predecessor)
+            || preceding_non_accepted_successors
+                .insert(*successor, *predecessor)
+                .is_some()
+        {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch {
+                    turn: *predecessor,
+                },
+            );
+        }
+    }
+    let mut external_interrupt_successors = BTreeSet::new();
+    for (successor, predecessor) in &preceding_non_accepted_successors {
+        match records_by_turn[successor].order.priority() {
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: recorded,
+            } if recorded == *predecessor => {
+                external_interrupt_successors.insert(*successor);
+            }
+            AcceptedInputQueuePriority::Ordinary => {}
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter { .. } => {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch {
+                        turn: *predecessor,
+                    },
+                );
+            }
+        }
+    }
+    // The generic accepted-input order owns only accepted origins. A
+    // runtime-relevant record can instead be the immediate successor of a
+    // separately authenticated non-accepted terminal boundary; treat every
+    // such external edge as a derivation root while retaining and validating
+    // interrupt priority below.
+    let ordinary_roots = input
+        .turns
+        .iter()
+        .filter(|record| record.order.priority() == AcceptedInputQueuePriority::Ordinary)
+        .map(|record| record.turn)
+        .collect::<BTreeSet<_>>();
+    let queued_turns = input
+        .turns
+        .iter()
+        .filter(|record| matches!(record.state, AcceptedInputTurnSchedulingRecordState::Queued))
+        .map(|record| record.turn)
+        .collect::<BTreeSet<_>>();
+    let queue_work = input.turns.iter().map(|record| {
+        let order = if preceding_non_accepted_successors.contains_key(&record.turn) {
+            AcceptedInputQueueOrder::ordinary(record.order.acceptance_position())
+        } else {
+            record.order
+        };
+        AcceptedInputQueueWork::new(record.queue_session, record.queue_turn, order)
+    });
+    let total_order = promote_external_interrupt_chains(
+        derive_accepted_input_total_order(queue_work).map_err(|error| {
+            AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder { error }
+        })?,
+        external_interrupt_successors,
+        &ordinary_roots,
+        &queued_turns,
+    );
     let mut delegated_turns = BTreeMap::new();
     for fact in input.delegated_turns.iter().copied() {
         let turn = fact.turn();
@@ -3760,7 +4025,12 @@ fn reconstitute_inner(
         }
     }
     for record in records_by_turn.values() {
-        if !origin_delivery_matches_record(record.origin_delivery, record, &records_by_turn) {
+        if !origin_delivery_matches_record(
+            record.origin_delivery,
+            record,
+            &records_by_turn,
+            &preceding_non_accepted_terminal_turns,
+        ) {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
                     turn: record.turn,
@@ -4092,20 +4362,13 @@ fn reconstitute_inner(
         }
     }
 
-    let preceding_non_accepted_terminal = match input.preceding_non_accepted_terminal {
-        Some((stored_session, turn, terminal_frontier, selected)) => {
-            if stored_session != session || records_by_turn.contains_key(&turn) {
-                return Err(
-                    AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch { turn },
-                );
-            }
-            let snapshot = snapshots.get(&terminal_frontier).cloned().ok_or(
-                AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
-            )?;
-            Some((turn, snapshot, selected))
-        }
-        None => None,
-    };
+    let mut preceding_non_accepted_terminals = BTreeMap::new();
+    for (_, turn, _, terminal_frontier, selected) in &input.preceding_non_accepted_terminals {
+        let snapshot = snapshots.get(terminal_frontier).cloned().ok_or(
+            AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn: *turn },
+        )?;
+        preceding_non_accepted_terminals.insert(*turn, (snapshot, *selected));
+    }
 
     let mut compaction_calls = BTreeMap::new();
     let mut compaction_snapshots = BTreeSet::new();
@@ -4528,6 +4791,10 @@ fn reconstitute_inner(
                                     _,
                                 ) => false,
                                 (
+                                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. },
+                                    _,
+                                ) => false,
+                                (
                                     StoredActiveTurnPhase::AwaitingModelCallRecovery {
                                         call, ..
                                     },
@@ -4887,12 +5154,8 @@ fn reconstitute_inner(
     }
 
     let mut turns = Vec::with_capacity(total_order.len());
-    let mut previous_terminal = preceding_non_accepted_terminal
-        .as_ref()
-        .map(|(turn, snapshot, _)| (*turn, snapshot.clone()));
-    let mut previous_selected = preceding_non_accepted_terminal
-        .as_ref()
-        .map(|(_, _, selected)| *selected);
+    let mut previous_terminal = None;
+    let mut previous_selected = None;
     let mut active = None;
     let mut active_model_call_recovery = None;
     let mut active_tool_recovery_attempt = None;
@@ -4901,15 +5164,21 @@ fn reconstitute_inner(
     let mut referenced_snapshots = consumed_snapshots;
     referenced_snapshots.extend(initial_seed_frontier);
     referenced_snapshots.extend(
-        preceding_non_accepted_terminal
-            .as_ref()
-            .map(|(_, snapshot, _)| snapshot.frontier().snapshot()),
+        preceding_non_accepted_terminals
+            .values()
+            .map(|(snapshot, _)| snapshot.frontier().snapshot()),
     );
     let mut attempt_owners = BTreeMap::new();
     let mut claimed_continuation_rounds = BTreeSet::new();
 
     for (index, turn) in total_order.into_iter().enumerate() {
         let record = records_by_turn[&turn];
+        let external_predecessor = preceding_non_accepted_successors.get(&turn).copied();
+        if let Some(predecessor) = external_predecessor {
+            let (snapshot, selected) = &preceding_non_accepted_terminals[&predecessor];
+            previous_terminal = Some((predecessor, snapshot.clone()));
+            previous_selected = Some(*selected);
+        }
         let selected = record
             .origin_configuration
             .effective()
@@ -5041,6 +5310,14 @@ fn reconstitute_inner(
                         }
                         ActiveTurnPhase::AwaitingChild { wait: *wait }
                     }
+                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => phase
+                        .canonical_evidence_free_phase()
+                        .ok_or(
+                        AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                            turn,
+                            accepted_input: record.accepted_input.id(),
+                        },
+                    )?,
                     StoredActiveTurnPhase::AwaitingToolRecovery { wait, attempt_end } => {
                         let Some(current_attempt) = phase.current_attempt else {
                             return Err(
@@ -5955,17 +6232,20 @@ fn reconstitute_inner(
                 let interrupt = terminal_execution.interrupt;
                 let attempt_end = &terminal_execution.attempt_end;
                 let successor = records_by_turn.get(&interrupt.successor());
+                let attempt_end_matches = match attempt_end.end() {
+                    AttemptEnd::AfterCancellation {
+                        cause,
+                        disposition: CancellationStopDisposition::Cancelled,
+                    } => *cause == interrupt.proof() && attempt_end.interrupt() == Some(interrupt),
+                    AttemptEnd::WithoutStop {
+                        disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+                    } => attempt_end.interrupt() == Some(interrupt),
+                    _ => false,
+                };
                 if terminal_execution.owning_turn != turn
                     || interrupt.session() != session
                     || interrupt.proof().predecessor() != turn
-                    || !matches!(
-                        attempt_end.end(),
-                        AttemptEnd::AfterCancellation {
-                            cause,
-                            disposition: CancellationStopDisposition::Cancelled,
-                        } if *cause == interrupt.proof()
-                    )
-                    || attempt_end.interrupt() != Some(interrupt)
+                    || !attempt_end_matches
                     || successor.is_none_or(|successor| {
                         successor.stored_session != session
                             || successor.accepted_input.id() != interrupt.accepted_input()
@@ -6341,6 +6621,9 @@ fn reconstitute_inner(
                         *cause == interrupt.proof()
                             && reconciling_attempt_end.interrupt() == Some(*interrupt)
                     }
+                    AttemptEnd::WithoutStop {
+                        disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+                    } => reconciling_attempt_end.interrupt() == Some(*interrupt),
                     _ => false,
                 };
                 let successor = records_by_turn.get(&interrupt.successor());
@@ -6486,6 +6769,7 @@ fn reconstitute_inner(
         input.active_acceptance_tail.as_ref(),
         &records_by_turn,
         &accepted_input_turns,
+        &preceding_non_accepted_terminal_turns,
     )?;
 
     if let Some(call) = active_compaction_call
@@ -6507,8 +6791,53 @@ fn reconstitute_inner(
         active_model_call_recovery,
         active_tool_recovery_attempt,
         active_executing_tool_batch,
-        preceding_non_accepted_terminal,
+        preceding_non_accepted_successors,
+        preceding_non_accepted_terminals,
     })
+}
+
+fn promote_external_interrupt_chains(
+    total_order: Vec<TurnId>,
+    external_successors: BTreeSet<TurnId>,
+    ordinary_roots: &BTreeSet<TurnId>,
+    queued_turns: &BTreeSet<TurnId>,
+) -> Vec<TurnId> {
+    if external_successors.is_empty() {
+        return total_order;
+    }
+    let roots = ordinary_roots
+        .union(&external_successors)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let Some((crossing_start, insertion)) = total_order
+        .iter()
+        .enumerate()
+        .filter(|(_, turn)| external_successors.contains(turn) && queued_turns.contains(turn))
+        .find_map(|(start, _)| {
+            total_order[..start]
+                .iter()
+                .position(|turn| queued_turns.contains(turn) && ordinary_roots.contains(turn))
+                .map(|insertion| (start, insertion))
+        })
+    else {
+        return total_order;
+    };
+    let start = total_order[insertion..crossing_start]
+        .iter()
+        .position(|turn| external_successors.contains(turn))
+        .map(|offset| insertion + offset)
+        .unwrap_or(crossing_start);
+    let end = total_order[crossing_start + 1..]
+        .iter()
+        .position(|turn| roots.contains(turn))
+        .map(|offset| crossing_start + 1 + offset)
+        .unwrap_or(total_order.len());
+    let mut promoted = Vec::with_capacity(total_order.len());
+    promoted.extend_from_slice(&total_order[..insertion]);
+    promoted.extend_from_slice(&total_order[start..end]);
+    promoted.extend_from_slice(&total_order[insertion..start]);
+    promoted.extend_from_slice(&total_order[end..]);
+    promoted
 }
 
 fn reconstitute_active_acceptance_tail(
@@ -6517,6 +6846,7 @@ fn reconstitute_active_acceptance_tail(
     candidate: Option<&SessionAcceptanceTailReconstitutionInput>,
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
     accepted_input_turns: &BTreeMap<AcceptedInputId, TurnId>,
+    preceding_non_accepted_terminals: &BTreeSet<TurnId>,
 ) -> Result<Option<SessionAcceptanceTail>, AcceptedInputSchedulingReconstitutionFailure> {
     let (active, candidate) = match (active, candidate) {
         (None, None) => return Ok(None),
@@ -6557,7 +6887,8 @@ fn reconstitute_active_acceptance_tail(
             StoredActiveTurnPhase::Prepared
             | StoredActiveTurnPhase::Running
             | StoredActiveTurnPhase::AwaitingApproval { .. }
-            | StoredActiveTurnPhase::AwaitingChild { .. } => None,
+            | StoredActiveTurnPhase::AwaitingChild { .. }
+            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
@@ -6675,6 +7006,7 @@ fn reconstitute_active_acceptance_tail(
                                     record.origin_delivery,
                                     record,
                                     records_by_turn,
+                                    preceding_non_accepted_terminals,
                                 )
                         })
                     }
@@ -6854,6 +7186,7 @@ fn origin_delivery_matches_record(
     delivery: DeliveryRequest,
     record: &AcceptedInputTurnSchedulingRecord,
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
+    preceding_non_accepted_terminals: &BTreeSet<TurnId>,
 ) -> bool {
     if let TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding) =
         &record.configuration_provenance
@@ -6899,7 +7232,11 @@ fn origin_delivery_matches_record(
             AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor },
         ) => {
             expected_active_turn == predecessor
-                && historical_target_precedes_origin(expected_active_turn, record, records_by_turn)
+                && (historical_target_precedes_origin(
+                    expected_active_turn,
+                    record,
+                    records_by_turn,
+                ) || preceding_non_accepted_terminals.contains(&expected_active_turn))
         }
         (
             DeliveryRequest::StartWhenNoActiveTurn { .. }
@@ -7400,7 +7737,8 @@ fn prepare_active_turn_lost_failure(
         Some(
             ActiveTurnPhase::AwaitingApproval { .. }
             | ActiveTurnPhase::AwaitingChild { .. }
-            | ActiveTurnPhase::AwaitingRecoveryDecision { .. },
+            | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+            | ActiveTurnPhase::AwaitingRunnerRecovery { .. },
         )
         | None => {
             return Err(fail(
@@ -7524,6 +7862,15 @@ fn prepare_earliest_queued_activation(
     }
 
     let queued = &projection.turns[index];
+    let preceding_non_accepted_terminal = projection
+        .preceding_non_accepted_successors
+        .get(&queued.turn())
+        .and_then(|predecessor| {
+            projection
+                .preceding_non_accepted_terminals
+                .get(predecessor)
+                .map(|(snapshot, selected)| (*predecessor, snapshot, *selected))
+        });
     let origin_entry = SemanticTranscriptEntry::from_validated_parts(
         identities.origin_entry,
         source_session,
@@ -7536,23 +7883,18 @@ fn prepare_earliest_queued_activation(
         .effective()
         .model()
         .selected_direct();
-    let previous_selected = index.checked_sub(1).map_or_else(
-        || {
-            projection
-                .preceding_non_accepted_terminal
-                .as_ref()
-                .map(|(_, _, selected)| *selected)
-        },
-        |predecessor| {
-            Some(
+    let previous_selected = preceding_non_accepted_terminal
+        .as_ref()
+        .map(|(_, _, selected)| *selected)
+        .or_else(|| {
+            index.checked_sub(1).map(|predecessor| {
                 projection.turns[predecessor]
                     .origin_configuration
                     .effective()
                     .model()
-                    .selected_direct(),
-            )
-        },
-    );
+                    .selected_direct()
+            })
+        });
     let model_identity_entry = previous_selected
         .filter(|previous| *previous != selected)
         .map(|_| {
@@ -7591,9 +7933,7 @@ fn prepare_earliest_queued_activation(
         .iter()
         .map(SemanticTranscriptEntry::reference)
         .collect::<Vec<_>>();
-    let (lineage, starting_snapshot) = if index == 0
-        && projection.preceding_non_accepted_terminal.is_none()
-    {
+    let (lineage, starting_snapshot) = if index == 0 && preceding_non_accepted_terminal.is_none() {
         let seed = projection
             .initial_seed_frontier
             .and_then(|frontier| projection.snapshots.get(&frontier));
@@ -7632,32 +7972,28 @@ fn prepare_earliest_queued_activation(
         };
         (AcceptedInputStartingLineage::FirstInSession, snapshot)
     } else {
-        let (predecessor_turn, terminal_frontier) = match index.checked_sub(1) {
-            Some(predecessor_index) => {
+        let (predecessor_turn, terminal_frontier) =
+            if let Some((predecessor_turn, terminal_frontier, _)) = preceding_non_accepted_terminal
+            {
+                (predecessor_turn, terminal_frontier)
+            } else if let Some(predecessor_index) = index.checked_sub(1) {
                 let predecessor = &projection.turns[predecessor_index];
                 let predecessor_turn = predecessor.turn;
                 let Some(terminal_frontier) = predecessor.terminal_frontier() else {
                     return Err(fail(
-                        projection,
-                        AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
-                            predecessor: predecessor_turn,
-                        },
-                    ));
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
+                        predecessor: predecessor_turn,
+                    },
+                ));
                 };
                 (predecessor_turn, terminal_frontier)
-            }
-            None => {
-                let Some((predecessor_turn, terminal_frontier, _)) =
-                    projection.preceding_non_accepted_terminal.as_ref()
-                else {
-                    return Err(fail(
-                        projection,
-                        AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
-                    ));
-                };
-                (*predecessor_turn, terminal_frontier)
-            }
-        };
+            } else {
+                return Err(fail(
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
+                ));
+            };
         let compacted = projection
             .latest_compaction_result
             .and_then(|frontier| projection.snapshots.get(&frontier))
@@ -16399,6 +16735,179 @@ mod tests {
             AcceptedInputSchedulingReconstitutionFailure::DuplicateModelCallIdentityAcrossKinds {
                 call,
             }
+        );
+    }
+
+    /// INV-009 / INV-044: checked relational runner-loss facts reconstitute the
+    /// exact closed active phase without a live turn attempt.
+    #[test]
+    fn inv009_inv044_runner_recovery_phase_reconstitutes_exact_loss_subject() {
+        let owning_turn = turn_id(801);
+        let runner = crate::RunnerId::from_uuid(uuid::Uuid::from_u128(802));
+        let revision = crate::RunnerGeneration::try_from_u64(3)
+            .expect("the fixture placement revision is positive");
+        let interrupted_tool_attempt = Some(tool_attempt_id(803));
+        let input = ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
+            owning_turn,
+            runner,
+            revision,
+            interrupted_tool_attempt,
+        );
+
+        assert_eq!(
+            input.canonical_evidence_free_phase(),
+            Some(ActiveTurnPhase::AwaitingRunnerRecovery {
+                runner,
+                placement_revision: revision,
+                optional_tool_attempt: interrupted_tool_attempt,
+            })
+        );
+    }
+
+    /// INV-009: an interrupt successor authenticated against an external
+    /// terminal predecessor remains ahead of older ordinary queued work.
+    #[test]
+    fn inv009_external_interrupt_chain_is_the_first_accepted_order_root() {
+        let older_ordinary = turn_id(811);
+        let external_successor = turn_id(812);
+        let interrupt_descendant = turn_id(813);
+        let later_ordinary = turn_id(814);
+        let ordinary_roots = BTreeSet::from([older_ordinary, later_ordinary]);
+        let queued_turns = BTreeSet::from([
+            older_ordinary,
+            external_successor,
+            interrupt_descendant,
+            later_ordinary,
+        ]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![
+                older_ordinary,
+                external_successor,
+                interrupt_descendant,
+                later_ordinary,
+            ],
+            BTreeSet::from([external_successor]),
+            &ordinary_roots,
+            &queued_turns,
+        );
+
+        assert_eq!(
+            promoted,
+            vec![
+                external_successor,
+                interrupt_descendant,
+                older_ordinary,
+                later_ordinary,
+            ]
+        );
+    }
+
+    /// INV-009: later external chains retain their historical placement once
+    /// the oldest crossing chain is promoted ahead of queued work.
+    #[test]
+    fn inv009_multiple_external_interrupt_chains_are_retained_in_order() {
+        let older_ordinary = turn_id(821);
+        let first_external_successor = turn_id(822);
+        let first_descendant = turn_id(823);
+        let second_external_successor = turn_id(824);
+        let second_descendant = turn_id(825);
+        let later_ordinary = turn_id(826);
+        let ordinary_roots = BTreeSet::from([older_ordinary, later_ordinary]);
+        let queued_turns = BTreeSet::from([
+            older_ordinary,
+            first_external_successor,
+            first_descendant,
+            second_external_successor,
+            second_descendant,
+            later_ordinary,
+        ]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![
+                older_ordinary,
+                first_external_successor,
+                first_descendant,
+                second_external_successor,
+                second_descendant,
+                later_ordinary,
+            ],
+            BTreeSet::from([first_external_successor, second_external_successor]),
+            &ordinary_roots,
+            &queued_turns,
+        );
+
+        assert_eq!(
+            promoted,
+            vec![
+                first_external_successor,
+                first_descendant,
+                older_ordinary,
+                second_external_successor,
+                second_descendant,
+                later_ordinary,
+            ]
+        );
+    }
+
+    /// INV-009: an external interrupt chain does not cross a completed
+    /// accepted-input terminal prefix.
+    #[test]
+    fn inv009_external_interrupt_chain_retains_terminal_prefix() {
+        let terminal = turn_id(831);
+        let external_successor = turn_id(832);
+        let ordinary_roots = BTreeSet::from([terminal]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![terminal, external_successor],
+            BTreeSet::from([external_successor]),
+            &ordinary_roots,
+            &BTreeSet::from([external_successor]),
+        );
+
+        assert_eq!(promoted, vec![terminal, external_successor]);
+    }
+
+    /// INV-009: an external interrupt chain crosses queued ordinary work but
+    /// retains the completed accepted-input terminal prefix.
+    #[test]
+    fn inv009_external_interrupt_chain_precedes_only_queued_prefix() {
+        let terminal = turn_id(841);
+        let older_queued = turn_id(842);
+        let external_successor = turn_id(843);
+        let ordinary_roots = BTreeSet::from([terminal, older_queued]);
+        let queued_turns = BTreeSet::from([older_queued, external_successor]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![terminal, older_queued, external_successor],
+            BTreeSet::from([external_successor]),
+            &ordinary_roots,
+            &queued_turns,
+        );
+
+        assert_eq!(promoted, vec![terminal, external_successor, older_queued]);
+    }
+
+    /// INV-009: a historical external terminal does not hide the later
+    /// external interrupt chain that actually crosses queued ordinary work.
+    #[test]
+    fn inv009_later_external_interrupt_chain_crosses_queued_work() {
+        let historical_external = turn_id(851);
+        let older_queued = turn_id(852);
+        let crossing_external = turn_id(853);
+        let ordinary_roots = BTreeSet::from([older_queued]);
+        let queued_turns = BTreeSet::from([older_queued, crossing_external]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![older_queued, historical_external, crossing_external],
+            BTreeSet::from([historical_external, crossing_external]),
+            &ordinary_roots,
+            &queued_turns,
+        );
+
+        assert_eq!(
+            promoted,
+            vec![historical_external, crossing_external, older_queued]
         );
     }
 }

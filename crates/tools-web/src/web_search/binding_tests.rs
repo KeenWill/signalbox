@@ -36,9 +36,7 @@ async fn web_search_bound_executor_result_omits_credential_collision() {
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -78,9 +76,7 @@ async fn web_search_bound_executor_result_omits_case_normalized_credential_colli
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -202,9 +198,7 @@ async fn web_search_bound_known_failure_token_omits_case_folded_credential_colli
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -248,9 +242,7 @@ async fn web_search_bound_known_failure_token_omits_credential_substring_collisi
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -348,9 +340,7 @@ async fn web_search_bound_known_failure_omits_outer_ok_wrapper_collision() {
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -393,9 +383,7 @@ async fn web_search_bound_executor_result_omits_punctuated_case_collision() {
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -439,9 +427,7 @@ async fn web_search_bound_executor_error_result_omits_credential_collision() {
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),

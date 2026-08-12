@@ -150,6 +150,23 @@ request against a quiet `main` rather than inside the compaction stack.
 Raised as a review finding and dispositioned with this condition attached:
 https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
+## Goal mode
+
+- **What a consumer does when its generation closes mid-operation.** A consumer
+  reads the authority a turn ran under, works, and commits afterwards, so a
+  generation stopped or achieved in between was open when read and closed when
+  committed. Binding the read to the commit is committed unimplemented
+  functionality in [goal mode](spec/goal-mode.md); what the consumer should then
+  do is not decided. Escalating treats the closure as a reason to ask a human,
+  which is safe but turns an ordinary stop into an interruption for work already
+  performed. Refusing treats it as withdrawn authority, which is stricter but
+  discards a decision the model already paid for. The choice is observable and
+  belongs to whichever consumer binds it first. Blocks nothing today, because no
+  consumer rechecks.
+
+Raised as a review finding on the dispatch-goal work:
+https://github.com/KeenWill/signalbox/pull/562#discussion_r3760635157
+
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
@@ -219,55 +236,75 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   as an enforced pin-bump gate; it does not block the existing mechanical pin or
   live compatibility gates.
 
-## Claude Code CLI smoke credential delivery
+## Codex CLI image capability features
 
-- **How the compatibility-smoke credential reaches the wrapped CLI.** The
-  adapter clears the child environment and forwards only an allowlist that
-  deliberately carries no direct credential value, with a unit test asserting
-  `ANTHROPIC_API_KEY` never reaches the child; the CLI is expected to resolve
-  its own login from the forwarded credential home. An environment-scoped API
-  key therefore reaches the smoke's test process but not the CLI it spawns.
-  Decide whether the adapter's allowlist gains an explicit direct-credential
-  variable — a deliberate narrowing of that contract, with the accepted exposure
-  recorded — or the workflow writes a credential store the CLI reads under the
-  already-forwarded credential home. Blocks the live Claude compatibility smoke
-  from authenticating; it blocks neither the derived pin nor the credential-free
-  version gate, both of which are in force.
+- **Whether the pinned CLI's image features return once accepted input carries
+  images.** The adapter hard-disables `image_generation` and `view_image`. Each
+  adds a model-visible tool that the adapter's structured-output envelope does
+  not carry, and `view_image` — which loads a local image file into the
+  conversation context — is enabled by default in the pinned inventory, so
+  classifying it as non-capability would leave it live rather than merely
+  acknowledged. Accepted input is text-only today, so neither feature has
+  anything to act on. When the content extensions recorded under accepted-input
+  content above carry image and file content, decide whether either name is
+  re-enabled and how the bytes reach the spawned CLI. Blocks re-enabling either
+  name; it does not block the present disables, which stand on the capability
+  rule alone.
 
 ## Model fallback and provenance
 
-- **Whether automatic fallback is supported.** Decided: a classified
-  availability failure may be followed by a distinct successor model call
-  authenticated by another credential profile. The compatibility constraint this
-  places on present change is recorded in
-  [one call, one physical interaction](spec/model-call-execution.md#one-call-one-physical-interaction);
-  no present surface implements it. (S22, S23)
-- **Which failure classes permit fallback.** Decided: only provider quota
-  exhaustion, rate limiting, and overload accompanied by distinct typed evidence
-  that the request was not accepted. The availability classification alone is
-  insufficient. Refusal never qualifies. An ambiguous outcome never qualifies,
-  because a lost acknowledgement cannot prove the provider did not act
-  (INV-025). Credential resolution failure never qualifies: it is deployment
-  misconfiguration, and substitution would hide it. (S22, S23)
-- **Fallback configuration.** Decided in shape: a deployment groups
-  interchangeable credential profiles into a pool, ranks each membership within
-  its own pool rather than globally, and states the per-trigger response,
-  tie-break rule, and pool-exhaustion behavior as closed vocabularies admitted
-  at startup. Exact configuration grammar is an implementation choice for the
-  change that introduces it. What remains open is the per-turn client visibility
-  surface while a successor call is selected. (S20, S22)
+- **Automatic fallback.** Decided and specified: what a selection attempt can
+  end as, and every projection of each ending, by
+  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine);
+  the qualifying causes and the successor-call shape by
+  [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
+  the pool grammar, per-membership ranking, and closed action vocabulary by
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  What remains open is the client projection: snapshots expose each call's usage
+  and the final turn state, while the predecessor, cause, and successor relation
+  is committed future storage that no present migration or repository operation
+  supplies. Blocks fallback UI, not fallback. (S22)
 - **Whether an automatic successor may cross adapter kinds.** Decided for the
   first slice: no. A pool's members share one adapter, so cross-kind
   substitution is inexpressible rather than merely disabled, and moving a
   session between adapter kinds stays an explicit defaults replacement. Whether
-  mixed pools are ever admitted remains open. (S22)
+  mixed pools are ever admitted, and what would reconcile two adapters'
+  authentication shapes if they were, remains open. (S22)
 - **Provider headroom observation.** Selecting a profile by remaining capacity
   requires an observation surface no adapter currently captures: the Anthropic
   HTTP adapter reads only a request identifier from response headers, and the
   Codex CLI adapter's documented percentage headers are not established as
-  reachable through its process boundary. Which adapters can supply headroom,
-  and what a deployment may configure where none can, remains undecided. Blocks
+  reachable through its process boundary. What a deployment may configure where
+  no adapter supplies headroom is decided and no longer open: startup rejects
+  `headroom_reserve_percent`, `tie_break = "least_used"`, and any
+  `on_headroom_low` action other than `stay`, under the fail-closed admission
+  rule in
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection),
+  because a protection that silently never fires reads as one the deployment
+  has. What remains undecided is which adapters can supply headroom at all and
+  the normalized quantity, observation lifetime, and deterministic secondary
+  tie-break a later contract must define before `least_used` is admitted, and
+  whether a free probe exists that does not consume the quota it reports. Blocks
   capacity-aware selection, not availability failover. (S22)
+- **Zero-cost liveness probes.** Quarantine semantics are decided and owned by
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection):
+  durable, profile-scoped, cleared by an operator command or by a probe that
+  calls no model. What remains open is whether any adapter can offer such a
+  probe. Absent one, an operator command is the only clearing path. Blocks
+  automatic recovery from a rejected credential, not recovery itself. (S22)
+- **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
+  delivery contract is owned by
+  [credential deliveries](spec/configuration-and-credentials.md#credential-deliveries).
+  What remains open is the minimum supported CLI version and exact live
+  conformance check that establish this behavior. The implementing slice cannot
+  land until that evidence exists; a current CLI version declining the store
+  blocks that slice rather than making the committed delivery optional. (S22)
+- **Reuse-detection blast radius.** Whether a provider rejecting a reused
+  refresh token invalidates only that token or the whole authorization family is
+  not determinable from either CLI's source. It does not affect the `oauth`
+  delivery, which has exactly one refresher, but it bounds how bad a
+  `codex_home` concurrency violation is: single-token rejection is recoverable,
+  family revocation is account loss. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
   [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
@@ -331,9 +368,13 @@ The questions below remain open.
   Blocks runner-side tool registry and executor implementation.
 - **Daemon Git push transport.** `git_push_configured` is implemented as a
   declaration and executor over an injected transport, but no production
-  `GitPushTransport` exists. The remote authority, credential and destination
-  policy, and production transport remain undecided; until they are decided the
-  tool stays absent from the daemon registry. Blocks daemon-side Git push.
+  `GitPushTransport` exists. Remote authority and destination policy are decided
+  and stated under
+  [remote destination authority](spec/git-authority-threat-model.md#remote-destination-authority):
+  destinations are durable records an operator mints, scoped by workspace
+  identity, and `https` only. The credential policy for a push and the
+  production transport itself remain undecided; until they are decided the tool
+  stays absent from the daemon registry. Blocks daemon-side Git push.
 - **Workspace portability between runners.** Moving a session that owns a
   workspace to another runner requires that workspace to exist, or to be
   reconstructible, on the destination. Version one never carries a workspace
@@ -442,6 +483,28 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
+- **Turn-origin instructions in the approval-judge request.** The delegated
+  request context carries session-scoped authority — the goal generation the
+  judged turn is bound to, the template name, and the system prompt frozen for
+  that turn — but no turn-origin content. A delegation-origin child turn's exact
+  parent-supplied task is therefore not shown, so a child created from a broad
+  template may ask for an effect its delegated task never covered while the
+  judge sees only the wider session authority. Freezing that task alongside the
+  session-level fields is undecided, because each added field is further
+  attacker-influenced text placed inside the judge's own prompt, and the
+  injection posture is what makes any session-derived context admissible at all.
+  Recorded as a design question rather than a blocker; authority the context
+  does not settle escalates rather than approves.
+- **Per-template thread-resolution policy.** Whether a session template may
+  choose its own posture toward
+  [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog)
+  — so that one template resolves the reviewer threads it has answered while
+  another may only reply and leave resolution to the reviewer — is undecided.
+  Deciding it requires the template configuration surface to carry per-template
+  tool posture at all, which is itself open under
+  [Template storage and authoring](#template-storage-and-authoring). Recorded as
+  a design question rather than a blocker; it blocks only a per-template choice,
+  never the posture the daemon composition already applies.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
   remain undecided.
@@ -477,6 +540,25 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   `git` usage sees. Recorded as a design question rather than a blocker; the
   forced configuration and the effective-URL check remain the version-one
   boundary.
+- **Several bound workspaces per session, and explicit session relocation.** A
+  session binds one workspace root, derived from the configured root by the
+  fixed session-UUID formula owned by
+  [configuration and credentials](spec/configuration-and-credentials.md#derived-session-workspace-roots),
+  which is what keeps the set of roots the daemon can open a property of
+  deployment configuration alone. Two operations are anticipated on that
+  mechanism and are inexpressible today: a session bound to several workspaces
+  at once, and an operator moving or pinning a session's workspace deliberately.
+  Both are explicit rebinds of the per-session instance rather than anything
+  derived from placement — they compose with runner placement without being
+  selected by it, and the workspace portability question under
+  [scheduling and runners](#scheduling-and-runners) owns carrying a workspace
+  between runners rather than rebinding one inside a daemon. Deciding them needs
+  what names a further root without letting a session name a path, how the
+  isolation comparisons that today refuse a directory shared between two
+  sessions read across several roots one session holds, and what a rebind owes
+  executors already retained against the previous root. Recorded as a design
+  question rather than a blocker; the one-root-per-session derivation remains
+  correct until it is answered. (S15)
 
 ## Identity, credentials, and resource governance
 

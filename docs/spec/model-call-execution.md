@@ -11,14 +11,18 @@ against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
 authorize-send / commit-observation effects, assistant content, intra-turn tool
 rounds and final turn completion, provider failure classification into physical
-dispositions, and the retry prohibition. Tool requests, approvals, attempts, and
-continuation are owned by [tool-loop](tool-loop.md). Turn and attempt lifecycle
-law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entries and frontiers in
-[sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
-outbox in [persistence-protocol](persistence-protocol.md); the typed
-model-runtime layer in [runtime-substrate](runtime-substrate.md); daemon
-startup, scheduling, and shutdown composition in
+dispositions, and the retry prohibition. What a credential-pool selection
+attempt can end as, and every projection of each ending, is owned by
+[credential availability](credential-availability.md); this page owns the
+terminal-evidence-and-cause column of that table and the successor call's own
+mechanics. Tool requests, approvals, attempts, and continuation are owned by
+[tool-loop](tool-loop.md). Turn and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
+storage protocol and the outbox in
+[persistence-protocol](persistence-protocol.md); the typed model-runtime layer
+in [runtime-substrate](runtime-substrate.md); daemon startup, scheduling, and
+shutdown composition in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); and model
 configuration and credentials in
 [configuration-and-credentials](configuration-and-credentials.md). The
@@ -48,7 +52,9 @@ automatic machinery. Session-delegation semantic rendering and its
 provider-neutral bridge were verified against this PR (`agent/delegation`). The
 runner-placement rendering and executable session-tool snapshot paragraphs are
 the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Invariant tags cite
+verified only with those child pull requests. Availability successor calls are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with its child pull requests. Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -490,7 +496,17 @@ command. This proposal is accepted with the implementing stack's merge.
    revalidates complete authority — it never trusts the pre-send projection —
    checks the observation's correlation against fresh state, and atomically
    commits the call disposition, attempt and turn transitions, semantic entries,
-   terminal frontier, and outbox rows.
+   terminal frontier, and outbox rows. If the frozen credential-pool policy
+   derives any durable effect from that observation — a profile quarantine, a
+   pending session displacement, a membership exclusion, or the chain exclusion
+   that removes the failed member from this turn's availability-successor chain
+   — the transaction reloads the immutable policy identity pinned by that
+   `Prepared` call rather than the session's current credential-history head. It
+   commits every derived record with the observation's exact correlation, in the
+   same all-or-nothing transaction as the terminal evidence and the successor or
+   wait disposition; no side may commit alone. The chain exclusion is included
+   for the same reason as the rest: without it a crash between the observation
+   and a later release could readmit the profile whose failure parked the turn.
 
 Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
 render, capability, capability-failure commit, capability-failure reread,
@@ -550,32 +566,180 @@ provider-acceptance boundary. Storage backstops single-call-ness independently
 of the aggregate: `model_call_attempt_once UNIQUE (turn_attempt_id)` admits at
 most one call row per attempt against any buggy or racing writer. There is no
 automatic retry after a known failure and no automatic retry of an ambiguous
-outcome (INV-025, INV-026); a known failure fails the attempt and turn, and
-ambiguity parks the turn for recovery. A later scheduler pass never treats an
+outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
+its pool authorizes an availability successor against a *different* eligible
+profile ([availability successor calls](#availability-successor-calls)) — the
+`terminal` and `successor` rows of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+which states the four ordered gates that send a failure to the first rather than
+the second, the first gate it fails deciding — and ambiguity parks the turn for
+recovery. That exception is substitution, never repetition: no path re-issues a
+call against the profile that failed. A later scheduler pass never treats an
 issued unclassified call as fresh authorization. Why: a lost acknowledgement
 cannot prove the provider did not act, so repetition risks undisclosed duplicate
 provider effects and spend; honest ambiguity is preferred to an invented
 exactly-once claim.
 
-**Committed unimplemented functionality — availability successor calls.** No
-present configuration, command, or scheduler path selects another credential
-profile after a failed call; every known failure fails its attempt and turn as
-described above. A future availability-failover surface constrains present
-change in four ways; selection behavior is owned by
-[model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-Its successor is a distinct model call with its own pinned target and its own
-durable credential reference, never a second authorization or a substituted
-identity on an existing call, so the accepted no-silent-substitution rule
-(INV-014) is untouched. That successor belongs to a successor turn attempt, so
-`model_call_attempt_once UNIQUE (turn_attempt_id)` continues to admit exactly
-one call row per attempt and needs no relaxation. Its admitted causes require
-distinct typed non-acceptance evidence accompanying an admitted availability
-classification; the classification alone is insufficient. An ambiguous outcome
-stays outside them under INV-025, and a refusal stays outside them because
-refusal is provider judgment rather than provider capacity. And the reason a
-successor exists is recorded as durable evidence rather than inferred from the
-pair of calls. The qualifying-cause decision this constrains is
-[model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+### Availability successor calls
+
+The rule above governs repetition: one durable authorization never reaches the
+provider twice. It does not govern substitution of the credential that failed,
+which is the `successor` ending of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+A `KnownFailed` call whose cause is one of the three availability causes —
+`provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded` —
+and whose pool configures `switch_now` for that cause may be followed by a
+*successor call*: a distinct model call, on a successor turn attempt, against
+the next admitted member of the same credential pool
+([configuration-and-credentials](configuration-and-credentials.md#credential-pools-and-selection)).
+This is the `successor` row of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+which owns every other projection of it; this section owns the call's own
+mechanics.
+
+That framing is what makes this compatible with the accepted rules rather than
+an exception to them. The predecessor stays terminal and stays `KnownFailed`;
+nothing reclassifies it, and its pinned target, pinned credential reference, and
+reported usage remain exactly what it recorded. The successor pins the same
+resolved target and a different credential reference, so no call changes
+identity mid-flight and INV-018 is untouched. Because the successor belongs to
+its own attempt, `model_call_attempt_once UNIQUE (turn_attempt_id)` still admits
+exactly one call row per attempt and needs no relaxation; the attempt chain is
+the one intra-turn tool rounds already create.
+
+An observation that admits this path ends the predecessor attempt as
+`KnownFailure` but does not terminalize the turn. Under the session-scheduler
+lock, its atomic observation transaction applies the frozen `switch_now` action
+and either prepares the successor attempt and call or enters the pool's
+exhausted or contended disposition. It appends no `TurnFailed`, creates no
+terminal frontier, and does not reclassify pending steering while a successor or
+wait retains the active turn. A concurrently accepted stop is serialized by that
+same lock: when its applied-interrupt proof already exists, the known failure
+follows the ordinary stop-requested terminal path and no successor is created;
+when the observation wins first, the later stop targets the newly active
+successor. One commit can therefore never both terminalize the turn and
+authorize a successor.
+
+Three causes qualify and no others. Refusal never qualifies: it is provider
+judgment about the request, so another account would refuse the same content and
+substituting one would be shopping for a different answer. Ambiguity never
+qualifies (INV-025): a lost acknowledgement cannot prove the provider did not
+act, so a successor could duplicate both an effect and its spend. Credential
+resolution failure and `provider_credential_rejected` never qualify: both are
+deployment misconfiguration, and moving to another account hides the account
+that is broken. For each admitted availability cause, the adapter supplies
+distinct typed evidence that the request was not accepted; classification as
+quota exhaustion, rate limiting, or overload alone is insufficient. Every other
+known failure keeps the behavior above, failing its attempt and turn.
+
+The chain is bounded by the pool. A member that produced a qualifying failure is
+excluded from the current availability-successor chain, so at most one call per
+member exists per chain and the longest possible chain is the pool's member
+count. A successful call ends that chain before any tool-round continuation is
+prepared. A parked wait does **not** end it: the wait is part of the chain that
+entered it, and releasing the wait resumes that same chain and recomputes
+admission. That is forced by the release contract rather than chosen here — the
+wait-release origin carries the predecessor call and its non-acceptance proof
+exactly where this chain had already observed a qualifying failure, so a
+successor prepared at release is that failure's authorized successor, and the
+`wait-transition fail (after call)` ending exists for the release that finds the
+pool exhausted instead. A release that began a fresh chain could carry neither.
+The chain bound survives this because a qualifying failure excludes its member
+for the rest of the turn, not merely for the chain, so no wait can readmit one.
+Every durable membership exclusion and profile quarantine is retained as well.
+
+A member that produced a qualifying failure stays excluded for the rest of the
+turn, not merely for the chain that observed it. A release therefore never
+re-admits a profile whose own failure parked the turn, so this turn issues at
+most one availability-successor call per pool member however many times it parks
+and resumes. That bound is on availability-successor calls, not on the turn's
+provider calls in total: a tool loop still creates its own continuation attempts
+and calls, which this rule neither counts nor limits.
+
+Why the exclusion outlives its chain: a one-member pool configured `switch_now`
+with `park` would otherwise park on a reset-bearing failure, wake at the
+deadline, drop the sole member's exclusion, call the same profile again, and
+repeat without bound — an automatic same-profile retry loop, which INV-014 and
+INV-018 forbid and which
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance)
+explicitly leaves outside accepted policy under its future same-profile retry
+question. Nothing readmits such a member within the same turn. A reset passing
+releases the wait without readmitting the member that failed, and an operator
+clear of the exact predecessor correlation does not readmit it either: a clear
+is administrative repair that takes effect from the next turn, deliberately not
+a retry command. Making it readmit here would turn `clear_credential_exclusion`
+into precisely the same-profile retry that question reserves for a separate
+decision, and repeated clears would defeat this bound. When no member remains,
+the turn takes the exhaustion path below rather than calling a failed member
+again.
+
+When no member remains admissible, which ending the attempt reaches is decided
+by whether the exhaustion selects a wait — which `fail` never does and `park`
+does only while some exclusion a wake can clear remains — together with whether
+this **availability chain** has already issued a call, the chain and not the
+turn, since a later tool round opens a fresh chain against a turn that has
+already issued calls. Every such ending, and every projection of each, is stated
+once by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+
+This page owns one column of
+[that table](credential-availability.md#the-credential-availability-machine) —
+terminal evidence and cause — and states only that column here. A chain that
+already observed a qualifying provider failure carries that last observed cause
+and its `ProviderError` evidence. A turn that reached an exhausted pool before
+issuing any call instead carries the distinct `credential_pool_exhausted`
+preparation cause together with the frozen policy's durable member-exclusion
+evidence; it never fabricates provider evidence and never borrows a stale
+provider cause, because no provider request was issued for it to have observed.
+A parked turn carries no terminal evidence at all: it has not terminalized, and
+is not one of this page's terminal outcomes.
+
+**Committed unimplemented functionality — pre-call pool-exhaustion failure.** No
+present domain transition, repository shape, or process event can produce this
+failure. Its implementing child must add the sealed
+`CredentialPoolExhaustedFailure` value carrying the immutable pool-policy
+identity and a complete nonempty evidence list in policy-member order. Each
+member item carries the profile reference, the one closed exclusion kind
+(`profile_quarantine`, `membership_exclusion`, `session_displacement`, or
+`chain_exclusion`), its durable record generation or predecessor-observation
+correlation, and its optional reset. A member covered by several at once selects
+one kind by the widest-scope-first precedence, and reports a reset only when
+every exclusion then active for it is of a kind that *expires* at the reset it
+reports — and then the latest of them — exactly as
+[process protocol](process-protocol.md#credential-pool-preparation-failure)
+requires. Reporting a reset is not sufficient, because a displacement or a
+quarantine can carry one while clearing only by another preparation or an
+operator command. It carries no provider prose or credential value. The guarded
+transition requires an active turn whose current attempt has no model call, ends
+that attempt `KnownFailure`, terminalizes the turn `Failed`, appends the
+ordinary `TurnFailed { turn }` marker to that attempt's source frontier, and
+atomically emits the typed preparation-failure event owned by
+[process protocol](process-protocol.md#credential-pool-preparation-failure).
+Partial evidence, a member outside the frozen policy, duplicate or reordered
+members, or a correlation that did not supply active exclusion evidence in the
+atomic failure commit fails closed. A later authorized clear leaves that
+historical correlation valid: reconstitution validates the retained generation
+or predecessor observation and its active-at-failure fact, not its current
+active state. Persistence owns the corresponding all-or-nothing representation
+below.
+
+The same child adds the selecting immutable pool-policy identity to every
+pool-selected `Prepared` call as an insert-only authorization fact beside its
+credential reference. Reconstitution requires that policy to contain the pinned
+profile with the expected target adapter and delivery kind. Every observation-
+derived trigger action reloads this call-pinned revision, so an explicit session
+credential update that commits while the provider interaction is in flight
+cannot change the action applied to its result.
+
+Each successor durably records the predecessor call it follows and the cause
+that authorized it, so a chain reads as evidence rather than as two calls that
+happen to share a turn. A goal-mode turn whose pool exhaustion selects no wait
+blocks with the ordinary `execution_failure` reason ([goal-mode](goal-mode.md));
+one that selects a wait remains the current goal turn and appends nothing,
+because no terminal disposition exists yet. The discriminator is wait selection
+and not the configured value, so a `park` pool whose members this turn's own
+chain exclusions have all removed blocks like any other failure rather than
+staying current forever.
 
 ## Provider observation classification
 
@@ -714,10 +878,12 @@ persistence commits it atomically with its outbox rows
 - **KnownFailed.** The call ends `KnownFailed`; definitive provider-error
   evidence additionally retains only its closed `ProviderErrorKind`
   classification as the optional provider-failure cause — never provider prose.
-  An unstopped attempt ends `KnownFailure`, and the turn fails with a
-  `TurnFailed` entry and terminal frontier. A stop-requested attempt instead
-  ends `AfterCancellation(KnownFailure)` and still fails; the physical result
-  has not proven cancellation.
+  An unstopped attempt ends `KnownFailure`. Unless the same atomic observation
+  admits the availability-successor path above, the turn fails with a
+  `TurnFailed` entry and terminal frontier; an admitted successor instead keeps
+  the turn active without either. A stop-requested attempt ends
+  `AfterCancellation(KnownFailure)` and still fails, and cannot admit a
+  successor; the physical result has not proven cancellation.
 - **Cancelled.** Without the exact applied-interrupt proof, a physical
   cancellation is an unstopped known failure. With the exact proof — carried
   directly by the atomic interrupt transition before any call exists or for an
@@ -819,11 +985,14 @@ attempt, redispatches a call, or assumes a request was or was not sent.
 
 Production composition wires `PostgresModelCallRepository` (all four transaction
 roles), the in-process gate, and `RuntimeModelCallProvider` over the
-configuration-selected Anthropic HTTP or Codex CLI runtime, with the domain
-target catalog, runtime model catalog, and exact adapter routes built from one
-versioned static configuration file. Anthropic rereads its credential file;
-Codex uses its external CLI login
-([configuration-and-credentials](configuration-and-credentials.md)). The
+configuration-selected Anthropic HTTP, OpenAI HTTP, Claude CLI, or Codex CLI
+runtime, with the domain target catalog, runtime model catalog, and exact
+adapter routes built from one versioned static configuration file. Direct HTTP
+runtimes reread their credential files; each CLI runtime uses its ambient login,
+which is the only delivery the present composition supplies for one. Selecting a
+CLI credential from the profile's own delivery is committed unimplemented
+functionality owned by
+[configuration-and-credentials](configuration-and-credentials.md). The
 `signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
 one session through the real scheduler and PostgreSQL path with either a
 deterministic scripted reply or an explicit `--anthropic` smoke mode, then
@@ -848,13 +1017,19 @@ prints the semantic transcript; it is deliberately not the client protocol.
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.
-- No availability successor call exists: a classified availability failure fails
-  its attempt and turn like any other known failure. The qualifying causes, the
-  configuration that would select another profile, and the client visibility
-  surface are routed through
-  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance);
-  the compatibility constraint on present change is stated under
-  [one call, one physical interaction](#one-call-one-physical-interaction).
+- **Committed unimplemented functionality.** An
+  [availability successor call](#availability-successor-calls) — the `successor`
+  ending of
+  [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+  — is designed as durable evidence, but no present migration, repository
+  operation, or reconstitution path stores or recovers one, as
+  [persistence protocol](persistence-protocol.md) states under its
+  availability-successor storage contract, so predecessor lineage is not
+  presently recoverable. Once its implementing child lands that storage, the
+  chain will still be visible only after the fact: no client surface renders
+  that a successor is being selected. That transient visibility surface is
+  routed through
+  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.
 - The aggregate admits at most one call per turn attempt; the tool loop creates

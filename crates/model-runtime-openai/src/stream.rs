@@ -20,19 +20,24 @@ use signalbox_model_runtime::{
     LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
     ProviderErrorEvidence, ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence,
     SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-    ToolName, validate_provider_json_nesting,
+    ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
-/// The violation detail reported when an otherwise well-formed stream ends on
-/// an unrecognized finish reason — in practice, `length`, the token this
-/// adapter declines to map because the provider reuses it for two different
-/// bounds.
+/// The violation detail the deferred unrecognized-finish verdict reports.
 ///
-/// Public because a caller cannot otherwise distinguish that outcome from any
-/// other protocol violation: the loss evidence carries only the cause and the
-/// finish, and the finish is deliberately retained for truncated tool calls
-/// too. Exporting the exact spelling makes this one shared constant rather
-/// than a string a caller has to guess and keep in sync.
+/// Identifies *which* violation this is, and nothing more. Whether a tool call
+/// was involved rides `BoundaryLossEvidence::tool_calls`, so this string is no
+/// longer varied and no caller reads a suffix off it.
+///
+/// It is still a rendered string, which the terminal-evidence rule in
+/// `docs/spec/runtime-substrate.md` would rather no caller classified on. It
+/// survives because the loss vocabulary has no typed way to say *this*
+/// violation: `LossCause::StreamProtocolViolation` covers every stream defect,
+/// and a stream that reports `length` and then trips a different defect before
+/// `[DONE]` reaches identical typed evidence — same cause, same retained
+/// finish, same tool fact. Closing that needs a `LossCause` variant of its own
+/// and the durable operator-facing token that comes with it, which is a
+/// deliberate vocabulary decision rather than a detail of this change.
 pub const OUTPUT_CEILING_VIOLATION_DETAIL: &str = "stream carries an unrecognized finish_reason";
 
 use crate::response::{StopSequences, convert_usage, map_finish};
@@ -46,6 +51,19 @@ pub(crate) enum StreamStep {
     Continue,
     /// The stream reached typed terminal evidence; stop reading.
     Terminal(Box<TerminalEvidence>),
+}
+
+/// Whether records this chunk framed sit behind the one being applied now.
+///
+/// This is the axis that separates a withheld answer from a stated negative: a
+/// terminal raised on the last record of a chunk discards nothing, while one
+/// raised earlier drops records the decoder never scanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaterRecords {
+    /// Records the caller framed but has not applied yet follow this one.
+    Unapplied,
+    /// This is the last record the chunk framed, so nothing follows it.
+    AllApplied,
 }
 
 #[derive(Default)]
@@ -71,6 +89,12 @@ pub(crate) struct StreamDecoder {
     refusal_text: String,
     tool_builders: BTreeMap<u32, ToolBuilder>,
     completed_tools: Vec<ToolCallProposal>,
+    /// Sticky: at least one tool call was announced by the provider. Neither
+    /// `tool_builders` (emptied by `finalize_tools`) nor `completed_tools`
+    /// (populated only there) survives every loss path.
+    opened_tool_calls: bool,
+    discarded_unexamined_bytes: bool,
+    later_records: LaterRecords,
     final_usage_reported: bool,
     /// The violation an unrecognized finish will report at `[DONE]`. Held
     /// rather than returned so records following that finish are still
@@ -92,6 +116,9 @@ impl StreamDecoder {
             refusal_text: String::new(),
             tool_builders: BTreeMap::new(),
             completed_tools: Vec::new(),
+            opened_tool_calls: false,
+            discarded_unexamined_bytes: false,
+            later_records: LaterRecords::AllApplied,
             final_usage_reported: false,
             pending_unrecognized_finish: None,
         }
@@ -108,14 +135,32 @@ impl StreamDecoder {
             return self.apply_done();
         }
         if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
-            return self.violation(format!("stream chunk exceeds the JSON bound: {error}"));
+            return self
+                .undecoded_violation(format!("stream chunk exceeds the JSON bound: {error}"));
         }
         let chunk: ChatChunk = match serde_json::from_str(&record.data) {
             Ok(chunk) => chunk,
             Err(error) => {
-                return self.violation(format!("malformed stream chunk payload: {error}"));
+                return self
+                    .undecoded_violation(format!("malformed stream chunk payload: {error}"));
             }
         };
+        // Recorded the moment the chunk deserializes, before any of the checks
+        // below can end the stream, and never cleared: a decoded tool-call delta
+        // is the provider demonstrably opening a call, whatever else about the
+        // chunk is then rejected. Every validation between here and the choice
+        // loop returns early — the conflicting-id, reported-model, final-usage,
+        // object-type, choice-count, missing-id, post-finish, and choice-index
+        // checks — so a flag set inside that loop would report "none opened" for
+        // a chunk whose own bytes carry the announcement.
+        if chunk.choices.iter().any(|choice| {
+            choice
+                .delta
+                .as_ref()
+                .is_some_and(|delta| !delta.tool_calls.is_empty())
+        }) {
+            self.opened_tool_calls = true;
+        }
         if chunk.error.is_some()
             && let (Some(existing), Some(reported)) = (&self.completion_id, &chunk.id)
             && existing != reported
@@ -214,6 +259,11 @@ impl StreamDecoder {
                 ));
             }
             if let Some(delta) = choice.delta {
+                // The tool fact for this delta was already recorded by the
+                // chunk-level pre-scan above; the decoder's own tool state
+                // cannot answer for it later, since `tool_builders` is emptied
+                // by `finalize_tools` and an entry is created only after the
+                // index and type checks below pass.
                 let mut known_indices: BTreeSet<u32> = self.tool_builders.keys().copied().collect();
                 let Ok(mut next_index) = u32::try_from(known_indices.len()) else {
                     return self.violation("stream carries too many tool-call indices");
@@ -397,21 +447,17 @@ impl StreamDecoder {
                     // unrecognized-finish paragraph of the runtime-substrate
                     // specification, which owns this behavior.
                     //
-                    // It does change *which* violation this is, though. A tool
-                    // call opened here may have emitted no observation at all —
-                    // `ToolArgumentsDelta` needs a non-empty fragment and
-                    // `ToolCallProposed` needs `finalize_tools`, which this
-                    // return precedes — so the cause is the only place that
-                    // fact can survive for a caller who cares whether tools
-                    // were involved.
-                    let opened_tool_calls =
-                        !self.tool_builders.is_empty() || !self.completed_tools.is_empty();
+                    // Whether a tool call was involved rides
+                    // `BoundaryLossEvidence::tool_calls`, not this detail. That
+                    // fact needs a channel because a call opened here may emit
+                    // no observation at all — `ToolArgumentsDelta` needs a
+                    // non-empty fragment and `ToolCallProposed` needs
+                    // `finalize_tools`, which the deferred verdict returns ahead
+                    // of — but the channel is the typed field, so the detail
+                    // stays a rendered diagnostic no caller classifies on.
                     self.finish = Some(finish);
-                    self.pending_unrecognized_finish = Some(if opened_tool_calls {
-                        format!("{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened")
-                    } else {
-                        OUTPUT_CEILING_VIOLATION_DETAIL.to_string()
-                    });
+                    self.pending_unrecognized_finish =
+                        Some(OUTPUT_CEILING_VIOLATION_DETAIL.to_string());
                     return StreamStep::Continue;
                 }
                 if !self.refusal_text.is_empty() {
@@ -439,13 +485,88 @@ impl StreamDecoder {
         StreamStep::Continue
     }
 
+    /// Whether a tool call had opened in the records decoded so far.
+    ///
+    /// Every record that deserialized was scanned for tool material before any
+    /// check could reject it, so across decoded records the negative case is
+    /// the stated fact rather than an absence. Records that never deserialized
+    /// are answered by [`Self::tool_calls_at_decode_failure`] instead.
+    fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else if self.discarded_unexamined_bytes {
+            ToolCallsAtLoss::Unobserved
+        } else {
+            match self.later_records {
+                LaterRecords::Unapplied => ToolCallsAtLoss::Unobserved,
+                LaterRecords::AllApplied => ToolCallsAtLoss::NoneOpened,
+            }
+        }
+    }
+
+    /// Records that the transport accepted bytes no record ever carried into
+    /// this decoder — a partial record held by the framer when the stream was
+    /// cancelled or failed. Those bytes are discarded unexamined, so from this
+    /// point the decoder can no longer state that no tool call opened.
+    pub(crate) fn note_discarded_unexamined_bytes(&mut self) {
+        self.discarded_unexamined_bytes = true;
+    }
+
+    /// Records whether this chunk framed records the caller has not applied yet.
+    ///
+    /// Not sticky: it holds only while such records exist. A terminal built
+    /// during the apply below discards them, and the evidence is constructed
+    /// inside `apply`, so the decoder has to know before it is called rather
+    /// than be corrected afterwards.
+    pub(crate) fn note_later_records(&mut self, later_records: LaterRecords) {
+        self.later_records = later_records;
+    }
+
+    /// The tool fact for a violation raised by a record that never decoded.
+    ///
+    /// A record rejected by the JSON bound or by `ChatChunk` deserialization —
+    /// and a stream whose framing ended inside an incomplete record — was never
+    /// scanned, so it could itself have carried the tool-call delta. "None
+    /// opened" would claim a negative about bytes the decoder never read. A
+    /// tool call an earlier record already established still stands.
+    fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else {
+            ToolCallsAtLoss::Unobserved
+        }
+    }
+
+    /// Protocol-violation evidence for a record that never decoded.
+    pub(crate) fn undecoded_violation_evidence(
+        &self,
+        detail: impl Into<String>,
+    ) -> TerminalEvidence {
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::StreamProtocolViolation {
+                detail: detail.into(),
+            },
+            exchange: self.exchange.clone(),
+            reported_model: self.reported_model.clone(),
+            finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_decode_failure(),
+            usage: self.usage,
+        })
+    }
+
+    fn undecoded_violation(&self, detail: impl Into<String>) -> StreamStep {
+        StreamStep::Terminal(Box::new(self.undecoded_violation_evidence(detail)))
+    }
+
     /// Evidence for a stream that ended without `[DONE]`.
     pub(crate) fn lost(self, interruption: StreamInterruption) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::StreamEndedWithoutTerminalMarker { interruption },
             exchange: self.exchange,
             reported_model: self.reported_model,
             finish_reported: self.finish,
+            tool_calls,
             usage: self.usage,
         })
     }
@@ -457,6 +578,7 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
@@ -470,6 +592,7 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
@@ -660,13 +783,18 @@ mod tests {
         AssistantPart, BoundaryLossEvidence, CompletionFinish, ExchangeFacts, FinishReason,
         LossCause, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind,
         ProviderReportedModel, ProviderRequestId, SseFraming, SseRecord, StreamInterruption,
-        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
     };
 
     use signalbox_model_runtime::ProviderErrorEvidence;
 
-    use super::{OUTPUT_CEILING_VIOLATION_DETAIL, StreamDecoder, StreamStep};
+    use super::{StreamDecoder, StreamStep};
     use crate::response::StopSequences;
+
+    /// Larger than any fixture record in this module. These tests exercise the
+    /// decoder, not the framer's record bound, so the value only has to be out
+    /// of reach — the bound's own behavior is covered in the framer's tests.
+    const AMPLE_RECORD_LIMIT: usize = 1024 * 1024;
 
     /// Pushes one chunk that must frame without a failure and returns its
     /// completed records.
@@ -694,7 +822,7 @@ mod tests {
         chunks: &[&[u8]],
         stop_sequences: StopSequences,
     ) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
-        let mut framing = SseFraming::new(1024 * 1024);
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
         let mut decoder = StreamDecoder::new(exchange(), stop_sequences);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
@@ -718,7 +846,7 @@ mod tests {
     /// Drives chunks that must not terminate, then reports the end-of-stream
     /// loss evidence for the resulting decoder state.
     fn drive_to_eof(chunks: &[&[u8]]) -> (TerminalEvidence, Vec<Observation<String>>) {
-        let mut framing = SseFraming::new(1024 * 1024);
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
         let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
@@ -755,6 +883,240 @@ mod tests {
             panic!("a statusless stream error is definitive provider evidence");
         };
         assert_eq!(error.kind, expected, "native token {token}");
+    }
+
+    /// Reports the boundary loss a fixture ended on.
+    #[track_caller]
+    fn loss_of(terminal: Option<TerminalEvidence>) -> BoundaryLossEvidence {
+        match terminal {
+            Some(TerminalEvidence::BoundaryLoss(loss)) => loss,
+            other => panic!("fixture expected boundary loss, got {other:?}"),
+        }
+    }
+
+    /// an output-bound stop reached after a tool call opened is
+    /// distinguishable from a plain one without reading the violation detail.
+    ///
+    /// The provider announces a call's id and name and is then cut off by the
+    /// output bound before any argument fragment, so neither
+    /// `ToolArgumentsDelta` (needs a non-empty fragment) nor `ToolCallProposed`
+    /// (needs `finalize_tools`, which the deferred verdict returns ahead of in
+    /// `apply_done`) is emitted. The observation stream cannot answer the
+    /// question and the loss evidence must.
+    #[test]
+    fn a_tool_call_opened_before_an_unrecognized_finish_is_typed_on_the_loss() {
+        let (terminal, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
+        ]);
+
+        let loss = loss_of(terminal);
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "length".to_string(),
+            })
+        );
+        assert!(
+            !observations.iter().any(|observation| matches!(
+                observation.fact,
+                ObservationFact::ToolCallProposed(_) | ObservationFact::ToolArgumentsDelta { .. }
+            )),
+            "the opened call reaches no observation, so only the loss carries it"
+        );
+    }
+
+    /// The same stop with no tool call opened reports the other fact, so the
+    /// two are told apart by type rather than by the rendered detail.
+    #[test]
+    fn an_unrecognized_finish_without_tool_calls_reports_none_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// `finalize_tools` takes `tool_builders` before it can raise a violation,
+    /// so the decoder's tool state is already empty at that point; the fact
+    /// must survive it.
+    #[test]
+    fn a_violation_raised_after_the_tool_builders_are_taken_still_reports_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\"}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// A sparse first index is rejected by the pre-scan, which runs before any
+    /// builder exists for it — the other point where decoder tool state is
+    /// blind to a call the provider announced.
+    #[test]
+    fn a_violation_raised_before_a_builder_exists_still_reports_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// The choice-index check rejects the chunk before the choice loop reaches
+    /// its delta, so a flag set inside that loop would miss a tool announcement
+    /// the chunk's own bytes carry. The pre-scan runs at deserialization.
+    #[test]
+    fn a_chunk_rejected_for_its_choice_index_still_reports_the_tool_call_it_carried() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":7,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// The same rejection with no tool material still states the negative, so
+    /// the pre-scan reports the chunk rather than defaulting to `Opened`.
+    #[test]
+    fn a_chunk_rejected_for_its_choice_index_without_tool_material_reports_none_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":7,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// A stream that simply stops carries the negative fact, not an absence:
+    /// every record it received deserialized and was scanned.
+    #[test]
+    fn a_stream_lost_before_any_tool_call_reports_none_opened() {
+        let (terminal, _) = drive_to_eof(&[first_chunk()]);
+
+        let TerminalEvidence::BoundaryLoss(loss) = terminal else {
+            panic!("an unterminated stream is boundary loss");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// A record that never deserialized withholds the fact: the bytes the
+    /// decoder could not read could themselves have carried the tool delta.
+    #[test]
+    fn a_record_that_never_deserializes_withholds_the_tool_fact() {
+        let (terminal, _) = drive(&[first_chunk(), b"data: {not-json\n\n"]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// The JSON bound rejects the record before deserialization, so it is the
+    /// same withholding rather than a serde-specific case.
+    #[test]
+    fn a_record_rejected_by_the_json_bound_withholds_the_tool_fact() {
+        let deep = format!("data: {}1{}\n\n", "[".repeat(2048), "]".repeat(2048));
+        let (terminal, _) = drive(&[first_chunk(), deep.as_bytes()]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// Frames exactly one record from `chunk` and applies it, asserting both
+    /// the record count and that the decoder kept going.
+    ///
+    /// Plumbing: every fixture below sends one record per chunk, and stating
+    /// that expectation here keeps the iteration out of the test bodies.
+    #[track_caller]
+    fn apply_one_record(
+        framing: &mut SseFraming,
+        decoder: &mut StreamDecoder,
+        observations: &mut Vec<Observation<String>>,
+        chunk: &[u8],
+    ) {
+        let records = push_ok(framing, chunk);
+        let [record] = records.as_slice() else {
+            panic!("fixture chunk frames exactly one record");
+        };
+        assert!(matches!(
+            decoder.apply(record, &"call-1".to_string(), observations),
+            StreamStep::Continue
+        ));
+    }
+
+    /// A loss raised while the framer still holds bytes discards material the
+    /// decoder never saw, so the fact is withheld even though every record that
+    /// did reach the decoder was scanned.
+    #[test]
+    fn a_loss_with_unframed_bytes_held_withholds_the_tool_fact() {
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
+        let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
+        let mut observations: Vec<Observation<String>> = Vec::new();
+        apply_one_record(&mut framing, &mut decoder, &mut observations, first_chunk());
+        // A partial record: accepted by the transport, never framed, never seen.
+        assert_eq!(
+            push_ok(&mut framing, b"data: {\"choices\":[{\"index\""),
+            vec![]
+        );
+        assert!(framing.holds_unframed_bytes());
+        decoder.note_discarded_unexamined_bytes();
+
+        let TerminalEvidence::BoundaryLoss(loss) = decoder.lost(StreamInterruption::EndOfStream)
+        else {
+            panic!("an interrupted stream is boundary loss");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// Records framed from one chunk but dropped before the decoder applied
+    /// them are out of the framer's hands, so `holds_unframed_bytes` cannot see
+    /// them and the decoder is told directly. Without that, a cancellation that
+    /// lands mid-chunk would state a negative about records it discarded.
+    #[test]
+    fn records_dropped_before_the_decoder_applies_them_withhold() {
+        let mut framing = SseFraming::new(AMPLE_RECORD_LIMIT);
+        let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
+        let mut observations: Vec<Observation<String>> = Vec::new();
+        apply_one_record(&mut framing, &mut decoder, &mut observations, first_chunk());
+        // Framed cleanly and then dropped unapplied, exactly as the runtime's
+        // mid-chunk cancellation does.
+        assert_eq!(
+            push_ok(
+                &mut framing,
+                b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\"}]}}]}\n\n"
+            )
+            .len(),
+            1
+        );
+        assert!(
+            !framing.holds_unframed_bytes(),
+            "a framed record leaves the framer holding nothing"
+        );
+        decoder.note_discarded_unexamined_bytes();
+
+        let TerminalEvidence::BoundaryLoss(loss) = decoder.lost(StreamInterruption::EndOfStream)
+        else {
+            panic!("an interrupted stream is boundary loss");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// An undecodable record does not erase a tool call an earlier record
+    /// already established, so the withholding is not a blanket refusal.
+    #[test]
+    fn an_undecodable_record_after_a_tool_call_still_reports_it() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+            b"data: {not-json\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]
@@ -1178,16 +1540,11 @@ mod tests {
                 provider_token: CEILING_FINISH_TOKEN.to_string()
             })
         );
-        // The token survives, and the cause additionally records that tools
-        // were involved. Here the delta observation records it too, as the
-        // assertion above shows; the cause is the channel that still carries
-        // it when no fragment is emitted — see the sibling case below.
-        assert_eq!(
-            loss.cause,
-            protocol_violation(&format!(
-                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
-            ))
-        );
+        // The token survives, and the typed field records that tools were
+        // involved. Here the delta observation records it too, as the assertion
+        // above shows; the field is the channel that still carries it when no
+        // fragment is emitted — see the sibling case below.
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]
@@ -1211,12 +1568,7 @@ mod tests {
             "a tool call opened with no argument fragment emits no delta"
         );
         let loss = expect_boundary_loss(terminal);
-        assert_eq!(
-            loss.cause,
-            protocol_violation(&format!(
-                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
-            ))
-        );
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]

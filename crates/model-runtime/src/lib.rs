@@ -74,7 +74,7 @@ pub use cli_process::{
     CliSession, CliTerminalTextCapture, execute_cli_process,
 };
 pub use cli_redaction::{
-    REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text,
+    DiscardedField, REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text,
     trailing_credential_context,
 };
 pub use credential::{
@@ -85,8 +85,8 @@ pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, ProvenUnsentEvidence,
     ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
-    RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, TransportFacts,
-    UnsentCause,
+    RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, ToolCallsAtLoss,
+    TransportFacts, UnsentCause,
 };
 pub use input_count::{InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{

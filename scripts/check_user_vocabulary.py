@@ -296,6 +296,58 @@ ALLOWLIST = (
         ),
     ),
     Allowance(
+        # The migration that retires the stored spelling has to name it in
+        # order to rename it: it renames the column and the objects named
+        # after it, rewrites the stored values, and records which four
+        # record-ownership constraint names it deliberately leaves alone.
+        # Every other reference to these spellings is now a failure.
+        "storage vocabulary rename migration",
+        re.compile(
+            r"^crates/persistence/migrations/"
+            r"202608110001_user_role_storage_vocabulary[.]sql$"
+        ),
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:"
+            r"imported_conversation_raw_record_owner_fk|"
+            r"imported_transcript_entry_owner_fk|"
+            r"imported_transcript_entry_owner_identity_key|"
+            r"tool_approval_decision_owner_command_id_key|"
+            r"tool_approval_decision_owner_command_fk|"
+            r"owner_tool_approval_requires_command|"
+            r"review_pass_produced_finding_owner|"
+            r"owner_command_id|owner_command|owner_initiated|owner"
+            r")(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        # Fixtures that seed a database standing at an earlier migration, so
+        # that a later migration can be exercised against real rows. The
+        # CHECK constraints in force at that point admit only the retired
+        # spelling, so writing the current one fails with `23514` before the
+        # migration under test ever runs. This is not compatibility with the
+        # retired vocabulary: it is the evidence that the rename upgrades data
+        # that was written before it, and every one of these lines is inside a
+        # test whose pool is deliberately held short of the rename.
+        "pre-rename migration fixtures",
+        re.compile(
+            r"^crates/persistence/tests/(?:conversation_import_postgres|"
+            r"runner_protocol_postgres|"
+            r"postgres_integration/(?:approval_decisions|"
+            r"model_call_execution_and_recovery))[.]rs$"
+        ),
+        re.compile(
+            r'^const RETIRED_CREATION_CAUSE: &str = "owner_initiated";$|'
+            r'^\s*"owner_initiated",$|'
+            r"^\s*\(request_id, decision_kind, decision_source, "
+            r"owner_command_id\)$|"
+            r"^\s*VALUES \(\$1, 'approve', 'owner_command', \$2\)\",$|"
+            r"^\s*'owner_initiated', 'none'\);$|"
+            r"^\s*'create_session', 1, 'owner_initiated', 'none', 1,$|"
+            r"^\s*'owner', NULL, NULL, 'text', 'queued before migration',$"
+        ),
+    ),
+    Allowance(
         "imported-conversation record owner identifiers",
         re.compile(
             r"^crates/(?:application/src/conversation_import|"
@@ -417,79 +469,6 @@ ALLOWLIST = (
         re.compile(r"isCollapsedByOwner|is_collapsed_by_owner|workspace_owner_usage_nudge"),
     ),
     Allowance(
-        "legacy PostgreSQL user encodings",
-        re.compile(
-            r"^(?:apps/signalboxd/tests/offline_tool_loop[.]rs|"
-            r"crates/persistence/src/(?:create_session|"
-            r"create_session_from_imported_frontier|mapping|model_execution|process_read|session|"
-            r"session_metadata|submit_input|tool_loop)[.]rs|"
-            r"crates/persistence/tests/(?:conversation_import_postgres|postgres_integration|"
-            r"runner_protocol_postgres|session_metadata_postgres)[.]rs|"
-            r"docs/spec/identity-and-commands[.]md)$"
-        ),
-        re.compile(
-            r"[\"']owner_initiated[\"']|[\"']owner_command(?:_id)?[\"']|"
-            r"\bowner_command_id\b"
-        ),
-    ),
-    Allowance(
-        "legacy PostgreSQL actor decoder fields",
-        re.compile(
-            r"^crates/persistence/src/(?:session_metadata|submit_input)[.]rs$"
-        ),
-        re.compile(
-            r'^\s*\("owner", None, None\) => Ok\(Actor::User\),\s*$|'
-            r'^\s*\("owner" \| "model" \| "recovery" \| "tool", _, _\) => \{\s*$'
-        ),
-        enclosing_functions={
-            "crates/persistence/src/session_metadata.rs": frozenset({"decode_actor"}),
-            "crates/persistence/src/submit_input.rs": frozenset({"decode_actor"}),
-        },
-    ),
-    Allowance(
-        "legacy PostgreSQL command issuer decoder fields",
-        re.compile(r"^crates/persistence/src/session_metadata[.]rs$"),
-        re.compile(
-            r'^\s*\("owner", None\) => ReplaceSessionMetadata::new\('
-            r"command_id, session, content\),\s*$|"
-            r'^\s*\("owner", Some\(_\)\) \| \("tool", None\) => \{\s*$'
-        ),
-        enclosing_functions={
-            "crates/persistence/src/session_metadata.rs": frozenset({"decode_command"})
-        },
-    ),
-    Allowance(
-        "legacy PostgreSQL actor encoding specification",
-        re.compile(r"^docs/spec/identity-and-commands[.]md$"),
-        re.compile(
-            r"^\(`owner`/`model`/`recovery`/`tool`\) plus `actor_turn_id` and$|"
-            r"^receipts additionally carry constructor-selected `issuer_kind` \(`owner`/`tool`\)$"
-        ),
-    ),
-    Allowance(
-        "legacy PostgreSQL actor fixture",
-        re.compile(r"^crates/persistence/tests/session_metadata_postgres[.]rs$"),
-        re.compile(
-            r'^\s*let expected_issuer = \("owner"[.]to_owned\(\), None\);\s*$'
-        ),
-    ),
-    Allowance(
-        "legacy PostgreSQL actor encoder fields",
-        re.compile(
-            r"^crates/persistence/src/(?:session_metadata|submit_input)[.]rs$"
-        ),
-        re.compile(r'^\s*kind:\s*"owner",\s*$'),
-        previous_line=re.compile(r"^\s*Actor::User => EncodedActor \{\s*$"),
-    ),
-    Allowance(
-        "legacy PostgreSQL SQL actor literals",
-        re.compile(
-            r"^crates/persistence/tests/(?:postgres_integration|"
-            r"session_metadata_postgres)[.]rs$"
-        ),
-        re.compile(r"(?:^|,|=\s*)\s*'owner'(?=\s*[,)]|$)"),
-    ),
-    Allowance(
         "Rust borrow/ownership phrasing",
         re.compile(r"^(?:crates|apps|clients|docs/spec)/"),
         re.compile(
@@ -511,7 +490,8 @@ ALLOWLIST = (
             r"crates/domain/src/(?:context_frontier|imported_session|model_execution|"
             r"replace_session_defaults|review_workflow|runner|session|submit_input|"
             r"tool_execution|turn_eligibility)[.]rs|"
-            r"crates/persistence/tests/(?:postgres_integration|review_workflow_postgres)[.]rs|"
+            r"crates/persistence/tests/(?:postgres_integration/[a-z_]+|"
+            r"review_workflow_postgres)[.]rs|"
             r"docs/spec/(?:conversation-import|model-call-execution|persistence-protocol|"
             r"process-protocol|review-workflows|sessions-and-transcript|"
             r"turn-lifecycle-and-scheduling)[.]md)$"

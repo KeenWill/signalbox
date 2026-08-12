@@ -5,7 +5,11 @@ name: Coverage
 # and every job carries `continue-on-error` so a coverage failure can never
 # block a merge — the same report-only shape rust.yml's instruction counts and
 # tool-smokes.yml's live smokes already use. What this produces is a job
-# summary, a downloadable HTML and LCOV report, and one pull-request comment.
+# summary, a downloadable HTML and LCOV report, one pull-request comment, and
+# an upload of that LCOV to Codecov under the `rust` flag. The upload changes
+# nothing about the posture: codecov.yml marks every status there
+# `informational: true`, so what Codecov reports is another readout and not a
+# second opinion with a veto.
 #
 # The report is deliberately honest about what it does not measure; the
 # "Report the numbers" step below states every exclusion alongside the number,
@@ -80,14 +84,14 @@ jobs:
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           key: rust-coverage
       # Exact version pin, as cargo-deny is pinned in deny.yml: an instrumented
       # build and its report must come from one known tool build.
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-llvm-cov@0.8.7
       # Each measured suite runs under `--no-report`, which accumulates
@@ -120,10 +124,13 @@ jobs:
           cargo llvm-cov --no-report --no-fail-fast
           -p signalbox-persistence --features postgres-integration --tests
           -- --ignored --test-threads=4
-      # `--skip` keeps the whole-daemon live smoke out of this run. It is
-      # already inert without GITHUB_TOKEN, which this job never sets, but a
-      # measurement job spends no real HTTP requests by construction rather
-      # than by an absent credential.
+      # `--skip` keeps the whole-daemon live smoke and subprocess-only bridge
+      # fixtures out of this run. The live smoke is already inert without
+      # GITHUB_TOKEN, which this job never sets, but a measurement job spends
+      # no real HTTP requests by construction rather than by an absent
+      # credential. The bridge fixtures are launched only by owning tests;
+      # selecting them directly adds sleeps, builds, and orphaned descendants
+      # that measure no production behavior.
       - name: Measure the signalboxd PostgreSQL suite
         id: signalboxd
         continue-on-error: true
@@ -132,6 +139,8 @@ jobs:
           -p signalboxd --tests
           -- --ignored --test-threads=4
           --skip live_daemon_executes_every_tool_family_and_denies_every_gate
+          --skip bridge_build_direct_invocation_fixture
+          --skip bridge_wait_
       - name: Measure the terminal-client PostgreSQL suite
         id: terminal_client
         continue-on-error: true
@@ -231,6 +240,40 @@ jobs:
           path: ${{ runner.temp }}/coverage
           if-no-files-found: error
           retention-days: 14
+      # The LCOV the report step already wrote, sent on to Codecov — a second
+      # reader of one measurement, not a second measurement. Nothing above
+      # changes to produce it.
+      #
+      # Report-only like the rest of this workflow, and by two independent
+      # mechanisms: this step continues on error, and codecov.yml marks every
+      # status `informational: true`, so neither the upload nor anything
+      # Codecov concludes from it can fail a job or gate a merge.
+      #
+      # `flags: rust` is what keeps this separate from the native client's
+      # measurement, which swift.yml uploads under `swift`. The two are
+      # measured by different toolchains over disjoint trees, and a single
+      # merged percentage over both would be a number describing nothing.
+      #
+      # Pinned to a commit like every other third-party action here. The tag it
+      # resolves to is codecov-action v5.5.5.
+      - name: Upload coverage reports to Codecov
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ runner.temp }}/coverage/lcov.info
+          flags: rust
+          # The one file above is the whole upload. Without these two the
+          # action also walks the checkout for anything matching its coverage
+          # globs and runs its gcov and Python plugins, either of which can
+          # add a second, differently-derived report under the same flag.
+          disable_search: true
+          plugins: noop
+          # A report-only job does not fail on a failed upload to a third
+          # party. `continue-on-error` above would contain it anyway; this
+          # keeps the step's own outcome honest rather than relying on that.
+          fail_ci_if_error: false
 
   # Holds the only write token in this workflow and never builds or executes
   # anything, mirroring the token separation devenv-lock.yml already uses: the

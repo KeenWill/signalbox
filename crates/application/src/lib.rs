@@ -22,6 +22,8 @@ mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
 mod tool_dispatch_gate;
+#[cfg(feature = "test-support")]
+mod tool_execution_test_support;
 mod tool_loop;
 mod tool_loop_ports;
 mod update_session_placement;
@@ -72,16 +74,16 @@ pub use replace_session_defaults::{
 pub use repo_watch::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
     RepoWatchCheckCompletionGenerationError, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDifferError, RepoWatchDispatchIdGenerator,
-    RepoWatchDispatchPreparationError, RepoWatchDispatchService, RepoWatchDispatchServiceError,
-    RepoWatchDispatchTransaction, RepoWatchEventIdGenerator, RepoWatchObservation,
-    RepoWatchPreparedDispatchAction, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
-    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchCheckSuiteObservation, RepoWatchDifferError, RepoWatchDispatchGoal,
+    RepoWatchDispatchIdGenerator, RepoWatchDispatchPreparationError, RepoWatchDispatchService,
+    RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventIdGenerator,
+    RepoWatchObservation, RepoWatchPreparedDispatchAction, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput,
+    RepoWatchResolvedTemplate, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchSingletonKey, RepoWatchTemplateResolver,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -130,6 +132,12 @@ pub use submit_input::{
     SubmitInputService, SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
 };
 pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
+#[cfg(feature = "test-support")]
+pub use tool_execution_test_support::{
+    FixtureToolExecutionTransaction, FixtureTransactionFailures, PreparedAttemptApproval,
+    PreparedAttemptIdentities, PreparedAttemptProposal, RecordedEvidence, RecordingToolExecutor,
+    prepared_single_attempt_batch,
+};
 pub use tool_loop::{
     CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CorrelatedDurableToolCompletion,
     CorrelatedToolExecutorEvidence, DecideToolRequestService, DuplicateToolDefinition,

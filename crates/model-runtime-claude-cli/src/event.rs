@@ -6,11 +6,12 @@ use serde_json::Value;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
     CliSession, CliTerminalTextCapture, CompletionEvidence, CompletionFinish, DeliveryMode,
-    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
-    ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
+    DiscardedField, ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation,
+    ObservationFact, ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
-    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    provider_json_has_duplicate_members, redact_json, redact_text, validate_provider_json_nesting,
+    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_json, redact_text,
+    validate_provider_json_nesting,
 };
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
@@ -42,10 +43,18 @@ pub(crate) struct EventDecoder<C> {
     exchange: ExchangeFacts,
     reported_model: Option<ProviderReportedModel>,
     native_session_id: Option<String>,
-    native_model: Option<String>,
+    native_assistant_model: Option<String>,
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
+    /// Sticky: the CLI announced at least one `tool_use` block. Set before the
+    /// block is validated, so a call this adapter rejects — an empty or
+    /// duplicate id, a name outside the private MCP namespace, an undeclared
+    /// tool — is still recorded as opened. `proposal_indexes` cannot answer
+    /// for those: the rejection returns before the insert.
+    opened_tool_calls: bool,
+    current_event_examined: bool,
+    undelivered_line: bool,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
     emitted_tool_ids: HashSet<String>,
@@ -89,10 +98,13 @@ impl<C: Clone> EventDecoder<C> {
             exchange: ExchangeFacts::default(),
             reported_model: None,
             native_session_id: None,
-            native_model: None,
+            native_assistant_model: None,
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
+            opened_tool_calls: false,
+            current_event_examined: false,
+            undelivered_line: false,
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
             emitted_tool_ids: HashSet::new(),
@@ -132,6 +144,9 @@ impl<C: Clone> EventDecoder<C> {
         line: &[u8],
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
+        // Each line is examined on its own merits; nothing carries over except
+        // `opened_tool_calls`, which is sticky by design.
+        self.current_event_examined = false;
         if self.terminal.is_some() {
             return Err(DecodeFailure::stream_protocol(
                 "Claude emitted an event after its terminal result",
@@ -149,6 +164,12 @@ impl<C: Clone> EventDecoder<C> {
         let event_type = value.get("type").and_then(Value::as_str).ok_or_else(|| {
             DecodeFailure::stream_protocol("event has no string `type` discriminator")
         })?;
+        if event_type != "assistant" {
+            // Only an `assistant` event carries content blocks, so for every
+            // other type the discriminator alone settles the tool question: no
+            // tool call can have opened in material of this shape.
+            self.current_event_examined = true;
+        }
         match event_type {
             "system" => self.system(value, sink),
             "assistant" => self.assistant(text, sink),
@@ -169,10 +190,86 @@ impl<C: Clone> EventDecoder<C> {
         value: Value,
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
-        if value.get("subtype").and_then(Value::as_str) != Some("init") || self.initialized {
-            return Err(DecodeFailure::stream_protocol(
-                "unexpected or duplicate Claude system event",
-            ));
+        let subtype = value.get("subtype").and_then(Value::as_str);
+        if matches!(
+            subtype,
+            Some(
+                "status"
+                    | "hook_started"
+                    | "hook_progress"
+                    | "hook_response"
+                    | "api_retry"
+                    | "thinking_tokens"
+            )
+        ) {
+            let mut event = value;
+            if let Value::Object(members) = &mut event {
+                // Closed protocol metadata describes the envelope, not
+                // discarded provider content. In particular,
+                // `thinking_tokens` must not create a credential-shaped
+                // lookbehind merely because its name contains `token`, and
+                // repeated copies of the already-retained session identity
+                // must not accumulate as dropped content.
+                members.remove("type");
+                members.remove("subtype");
+                // That last exemption is a claim about the value, so it is
+                // checked rather than assumed. `session_id` is dropped only
+                // where it is provably the identity `system/init` retained; a
+                // differing value contradicts that correlation exactly as it
+                // does on a `result` event, and a value arriving before any
+                // init is not a repeated identity at all. Anything this
+                // predicate cannot vouch for stays provider-controlled content
+                // and seeds the dropped lookbehind (INV-035), because a
+                // credential prefix discarded here would let its continuation
+                // escape the shape redactor in a later field.
+                match (
+                    members.get("session_id").and_then(Value::as_str),
+                    self.native_session_id.as_deref(),
+                ) {
+                    (Some(session), Some(native)) if session == native => {
+                        members.remove("session_id");
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(DecodeFailure::stream_protocol(
+                            "Claude lifecycle session contradicts system init",
+                        ));
+                    }
+                    _ => {}
+                }
+                members.retain(|_, value| !value.is_null());
+                if members.is_empty() {
+                    return Ok(());
+                }
+            }
+            let mut context = String::new();
+            let members = event.as_object().ok_or_else(|| {
+                DecodeFailure::stream_protocol("Claude system event is not an object")
+            })?;
+            for (name, value) in members {
+                if !context.is_empty() {
+                    context.push('\n');
+                }
+                context.push_str(name);
+                context.push(':');
+                if let Some(value) = value.as_str() {
+                    context.push_str(value);
+                } else {
+                    let value = serde_json::to_string(value).map_err(|error| {
+                        DecodeFailure::stream_protocol(format!(
+                            "Claude lifecycle event could not be retained for redaction: {error}"
+                        ))
+                    })?;
+                    context.push_str(&value);
+                }
+            }
+            sink.extend_dropped_context(&context);
+            return Ok(());
+        }
+        if subtype != Some("init") || self.initialized {
+            let subtype = subtype.unwrap_or("<missing>");
+            return Err(DecodeFailure::stream_protocol(format!(
+                "unexpected or duplicate Claude system event subtype `{subtype}`"
+            )));
         }
         let event: SystemInit = decode(value)?;
         if event.session_id.is_empty() || event.model.is_empty() {
@@ -214,7 +311,6 @@ impl<C: Clone> EventDecoder<C> {
         let request_id = sink.redact_provider_id("", &event.session_id);
         let model = sink.redact_provider_id(&request_id, &event.model);
         self.native_session_id = Some(event.session_id);
-        self.native_model = Some(event.model);
         self.exchange.provider_request_id = Some(ProviderRequestId::new(request_id.clone()));
         self.reported_model = Some(ProviderReportedModel::new(model.clone()));
         self.initialized = true;
@@ -238,6 +334,19 @@ impl<C: Clone> EventDecoder<C> {
         self.require_initialized()?;
         let event: AssistantEvent = decode_text(text)?;
         let raw_event: AssistantRawEvent = decode_text(text)?;
+        // Read the tool fact off the decoded content before any check below can
+        // reject the event. The identity, nesting, message-id, and model checks
+        // all return before `assistant_block` runs, so a flag set during the
+        // block walk would miss a call this event plainly announced.
+        self.current_event_examined = true;
+        if event
+            .message
+            .content
+            .iter()
+            .any(|block| matches!(block, AssistantContent::ToolUse { .. }))
+        {
+            self.opened_tool_calls = true;
+        }
         if event.parent_tool_use_id.is_some()
             || event.message.role != "assistant"
             || event.message.id.is_empty()
@@ -269,11 +378,37 @@ impl<C: Clone> EventDecoder<C> {
             self.message_id = Some(ProviderMessageId::new(sanitized));
             self.native_message_id = Some(event.message.id.clone());
         }
-        if self.native_model.as_deref() != Some(event.message.model.as_str()) {
+        if self
+            .native_assistant_model
+            .as_ref()
+            .is_some_and(|model| model != &event.message.model)
+        {
             return Err(DecodeFailure::stream_protocol(
-                "Claude assistant model contradicts system init",
+                "Claude assistant model contradicts prior assistant content",
             ));
         }
+        // The provider-resolved model is accepted and then discarded: it is
+        // retained only to detect a later contradiction and leaves the adapter
+        // in no record, so an ambient delivery has no exact value to redact
+        // downstream. A marker prefix ending it (`api_`) beside a text block
+        // opening `key=value` still reconstructs the credential, so register it
+        // as a lookbehind chain of its own — the emitted chain belongs to the
+        // message id above, and the dropped chain to provider content this
+        // field does not sit in.
+        //
+        // Every assistant envelope repeats and discards this same field, and
+        // each repetition sits beside that envelope's own content blocks, so
+        // registration happens on every event rather than only the first:
+        // content that spends the lookbehind in one event would otherwise leave
+        // the next event's text unguarded. The check above has already proven a
+        // repeat equal to the stored value.
+        let repetition = if self.native_assistant_model.is_none() {
+            self.native_assistant_model = Some(event.message.model.clone());
+            DiscardedField::New
+        } else {
+            DiscardedField::Repeated
+        };
+        sink.add_discarded_field_identifier(&event.message.model, repetition);
         if let Some(usage) = event.message.usage {
             self.usage.absorb(message_usage(usage));
         }
@@ -339,6 +474,7 @@ impl<C: Clone> EventDecoder<C> {
                 });
             }
             AssistantContent::ToolUse { id, name, input } => {
+                self.opened_tool_calls = true;
                 if id.is_empty() || self.proposal_indexes.contains_key(&id) {
                     return Err(DecodeFailure::stream_protocol(
                         "Claude tool_use carries an empty or duplicate id",
@@ -744,12 +880,65 @@ impl<C: Clone> EventDecoder<C> {
             .collect()
     }
 
-    fn loss(self, cause: LossCause) -> TerminalEvidence {
+    /// Whether a tool call had opened in the events decoded so far.
+    ///
+    /// The adapter classifies every structured CLI event it reads, so the
+    /// negative case is the stated fact rather than an absence.
+    fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else if self.undelivered_line {
+            ToolCallsAtLoss::Unobserved
+        } else {
+            ToolCallsAtLoss::NoneOpened
+        }
+    }
+
+    /// The tool fact for a loss raised by an event that never decoded.
+    ///
+    /// The dividing line is whether *this* event's content was examined, not
+    /// whether it was accepted. A line that failed UTF-8, nesting,
+    /// duplicate-member, JSON, or `type`-discriminator decoding was never
+    /// classified and could itself have been the `tool_use` event, so the
+    /// negative is withheld. An event whose content did decode — every
+    /// non-`assistant` type, whose discriminator alone precludes content
+    /// blocks, and an `assistant` event whose blocks were scanned before the
+    /// semantic checks ran — states the negative, because the adapter read the
+    /// material and no tool call was in it. A tool call an earlier event
+    /// already established outranks both.
+    fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else if self.undelivered_line {
+            ToolCallsAtLoss::Unobserved
+        } else if self.current_event_examined {
+            ToolCallsAtLoss::NoneOpened
+        } else {
+            ToolCallsAtLoss::Unobserved
+        }
+    }
+
+    /// Boundary-loss evidence for a line that never decoded.
+    pub(crate) fn loss_at_decode_failure(self, cause: LossCause) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_decode_failure();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause,
             exchange: self.exchange,
             reported_model: self.reported_model,
             finish_reported: self.finish_reported,
+            tool_calls,
+            usage: self.usage,
+        })
+    }
+
+    fn loss(self, cause: LossCause) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_loss();
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause,
+            exchange: self.exchange,
+            reported_model: self.reported_model,
+            finish_reported: self.finish_reported,
+            tool_calls,
             usage: self.usage,
         })
     }
@@ -872,7 +1061,9 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     }
 
     fn decode_failure(self, _class: CliDecodeFailureClass, detail: String) -> TerminalEvidence {
-        self.boundary_loss(LossCause::StreamProtocolViolation { detail })
+        // Not `boundary_loss`: the failing line was never classified, so the
+        // tool fact is withheld rather than stated negative.
+        EventDecoder::loss_at_decode_failure(self, LossCause::StreamProtocolViolation { detail })
     }
 
     fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
@@ -881,6 +1072,18 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
 
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
         EventDecoder::boundary_loss(self, cause)
+    }
+
+    fn note_undelivered_line(&mut self) {
+        self.undelivered_line = true;
+    }
+
+    fn undelivered_line_loss(mut self, cause: LossCause) -> TerminalEvidence {
+        // The rejected line may itself have been the `assistant` event carrying
+        // a `tool_use` block. Nothing about it was examined, and the previous
+        // event's examination says nothing about this one.
+        self.current_event_examined = false;
+        EventDecoder::loss_at_decode_failure(self, cause)
     }
 
     fn boundary_loss_unless_provider_failure(

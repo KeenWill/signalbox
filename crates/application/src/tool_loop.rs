@@ -1858,17 +1858,34 @@ fn report_tool_attempt(name: &ToolName, observation: &CorrelatedToolAttemptObser
 }
 
 /// Selects initial approval for one proposal from frozen posture and catalog.
+///
+/// An explicitly configured `Delegated` posture satisfies an `AlwaysConfirm`
+/// declaration; a configured `Auto` posture never does. `AlwaysConfirm` exists
+/// so that a session blanket cannot silently approve the tool — see
+/// [`InitialToolApproval::AlwaysConfirm`], "leave an `AlwaysConfirm` request
+/// undecided despite blanket posture". A delegate judge is not a blanket but a
+/// distinct decider that can still deny the request or escalate it to the user,
+/// so admitting it serves that purpose rather than evading it. Admitting `Auto`
+/// would instead erase the decision altogether, which is the loophole this
+/// distinction keeps closed. An unconfigured `AlwaysConfirm` declaration still
+/// parks for a human under either blanket posture.
 pub(crate) fn initial_tool_approval(
     posture: DangerousToolAutoApproval,
     definition: Option<&ToolDefinition>,
 ) -> InitialToolApproval {
+    let configured = definition.and_then(ToolDefinition::approval_posture);
     if definition.is_some_and(|definition| {
         definition.permission_default() == ToolPermissionDefault::AlwaysConfirm
     }) {
-        return InitialToolApproval::AlwaysConfirm;
+        return match configured {
+            Some(ToolApprovalPosture::Delegated) => InitialToolApproval::Delegated,
+            Some(ToolApprovalPosture::Auto | ToolApprovalPosture::Human) | None => {
+                InitialToolApproval::AlwaysConfirm
+            }
+        };
     }
-    if let Some(posture) = definition.and_then(ToolDefinition::approval_posture) {
-        return match posture {
+    if let Some(configured) = configured {
+        return match configured {
             ToolApprovalPosture::Auto => InitialToolApproval::PolicyAuto,
             ToolApprovalPosture::Delegated => InitialToolApproval::Delegated,
             ToolApprovalPosture::Human => InitialToolApproval::Human,
@@ -2620,16 +2637,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
-        let explicit = definition(
-            "explicit",
+    fn always_confirm_definition(name: &str) -> ToolDefinition {
+        definition(
+            name,
             ToolPermissionDefault::AlwaysConfirm,
             ToolEffectClass::ExternalEffect,
-        );
-        let configured_delegate = explicit
-            .clone()
-            .with_approval_posture(ToolApprovalPosture::Delegated);
+        )
+    }
+
+    /// With no posture configured, an `AlwaysConfirm` declaration parks for a
+    /// human under either blanket posture. This is the default `unsandboxed_exec`
+    /// behavior, which the configured-posture admission below must not change.
+    #[test]
+    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
+        let explicit = always_confirm_definition("explicit");
 
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
@@ -2639,11 +2660,61 @@ mod tests {
             initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
             InitialToolApproval::AlwaysConfirm
         );
+    }
+
+    /// An explicitly configured `Delegated` posture satisfies `AlwaysConfirm`.
+    /// The declaration exists so that a session blanket cannot silently approve
+    /// the tool; a delegate judge is not a blanket but a distinct decider that
+    /// can still deny the request or escalate it to the user, so routing to it
+    /// serves that purpose rather than evading it.
+    #[test]
+    fn configured_delegated_posture_satisfies_always_confirm() {
+        let delegated = always_confirm_definition("explicit")
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
         assert_eq!(
-            initial_tool_approval(
-                DangerousToolAutoApproval::ApproveAll,
-                Some(&configured_delegate)
-            ),
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+    }
+
+    /// A configured `Auto` posture must never satisfy `AlwaysConfirm`. Unlike a
+    /// delegate judge it erases the decision entirely, which is exactly the
+    /// silent automatic approval the declaration refuses; admitting it would be
+    /// the loophole that admitting `Delegated` is not.
+    #[test]
+    fn configured_auto_posture_never_satisfies_always_confirm() {
+        let automatic =
+            always_confirm_definition("explicit").with_approval_posture(ToolApprovalPosture::Auto);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&automatic)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&automatic)),
+            InitialToolApproval::AlwaysConfirm
+        );
+    }
+
+    /// A configured `Human` posture keeps the stricter `AlwaysConfirm` outcome
+    /// rather than the plain human park, since both await the same user and the
+    /// declaration is the more specific fact.
+    #[test]
+    fn configured_human_posture_leaves_always_confirm_parked() {
+        let human =
+            always_confirm_definition("explicit").with_approval_posture(ToolApprovalPosture::Human);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&human)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&human)),
             InitialToolApproval::AlwaysConfirm
         );
     }
@@ -2736,6 +2807,120 @@ mod tests {
         let (_, _, _, executor, _, _) = service.into_parts();
         assert_eq!(executor.calls, 0);
         assert_eq!(*events.lock().expect("event lock"), ["preflight"]);
+    }
+
+    /// What one execution against a possibly drifted catalog produced.
+    struct ExecutionUnderCatalog {
+        result:
+            Result<ToolExecutionServiceOutcome, ToolExecutionServiceError<FakeError, FakeError>>,
+        executor_calls: usize,
+        transaction_events: Vec<&'static str>,
+    }
+
+    /// The two effect classes one drift execution puts in disagreement.
+    ///
+    /// A struct rather than two positional arguments: both fields are
+    /// `ToolEffectClass`, the two tests below deliberately pass them in
+    /// opposite orders, and a transposition would compile while silently
+    /// reversing which side is the drifted one — leaving the assertion
+    /// describing a case it no longer covers.
+    struct CatalogDrift {
+        /// What the durable authorization froze when the attempt was prepared.
+        prepared_effect: ToolEffectClass,
+        /// What the live, rebuilt catalog declares for the same tool.
+        catalog_effect: ToolEffectClass,
+    }
+
+    /// Prepares one attempt whose durable authorization froze
+    /// `drift.prepared_effect`, then executes it against a live catalog
+    /// declaring the same tool `drift.catalog_effect` — the daemon-restart
+    /// shape in which a rebuilt catalog can disagree with a parked approval.
+    async fn execute_under_catalog_effect_class(drift: CatalogDrift) -> ExecutionUnderCatalog {
+        let CatalogDrift {
+            prepared_effect,
+            catalog_effect,
+        } = drift;
+        let (batch, _) = prepared_batch("{}", prepared_effect);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition("known", ToolPermissionDefault::Auto, catalog_effect),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let (_, _, _, executor, _, _) = service.into_parts();
+        let transaction_events = events.lock().expect("event lock").clone();
+        ExecutionUnderCatalog {
+            result,
+            executor_calls: executor.calls,
+            transaction_events,
+        }
+    }
+
+    /// The effect class frozen at preparation is what the approval gate
+    /// authorized, so a catalog that now declares another class stops the call
+    /// before authorization rather than running it under a class no approval
+    /// ever covered.
+    #[tokio::test]
+    async fn drifted_catalog_effect_class_never_reaches_authorization_or_the_executor() {
+        let drifted = execute_under_catalog_effect_class(CatalogDrift {
+            prepared_effect: ToolEffectClass::EffectFree,
+            catalog_effect: ToolEffectClass::ExternalEffect,
+        })
+        .await;
+
+        assert!(matches!(
+            drifted.result,
+            Err(ToolExecutionServiceError::CatalogDrift)
+        ));
+        assert_eq!(drifted.executor_calls, 0);
+        assert!(
+            drifted.transaction_events.is_empty(),
+            "drift stops before authorization, preflight commit, and observation commit"
+        );
+    }
+
+    /// Catalog drift is an operator-visible caller-or-hub bug carrying its own
+    /// stable cause token, so a wedged turn is attributable without formatting
+    /// adapter detail.
+    #[tokio::test]
+    async fn drifted_catalog_effect_class_reports_its_declared_operator_failure() {
+        let drifted = execute_under_catalog_effect_class(CatalogDrift {
+            prepared_effect: ToolEffectClass::ExternalEffect,
+            catalog_effect: ToolEffectClass::EffectFree,
+        })
+        .await;
+        let error = drifted
+            .result
+            .expect_err("a prepared call cannot execute under a drifted effect class");
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(error.operator_failure_cause_code(), "tool_catalog_drift");
     }
 
     /// INV-011 / INV-021 / INV-024: durable authorization precedes the

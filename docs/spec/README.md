@@ -49,6 +49,7 @@ owned by a sibling page is linked, never restated.
 - [Goal mode](goal-mode.md)
 - [Model-call execution](model-call-execution.md)
 - [Tool loop](tool-loop.md)
+- [Git authority threat model](git-authority-threat-model.md)
 - [Web egress threat model](web-egress-threat-model.md)
 - [Runner protocol and placement](runner-protocol.md)
 - [Review workflows](review-workflows.md)
@@ -57,6 +58,7 @@ owned by a sibling page is linked, never restated.
 - [Model-runtime substrate](runtime-substrate.md)
 - [Model and session settings](model-session-settings.md)
 - [Configuration and credentials](configuration-and-credentials.md)
+- [Credential availability](credential-availability.md)
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
 

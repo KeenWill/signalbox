@@ -342,6 +342,15 @@ pub enum ActiveTurnPhase {
         /// The exact interrupt still stopping the turn, when one was applied.
         applied_interrupt: Option<crate::AppliedInterruptProof>,
     },
+    /// Orchestration waits for replacement of one exact lost runner placement.
+    AwaitingRunnerRecovery {
+        /// Runner whose durable loss owns this wait.
+        runner: crate::RunnerId,
+        /// Placement revision against which loss was projected.
+        placement_revision: crate::RunnerGeneration,
+        /// Physical tool attempt interrupted by loss, when one exists.
+        optional_tool_attempt: Option<crate::ToolAttemptId>,
+    },
 }
 
 impl ActiveTurnPhase {

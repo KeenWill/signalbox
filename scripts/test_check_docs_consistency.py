@@ -275,6 +275,139 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
 
+    def _write_machine_owner(self, projecting_body: str) -> None:
+        """Create the machine owner and one page that projects a column."""
+        (self.root / "docs/spec/credential-availability.md").write_text(
+            "# Credential availability\n\n"
+            "Verified against the implementing stack through PR #12 "
+            "(`agent/example`).\n\n"
+            "## The credential-availability machine\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/runtime-substrate.md").write_text(
+            "# Model-runtime substrate\n\n"
+            "Verified against the implementing stack through PR #12 "
+            "(`agent/example`).\n\n" + projecting_body,
+            encoding="utf-8",
+        )
+
+    def test_projection_owner_without_a_link_fails(self) -> None:
+        """A derived view that stops citing its owner is the carve seam.
+
+        This is the failure that started the restructuring: a paragraph moved
+        to another branch, the anchor citing it still resolved, and only the
+        meaning left — so no link checker saw anything.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of the "
+            "credential-availability machine.\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
+    def test_projection_owner_with_a_resolving_link_passes(self) -> None:
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            "[the machine](credential-availability.md#the-credential-availability-machine).\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertNotIn("machine-owner-link", failure_categories(failures))
+
+    def test_projection_owner_with_a_reference_link_passes(self) -> None:
+        self._write_machine_owner(
+            "This page owns the evidence algebra of [the machine][owner].\n\n"
+            "[owner]: credential-availability.md\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertNotIn("machine-owner-link", failure_categories(failures))
+
+    def _assert_label_still_cites(self, label: str) -> None:
+        """Assert one label spelling still counts as a citation."""
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            f"[{label}](credential-availability.md).\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertNotIn("machine-owner-link", failure_categories(failures))
+
+    def test_empty_label_is_still_a_citation(self) -> None:
+        """Label rendering is out of scope; the destination decides.
+
+        This pins a scope decision, not an oversight. Four waves produced four
+        findings in one family — a construct that resolves but renders no
+        navigation — and testing the label closed three while the fourth
+        arrived against the restatement meant to end the family. Deciding it
+        soundly needs a Markdown renderer this module does not have, and none
+        of the shapes occurs in the tracked corpus. The guarded failure is a
+        page that stops citing its owner, which no label can cause.
+        """
+        self._assert_label_still_cites("")
+
+    def test_formatting_only_label_is_still_a_citation(self) -> None:
+        self._assert_label_still_cites("**  **")
+
+    def test_raw_html_label_is_still_a_citation(self) -> None:
+        self._assert_label_still_cites("<span></span>")
+
+    def test_image_destination_is_not_a_citation(self) -> None:
+        """An image renders a fetch, not a navigation.
+
+        The extractor returns image destinations because its other caller
+        checks that every destination resolves. Counted here, a broken image
+        would satisfy the guard while the page carries no way to reach the
+        owner.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            "![the machine](credential-availability.md).\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
+    def test_reference_style_image_is_not_a_citation(self) -> None:
+        """An image cites nothing however its destination is spelled.
+
+        The reference form is a distinct path from the inline one: skipping
+        only the image's `!` re-enters its own construct, so `[owner]` parses
+        again as a shortcut link and the image counts as navigation. Image
+        exclusion is retained contract, not the out-of-scope label question.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of ![the machine][owner].\n\n"
+            "[owner]: credential-availability.md\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
+    def test_unused_reference_definition_is_not_a_citation(self) -> None:
+        """A definition nobody uses renders no link a reader can follow.
+
+        The extractor returns definitions alongside links because its other
+        caller is checking that every destination resolves. Counted here, an
+        unused definition would satisfy this guard with exactly the missing
+        citation the guard exists to reject.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of the machine.\n\n"
+            "[owner]: credential-availability.md\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
     def test_untracked_sibling_markdown_and_rust_sources_are_ignored(self) -> None:
         sibling = self.root / ".claude/worktrees/agent-phantom"
         (sibling / "docs/spec").mkdir(parents=True)
@@ -566,6 +699,119 @@ class DocsConsistencyTests(unittest.TestCase):
         write_suite_manifest(
             self.root,
             'name = "fixture"\npackage = "fixture"\nshards = 1\n',
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_the_declared_cargo_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[[test]]\n"
+            'name = "selected_target"\n'
+            'path = "tests/physical_file.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/physical_file.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_declared_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'include_binaries = ["selected_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_exclude_uses_the_declared_cargo_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[[test]]\n"
+            'name = "excluded_target"\n'
+            'path = "tests/physical_file.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/physical_file.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_declared_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'exclude_binaries = ["excluded_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertNotIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_the_conventional_directory_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/nested_target/main.rs"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_directory_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'include_binaries = ["nested_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_an_overridden_library_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture-package"\nversion = "0.0.0"\n\n'
+            '[lib]\nname = "selected_library"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text(
+            "#[test]\n#[ignore]\nfn inv_001_library_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture-package"\n'
+            'include_binaries = ["selected_library"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_the_implicit_name_for_a_relocated_library(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture-package"\nversion = "0.0.0"\n\n'
+            '[lib]\npath = "src/custom_library.rs"\n',
+            encoding="utf-8",
+        )
+        target = self.root / "src/custom_library.rs"
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_implicit_library_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture-package"\n'
+            'include_binaries = ["fixture_package"]\n'
+            "shards = 1\n",
         )
 
         self.assertIn("| INV-001", render_invariant_index(self.root))

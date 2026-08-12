@@ -5,9 +5,9 @@ use std::time::Duration;
 
 /// Configuration for [`crate::ClaudeCliRuntime`].
 ///
-/// It carries executable paths, bounds, and a non-secret credential reference
-/// only. Claude Code resolves its own subscription login; the adapter never
-/// receives a credential value.
+/// It carries executable paths, bounds, and a non-secret default credential
+/// reference. The runtime constructor separately selects ambient delivery or
+/// supplies an operation-scoped delivery catalog.
 #[derive(Debug, Clone)]
 pub struct ClaudeCliConfig {
     /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
@@ -18,8 +18,7 @@ pub struct ClaudeCliConfig {
     pub mcp_bridge_executable: PathBuf,
     /// Absolute existing directory used as the CLI's working root.
     pub working_directory: PathBuf,
-    /// Non-secret durable reference naming the operator-selected ambient
-    /// Claude Code login.
+    /// Non-secret durable reference naming the selected Claude credential.
     pub credential_reference: signalbox_model_runtime::CredentialReference,
     /// Positive whole-process timeout representable by the runtime clock.
     pub exchange_timeout: Duration,

@@ -1,5 +1,9 @@
 # Turn lifecycle and scheduling
 
+The runner-recovery active-phase algebra, checked persistence reconstitution,
+and preserved interrupt/stop authority were verified against this PR
+(`agent/runner-awaiting-recovery-persistence`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -89,6 +93,113 @@ a stored current-attempt state inside the `running` active phase and
 reconstitutes only from its exact applied-interrupt proof; `AwaitingApproval`
 reconstitutes only from the exact earliest undecided request of a complete tool
 batch and carries no live turn or tool attempt ([tool-loop](tool-loop.md)).
+
+**Committed unimplemented functionality — credential-availability wait.** No
+present `ActiveTurnPhase`, storage discriminator, startup-scan branch, scheduler
+path, or process state supplies the pool-availability wait in
+[model-call execution](model-call-execution.md#availability-successor-calls),
+and no present runtime can enter it. Its implementing child must add a distinct
+active phase with a closed `exhausted`/`contended` cause that retains the
+session slot and durably binds the frozen pool-policy snapshot. The exhausted
+form carries every policy member's exclusion evidence and optional reset, plus
+the optional deadline the machine computes from them — this page carries the
+field, never its formula, since only the machine decides which exclusion kinds
+expire at a reset they report. The contended form carries every durable
+exclusion in the selection snapshot and the complete nonempty set of
+otherwise-admissible bounded members with exact invocation-reservation
+identities. Startup may reconstitute either only from that complete evidence.
+Which ending a selection attempt reaches — and therefore whether a wait is
+stored at all, and in which form — is owned by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+This page owns two of that table's columns, turn phase with attempt disposition
+and wake conditions, and states no rule about which row is reached. Startup
+reconstitutes the persisted choice without reclassifying it, and release
+consumes only a stored wait. Entering either wait form atomically ends the
+call-free current attempt as `WithoutStop(YieldedToDurableWait)` and stores the
+wait, leaving no live attempt. A reservation is `pending_spawn` from its atomic
+acquisition with the `Prepared` call until successful spawn durably attaches the
+child process group's reuse-safe host identity as
+`spawned { process_group_identity }`. Startup retains live-process `spawned`
+reservations, whose observation path this daemon still owns, and must resolve
+every fenced prior-process reservation before scheduling — proving that exact
+process group absent, or terminating it and then proving absence — before
+closing it as lost. It is never retained for a later death notice, since the
+observation that would release it died with its daemon. A prior-process
+`pending_spawn` reservation is ambiguous and fails startup before scheduling.
+The scheduler makes a reached deadline, an exact reservation release, or a
+durable member-availability update eligible. Because a capacity bound is a live
+configuration value rather than a frozen one, startup additionally re-evaluates
+every retained `contended` wait against the current registrations before
+enabling scheduling. Each wait names a complete nonempty bounded-member set, so
+every member is evaluated and any one of them suffices: a member the current
+registration leaves unbounded makes the wait eligible outright, and a member
+still bounded makes it eligible when that profile's surviving reservation count
+is below the current bound. Without that pass a raised or removed bound would
+not admit work until an unrelated old invocation happened to finish, since a
+configuration edit produces neither a release nor an availability update.
+Release atomically consumes the wait, creates a fresh `Prepared` successor
+attempt, and returns the same turn to `Running`, resuming the availability chain
+the wait was part of rather than starting a new one — the release origin carries
+that chain's predecessor call and its proof, which a new chain could not. Which
+exclusions survive that release is owned by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+and it splits them in two. A predecessor exclusion earned by a qualifying
+failure in this turn is insert-only and turn-local, so nothing readmits that
+member within this turn — not a reset passing, not an operator clear of its
+exact predecessor correlation, and not any other durable availability update
+([model-call execution](model-call-execution.md#availability-successor-calls));
+without that, waking a one-member `switch_now` pool on its own reported reset
+would call the same profile again without bound. Every other exclusion the wait
+recorded — an ordinary reset-aware membership exclusion, an `avoid_new_sessions`
+exclusion, a profile quarantine — is re-read from its current active state
+instead, because a release that re-applied a reset which had already passed
+would re-enter the same wait on the very wake its deadline exists to produce.
+
+Eligibility is permission to retry selection, not a guarantee of a slot. One
+release can make several contended waits eligible while admitting only one, so
+each release transaction reruns admission under the same capacity locks
+preparation takes. The transaction that acquires the freed reservation performs
+the release above. A transaction that finds no admissible member does not fail
+and does not leave its wait pointing at a reservation that no longer exists:
+under those locks it atomically replaces the wait's evidence with the live
+reservation identities now holding the bound, and the turn stays parked in the
+contended form. If no bounded member remains — every former one is now durably
+excluded — the contention is over and the transaction re-runs the pool's
+exhaustion policy rather than assuming a wait. Which ending that re-run reaches
+is the contended-to-exhausted rule of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+and this page adds nothing to it: the turn moves to whichever row that table
+names, and releasing a contended wait does not change which one. A `fail` pool
+therefore cannot be left parked indefinitely by having entered contention first,
+and cannot acquire a pre-call cause it never earned. Releasing a bounded
+reservation holds that profile's capacity row across the atomic release-and-wake
+commit, and a rewrite holds the capacity rows of every bounded member its
+evidence names, so a completion cannot slip between a loser's read and its
+commit. A reservation identity therefore never outlives the wait that names it,
+and losing a race costs a re-park rather than a failed turn, a missed wake, or
+an admission above the bound.
+
+The wait has an exact occupied-slot control matrix. `steer` is accepted as
+ordinary pending steering bound to this source turn and remains pending until a
+release transaction consumes it with the fresh call. `stop_turn` is admitted:
+under the scheduler lock it revalidates the exact wait, accepts the configured
+immediate-successor origin, closes the wait, creates the fresh `Prepared`
+attempt, records the ordinary applied-interrupt proof on that attempt, ends it
+`AfterCancellation(Cancelled)`, appends `TurnCancelled` after the wait's latest
+frontier, reclassifies any steering still pending on the source turn as a queued
+successor, and terminalizes `Cancelled`, all atomically. No live attempt
+remains. The reclassification is not optional here: pending steering accepted
+while the turn was parked is ordinary pending steering, and the lifecycle rule
+below — with the `turn_lifecycle_pending_steering_closed` constraint that
+enforces it — requires every such row to be closed before its turn terminalizes,
+so a stop transaction that left it pending would be rejected at commit. Equal
+replay returns that receipt; a released or otherwise changed wait returns the
+ordinary active-turn mismatch. A goal `stop_goal` or supersede command remains a
+goal-state transition and does not manufacture turn-interrupt authority; if the
+caller also wants to release this active slot it submits the existing
+`stop_turn` command. No approval or reconciliation command applies to the wait.
+This compatibility constraint does not add that phase or these branches to the
+implemented closed vocabulary above.
 
 At most one turn per session is `active`. Enforcement is layered:
 
@@ -742,9 +853,10 @@ values—`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
 naming provider targets, selections, and aliases),
 `SIGNALBOX_TEMPLATE_CONFIG_FILE`, `BRAVE_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
 `SIGNALBOX_SOCKET_PATH`—from the process environment, plus the optional
-`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. It
-additionally requires `ANTHROPIC_API_KEY_FILE` when at least one static model
-mapping selects the Anthropic adapter, as specified by
+`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. A
+model-provider credential path is not among them: every `file` profile carries
+its own path, and composition builds `FileCredentialAccess` from the complete
+profile map, as specified by
 [configuration and credentials](configuration-and-credentials.md#process-configuration).
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
@@ -753,15 +865,34 @@ fences the prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes the generic recovery scan, marks every prior-process nonterminal
-runner connection lost, binds the runner socket, binds the process socket, then
-concurrently admits runner enrollment and protocol requests, dispatches the
-outbox, and schedules eligible work. On a database without the fence migration,
-the guarded first migration creates the fence row before the daemon initializes
-its first fenced pool. No request, dispatch cursor advance, or scheduler pass
-occurs before recovery completes. Any phase failure is a failed startup with a
-classified, key-bearing log line and a failure exit code. Runner recovery-only
-binding and reconciliation remain the committed unimplemented ordering stated
-under [startup scan and recovery](#startup-scan-and-recovery).
+runner connection lost, and — once the credential-pool child is composed —
+establishes each `codex_home` profile's credential-home identity, resolves every
+prior-process capacity reservation, resolves every retained OAuth
+refresh-in-progress marker to a replacement token or a quarantine, scavenges
+every crash-left OAuth scratch home, and runs the legacy family-to-policy
+backfill
+([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
+Those five gates sit after the recovery scan so a failure cannot block recovery
+of acknowledged work, and before any socket binding or scheduling so no request
+reaches a historical session whose policy is not yet rewritten and no CLI call
+runs against an unestablished credential home. The two OAuth gates are here for
+the same reason and are not optional cleanup. A retained marker names a
+single-flight refresh whose owning daemon is gone, so a preparation that
+admitted work first would either join a flight that no longer exists or reuse a
+generation the provider may already have rotated, which the pinned client treats
+as permanent failure. A crash-left scratch home holds real tokens on disk under
+a directory nothing is now watching, so scavenging it before admitting work is
+what bounds how long those tokens outlive the process that minted them. No
+present composition performs any of the five. It then binds the runner socket,
+binds the process socket, then concurrently admits runner enrollment and
+protocol requests, dispatches the outbox, and schedules eligible work. On a
+database without the fence migration, the guarded first migration creates the
+fence row before the daemon initializes its first fenced pool. No request,
+dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
+phase failure is a failed startup with a classified, key-bearing log line and a
+failure exit code. Runner recovery-only binding and reconciliation remain the
+committed unimplemented ordering stated under
+[startup scan and recovery](#startup-scan-and-recovery).
 
 The dedicated guard connection is checked once per second while the runtime is
 active. Losing that session is a fatal fencing event: admission, dispatch, and

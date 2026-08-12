@@ -6,7 +6,9 @@ state, user commands, model declarations, scheduler continuation, process wire,
 and terminal-client verbs. The domain and persistence surface was verified
 through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
 process, and terminal surfaces were verified through PR #384
-(`agent/goal-mode-runtime`). This bottom specification diff owns both stack
+(`agent/goal-mode-runtime`). Dispatch-composed commissions and the generation a
+turn's authority resolves to are verified against this PR
+(`agent/dispatch-session-goals`). This bottom specification diff owns both stack
 slices. Identity and durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
@@ -59,6 +61,43 @@ record either the appended event ordinal or a closed rejection, including
 acceptance and `acceptance_position_exhausted` when the session's positive
 accepted-input ordinal cannot advance. Equal replay returns the recorded result;
 structurally different reuse is a conflict.
+
+**Implemented behavior.** A commission need not originate from a user request.
+Repository-watch dispatch composes an attach for the session it is creating and
+commits it in that creation's own transaction, with its own durable command
+identity and the same receipt and event shapes any attach records; the goal
+statement is synthesized from the dispatch rather than supplied as text. Such a
+statement is system-authored in shape but not in every byte, because the
+identifiers it renders come from the watched repository, so a consumer placing
+it in a model prompt owes it exactly the quoting it owes any session text.
+
+**Implemented behavior.** A synthesized statement delimits every
+repository-supplied identifier it renders, because those identifiers are
+ordinary text and the sentence around them is not: an identifier left bare could
+close the field it sits in and continue as though it were the statement. Each is
+rendered between double quotes, with the quote and the backslash escaped so the
+closing delimiter cannot be forged, and with every line terminator escaped so a
+value cannot leave its line. The encoding is injective, so two distinct
+identifiers never render alike and the statement always says which one it named.
+Delimiting bounds where the repository's bytes begin and end; it does not make
+quoted data harmless, and a consumer still owes the whole statement the quoting
+above.
+
+**Implemented behavior.** Every goal turn records the generation it belongs to,
+and a consumer reading the authority a turn ran under reads that generation and
+not the session's current one, so a supersession while the turn is parked cannot
+broaden what that consumer sees. A turn the goal machinery did not schedule
+carries no such record, and a goal session runs those too. Such a turn reads the
+session's goal only when two conditions hold together: the lineage has exactly
+one generation, so no supersession can have broadened it; and that generation is
+still open, so a goal already stopped or achieved supplies no statement. Any
+other shape resolves to no statement, leaving the consumer to treat the
+authority as unsettled.
+
+**Implemented behavior.** That resolution decides what a consumer reads, not
+what it commits. A consumer that reads the authority, performs work, and commits
+a decision afterwards holds the statement as it stood at the read: a generation
+closed in between is not seen by the commit.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no
@@ -206,7 +245,31 @@ goal priority or more than one concurrent goal per session. Future extension
 must preserve immutable statements, full lineage, and the version-one rule that
 at most one generation is pursuing or blocked.
 
+**Committed unimplemented functionality.** No present goal-mode surface rechecks
+a generation's state when a consumer commits a decision it read that generation
+for. A consumer holding a statement across a long operation can commit after the
+generation closed. Future work binding the read to the commit must do so without
+making goal state part of a durable judge binding that deliberately excludes it.
+What such a consumer should then do is an
+[open question](../open-questions.md#goal-mode).
+
+**Committed unimplemented functionality.** No present surface binds a turn the
+goal machinery did not schedule to the generation it runs under. A generation
+attached after such a turn already existed is therefore still readable by it,
+and the one-generation and open conditions do not exclude that case. Ordering
+the commission before the turn would, but a turn's acceptance position is also
+its execution order, so commissioning first makes a dispatched session act
+before its triggering event arrives — a worse defect than the one it closes. The
+structural answer is to let the dispatched work turn carry a recorded
+generation, which requires relaxing the constraints that forbid a goal turn on
+an input carrying a command and force a goal turn's input to equal its statement
+verbatim. Until then the exposure is bounded by the statement being prompt
+context feeding an escalation instruction rather than a commit gate.
+
 ## Open edges
 
-**Deferred or undecided work.** No goal-mode open question is recorded by this
-version-one contract.
+**Deferred or undecided work.** One goal-mode open question is recorded by this
+version-one contract: what a consumer does when the generation it read closes
+before it commits the decision it read that generation for. Binding the read to
+the commit is committed unimplemented functionality above; the behaviour that
+binding should then take is [undecided](../open-questions.md#goal-mode).

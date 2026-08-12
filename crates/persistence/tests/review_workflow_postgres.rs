@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::error::Error;
+use std::{error::Error, future::Future};
 
 use signalbox_application::{
     AuthorizeModelCallOutcome, ModelCallCredentialReference, ReviewConcernClaim,
@@ -50,7 +50,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     review_orchestration::{
         PostgresReviewOrchestrationStore, ReviewOrchestrationCommand,
@@ -101,6 +101,7 @@ async fn migrated_postgres_with_max_connections(
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -124,6 +125,7 @@ async fn migrated_postgres_in_configured_schema()
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;
@@ -152,6 +154,67 @@ async fn migrated_postgres_in_configured_schema()
     migrate(&pool).await?;
     migrate(&pool).await?;
     Ok((container, pool))
+}
+
+/// Starts PostgreSQL with `pg_stat_statements` loaded so a test can count the
+/// statements one call issues.
+///
+/// The count is taken server-side rather than by instrumenting a call site,
+/// because the cost this guards against is spread across two crates: the
+/// orchestration loaders and the workflow store they delegate to. A server-side
+/// counter sees every statement either one issues, including any added later.
+async fn migrated_postgres_counting_statements()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_cmd(vec![
+            String::from("-c"),
+            String::from("shared_preload_libraries=pg_stat_statements"),
+            String::from("-c"),
+            String::from("pg_stat_statements.track=all"),
+        ])
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+        .execute(&pool)
+        .await?;
+    migrate(&pool).await?;
+    Ok((container, pool))
+}
+
+/// Runs `work` and reports how many statements PostgreSQL executed for it.
+///
+/// The reset and the reading query are both excluded by name, and the reading
+/// query has not yet been recorded when it computes its own sum.
+async fn statements_executed<Work: Future<Output = Output>, Output>(
+    pool: &PgPool,
+    work: Work,
+) -> Result<(Output, i64), Box<dyn Error>> {
+    sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(pool)
+        .await?;
+    let output = work.await;
+    let executed = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(sum(calls), 0)::bigint
+           FROM pg_stat_statements
+          WHERE query NOT LIKE '%pg_stat_statements%'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok((output, executed))
 }
 
 fn uuid(value: u128) -> Uuid {
@@ -8929,12 +8992,26 @@ struct PreparedOrchestrationFixture {
 async fn prepare_orchestration_fixture(
     pool: &PgPool,
 ) -> Result<PreparedOrchestrationFixture, Box<dyn Error>> {
+    prepare_orchestration_fixture_with_findings(pool, 1).await
+}
+
+/// Prepares one sealed attempt carrying `findings` findings on a single target.
+///
+/// Every finding shares the fixture's target, which is what makes the count a
+/// meaningful load parameter: the workflow store reconstructs findings by whole
+/// target graph, so a loader that reaches for one finding at a time scales with
+/// the product of the claim's members and the target's.
+async fn prepare_orchestration_fixture_with_findings(
+    pool: &PgPool,
+    findings: usize,
+) -> Result<PreparedOrchestrationFixture, Box<dyn Error>> {
     const IMPORT_PASS_IDENTITY: u128 = 0x7a0;
     const ANALYSIS_PASS_IDENTITY: u128 = 0x7a1;
     const EFFECT_PASS_IDENTITY: u128 = 0x7a2;
     const FIX_PASS_IDENTITY: u128 = 0x7a3;
     const FINDING_IDENTITY: u128 = 0x7a4;
     const ATTEMPT_IDENTITY: u128 = 0x7a5;
+    const ADDITIONAL_FINDING_IDENTITY_BASE: u128 = 0x7c0;
 
     let fixture = insert_review_pass_fixture(pool).await;
     let import_pass = insert_fixture_pass(
@@ -8960,21 +9037,35 @@ async fn prepare_orchestration_fixture(
         ],
     )
     .await;
-    let finding_ref = ReviewFindingRef::new(
-        fixture.pass,
-        ReviewFindingId::from_uuid(uuid(FINDING_IDENTITY)),
-    );
-    let producer = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
-    let proposed = finding(finding_ref, producer.clone(), &fixture.target_snapshot);
-    fixture
-        .store
-        .insert_findings(&producer, std::slice::from_ref(&proposed))
-        .await?;
-    let canonical_finding = fixture
-        .store
-        .load_finding(finding_ref.finding())
-        .await?
-        .expect("canonical finding exists");
+    let finding_refs = (0..findings)
+        .map(|index| {
+            let identity = if index == 0 {
+                FINDING_IDENTITY
+            } else {
+                ADDITIONAL_FINDING_IDENTITY_BASE + u128::try_from(index).unwrap_or_default()
+            };
+            ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(identity)))
+        })
+        .collect::<Vec<_>>();
+    let finding_ref = *finding_refs
+        .first()
+        .expect("the fixture carries at least one finding");
+    let producer = pass_with_produced_findings(finding_refs.clone(), evidence[0].clone());
+    let proposed = finding_refs
+        .iter()
+        .map(|reference| finding(*reference, producer.clone(), &fixture.target_snapshot))
+        .collect::<Vec<_>>();
+    fixture.store.insert_findings(&producer, &proposed).await?;
+    let mut canonical_findings = Vec::with_capacity(finding_refs.len());
+    for reference in &finding_refs {
+        canonical_findings.push(
+            fixture
+                .store
+                .load_finding(reference.finding())
+                .await?
+                .expect("canonical finding exists"),
+        );
+    }
 
     let attempt_id = ReviewOrchestrationAttemptId::from_uuid(uuid(ATTEMPT_IDENTITY));
     let attempt = ReviewOrchestrationAttempt::try_new(
@@ -9007,17 +9098,19 @@ async fn prepare_orchestration_fixture(
             producer,
             run_evidence_for_pass(evidence[0].clone()),
             ReviewTemplateDigest::new([5; 32]),
-            vec![canonical_finding],
+            canonical_findings,
         ))),
     );
     let plan = ReviewJudgmentPlan::new(
         evidence[2].clone(),
         run_evidence_for_pass(evidence[2].clone()),
         ReviewTemplateDigest::new([2; 32]),
-        vec![ReviewJudgmentPlanMember::new(
-            finding_ref,
-            ReviewPlannedDisposition::Accepted,
-        )],
+        finding_refs
+            .iter()
+            .map(|reference| {
+                ReviewJudgmentPlanMember::new(*reference, ReviewPlannedDisposition::Accepted)
+            })
+            .collect(),
     );
     let mut store = PostgresReviewOrchestrationStore::new(pool.clone());
     assert_eq!(
@@ -9082,6 +9175,222 @@ async fn incomplete_judgment_result(
             .await?
             .expect("planned judgment has durable progress"),
     })
+}
+
+/// A snapshot reports one database snapshot, not a seam between several.
+///
+/// The whole projection is reconstructed inside a single read-only
+/// `REPEATABLE READ` transaction, so its facts are all drawn from the instant
+/// the transaction took its snapshot. This forces the interleave that a torn
+/// read needs and shows it cannot happen: the snapshot is stopped after its
+/// first read has fixed its MVCC snapshot, a writer then commits an effect, and
+/// the snapshot is released to run every remaining loader. Those later loaders
+/// must still report the pre-write state.
+///
+/// The stop is a table lock on `review_orchestration_import`, which the stage
+/// ladder reads immediately after the attempt row. It is deliberately not a
+/// timing delay: the writer commits only once `pg_stat_activity` shows the
+/// reader blocked, so the ordering is observed rather than assumed.
+///
+/// Before the read became one transaction, each loader opened its own — so the
+/// effect written here landed between them and the snapshot reported it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_excludes_a_write_committed_after_it_began()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres_with_max_connections(6).await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+
+    let mut blocker = pool.begin().await?;
+    sqlx::query("LOCK TABLE review_orchestration_import IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+
+    let reader = fixture.store.clone();
+    let attempt_id = fixture.attempt_id;
+    let reading = tokio::spawn(async move { reader.load_snapshot(attempt_id).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the snapshot must be waiting on the held import lock before the writer commits"
+    );
+
+    let mut writer = PostgresReviewOrchestrationStore::new(pool.clone());
+    assert_eq!(
+        writer
+            .record_applied_judgment_effect(ReviewJudgmentEffectId::new(
+                attempt_id,
+                fixture.finding_ref,
+            ))
+            .await?,
+        ReviewDurableSealOutcome::Recorded,
+        "the concurrent writer must commit while the snapshot is still blocked"
+    );
+
+    blocker.rollback().await?;
+    let facts = tokio::time::timeout(std::time::Duration::from_secs(60), reading)
+        .await???
+        .expect("the sealed attempt has a snapshot");
+
+    assert!(
+        facts.applied_judgment_effects.is_empty(),
+        "the snapshot reported an effect committed after it began: {:?}",
+        facts.applied_judgment_effects
+    );
+    assert_eq!(
+        facts.current_stage,
+        ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects,
+        "the reported stage must agree with the effects the same snapshot reports"
+    );
+
+    // The write is durable; only this snapshot's view of it was fixed earlier.
+    assert_eq!(
+        fixture.store.current_stage(attempt_id).await?,
+        Some(ReviewOrchestrationCurrentStage::AwaitingRepair)
+    );
+    Ok(())
+}
+
+/// A snapshot under construction blocks no writer.
+///
+/// This is the regression the redesign exists for. The read previously held
+/// `SHARE` locks over 34 tables for its whole duration, two of which were
+/// `accepted_input` and `turn_lifecycle` — so daemon-wide and across every
+/// session, no user could submit input, no queued turn could start, no
+/// in-flight turn could advance, and no approval could be recorded until a
+/// client-facing read finished.
+///
+/// The snapshot is held mid-construction on a table lock, and a real input
+/// submission that starts a turn must complete anyway. Against the lock-guarded
+/// form this times out: that form takes `accepted_input` first in its lock
+/// inventory, so it is still holding it while it waits for the rest.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_does_not_block_input_or_turns() -> Result<(), Box<dyn Error>>
+{
+    const WRITER_SESSION: u128 = 0x7e0;
+    const WRITER_INPUT: u128 = 0x7e1;
+    const WRITER_TURN: u128 = 0x7e2;
+    const WRITER_OFFSET: u128 = 0x7e3;
+
+    let (_container, pool) = migrated_postgres_with_max_connections(6).await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+
+    let mut blocker = pool.begin().await?;
+    sqlx::query("LOCK TABLE review_orchestration_import IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+
+    let reader = fixture.store.clone();
+    let attempt_id = fixture.attempt_id;
+    let reading = tokio::spawn(async move { reader.load_snapshot(attempt_id).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the snapshot must be mid-construction before the writer runs"
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        insert_active_turn_with_offset(
+            &pool,
+            SessionId::from_uuid(uuid(WRITER_SESSION)),
+            AcceptedInputId::from_uuid(uuid(WRITER_INPUT)),
+            TurnId::from_uuid(uuid(WRITER_TURN)),
+            WRITER_OFFSET,
+        ),
+    )
+    .await
+    .expect("a snapshot under construction must not delay input submission or turn start");
+
+    blocker.rollback().await?;
+    tokio::time::timeout(std::time::Duration::from_secs(60), reading)
+        .await???
+        .expect("the sealed attempt has a snapshot");
+    Ok(())
+}
+
+/// The snapshot holds exactly one pooled connection for its whole construction.
+///
+/// A single connection is a single transaction, which is what makes the read
+/// coherent under MVCC rather than under locks. Pinning it against a
+/// one-connection pool states that structurally: a construction that reached
+/// for a second connection — as the lock-guarded form did, holding a guard
+/// transaction while its loaders ran elsewhere — could not finish here at all.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_completes_on_a_single_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+
+    let facts = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        fixture.store.load_snapshot(fixture.attempt_id),
+    )
+    .await
+    .expect("a one-connection pool must satisfy the snapshot")?
+    .expect("the sealed attempt has a snapshot");
+
+    assert_eq!(
+        facts.current_stage,
+        ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
+    );
+    Ok(())
+}
+
+/// Snapshot cost grows linearly, not quadratically, in an attempt's findings.
+///
+/// Two independent defects once made it quadratic. The stage ladder
+/// independently re-ran nearly every loader the snapshot ran again on the next
+/// line, and each concern finding was fetched with a loader that reconstructs
+/// the whole target finding graph in order to return a single row — so the
+/// claim's members multiplied the target's. The wire contract admits 1,024
+/// findings, where a quadratic is not a constant factor.
+///
+/// The marginal assertion is the load-bearing one: an absolute ceiling can be
+/// met by a quadratic on a small fixture, but a per-finding bound cannot. Under
+/// either defect the marginal cost is itself proportional to the finding count,
+/// so it fails whichever one returns.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_cost_is_linear_in_findings() -> Result<(), Box<dyn Error>> {
+    /// Statements one additional finding on the attempt may add.
+    ///
+    /// A finding costs one projection plus its event and external-link reads.
+    /// Measured marginal cost is 8; the budget carries headroom over that and
+    /// stays far below what a per-finding target-graph reconstruction needs.
+    /// For scale, the same two fixtures measured 77 and 125 statements here
+    /// against 172 and 1,180 before this shape was fixed.
+    const STATEMENTS_PER_ADDITIONAL_FINDING: i64 = 10;
+    const FEW_FINDINGS: usize = 2;
+    const MANY_FINDINGS: usize = 8;
+
+    let (_small_container, small_pool) = migrated_postgres_counting_statements().await?;
+    let small = prepare_orchestration_fixture_with_findings(&small_pool, FEW_FINDINGS).await?;
+    let (small_snapshot, small_statements) =
+        statements_executed(&small_pool, small.store.load_snapshot(small.attempt_id)).await?;
+    assert!(
+        small_snapshot?.is_some(),
+        "the sealed attempt must produce a snapshot"
+    );
+
+    let (_large_container, large_pool) = migrated_postgres_counting_statements().await?;
+    let large = prepare_orchestration_fixture_with_findings(&large_pool, MANY_FINDINGS).await?;
+    let (large_snapshot, large_statements) =
+        statements_executed(&large_pool, large.store.load_snapshot(large.attempt_id)).await?;
+    assert!(
+        large_snapshot?.is_some(),
+        "the sealed attempt must produce a snapshot"
+    );
+
+    let additional_findings = i64::try_from(MANY_FINDINGS - FEW_FINDINGS)?;
+    let budget = small_statements + additional_findings * STATEMENTS_PER_ADDITIONAL_FINDING;
+    assert!(
+        large_statements <= budget,
+        "a {MANY_FINDINGS}-finding snapshot executed {large_statements} statements against a \
+         {FEW_FINDINGS}-finding baseline of {small_statements}, over the linear budget of \
+         {budget}; the snapshot is scaling faster than its findings"
+    );
+    Ok(())
 }
 
 /// Complete stage seals reconstruct one coherent orchestration snapshot.

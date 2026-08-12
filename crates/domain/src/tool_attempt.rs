@@ -1391,6 +1391,50 @@ mod tests {
         assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
     }
 
+    /// S06 / INV-025 / INV-026: an executor that cannot establish the outcome
+    /// of an external effect ends the attempt ambiguous, which is the sole
+    /// entry to reconciliation; reporting it as a definite failure would let
+    /// an unknown-outcome push or GitHub mutation be repeated.
+    #[test]
+    fn s06_inv025_inv026_external_effect_observation_ends_ambiguous() {
+        let authorized = prepared(ToolEffectClass::ExternalEffect)
+            .authorize()
+            .expect("prepared work can be authorized");
+        let (in_flight, correlation) = authorized.into_parts();
+        let attempt = in_flight.attempt();
+        let ended = in_flight
+            .apply_terminal_observation(
+                IssuedExecutorFence { correlation }.bind(ToolAttemptObservation::Ambiguous),
+            )
+            .expect("external-effect ambiguity is admissible evidence");
+
+        assert_eq!(ended.attempt(), attempt);
+        assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
+    }
+
+    /// S06 / INV-025 / INV-026: effect-free work cannot claim external-effect
+    /// ambiguity, so the rejection retains the unchanged in-flight attempt
+    /// rather than opening a reconciliation wait nothing can resolve.
+    #[test]
+    fn s06_inv025_inv026_effect_free_observation_cannot_be_ambiguous() {
+        let authorized = prepared(ToolEffectClass::EffectFree)
+            .authorize()
+            .expect("prepared work can be authorized");
+        let (in_flight, correlation) = authorized.into_parts();
+        let error = in_flight
+            .clone()
+            .apply_terminal_observation(
+                IssuedExecutorFence { correlation }.bind(ToolAttemptObservation::Ambiguous),
+            )
+            .expect_err("effect-free work cannot manufacture external ambiguity");
+
+        assert_eq!(
+            error.failure(),
+            ToolAttemptTransitionFailure::EffectFreeCannotBeAmbiguous
+        );
+        assert_eq!(error.attempt(), &in_flight);
+    }
+
     /// S10 / INV-027: a denial cannot produce approved-request authority.
     #[test]
     fn s10_inv027_denial_cannot_authorize_an_attempt() {

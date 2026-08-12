@@ -8,11 +8,26 @@ and filesystem laws, and its child slices add local operations, their typed tool
 surface, and explicitly approved repair writes. These paragraphs become verified
 only with that stack. Daemon catalog wiring is outside it.
 
-The deployment injects one workspace root. The Git family may operate only on a
-direct main worktree whose `.git` directory is immediately inside that root.
-Repository paths and repository data are untrusted input. The local process,
-kernel, filesystem implementation, cryptographic hash implementations, and the
-typed Git library are trusted computing-base components.
+The scope of the authority — how many suites the daemon composes and which root
+each is constructed with — is not part of that stack, and was verified against
+PR #539 (`agent/per-session-workspaces`). The remote destination authority below
+is verified against this PR (`agent/git-remote-authority`), which lands the
+durable workspace record and the destination schema; the push transport that
+resolves against them is later work.
+
+The deployment injects a workspace root into each constructed suite. The daemon
+composes one suite for the configured root, and one further suite for each
+session provisioned with a root of its own; a session with no provisioned root
+uses the configured suite, which every such session shares. The Git family may
+operate only on a direct main worktree whose `.git` directory is immediately
+inside the root its own suite was constructed with. Composing several suites
+does not weaken the invariants stated below: each suite is a separate
+construction with its own injected root, so the root remains construction input
+rather than a per-call argument, and no suite can reach a root another suite was
+constructed with. Repository paths and repository data are untrusted input. The
+local process, kernel, filesystem implementation, cryptographic hash
+implementations, and the typed Git library are trusted computing-base
+components.
 
 ## Library and descriptor boundary
 
@@ -72,8 +87,11 @@ is preserved and the operation fails closed.
 directory, ancestors, environment, home directory, or process-global Git state
 for a repository. The workspace root is construction input, not a per-call
 argument. Local operations cannot select another repository. An external-write
-slice may name a branch, but its remote endpoint is deployment configuration and
-is never model-supplied data.
+slice may name a branch and it may name a minted remote, but never a
+destination: the endpoint it resolves to is durable authority recorded ahead of
+the call, described under
+[remote destination authority](#remote-destination-authority), and is never
+model-supplied data.
 
 **References match the repository object format.** The pinned repository
 configuration selects SHA-1 or SHA-256 once. Direct reference values, detached
@@ -91,6 +109,50 @@ demonstrates their violation remains must-fix regardless of review-wave count. A
 newly identified gap in the mechanisms that enforce one of these invariants is
 in-scope hardening and is fixed in the current pull request's single batched
 disposition commit.
+
+## Remote destination authority
+
+**Minting a destination is a human act; pushing to a minted destination is an
+approval-gated agent act.** A push destination is durable data, not deployment
+configuration and not a tool argument. No caller — model, session, or tool — can
+supply a URL: `GitPushArguments` carries a branch and nothing else, and the
+executor is constructed with one already-validated `ConfiguredGitRemote`.
+Committed but unimplemented: the push surface is to accept a remote *name* and
+resolve it against the durable record this PR lands. Until that resolver is
+built the destination reaches the executor by construction, and the durable
+record has no reader. Only `https` destinations are storable, and the transport
+compiles no SSH support, so the two sides refuse the same set.
+
+A destination is scoped to a **workspace**, and a workspace is a durable record
+with its own identity. The root path is canonicalized exactly once, when the
+workspace record is minted, and is stored in canonical form; every scope
+comparison afterwards is between identities. This is what makes "one live
+destination per workspace and name" a rule that holds: keyed by path,
+`/srv/workspace` and `/srv/workspace/.` are one directory under two keys, and
+the rule would have admitted two destinations for it. There is deliberately no
+comparison-time normalization to forget.
+
+**Committed unimplemented functionality.** No present surface mints a workspace
+record. The schema admits three tiers of minting, and they are to carry
+different authority:
+
+1. **Operator-registered.** A person is to register a new authority scope
+   through the client. This is the only tier that widens what Signalbox may push
+   from, so the record is to carry the durable command that registered it,
+   keeping that act provable after the fact.
+2. **Daemon-system-minted.** The daemon is to record the roots its
+   [per-session derivation](configuration-and-credentials.md#derived-session-workspace-roots)
+   materializes from the configured base. Authority still flows from that base
+   and its fixed formula: these rows are to be bookkeeping of what the formula
+   produced, never an input to which roots the daemon may open, and nothing is
+   to read them to decide a binding.
+3. **Session-facing minting is future work.** A session cannot mint a workspace
+   or a destination. If it is ever admitted it will be a posture-gated tool
+   under [tool safety](../open-questions.md#tool-safety), decided separately.
+
+Retiring a destination is a new durable fact rather than an edit, because the
+minting tables are append-only. A withdrawal retires exactly one mint and frees
+its name, so a withdrawal and its replacement may land in one transaction.
 
 ## Explicitly accepted residuals
 
@@ -117,8 +179,30 @@ disposition commit.
   extension surfaces require a separate user-approved contract before support.
 - Remote authentication, transport security, server-side authorization, and
   remote repository behavior are not properties of the local authority. The
-  repair-write slice separately constrains egress to the configured remote and
+  repair-write slice separately constrains egress to a minted remote and
   requires non-overridable explicit approval before push.
+- A minted destination is machine-independent only insofar as its workspace is.
+  Registering a workspace records the canonical root a person resolved at that
+  moment; moving the directory afterwards leaves the record naming a path that
+  no longer exists. Re-registration mints a *new* workspace identity rather than
+  preserving the existing one: `workspace_id` is the primary key, `root_path` is
+  unique, and the table is append-only, so nothing can rebind a recorded
+  identity to a moved directory. Grants are scoped by identity, so they do not
+  survive the move and must be minted again under the new workspace. Modeling
+  relocation as a durable fact that preserves identity is committed but
+  unimplemented.
+- Workspace roots are globally unique by canonical spelling, and the key carries
+  no runner or location dimension. Version one enrolls a single runner, so no
+  two machines can present the same root; more than one simultaneously enrolled
+  runner is committed and deferred, and a second runner hosting an identically
+  spelled root is what this key would then refuse. Scoping physical root
+  bindings by runner identity — or separating the stable workspace identity from
+  its per-runner locations — is the migration that deferral will require. It is
+  not attempted here because this slice models no runner identity to scope by.
+- Canonical form is judged as *bytes* by the durable store, which cannot see the
+  filesystem. A root whose spelling is canonical but whose components are
+  symbolic links is admitted; resolving those is what the minting boundary does
+  once, and no later reader repeats it.
 
 For this stack's review disposition, a finding that does not violate a stated
 invariant, identify an in-scope enforcement gap, or contradict another

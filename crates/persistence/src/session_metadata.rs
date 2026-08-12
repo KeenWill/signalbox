@@ -270,7 +270,21 @@ impl SessionMetadataRepository {
             Some(CommandKind::ReplaceSessionMetadata) => {
                 load_command_from_connection(&mut connection, command_id).await
             }
-            Some(_) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
+                | CommandKind::CompactSession
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
+            ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
     }
 
@@ -608,10 +622,25 @@ async fn existing_or_conflicting(
     command: &ReplaceSessionMetadata,
     kind: CommandKind,
 ) -> Result<ReplaceSessionMetadataHandlingOutcome, SessionMetadataRepositoryError> {
-    if kind != CommandKind::ReplaceSessionMetadata {
-        return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
-            command_id: command.command_id(),
-        });
+    match kind {
+        CommandKind::ReplaceSessionMetadata => {}
+        CommandKind::CreateSession
+        | CommandKind::CreateSessionFromImportedFrontier
+        | CommandKind::ReplaceSessionDefaults
+        | CommandKind::SubmitInput
+        | CommandKind::DecideToolRequest
+        | CommandKind::ReviewWorkflow
+        | CommandKind::ReviewOrchestration
+        | CommandKind::CompactSession
+        | CommandKind::Goal
+        | CommandKind::UpdateSessionPlacement
+        | CommandKind::RegisterWorkspace
+        | CommandKind::MintGitRemote
+        | CommandKind::WithdrawGitRemote => {
+            return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
+                command_id: command.command_id(),
+            });
+        }
     }
     let recorded = load_command_from_connection(connection, command.command_id())
         .await?
@@ -884,14 +913,14 @@ fn decode_command(
         required(row, "replacement_archived")?,
     )?;
     let command = match (issuer_kind.as_str(), issuer_tool) {
-        ("owner", None) => ReplaceSessionMetadata::new(command_id, session, content),
+        ("user", None) => ReplaceSessionMetadata::new(command_id, session, content),
         ("tool", Some(request)) => ReplaceSessionMetadata::new_for_tool(
             command_id,
             session,
             tool_request_id_from_uuid(request),
             content,
         ),
-        ("owner", Some(_)) | ("tool", None) => {
+        ("user", Some(_)) | ("tool", None) => {
             return Err(SessionMetadataCorruption::Inconsistent("command issuer shape").into());
         }
         (other, _) => {
@@ -1159,9 +1188,8 @@ struct EncodedActor {
 
 fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
-        // Applied migrations freeze this legacy storage discriminator.
         Actor::User => EncodedActor {
-            kind: "owner",
+            kind: "user",
             turn: None,
             tool_request: None,
         },
@@ -1190,7 +1218,7 @@ fn decode_actor(
     relationship: &'static str,
 ) -> Result<Actor, SessionMetadataRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
-        ("owner", None, None) => Ok(Actor::User),
+        ("user", None, None) => Ok(Actor::User),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),
@@ -1198,7 +1226,7 @@ fn decode_actor(
         ("tool", None, Some(request)) => Ok(Actor::Tool {
             request: ToolRequestId::from_uuid(request),
         }),
-        ("owner" | "model" | "recovery" | "tool", _, _) => {
+        ("user" | "model" | "recovery" | "tool", _, _) => {
             Err(SessionMetadataCorruption::Inconsistent(relationship).into())
         }
         _ => Err(SessionMetadataCorruption::Unsupported {

@@ -5,16 +5,16 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future};
 use signalbox_domain::{
     AcceptedInputId, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
     ContextFrontierId, CreateSession, DeliveryRequest, DurableCommandId, GitHubObjectId,
-    MergeableState, ModelSelectionOverride, PerInputConfigurationChoices, PreparedCreateSession,
-    PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject,
-    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId,
-    RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindV1,
-    RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion,
-    RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
-    ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TranscriptAncestry,
-    TurnId, UserContent, WorkflowName,
+    GoalTextError, GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionOverride,
+    PerInputConfigurationChoices, PreparedCreateSession, PullRequestEventContext,
+    PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject, RepoWatchActionV1,
+    RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionTemplateName,
+    SessionTemplateProvenance, SubmitInput, TranscriptAncestry, TurnId, UserContent, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -802,7 +802,9 @@ fn derive_check_events(
     }
     for run in current.completed_check_runs() {
         if !previous.completed_check_runs().iter().any(|prior| {
-            prior.id() == run.id() && prior.completion_generation() == run.completion_generation()
+            prior.id() == run.id()
+                && prior.completion_generation() == run.completion_generation()
+                && prior.conclusion() == run.conclusion()
         }) {
             push_pull_request_event(
                 repository,
@@ -1207,6 +1209,44 @@ pub enum RepoWatchSingletonKey {
     },
 }
 
+/// The goal one dispatched session is commissioned with at creation.
+///
+/// A dispatched session declares nothing about itself, so the goal that states
+/// its authority is composed here, from the dispatch, and committed with the
+/// session rather than left for the session to attach.
+#[derive(Debug)]
+pub struct RepoWatchDispatchGoal {
+    command: GoalUserCommand,
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+}
+
+impl RepoWatchDispatchGoal {
+    pub const fn new(
+        command: GoalUserCommand,
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+    ) -> Self {
+        Self {
+            command,
+            accepted_input,
+            turn,
+        }
+    }
+
+    pub const fn command(&self) -> &GoalUserCommand {
+        &self.command
+    }
+
+    pub const fn accepted_input(&self) -> AcceptedInputId {
+        self.accepted_input
+    }
+
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+}
+
 /// One action whose current-interface session creation has been domain-prepared.
 #[derive(Debug)]
 pub struct RepoWatchPreparedDispatchAction {
@@ -1217,6 +1257,7 @@ pub struct RepoWatchPreparedDispatchAction {
     turn: TurnId,
     cancellation_entry: SemanticTranscriptEntryId,
     cancellation_frontier: ContextFrontierId,
+    goal: RepoWatchDispatchGoal,
 }
 
 impl RepoWatchPreparedDispatchAction {
@@ -1226,6 +1267,10 @@ impl RepoWatchPreparedDispatchAction {
 
     pub const fn prepared_session(&self) -> &PreparedCreateSession {
         &self.prepared_session
+    }
+
+    pub const fn goal(&self) -> &RepoWatchDispatchGoal {
+        &self.goal
     }
 
     pub fn into_parts(
@@ -1238,6 +1283,7 @@ impl RepoWatchPreparedDispatchAction {
         TurnId,
         SemanticTranscriptEntryId,
         ContextFrontierId,
+        RepoWatchDispatchGoal,
     ) {
         (
             self.action,
@@ -1247,6 +1293,7 @@ impl RepoWatchPreparedDispatchAction {
             self.turn,
             self.cancellation_entry,
             self.cancellation_frontier,
+            self.goal,
         )
     }
 }
@@ -1349,6 +1396,7 @@ pub enum RepoWatchDispatchPreparationError {
     UnknownTemplate(SessionTemplateName),
     SessionPreparation,
     InvalidSingletonTarget,
+    GoalStatement(GoalTextError),
 }
 
 impl fmt::Display for RepoWatchDispatchPreparationError {
@@ -1360,6 +1408,9 @@ impl fmt::Display for RepoWatchDispatchPreparationError {
             Self::InvalidSingletonTarget => {
                 "repository-watch singleton scope is incompatible with the event target"
             }
+            Self::GoalStatement(_) => {
+                "repository-watch dispatch could not form its synthesized goal statement"
+            }
         })
     }
 }
@@ -1368,6 +1419,7 @@ impl Error for RepoWatchDispatchPreparationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Context(error) => Some(error),
+            Self::GoalStatement(error) => Some(error),
             Self::UnknownTemplate(_) | Self::SessionPreparation | Self::InvalidSingletonTarget => {
                 None
             }
@@ -1454,14 +1506,32 @@ where
                     ),
                 },
             );
+            let statement = dispatch
+                .synthesized_goal_statement(rule.id())
+                .map_err(RepoWatchDispatchPreparationError::GoalStatement)
+                .map_err(RepoWatchDispatchServiceError::Preparation)?;
+            let accepted_input = self.ids.next_accepted_input_id();
+            let turn = self.ids.next_turn_id();
+            let cancellation_entry = self.ids.next_semantic_entry_id();
+            let cancellation_frontier = self.ids.next_context_frontier_id();
+            let goal = RepoWatchDispatchGoal::new(
+                GoalUserCommand::new(
+                    self.ids.next_command_id(),
+                    session,
+                    GoalUserAction::Attach(statement),
+                ),
+                self.ids.next_accepted_input_id(),
+                self.ids.next_turn_id(),
+            );
             prepared_actions.push(RepoWatchPreparedDispatchAction {
                 action,
                 prepared_session,
                 initial_input,
-                accepted_input: self.ids.next_accepted_input_id(),
-                turn: self.ids.next_turn_id(),
-                cancellation_entry: self.ids.next_semantic_entry_id(),
-                cancellation_frontier: self.ids.next_context_frontier_id(),
+                accepted_input,
+                turn,
+                cancellation_entry,
+                cancellation_frontier,
+                goal,
             });
         }
         self.transaction
@@ -2376,6 +2446,84 @@ mod tests {
                 conclusion: current_run.conclusion(),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn edited_check_run_conclusion_emits_again_under_one_generation() -> Result<(), Box<dyn Error>>
+    {
+        let previous_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Success,
+        );
+        let previous = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![previous_run],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Failure,
+        );
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![current_run.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::CheckRunCompleted {
+                name: current_run.name().clone(),
+                conclusion: current_run.conclusion(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_check_run_emits_no_event() -> Result<(), Box<dyn Error>> {
+        let run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Success,
+        );
+        let previous = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![run.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![run],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert!(derive(Some(&previous), &current)?.is_empty());
         Ok(())
     }
 

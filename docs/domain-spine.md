@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-four identities defined in `lib.rs`:
+The twenty-seven identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -81,6 +81,9 @@ pub struct ReviewFindingId(/* private */);
 pub struct ReviewExternalLinkId(/* private */);
 pub struct RepoWatchEventId(/* private */);
 pub struct RepoWatchDispatchId(/* private */);
+pub struct WorkspaceId(/* private */);
+pub struct GitRemoteMintId(/* private */);
+pub struct GitRemoteWithdrawalId(/* private */);
 ```
 
 Six more identities with the same shape are defined in their owning modules and
@@ -2307,8 +2310,12 @@ impl SubmitInputTurnOriginReconstitutionInput {
     pub fn reclassified(input: SubmitInputReclassifiedTurnOriginConstructionInput) -> Self;
 }
 
+pub struct NonAcceptedTurnPredecessorReconstitutionInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+}
 pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
-    /* public named command, result, accepted-input, queue, and configuration facts */
+    /* public named command, result, accepted-input, accepted/non-accepted predecessor, queue, and configuration facts */
 }
 pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
     /* public named command, result, source-turn, and accepted-input facts */
@@ -2343,7 +2350,6 @@ pub struct SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
 pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput {
     /* public named command, active-turn, and canonical origin facts */
 }
-
 pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
     pub fn applied_turn_origin(
@@ -2591,6 +2597,11 @@ pub enum ActiveTurnPhase {
         ambiguous_operations: NonEmptyIssuedOperationRefs,
         applied_interrupt: Option<AppliedInterruptProof>,
     },
+    AwaitingRunnerRecovery {
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        optional_tool_attempt: Option<ToolAttemptId>,
+    },
 }
 impl ActiveTurnPhase {
     pub const fn retains_progressing_slot(&self) -> bool;  // always true
@@ -2708,6 +2719,9 @@ impl TerminalAttemptEndReconstitutionInput {
         disposition: CancellationStopDisposition,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
+    pub const fn yielded_to_runner_recovery(
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
     // accessors: end(), interrupt()
 }
 
@@ -2799,6 +2813,12 @@ impl ActiveTurnSchedulingReconstitutionInput {
         ended_attempt: TurnAttemptId,
         ambiguous_call: ModelCallId,
         interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn awaiting_runner_recovery(
+        owning_turn: TurnId,
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        interrupted_tool_attempt: Option<ToolAttemptId>,
     ) -> Self;
     // accessor: owning_turn()
 }
@@ -2983,14 +3003,14 @@ impl AcceptedInputSchedulingReconstitutionInput {
     pub fn with_preceding_non_accepted_terminal(
         self,
         session: SessionId,
-        turn: TurnId,
+        predecessor: TurnId,
+        successor: TurnId,
         terminal_frontier: ContextFrontierId,
         selected: DirectModelSelection,
     ) -> Self;
     // accessors: session(), imported_session(), turns(), semantic_entries(),
-    // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
-    // compactions(), consumed_steering(), delegated_consumed_steering(),
-    // delegated_turns(),
+    // snapshots(), pinned_targets(), model_calls(), consumed_steering(),
+    // delegated_consumed_steering(), delegated_turns(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -3152,6 +3172,29 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_tool_batch(
         self,
         batch: ToolBatch,
@@ -3169,6 +3212,14 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn resolved_snapshot(
+        &self,
+        snapshot: ContextFrontierId,
+    ) -> Option<&ResolvedContextFrontierSnapshot>;
+    pub fn semantic_entry(
+        &self,
+        entry: SemanticTranscriptEntryRef,
+    ) -> Option<&SemanticTranscriptEntry>;
     pub fn prepare_earliest_queued_activation(
         self,
         identities: AcceptedInputTurnActivationIdentities,
@@ -3225,6 +3276,31 @@ impl ActivatedTurn {
         &self,
         entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     ) -> Option<Vec<SemanticTranscriptEntry>>;
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     // accessors: session(), turn(), configuration(), configuration_provenance(),
     // start(), phase(), pending_steering(), consumed_steering()
 }
@@ -3580,12 +3656,33 @@ pub enum ModelCallReconstitutionFailure {
 
 ```rust
 pub struct ModelTargetDefinition { /* private */ }
+impl ModelTargetDefinition {
+    pub const fn new(selection: DirectModelSelection, target: ResolvedProviderTarget) -> Self;
+    // accessors: selection(), target()
+}
 pub struct ModelTargetCatalog { /* private */ }
+impl ModelTargetCatalog {
+    pub fn try_from_definitions(
+        definitions: impl IntoIterator<Item = ModelTargetDefinition>,
+    ) -> Result<Self, ModelTargetCatalogError>;
+    pub fn resolve(
+        &self,
+        selection: FrozenModelSelection,
+    ) -> Result<ResolvedModelSelection, ModelTargetResolutionError>;
+}
 pub enum ModelTargetCatalogError { DuplicateSelection { selection: DirectModelSelection } }
 pub struct ResolvedModelSelection { /* private */ }
+// sealed: ModelTargetCatalog::resolve
+impl ResolvedModelSelection {
+    // accessors: selection(), target()
+}
 pub struct ModelTargetResolutionError { /* private */ }
+impl ModelTargetResolutionError {
+    // accessors: selection(), direct_selection()
+}
 pub struct ModelCallOriginContent { /* private */ }
 impl ModelCallOriginContent {
+    pub const fn from_goal_turn(accepted_input: AcceptedInputId, content: UserContent) -> Self;
     pub fn from_pending_steering(
         pending: &PendingSteeringInput,
         content: UserContent,
@@ -3670,27 +3767,41 @@ pub enum ModelCallExecutionReconstitutionFailure {
     LifecycleMismatch,
 }
 pub struct ModelCallExecutionReconstitutionError { /* private */ }
+impl ModelCallExecutionReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ModelCallExecutionReconstitutionInput,
+        ModelCallExecutionReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
 
 pub struct ModelCallExecution { /* private */ }
 impl ModelCallExecution {
+    pub fn frontier_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> Option<&UserContent>;
     pub fn preview_initial_call(
         &self,
         call: ModelCallId,
     ) -> Result<PreparedModelCallRequest, ModelCallPreparationError>;
+    pub fn prepare_initial_call(
+        self,
+        call: ModelCallId,
+    ) -> Result<PreparedInitialModelCall, ModelCallPreparationError>;
     pub fn prepare_initial_call_consuming_steering(
         self,
         call: ModelCallId,
         steering_entries: Vec<SemanticTranscriptEntryId>,
         steering_frontier: Option<ContextFrontierId>,
     ) -> Result<PreparedInitialModelCall, ModelCallPreparationError>;
-    pub fn recover_evidence_free_after_restart(
-        self,
-        failure_identities: FailedModelCallTurnIdentities,
-    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
-    pub fn recover_tool_crash_after_restart(
-        self,
-        failure_identities: FailedModelCallTurnIdentities,
-    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn resume_prepared_call(&self)
+        -> Result<PreparedModelCallRequest, ModelCallResumeFailure>;
+    pub fn authorize_send(self) -> Result<AuthorizedModelCall, ModelCallAuthorizationError>;
+    pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall>;
+    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn>;
     pub fn apply_interrupt(
         self,
         interrupt: AppliedInterruptCommandResult,
@@ -3702,12 +3813,34 @@ impl ModelCallExecution {
         result_projection: PreparedToolResultProjection,
         identities: CancelledModelCallTurnIdentities,
     ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_terminal_observation(
+        self,
+        observation: CorrelatedModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentities,
+    ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError>;
+    pub fn fail_target_resolution(
+        self,
+        resolution_error: ModelTargetResolutionError,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn fail_prepared_call(
+        self,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn recover_after_restart(
         self,
         failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError>;
-    pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall>;
-    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn>;
+    pub fn recover_evidence_free_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn recover_tool_crash_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    // accessors: active_turn(), session(), turn(), configuration(), start(),
+    // current_attempt(), current_call()
 }
 pub enum ModelCallPreparationFailure {
     TargetUnavailable,
@@ -3718,6 +3851,9 @@ pub enum ModelCallPreparationFailure {
     SteeringCorrelationMismatch,
 }
 pub struct ModelCallPreparationError { /* private */ }
+impl ModelCallPreparationError {
+    // accessors: failure(), execution(), target_resolution_error()
+}
 pub struct PreparedInitialModelCall { /* private */ }
 impl PreparedInitialModelCall {
     // accessors: session(), turn(), attempt(), call(), consumed_steering(),
@@ -3733,7 +3869,18 @@ pub struct PreparedModelCallRequest { /* private */ }
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
+impl ModelCallAuthorizationError {
+    // accessors: failure(), execution()
+}
 pub struct AuthorizedModelCall { /* private */ }
+// sealed: ModelCallExecution::authorize_send or resume_in_flight_call
+impl AuthorizedModelCall {
+    pub fn frontier_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry>;
+    pub fn origin_content(&self, accepted_input: AcceptedInputId) -> Option<&UserContent>;
+    // accessors: session(), turn(), attempt(), call(), observation_correlation()
+}
 pub struct IssuedModelCallCorrelation { /* private */ }
 impl IssuedModelCallCorrelation {
     // accessors: session(), turn(), attempt(), call(), target(), frontier()
@@ -3795,13 +3942,26 @@ pub enum ModelCallTerminalObservation {
     Cancelled,
     Ambiguous,
 }
+impl ModelCallTerminalObservation {
+    // accessor: disposition()
+}
 pub struct PendingSteeringReclassificationIdentity { /* private */ }
 impl PendingSteeringReclassificationIdentity {
     pub const fn new(accepted_input: AcceptedInputId, turn: TurnId) -> Self;
     // accessors: accepted_input(), turn()
 }
 pub struct CompletedModelCallIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl CompletedModelCallIdentities {
+    pub fn new(
+        assistant_entries: Vec<SemanticTranscriptEntryId>,
+        completion_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub enum ToolResponsePartIdentity {
     Text {
         entry: SemanticTranscriptEntryId,
@@ -3862,15 +4022,57 @@ impl StoppedToolRoundModelCallIdentities {
     ) -> Self;
 }
 pub struct FailedModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl FailedModelCallTurnIdentities {
+    pub fn new(
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntryId;
+    pub const fn terminal_frontier(&self) -> ContextFrontierId;
+}
 pub struct CancelledModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
+impl CancelledModelCallTurnIdentities {
+    pub fn new(
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+    pub fn into_ambiguous(self) -> AmbiguousModelCallTurnIdentities;
+}
 pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl PhysicalCancellationModelCallTurnIdentities {
+    pub fn new(
+        terminal_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub struct RefusedModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl RefusedModelCallTurnIdentities {
+    pub fn new(terminal_frontier: ContextFrontierId) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub struct AmbiguousModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+impl AmbiguousModelCallTurnIdentities {
+    pub const fn new(terminal_frontier: ContextFrontierId) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub enum ModelCallTerminalIdentities {
     Completed(CompletedModelCallIdentities),
     ToolRound(ToolRoundModelCallIdentities),
@@ -3897,6 +4099,11 @@ pub enum ModelCallInterruptOutcome {
     ToolReconciliationRequired(ReconciliationRequiredToolTurn),
 }
 pub struct CompletedModelCallTurn { /* private */ }
+impl CompletedModelCallTurn {
+    // accessors: session(), turn(), call(), attempt(), disposition(),
+    // assistant_entries(), completion_entry(), terminal_snapshot(),
+    // reclassified_pending_steering()
+}
 pub struct ToolRoundModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), assistant_entries(), requests(),
 // automatic_approvals(), yielded_snapshot(), next_phase()
@@ -3905,6 +4112,10 @@ pub struct CancelledToolRoundModelCallTurn { /* private */ }
 // requests(), closed_result_entries(), cancellation_entry(), terminal_snapshot(),
 // reclassified_pending_steering()
 pub struct FailedModelCallTurn { /* private */ }
+impl FailedModelCallTurn {
+    // accessors: session(), turn(), optional call(), attempt(), disposition(),
+    // failure_entry(), terminal_snapshot(), reclassified_pending_steering()
+}
 pub struct CancelledModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), optional attempt(), disposition(),
 // tool_result_entries(), cancellation_entry(), terminal_snapshot(),
@@ -3912,7 +4123,10 @@ pub struct CancelledModelCallTurn { /* private */ }
 pub struct StopRequestedModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), interrupt(), observation_correlation()
 pub struct RefusedModelCallTurn { /* private */ }
-// each terminal turn exposes reclassified_pending_steering()
+impl RefusedModelCallTurn {
+    // accessors: session(), turn(), call(), attempt(), disposition(),
+    // terminal_snapshot(), reclassified_pending_steering()
+}
 pub struct ReconciliationRequiredModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
 // terminal_snapshot(), reclassified_pending_steering()
@@ -3926,6 +4140,9 @@ impl ReclassifiedPendingSteeringTurn {
     // binding(), effective_configuration()
 }
 pub struct AmbiguousModelCallTurn { /* private */ }
+impl AmbiguousModelCallTurn {
+    // accessors: session(), turn(), call(), attempt(), ambiguous_operations()
+}
 pub enum ModelCallClosureError {
     IdentityShapeMismatch,
     CallStateMismatch,
@@ -5201,6 +5418,83 @@ pub struct ReconstitutedReplaceSessionMetadata { /* private */ }
 // sealed: ReplaceSessionMetadataReconstitutionInput::reconstitute
 impl ReconstitutedReplaceSessionMetadata {
     // accessors: command(), result()
+}
+```
+
+## domain: git_remote
+
+```rust
+pub const fn max_git_remote_name_bytes() -> usize;
+pub const fn max_git_remote_url_bytes() -> usize;
+
+pub enum GitRemoteTextError {
+    Empty,
+    ContainsNull,
+    TooLong { bytes: usize, maximum: usize },
+    Malformed,
+    UnsupportedScheme,
+}
+// impl Display + std::error::Error
+
+pub struct GitRemoteName { /* private */ }
+impl GitRemoteName {
+    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError>;
+    // accessors: as_str(), into_string()
+}
+pub struct GitRemoteUrl { /* private */ }
+impl GitRemoteUrl {
+    pub fn try_new(value: String) -> Result<Self, GitRemoteTextError>;
+    // accessors: as_str(), into_string()
+}
+// impl Debug redacts the destination
+pub struct ConfiguredGitRemoteRecord { /* private */ }
+impl ConfiguredGitRemoteRecord {
+    pub const fn new(
+        mint: GitRemoteMintId,
+        workspace: WorkspaceId,
+        name: GitRemoteName,
+        url: GitRemoteUrl,
+    ) -> Self;
+    // accessors: mint(), workspace(), name(), url()
+}
+```
+
+## domain: workspace
+
+```rust
+pub enum WorkspaceRootPathError {
+    Empty,
+    ContainsNull,
+    TooLong { bytes: usize, maximum: usize },
+    NotAbsolute,
+    ContainsControlByte,
+    NotCanonical,
+    NoFinalComponent,
+}
+// impl Display + std::error::Error
+
+pub struct WorkspaceRootPath { /* private */ }
+impl WorkspaceRootPath {
+    pub fn try_new(value: String) -> Result<Self, WorkspaceRootPathError>;
+    // accessors: as_str(), into_string()
+}
+
+pub enum WorkspaceOrigin {
+    OperatorRegistered,
+    DaemonDerived,
+}
+impl WorkspaceOrigin {
+    pub const fn is_operator_registered(self) -> bool;
+}
+
+pub struct WorkspaceRecord { /* private */ }
+impl WorkspaceRecord {
+    pub const fn new(
+        id: WorkspaceId,
+        root: WorkspaceRootPath,
+        origin: WorkspaceOrigin,
+    ) -> Self;
+    // accessors: id(), root(), origin()
 }
 ```
 
@@ -6605,9 +6899,19 @@ pub enum RepoWatchSingletonKey {
     Repository { repository: RepositorySlug },
 }
 
+pub struct RepoWatchDispatchGoal { /* private */ }
+impl RepoWatchDispatchGoal {
+    pub const fn new(
+        command: GoalUserCommand,
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+    ) -> Self;
+    // accessors: command(), accepted_input(), turn()
+}
+
 pub struct RepoWatchPreparedDispatchAction { /* private */ }
 impl RepoWatchPreparedDispatchAction {
-    // accessors: action(), prepared_session()
+    // accessors: action(), prepared_session(), goal()
     pub fn into_parts(
         self,
     ) -> (
@@ -6618,6 +6922,7 @@ impl RepoWatchPreparedDispatchAction {
         TurnId,
         SemanticTranscriptEntryId,
         ContextFrontierId,
+        RepoWatchDispatchGoal,
     );
 }
 
@@ -6678,6 +6983,7 @@ pub enum RepoWatchDispatchPreparationError {
     UnknownTemplate(SessionTemplateName),
     SessionPreparation,
     InvalidSingletonTarget,
+    GoalStatement(GoalTextError),
 }
 
 pub struct RepoWatchDispatchService<Ids, Transaction> { /* private */ }
@@ -7721,6 +8027,64 @@ impl InProcessToolDispatchGate {
 pub struct InProcessToolDispatchPermit { /* private */ }
 ```
 
+## application: tool_execution_test_support
+
+```rust
+// Compiled only under the `test-support` feature.
+pub struct PreparedAttemptIdentities {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub producing_call: ModelCallId,
+    pub request: ToolRequestId,
+    pub attempt: ToolAttemptId,
+    pub issuing_turn_attempt: TurnAttemptId,
+    pub frontier: ContextFrontierId,
+}
+
+pub struct PreparedAttemptProposal {
+    pub name: ToolName,
+    pub arguments: NormalizedToolArguments,
+    pub effect_class: ToolEffectClass,
+    pub approval: PreparedAttemptApproval,
+}
+
+pub enum PreparedAttemptApproval {
+    PolicyAuto,
+    UserConfirmation { command: DurableCommandId },
+}
+
+pub fn prepared_single_attempt_batch(
+    identities: PreparedAttemptIdentities,
+    proposal: PreparedAttemptProposal,
+) -> ToolBatch;
+
+pub struct FixtureTransactionFailures<Error> {
+    pub domain_rejection: Error,
+    pub declined_crash_classification: Error,
+}
+
+pub struct FixtureToolExecutionTransaction<Error> { /* private */ }
+impl<Error> FixtureToolExecutionTransaction<Error> {
+    pub const fn new(
+        batch: ToolBatch,
+        failures: FixtureTransactionFailures<Error>,
+    ) -> Self;
+    pub const fn batch(&self) -> &ToolBatch;
+}
+// impl ToolExecutionTransaction where Error: ClassifyOperatorFailure + Clone + Send
+
+pub struct RecordingToolExecutor<Executor> { /* private */ }
+impl<Executor> RecordingToolExecutor<Executor> {
+    pub fn new(inner: Executor) -> (Self, RecordedEvidence);
+}
+// impl ToolExecutor where Executor: ToolExecutor + Send
+
+pub struct RecordedEvidence { /* private */ }
+impl RecordedEvidence {
+    pub fn take(&self) -> Option<ToolExecutorEvidence>;
+}
+```
+
 ## application: tool_loop_ports
 
 ```rust
@@ -7926,12 +8290,46 @@ pub enum RunnerDomainError {
 pub struct RunnerCapabilityClass(/* private */);
 pub struct CredentialProfileName(/* private */);
 pub struct RunnerWorkingDirectory(/* private */);
+impl RunnerWorkingDirectory {
+    pub const MAX_BYTES: usize;
+}
 pub struct WorkspaceRepositoryKey(/* private */);
 pub struct CanonicalCloneUrlDigest(/* private */);
 pub struct WorkspaceRevision(/* private */);
 pub struct WorkspaceBranchName(/* private */);
 pub struct WorkspaceRelativePath(/* private */);
-// each checked string exposes try_new(String) and as_str()
+impl RunnerCapabilityClass {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl CredentialProfileName {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl RunnerWorkingDirectory {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceRepositoryKey {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl CanonicalCloneUrlDigest {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceRevision {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceBranchName {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
+impl WorkspaceRelativePath {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    // accessor: as_str()
+}
 
 pub enum RunnerSelector {
     Identity(RunnerId),
@@ -8081,12 +8479,11 @@ impl RunnerEnrollment {
         input: RunnerEnrollmentReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: enrollment(), runner(), authentication(), state(),
-    // last_issued_registration_revision()
+    // allowed_classes(), last_issued_registration_revision()
 }
 pub struct RunnerEnrollmentReconstitutionInput {
     /* public complete typed facts, including independently recorded optional last registration revision */
 }
-// enrollment accessors include allowed_classes().
 pub struct PreparedRunnerRegistration { /* private */ }
 impl PreparedRunnerRegistration {
     pub const fn registration(&self) -> &ValidatedRunnerRegistration;
@@ -8266,14 +8663,47 @@ pub struct PinnedRunnerPlacement {
     /* public complete pinned facts, including optional grant lineage, sandbox,
        permission overrides, and provisioned-workspace recovery facts */
 }
+pub enum RunnerPlacementLossSource {
+    Connection,
+    Registration,
+}
+pub struct RunnerLostBeforePin { /* private exact runner */ }
+impl RunnerLostBeforePin {
+    pub const fn from_stored(runner: RunnerId) -> Self;
+    // accessor: runner()
+}
+pub struct LostPinnedRunnerPlacement { /* private pinned facts + loss source */ }
+impl LostPinnedRunnerPlacement {
+    pub const fn from_stored(
+        pinned: PinnedRunnerPlacement,
+        source: RunnerPlacementLossSource,
+    ) -> Self;
+    // accessors: pinned(), source()
+}
+pub enum AbandonedRunnerPlacement {
+    BeforePin(RunnerLostBeforePin),
+    Pinned(Box<LostPinnedRunnerPlacement>),
+}
 pub enum SessionRunnerPlacementState {
     Unpinned,
+    RunnerLostBeforePin(RunnerLostBeforePin),
     Pinned(PinnedRunnerPlacement),
-    RunnerLost(PinnedRunnerPlacement),
+    RunnerLost(LostPinnedRunnerPlacement),
+    RunnerAbandoned(AbandonedRunnerPlacement),
 }
 pub struct SessionRunnerPlacement { /* private */ }
+pub enum RunnerPlacementReconstitutionHistory {
+    Initial,
+    PrePinReplacements(Vec<RunnerPrePinReplacementHistory>),
+}
+pub struct RunnerPrePinReplacementHistory {
+    pub prior_revision: RunnerGeneration,
+    pub lost_runner: RunnerId,
+    pub prior_request: SessionRunnerPlacementRequest,
+    pub replacement_request: SessionRunnerPlacementRequest,
+}
 pub struct SessionRunnerPlacementReconstitutionInput {
-    /* public complete typed placement facts */
+    /* public complete typed placement facts + append-only history proof */
 }
 impl SessionRunnerPlacement {
     // placement is the only producer of initial and retry lease offers
@@ -8307,10 +8737,19 @@ impl SessionRunnerPlacement {
         authorization: RunnerToolAttemptAuthorization,
     ) -> Result<RunnerLease, RunnerDomainError>;
     pub fn mark_runner_lost(self) -> Result<Self, RunnerDomainError>;
+    pub fn mark_runner_lost_before_pin(
+        self,
+        runner: RunnerId,
+    ) -> Result<Self, RunnerDomainError>;
     pub fn reconcile_registration(
         self,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError>;
+    pub fn replace_lost_runner_before_pin(
+        self,
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<RunnerPrePinReplacement, RunnerDomainError>;
     pub fn replace_lost_runner(
         self,
         request: SessionRunnerPlacementRequest,
@@ -8319,6 +8758,7 @@ impl SessionRunnerPlacement {
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn abandon_lost_runner(self) -> Result<Self, RunnerDomainError>;
     pub fn replace_credential_profile(
         self,
         grant: CredentialProfileGrant,
@@ -8336,6 +8776,9 @@ impl SessionRunnerPlacement {
 }
 pub struct SessionRunnerPin {
     /* public placement, optional initial grant, and initial lease */
+}
+pub struct RunnerPrePinReplacement {
+    /* public successor placement, exact loss, and before/after requests */
 }
 pub struct RunnerPlacementReplacement {
     /* public placement, change, optional replacement grant, and optional complete grant change */
@@ -8473,6 +8916,9 @@ pub enum GoalState {
     Achieved { report: GoalReportRef },
     UserStopped,
     Superseded { by_generation: GoalGeneration },
+}
+impl GoalState {
+    pub const fn is_open(&self) -> bool;
 }
 pub struct GoalGenerationSnapshot { /* private generation + statement + state */ }
 impl GoalGenerationSnapshot {
@@ -8643,7 +9089,42 @@ pub struct ReactionContent(/* private String */);
 pub struct RepoWatchRuleId(/* private String */);
 pub struct ReviewThreadId(/* private String */);
 pub struct PullRequestTitle(/* private String */);
-// Each bounded text type has try_new(), as_str(), and into_string().
+impl BranchName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl LabelName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl RepoWatchAuthorLogin {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl CheckRunName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl WorkflowName {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl ReactionContent {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl RepoWatchRuleId {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl ReviewThreadId {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
+impl PullRequestTitle {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError>;
+    // accessors: as_str(), into_string()
+}
 
 pub struct PullRequestBody(/* private String */);
 impl PullRequestBody {
@@ -8705,6 +9186,10 @@ pub enum RepoWatchEventKindNameV1 {
     Unlabeled,
     BaseAdvanced,
     ReactionChanged,
+}
+
+impl RepoWatchEventKindNameV1 {
+    pub fn all() -> Vec<Self>;
 }
 
 pub enum ChecksOutcome {
@@ -8860,6 +9345,7 @@ pub struct RepoWatchMatcherV1Input {
 }
 impl RepoWatchMatcherV1 {
     pub fn new(input: RepoWatchMatcherV1Input) -> Self;
+    pub fn matches(&self, event: &RepoWatchEvent) -> bool;
     // accessors: event_kinds(), repository(), base_branch(), head_branch(),
     //   title(), body(), labels(), draft(), author(), mergeable_state(),
     //   conclusion()
@@ -8893,7 +9379,8 @@ pub enum RepoWatchTemplateContextDeclarationError {
 
 pub struct PullRequestContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
-// accessors: repository(), number(), head_sha(), event()
+// accessors: repository(), number(), head_sha(), head_repository(), head_branch(),
+//            base_branch(), event()
 
 pub struct BranchContext { /* private */ }
 // sealed: DispatchSessionParameters::try_from_event().
@@ -8928,6 +9415,10 @@ impl DispatchSessionAction {
         template: SessionTemplateName,
         params: DispatchSessionParameters,
     ) -> Self;
+    pub fn synthesized_goal_statement(
+        &self,
+        rule: &RepoWatchRuleId,
+    ) -> Result<GoalStatement, GoalTextError>;
     // accessors: template(), params()
 }
 
@@ -8967,6 +9458,10 @@ impl RepoWatchRule {
         declarations: &[RepoWatchTemplateContextDeclaration],
     ) -> Result<(), RepoWatchRuleValidationError>;
     pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
+    pub fn actions_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> Result<Vec<RepoWatchActionV1>, RepoWatchDispatchContextError>;
     // accessors: id(), version(), matcher(), actions(), singleton_per(), cooldown()
 }
 ```
@@ -9775,11 +10270,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types          |
 | -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 24                    |
+| domain: lib.rs identities                          | 27                    |
 | domain: actor                                      | 1                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
+| domain: git_remote                                 | 4 (+2 free fn)        |
 | domain: session                                    | 22                    |
 | domain: session_delegation                         | 37 (+3 free fn)       |
 | domain: imported_session                           | 18                    |
@@ -9788,7 +10284,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                     |
 | domain: delivery_request                           | 2                     |
 | domain: user_content                               | 4                     |
-| domain: submit_input                               | 32                    |
+| domain: submit_input                               | 33                    |
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
 | domain: turn_lifecycle                             | 10                    |
@@ -9810,8 +10306,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **752 (+10 free fn)** |
+| domain: runner                                     | 70                    |
+| domain: workspace                                  | 4                     |
+| **signalbox-domain total**                         | **771 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -9824,7 +10321,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 33 (incl. 4 traits)   |
+| application: repo_watch                            | 34 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -9833,5 +10330,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: startup_scan                          | 7 (incl. 2 traits)    |
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
+| application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **242**               |
+| **signalbox-application total**                    | **250 (+1 free fn)**  |

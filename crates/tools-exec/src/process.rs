@@ -1,3 +1,12 @@
+//! `SandboxedExecTool` and `UnsandboxedExecTool`, and the
+//! `SandboxedCommandRunner` / `UnsandboxedCommandRunner` process runners that
+//! back them.
+//!
+//! On Linux the sandboxed runner shells out to bubblewrap and the compiled
+//! `signalbox-exec-supervisor` binary, decoding its `supervisor_protocol`
+//! status for exit code, timeout, cancellation, and stdout/stderr capture
+//! completeness.
+
 #[cfg(target_os = "linux")]
 use std::os::{fd::AsFd, unix::fs::MetadataExt};
 use std::{
@@ -113,8 +122,7 @@ struct SandboxedExecContract;
 impl ToolContract for SandboxedExecContract {
     type Arguments = ExecArguments;
     const NAME: &'static str = SANDBOXED_EXEC_NAME;
-    const DESCRIPTION: &'static str =
-        "Runs one bounded direct command in a bwrap-confined injected workspace.";
+    const DESCRIPTION: &'static str = "Runs one bounded direct command in a bwrap-confined injected workspace whose network namespace holds only a loopback interface.";
 }
 
 struct UnsandboxedExecContract;
@@ -214,7 +222,7 @@ impl<Runner: ProcessRunner> SandboxedExecTool<Runner> {
     ) -> Result<Self, ExecToolConstructionError> {
         let command_runner = SandboxedCommandRunner::try_new(runner, workspace_root)?;
         let (catalog, executor) =
-            build_tool::<SandboxedExecContract, _>(command_runner, ToolPermissionDefault::Auto)?;
+            build_tool::<SandboxedExecContract, _>(command_runner, ToolPermissionDefault::Confirm)?;
         Ok(Self { catalog, executor })
     }
 
@@ -1243,6 +1251,10 @@ fn bwrap_request(
     } else {
         format!("{SANDBOX_WORKSPACE}/{working_directory}")
     };
+    // The leading flags are this profile's whole namespace isolation. A deletion
+    // or reordering here fails
+    // `sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix`,
+    // which restates the expected prefix independently.
     let mut bwrap_arguments = [
         "--die-with-parent",
         "--new-session",
@@ -1250,6 +1262,7 @@ fn bwrap_request(
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
+        "--unshare-net",
         "--proc",
         "/proc",
         "--dev",
@@ -1276,15 +1289,31 @@ fn bwrap_request(
         "--ro-bind-try",
         "/etc/alternatives",
         "/etc/alternatives",
+        // `/etc/hosts` and `/etc/nsswitch.conf` are kept: the unshared network
+        // namespace still carries a loopback interface, and glibc reads
+        // `nsswitch.conf` for `passwd`/`group` lookups that no resolver serves.
+        //
+        // `/etc/ssl` is kept on purpose, and is not dead weight to clean up.
+        // Building a TLS client reads the trust store even when nothing will be
+        // connected to: reqwest depends on `rustls-platform-verifier`, which
+        // loads the native store on Linux, so workspace tests that construct an
+        // HTTPS client would meet an empty root store without it. Binding it
+        // adds no transport and no IP route, so it grants no reach the profile
+        // did not already have — it only lets a client finish constructing.
+        // What this profile does and does not fence, including the non-IP
+        // transports that survive `--unshare-net`, is owned by
+        // `docs/spec/configuration-and-credentials.md`.
+        //
+        // `/etc/resolv.conf` is deliberately absent. Resolving a name needs the
+        // network that `--unshare-net` removes, so it is genuinely inert, and
+        // binding it would leave the profile reading as though egress were
+        // still expected to work.
         "--ro-bind-try",
         "/etc/hosts",
         "/etc/hosts",
         "--ro-bind-try",
         "/etc/nsswitch.conf",
         "/etc/nsswitch.conf",
-        "--ro-bind-try",
-        "/etc/resolv.conf",
-        "/etc/resolv.conf",
         "--ro-bind-try",
         "/etc/ssl",
         "/etc/ssl",
@@ -2734,6 +2763,10 @@ mod tests {
     const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
     const OVERSIZED_CAPTURE_BYTES: usize = PROCESS_CAPTURE_BYTES_LIMIT + 1;
     const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
+    #[cfg(target_os = "linux")]
+    const TEST_SANDBOX_BIND_DESCRIPTOR: i32 = 90;
+    const TEST_SANDBOX_WORKSPACE_ROOT: &str = "/fixture/workspace";
+    const ISOLATION_FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -3523,7 +3556,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogs_fix_sandboxed_auto_and_unsandboxed_always_confirm_permissions()
+    fn catalogs_fix_sandboxed_confirm_and_unsandboxed_always_confirm_permissions()
     -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let sandboxed = SandboxedExecTool::try_new(
@@ -3550,7 +3583,7 @@ mod tests {
 
         assert_eq!(
             sandboxed_definition.permission_default(),
-            ToolPermissionDefault::Auto
+            ToolPermissionDefault::Confirm
         );
         assert_eq!(
             unsandboxed_definition.permission_default(),
@@ -3957,6 +3990,88 @@ mod tests {
         assert!(request.arguments.ends_with(&dispatch_arguments));
         assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
         Ok(())
+    }
+
+    /// Builds the launch context the two isolation tests below share. The
+    /// descriptor and launcher fields differ by host, so the conditional
+    /// compilation lives here and both test bodies stay straight-line.
+    fn isolation_fixture_context(workspace_root: &Path) -> SandboxLaunchContext<'_> {
+        SandboxLaunchContext {
+            workspace_root,
+            bind_source: workspace_root,
+            #[cfg(target_os = "linux")]
+            bind_descriptor: TEST_SANDBOX_BIND_DESCRIPTOR,
+            #[cfg(not(target_os = "linux"))]
+            launcher: Path::new(TEST_SANDBOX_LAUNCHER),
+            #[cfg(target_os = "linux")]
+            launcher_descriptor: TEST_SANDBOX_LAUNCHER_DESCRIPTOR,
+            #[cfg(not(target_os = "linux"))]
+            working_directory_bind_source: None,
+            #[cfg(target_os = "linux")]
+            working_directory_bind_descriptor: None,
+        }
+    }
+
+    /// This profile's containment is exactly the namespace flags it opens with,
+    /// and `--unshare-net` is the one that stops an approved command reaching a
+    /// remote host. Every other assertion on this request matches a sub-slice,
+    /// which a flag array that has silently lost an entry still satisfies, so
+    /// this pins the whole isolation prefix in order against an expectation
+    /// stated independently of the array under test. It calls `bwrap_request`
+    /// directly rather than driving the runner, so it needs no bubblewrap
+    /// binary and covers every host including the non-Linux development ones.
+    /// The prefix is the whole of what this pins: `--unshare-cgroup` is not
+    /// passed, so the cgroup namespace is shared and no assertion here says
+    /// otherwise.
+    #[test]
+    fn sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix() {
+        let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
+        let expected_isolation_prefix = [
+            OsString::from("--die-with-parent"),
+            OsString::from("--new-session"),
+            OsString::from("--unshare-user"),
+            OsString::from("--unshare-pid"),
+            OsString::from("--unshare-ipc"),
+            OsString::from("--unshare-uts"),
+            OsString::from("--unshare-net"),
+        ];
+
+        let request = bwrap_request(
+            isolation_fixture_context(workspace_root),
+            "cargo",
+            &[String::from("check")],
+            ".",
+            ISOLATION_FIXTURE_TIMEOUT,
+            EXEC_CAPTURE_BYTES,
+        );
+
+        assert!(request.arguments.starts_with(&expected_isolation_prefix));
+    }
+
+    /// `/etc/resolv.conf` served outbound DNS, which needs the network that
+    /// `--unshare-net` removes, so binding it would tell a later reader that
+    /// egress is still expected to function here. This pins that one path and
+    /// nothing broader: `/etc/hosts` and `/etc/nsswitch.conf` stay bound for
+    /// loopback and NSS lookups, and `/etc/ssl` stays bound because building a
+    /// TLS client reads the trust store even when no connection follows.
+    #[test]
+    fn sandboxed_request_omits_the_etc_resolv_conf_bind() {
+        let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
+
+        let request = bwrap_request(
+            isolation_fixture_context(workspace_root),
+            "cargo",
+            &[String::from("check")],
+            ".",
+            ISOLATION_FIXTURE_TIMEOUT,
+            EXEC_CAPTURE_BYTES,
+        );
+
+        assert!(
+            !request
+                .arguments
+                .contains(&OsString::from("/etc/resolv.conf"))
+        );
     }
 
     #[cfg(target_os = "linux")]
