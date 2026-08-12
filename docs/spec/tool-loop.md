@@ -1028,12 +1028,16 @@ The declarations and compact result objects are:
   resolves to no node or to a node of another type — fails closed with the fixed
   semantic detail
   `requested review thread was not found in the named change request`, and no
-  mutation request is dispatched. The repository comparison follows the code
-  host's case-insensitive repository addressing; the number must match exactly.
-  Ownership-check failures keep read classification: an infrastructure failure
-  during the confirmation reports that the mutation was never dispatched and is
-  never commit-ambiguous. A review thread never moves between change requests,
-  so the confirmation cannot be invalidated between the two requests.
+  mutation request is dispatched. Node absence is definitive only when every
+  error beside the evaluated null carries the code host's typed not-found
+  classification, or none accompanies it; any other field error proves nothing
+  about the thread and reports the undispatched mutation instead. The repository
+  comparison follows the code host's case-insensitive repository addressing; the
+  number must match exactly. Ownership-check failures keep read classification:
+  an infrastructure failure during the confirmation reports that the mutation
+  was never dispatched and is never commit-ambiguous. A review thread never
+  moves between change requests, so the confirmation cannot be invalidated
+  between the two requests.
 - `change_request_thread_resolve` accepts `repository`, `number`, and one opaque
   `thread_id` under the same pre-dispatch ownership confirmation as
   `change_request_thread_reply`; it returns that thread identity and the

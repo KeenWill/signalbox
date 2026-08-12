@@ -1271,9 +1271,10 @@ impl GitHubCodeHostTransport {
     /// The response is judged by its `data` member rather than by the shared
     /// GraphQL error rejection: definitive absence evidence for a `node`
     /// lookup arrives as an evaluated `data.node: null` beside an error
-    /// entry, and the sanitized failure taxonomy does not read error bodies,
-    /// so the presence of an evaluated `data` member is what distinguishes an
-    /// answered query from a failed request.
+    /// entry carrying the code host's typed `NOT_FOUND` classification, so
+    /// the evaluated `data` member distinguishes an answered query from a
+    /// failed request, and the error classification distinguishes definitive
+    /// absence from a transient field failure that proves nothing.
     async fn confirm_thread_in_change_request(
         &self,
         repository: &CodeHostRepository,
@@ -2630,12 +2631,16 @@ enum ThreadOwnershipEvidence {
 
 /// Reads ownership evidence from the bounded `ThreadOwnership` response.
 ///
-/// An evaluated `data.node: null` is the code host's definitive statement
-/// that the identity names no node, and a node of another type carries the
-/// same weight: neither can belong to the named change request. A response
-/// without an evaluated `data` member never ran the query, so it proves only
-/// that the mutation was not dispatched; a `data` member whose shape violates
-/// the query is a malformed bounded response.
+/// A `node` lookup nulls its field for definitive absence and for transient
+/// resolver failures alike, so an evaluated `data.node: null` is definitive
+/// absence evidence only when every accompanying error entry carries the code
+/// host's typed `NOT_FOUND` classification (or no error accompanies it); any
+/// other error beside the null proves nothing about the thread and reports
+/// only that the mutation was not dispatched. A node of another type carries
+/// absence weight itself: it cannot belong to any change request as a review
+/// thread. A response without an evaluated `data` member never ran the query,
+/// so it likewise proves only that the mutation was not dispatched; a `data`
+/// member whose shape violates the query is a malformed bounded response.
 fn parse_thread_ownership(
     value: &serde_json::Value,
 ) -> Result<ThreadOwnershipEvidence, CodeHostTransportFailure> {
@@ -2644,7 +2649,13 @@ fn parse_thread_ownership(
         Some(_) | None => return Err(CodeHostTransportFailure::MutationNotDispatched),
     };
     let node = match required(required_object(data)?, "node")? {
-        serde_json::Value::Null => return Ok(ThreadOwnershipEvidence::NotAThread),
+        serde_json::Value::Null => {
+            return if node_errors_prove_absence(value) {
+                Ok(ThreadOwnershipEvidence::NotAThread)
+            } else {
+                Err(CodeHostTransportFailure::MutationNotDispatched)
+            };
+        }
         node => required_object(node)?,
     };
     if required_string(node, "__typename")? != "PullRequestReviewThread" {
@@ -2656,6 +2667,23 @@ fn parse_thread_ownership(
         number: required_u64(change_request, "number")?,
         repository: required_string(repository, "nameWithOwner")?,
     })
+}
+
+/// Whether the error entries beside an evaluated `data.node: null` prove the
+/// identity names no node. Reading the closed `type` classification field
+/// parallels the REST absence proof in
+/// [`repository_commit_response_names_missing_revision`]; no error text
+/// enters a result or a sanitized detail. An empty or absent error array
+/// beside the evaluated null is the query's own answer that nothing
+/// resolved, and an entry without the classification field proves nothing.
+fn node_errors_prove_absence(value: &serde_json::Value) -> bool {
+    match value.get("errors") {
+        None => true,
+        Some(serde_json::Value::Array(errors)) => errors.iter().all(|error| {
+            error.get("type").and_then(serde_json::Value::as_str) == Some("NOT_FOUND")
+        }),
+        Some(_) => false,
+    }
 }
 
 /// Whether complete ownership evidence places the thread inside the named
@@ -5262,8 +5290,8 @@ mod tests {
     }
 
     /// Definitive node absence arrives as an evaluated `data.node: null`
-    /// beside an error entry, and reads as ownership refusal rather than as
-    /// transport loss.
+    /// beside the code host's typed not-found error, and reads as ownership
+    /// refusal rather than as transport loss.
     #[test]
     fn a_missing_thread_node_is_definitive_ownership_refusal() {
         let value = serde_json::json!({
@@ -5274,6 +5302,49 @@ mod tests {
         assert_eq!(
             parse_thread_ownership(&value),
             Ok(ThreadOwnershipEvidence::NotAThread)
+        );
+    }
+
+    /// An evaluated null node with no error entry at all is the query's own
+    /// answer that nothing resolved.
+    #[test]
+    fn an_evaluated_null_node_without_errors_is_definitive_absence() {
+        let value = serde_json::json!({"data": {"node": null}});
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Ok(ThreadOwnershipEvidence::NotAThread)
+        );
+    }
+
+    /// A field error without the not-found classification nulls the node for
+    /// a transient resolver failure as readily as for absence, so it proves
+    /// nothing about the thread and reports only the undispatched mutation.
+    #[test]
+    fn a_field_error_beside_a_null_node_is_not_absence_evidence() {
+        let value = serde_json::json!({
+            "data": {"node": null},
+            "errors": [{"type": "INTERNAL", "message": "Something went wrong"}],
+        });
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Err(CodeHostTransportFailure::MutationNotDispatched)
+        );
+    }
+
+    /// An error entry that carries no classification field cannot prove
+    /// absence, so the null node beside it stays an undispatched mutation.
+    #[test]
+    fn an_unclassified_error_beside_a_null_node_is_not_absence_evidence() {
+        let value = serde_json::json!({
+            "data": {"node": null},
+            "errors": [{"message": "Could not resolve to a node"}],
+        });
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Err(CodeHostTransportFailure::MutationNotDispatched)
         );
     }
 
