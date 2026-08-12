@@ -942,10 +942,16 @@ read state, length, digest, and range failures use the exhaustive content-silent
 `invalid_request` details below; an absent digest is `not_found`, storage
 availability is `unavailable`, an all-missing recorded replica set is
 `blob_missing`, a definitively corrupt set with no unavailable candidate is
-`blob_corrupt`, and an ambiguous catalog commit is `commit_ambiguous`. When no
-replica succeeds, `unavailable` takes precedence over `blob_corrupt`, which
-takes precedence over `blob_missing`, because an unavailable candidate prevents
-a definitive integrity conclusion.
+`blob_corrupt`, an S3 publication whose acceptance remains unknowable after its
+single reconciliation pass is `publication_ambiguous`, and an ambiguous catalog
+commit is `commit_ambiguous`. `publication_ambiguous` terminally discards the
+connection-local staging state and releases the bulk-ingest permit without
+claiming success. The terminal client's high-level upload retries by beginning
+the same digest, length, and bytes again rather than retrying commit alone; live
+verification of the deterministic routed key then returns already-present or
+repairs it before registration. When no replica succeeds, `unavailable` takes
+precedence over `blob_corrupt`, which takes precedence over `blob_missing`,
+because an unavailable candidate prevents a definitive integrity conclusion.
 
 ## Server messages
 
@@ -1560,20 +1566,21 @@ conversation-import and blob `invalid_request` mappings have no `detail`.
 
 The protocol error-code set is:
 
-| Code                  | Meaning                                                                                                                                |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                                                                |
-| `unsupported_version` | The frame version is unsupported.                                                                                                      |
-| `invalid_request`     | A boundary value cannot construct the requested application input.                                                                     |
-| `not_found`           | The selected session, named defaults epoch, imported conversation or frontier, review aggregate, or blob does not exist.               |
-| `blob_missing`        | The blob exists in the catalog, but every recorded replica is definitively absent.                                                     |
-| `blob_corrupt`        | The blob exists in the catalog, no candidate is unavailable, and at least one recorded replica fails length or digest verification.    |
-| `conflicting_reuse`   | A durable command identity already names different intent.                                                                             |
-| `rejected`            | The canonical command was durably rejected by current typed state, or a request-specific precondition refused it before recording one. |
-| `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                                                        |
-| `unavailable`         | Infrastructure failed; no requested mutation may have committed.                                                                       |
-| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                                                      |
-| `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
+| Code                    | Meaning                                                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `malformed_frame`       | JSON, UTF-8, framing, field, or size validation failed.                                                                                |
+| `unsupported_version`   | The frame version is unsupported.                                                                                                      |
+| `invalid_request`       | A boundary value cannot construct the requested application input.                                                                     |
+| `not_found`             | The selected session, named defaults epoch, imported conversation or frontier, review aggregate, or blob does not exist.               |
+| `blob_missing`          | The blob exists in the catalog, but every recorded replica is definitively absent.                                                     |
+| `blob_corrupt`          | The blob exists in the catalog, no candidate is unavailable, and at least one recorded replica fails length or digest verification.    |
+| `conflicting_reuse`     | A durable command identity already names different intent.                                                                             |
+| `rejected`              | The canonical command was durably rejected by current typed state, or a request-specific precondition refused it before recording one. |
+| `resync_required`       | A follower fell behind the bounded process-local event fan-out.                                                                        |
+| `unavailable`           | Infrastructure failed; no requested mutation may have committed.                                                                       |
+| `publication_ambiguous` | S3 may have accepted deterministic blob bytes, but reconciliation could not prove publication or nonacceptance.                        |
+| `commit_ambiguous`      | Infrastructure obscured whether the requested mutation committed.                                                                      |
+| `internal`              | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
 For `create_session`, `create_session_from_template`,
 `create_session_from_imported_frontier`, `submit_input`, `compact_session`,
