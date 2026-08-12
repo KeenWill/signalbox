@@ -3452,7 +3452,7 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
     .await?;
     assert_eq!(
         denial_shape,
-        (String::from("deny"), String::from("owner_command"), 0)
+        (String::from("deny"), String::from("user_command"), 0)
     );
     Ok(())
 }
@@ -3875,7 +3875,7 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
             ),
             (
                 String::from("confirmed"),
-                String::from("owner_command"),
+                String::from("user_command"),
                 String::from("completed"),
             ),
         ]
@@ -3911,7 +3911,7 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
 
     assert_eq!(executor.events(), vec![String::from("confirmed")]);
     let approval: (String, Option<Uuid>, String) = sqlx::query_as(
-        "SELECT approval.decision_source, approval.owner_command_id,
+        "SELECT approval.decision_source, approval.user_command_id,
                 lifecycle.terminal_disposition_kind
            FROM tool_approval_decision AS approval
            JOIN tool_request AS request
