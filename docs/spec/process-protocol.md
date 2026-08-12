@@ -1,5 +1,11 @@
 # Process protocol
 
+The typed runner-state session event, daemon outbox projection, authoritative
+session-summary and transcript-snapshot runner projections, and the runner
+request/projection implementation boundary were verified against this PR
+(`agent/runner-event-outbox-persistence`). Fresh-epoch connected recovery is
+re-verified through this PR (`agent/daemon-runner-health-events`).
+
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 
@@ -896,8 +902,9 @@ vocabulary. The closed-enum decoder rejects any unknown request, response,
 event, or nested tagged member rather than interpreting it as an older shape.
 Because every durable representation implemented in this tree is expressible at
 version `1`, selecting a session never requires a feature-specific version gate.
-The proposed runner requests and runner-bearing projections remain outside the
-implemented vocabulary until their implementing stack lands.
+The proposed runner requests remain outside the implemented vocabulary until
+their implementing stack lands. The runner-bearing projections named above are
+implemented at version `1`.
 
 Submitted content carries at most 1 MiB of aggregate text UTF-8. The daemon
 applies that boundary before application construction or mutation and returns
@@ -1208,12 +1215,11 @@ In the server shapes below, notation such as `queued` or
 `"type":"terminal"` plus exactly the named members.
 
 A session summary contains `session_id`, `defaults_version`, `model_selection`,
-positive `placement_version`, and the complete current session `placement`.
-Every proposed runner-aware native-session listing projection adds the same
-required `runner` member, either null or a complete object carrying selector,
-the current or lost exact runner id when the state names one, placement
-revision, sandbox profile, credential-profile name, repository key, working
-directory, and state (`unpinned`, `pinned`, `runner_lost_before_pin`,
+positive `placement_version`, the complete current session `placement`, and a
+required `runner` member. The runner member is either null or a complete object
+carrying selector, the current or lost exact runner id when the state names one,
+placement revision, sandbox profile, credential-profile name, repository key,
+working directory, and state (`unpinned`, `pinned`, `runner_lost_before_pin`,
 `runner_lost`, or `runner_abandoned`). The credential-profile name, repository
 key, and working directory are each present or JSON null independently, because
 the composition axes they project are independent
@@ -1654,8 +1660,16 @@ predecessor lineage is authoritative.
 
 One logical snapshot is a bounded message sequence sharing the request identity:
 
-1. `transcript_snapshot_start { session_id, cursor }`; the runner proposal also
-   requires the same complete nullable `runner` object as the session summary;
+1. `transcript_snapshot_start { session_id, cursor, runner }`, where `runner` is
+   the same complete nullable runner object as the session summary. The object
+   carries the exact selector, current-or-lost runner, positive placement
+   revision, sandbox, independent credential/repository/directory axes, closed
+   placement state, and required-nullable `connection_health`. Connection health
+   is present exactly for a pinned placement and is `connected`, `suspect`,
+   `shutdown`, or `lost`; the snapshot therefore authenticates a health event at
+   or before its cursor instead of suppressing that current fact as an already
+   observed delta. A `runner_lost_before_pin` state requires an exact runner
+   selector naming the lost runner, never a capability selector;
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`
    and required-nullable `model_settings`; a settings-aware turn carries the
    complete owning turn, accepted input, defaults epoch, requested and selected
@@ -1768,7 +1782,7 @@ The tool-bearing vocabulary adds
 and
 `tool_reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_tool_attempt_id }`.
 The distinct tool variant avoids changing the older `reconciliation_required`
-object. The runner proposal additionally admits
+object. The runner-bearing vocabulary additionally admits
 `active_awaiting_runner_recovery { runner_id, placement_revision, tool_attempt_id }`,
 where `tool_attempt_id` is null when no physical tool attempt owns the loss. The
 snapshot-level runner object remains authoritative for queued and otherwise
@@ -2180,18 +2194,18 @@ where `working_directory` is the placement's bounded directory or JSON null for
 the runner default and state is `pinned`, `suspect`, `connected`,
 `runner_lost_before_pin`, `runner_lost`, `replaced`,
 `working_directory_changed`, or `abandoned`. `suspect` is emitted on the first
-missed heartbeat and `connected` exactly when a later acknowledgement clears
-that same suspect epoch before durable loss. `replaced` and
-`working_directory_changed` are the relocation states, and this family is the
-only surface on which a follower learns that its session lost, changed, or moved
-on its runner — a client that cannot hear loss and replacement here cannot hear
-them at all. The family is also the extension point for later runner facts: a
-further relocation shape, or runner metadata and attributes, adds a state and
-its members to this one event kind rather than a second kind. The event carries
-no runner-discovered host path, credential fact, or arbitrary runner text; the
-working directory is the user-selected placement value the client itself
-supplied. The runner proposal includes its own representability gate before a
-runner-aware client subscribes.
+missed heartbeat. `connected` is emitted when a later acknowledgement clears
+that same suspect epoch before durable loss and when a newly established epoch
+supersedes a suspect predecessor. `replaced` and `working_directory_changed` are
+the relocation states, and this family is the only surface on which a follower
+learns that its session lost, changed, or moved on its runner — a client that
+cannot hear loss and replacement here cannot hear them at all. The family is
+also the extension point for later runner facts: a further relocation shape, or
+runner metadata and attributes, adds a state and its members to this one event
+kind rather than a second kind. The event carries no runner-discovered host
+path, credential fact, or arbitrary runner text; the working directory is the
+user-selected placement value the client itself supplied. The runner proposal
+includes its own representability gate before a runner-aware client subscribes.
 
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is
