@@ -129,14 +129,15 @@ completion nor the provider's background mergeability calculation moves
 attempts, which bounds how long any other fact that never moves `updated_at` can
 go unobserved. Reactions are re-fetched on every attempt and are never reused,
 because a reaction does not move `updated_at` at all and a signal-reviewer
-reaction is a dispatch trigger. A pull request absent from the open listing is
-never reused. Reuse carries the prior baseline forward unchanged, so no event
-class becomes unobservable: a reused pull request's accumulated changes all
-appear in the comparison that follows its next fetch. Cached resources survive
-the same bounded number of untouched attempts, so reuse does not discard the
-validators that keep the following fetch conditional. The freshness record is
-process-local, like the conditional-request cache, so a restarted daemon
-re-fetches every pull request.
+reaction is a dispatch trigger; with no configured signal reviewer there is
+nothing a reaction can trigger, so the poller issues no reaction request at all.
+A pull request absent from the open listing is never reused. Reuse carries the
+prior baseline forward unchanged, so no event class becomes unobservable: a
+reused pull request's accumulated changes all appear in the comparison that
+follows its next fetch. Cached resources survive the same bounded number of
+untouched attempts, so reuse does not discard the validators that keep the
+following fetch conditional. The freshness record is process-local, like the
+conditional-request cache, so a restarted daemon re-fetches every pull request.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Check runs are enumerated through
