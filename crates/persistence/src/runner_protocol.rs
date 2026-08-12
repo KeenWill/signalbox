@@ -2176,17 +2176,19 @@ impl RunnerProtocolStore {
         let runner = enrollment.runner();
         let authentication = enrollment.authentication();
         let classes: Vec<_> = enrollment.allowed_classes().cloned().collect();
+        let revoked_state = runner_enrollment_state_to_str(RunnerEnrollmentState::Revoked);
         sqlx::query(
             "INSERT INTO runner_enrollment_audit
                 (enrollment_id, revision, runner_id,
                  authentication_reference_id, allowed_class_count, state_kind)
-             VALUES ($1, $2, $3, $4, $5, 'revoked')",
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(enrollment_id.into_uuid())
         .bind(Decimal::from(revoked_revision))
         .bind(runner.into_uuid())
         .bind(authentication.into_uuid())
         .bind(count_decimal(classes.len())?)
+        .bind(revoked_state)
         .execute(&mut *transaction)
         .await?;
         for class in classes {
@@ -2203,11 +2205,12 @@ impl RunnerProtocolStore {
         }
         sqlx::query(
             "UPDATE runner_enrollment
-                SET revision = $2, state_kind = 'revoked'
+                SET revision = $2, state_kind = $3
               WHERE enrollment_id = $1",
         )
         .bind(enrollment_id.into_uuid())
         .bind(Decimal::from(revoked_revision))
+        .bind(revoked_state)
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
