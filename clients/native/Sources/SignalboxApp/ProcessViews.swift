@@ -1985,7 +1985,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           id: acceptedInputID,
           turnID: turnID,
           acceptancePosition: acceptancePosition,
-          content: content
+          content: content.displayText
         )
         if terminalTurnIDs.contains(turnID) {
           pendingInputs.removeAll { $0.id == acceptedInputID }
