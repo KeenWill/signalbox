@@ -10,8 +10,9 @@ instead. The mirror covers the public type and function surface of
 comments, no tests, no bodies. Any pull request that adds, removes, or changes a
 public item in either crate must update this file in the same change;
 `AGENTS.md` carries that rule, and CI (`scripts/check_domain_spine.py`) fails
-when an exported name is missing here or an inventory count disagrees with
-source.
+when an exported name or a listed type's public method is missing here, when a
+declaration outlives its source counterpart, or when an inventory count
+disagrees with source.
 
 Conventions used below:
 
@@ -121,7 +122,7 @@ pub enum BlobDigestParseFailure {
 
 pub struct BlobDigestParseError { /* private */ }
 impl BlobDigestParseError {
-    // accessors: rejected, failure
+    // accessors: rejected(), failure()
 }
 ```
 
