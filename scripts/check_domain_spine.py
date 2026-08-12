@@ -40,8 +40,14 @@ item. The spine is parsed per `## crate: module` section, taking column-0
 Known limitation of this mechanical check: signatures, associated consts
 and types, trait items, and enum variant lists inside a declaration are
 not validated — method names on listed types are, but keeping the rest
-faithful is a review responsibility (cargo public-api is the upgrade path
-if these tripwires prove insufficient).
+faithful is a review responsibility. The scan is textual, and its item
+model has a deliberate boundary: impls reached only through initializer
+expressions other than a braced anonymous-const body, minting-macro
+invocations off item positions, and `#[path]`-loaded files beneath a
+cfg-gated module directory are outside it. None of those shapes occur in
+these crates; a change that introduces one must restate itself or extend
+the check, and cargo public-api is the upgrade path if these textual
+tripwires prove insufficient.
 
 The spine may say more than declarations (sealed markers, accessor notes); it
 may not disagree with the export surface. Run from the repository root; exits

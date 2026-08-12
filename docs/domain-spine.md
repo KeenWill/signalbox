@@ -122,7 +122,7 @@ pub enum BlobDigestParseFailure {
 
 pub struct BlobDigestParseError { /* private */ }
 impl BlobDigestParseError {
-    // accessors: rejected, failure
+    // accessors: rejected(), failure()
 }
 ```
 
