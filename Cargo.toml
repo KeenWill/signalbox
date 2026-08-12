@@ -4,6 +4,8 @@ members = [
     "apps/signalbox-runner",
     "apps/signalboxd",
     "crates/application",
+    "crates/blob-store",
+    "crates/blob-store-filesystem",
     "crates/egress-transport",
     "crates/conversation-import-claude-code",
     "crates/conversation-import-codex",

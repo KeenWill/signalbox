@@ -3162,6 +3162,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-blob-store"
+version = "0.0.0"
+dependencies = [
+ "signalbox-domain",
+ "tokio",
+]
+
+[[package]]
+name = "signalbox-blob-store-filesystem"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "sha2 0.11.0",
+ "signalbox-blob-store",
+ "signalbox-domain",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-client"
 version = "0.0.0"
 dependencies = [
@@ -3344,6 +3364,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "signalbox-blob-store",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
@@ -3354,6 +3375,7 @@ dependencies = [
  "tokio",
  "toml",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@
 mod accepted_input;
 mod actor;
 mod applied_interrupt;
+mod blob;
 mod configuration;
 mod context_compaction;
 mod context_frontier;
@@ -50,6 +51,7 @@ pub use accepted_input::{
 };
 pub use actor::Actor;
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
+pub use blob::{BlobDigest, BlobDigestParseError, BlobDigestParseFailure};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
