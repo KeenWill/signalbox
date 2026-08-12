@@ -65,7 +65,7 @@ ROOT_DECLARATION = re.compile(
 )
 IMPL_HEADER = re.compile(r"^impl\b|^impl<")
 IMPL_METHOD = re.compile(
-    r"^\s*pub\s+(?:(?:async|const|unsafe)\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+    rf"^\s*pub\s+{MODIFIERS}fn\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 ACCESSOR_COMMENT = re.compile(r"^\s*// accessors?:")
 ACCESSOR_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\(\)")
@@ -73,9 +73,17 @@ SECTION_TYPE = re.compile(r"^pub (?:struct|enum) ([A-Za-z_][A-Za-z0-9_]*)")
 MACRO_INVOCATION = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_:]*)!\s*\(([^;]*?)\)\s*;", re.MULTILINE | re.DOTALL
 )
+# The only macros trusted to mint method surface on the types they name; any
+# other invocation naming a listed type earns no stale exemption, so a new
+# method-generating macro must be added here before its types can pass.
+METHOD_MINTING_MACROS = frozenset(
+    {"define_identity", "goal_text", "bounded_text", "positive_position"}
+)
 DOC_COMMENT_LINE = re.compile(r"///[^\n]*")
 CAPITALIZED_NAME = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
 ANGLE_TOKEN = re.compile(r"->|<|>|\bfor\b")
+CFG_TEST_ATTRIBUTE = re.compile(r"^#\[cfg\(test\)\]")
+ATTRIBUTE_LINE = re.compile(r"^#\[")
 
 
 def parse_exports(lib_rs: Path) -> dict[str, set[str]]:
@@ -130,12 +138,23 @@ def blank_comments_and_strings(text: str) -> str:
             index = end
             continue
         if char == "/" and text[index + 1 : index + 2] == "*":
-            end = text.find("*/", index + 2)
-            end = length if end == -1 else end + 2
-            for position in range(index, end):
+            # Rust block comments nest; scan for the delimiter that closes
+            # the outermost one rather than the first `*/`.
+            depth = 1
+            cursor = index + 2
+            while cursor < length and depth > 0:
+                if text[cursor : cursor + 2] == "/*":
+                    depth += 1
+                    cursor += 2
+                elif text[cursor : cursor + 2] == "*/":
+                    depth -= 1
+                    cursor += 2
+                else:
+                    cursor += 1
+            for position in range(index, cursor):
                 if code[position] != "\n":
                     code[position] = " "
-            index = end
+            index = cursor
             continue
         if char == "r" and text[index + 1 : index + 2] in ('"', "#"):
             hashes = 0
@@ -220,6 +239,32 @@ def impl_self_type(header: str) -> str | None:
     return segment.group(1) if segment else None
 
 
+def body_brace_offset(header: str) -> int | None:
+    """Offset of the impl body's opening brace, None while none is present.
+
+    A brace inside the header's angle brackets — a const-generic argument
+    such as `Foo<{ 1 + 1 }>` — is part of the self type, not the body, so
+    the opener is the first brace at angle depth zero (`->` skipped).
+    """
+    angle_depth = 0
+    index = 0
+    length = len(header)
+    while index < length:
+        pair = header[index : index + 2]
+        if pair == "->":
+            index += 2
+            continue
+        char = header[index]
+        if char == "<":
+            angle_depth += 1
+        elif char == ">":
+            angle_depth -= 1
+        elif char == "{" and angle_depth == 0:
+            return index
+        index += 1
+    return None
+
+
 def parse_source_methods(
     crate: str, path: Path
 ) -> tuple[dict[str, set[str]], list[str]]:
@@ -229,22 +274,33 @@ def parse_source_methods(
     impls attribute to their self type but can never contribute (`pub` on
     a trait-impl item is rejected by the compiler). Impls nested inside
     inline modules are out of scope by the column-0 rule, which is what
-    keeps `#[cfg(test)] mod tests` fixtures out of the surface.
+    keeps `mod tests` fixtures out of the surface, and a column-0 impl
+    under `#[cfg(test)]` is skipped for the same reason. Attribution is by
+    unqualified self-type name: an inherent impl may legally live anywhere
+    in its crate, so a private type sharing a listed type's name would
+    misattribute — loudly, as a spurious missing declaration — and would
+    need this parser extended to path-aware attribution.
     """
     lines = blank_comments_and_strings(path.read_text()).splitlines()
     methods: dict[str, set[str]] = {}
     failures: list[str] = []
+    test_configured = False
     index = 0
     while index < len(lines):
         line = lines[index]
         if IMPL_HEADER.match(line):
             header_start = index
-            header_lines = [line]
-            while "{" not in header_lines[-1] and index + 1 < len(lines):
+            header = line
+            while body_brace_offset(header) is None and index + 1 < len(lines):
                 index += 1
-                header_lines.append(lines[index])
-            header = " ".join(header_lines)
-            target = impl_self_type(header)
+                header = f"{header} {lines[index]}"
+            opener = body_brace_offset(header)
+            was_test_configured = test_configured
+            test_configured = False
+            if opener is None:
+                index += 1
+                continue
+            target = impl_self_type(header[:opener])
             if target is None:
                 failures.append(
                     f"{crate} {path.as_posix()}:{header_start + 1} has an impl"
@@ -253,32 +309,38 @@ def parse_source_methods(
                 )
                 index += 1
                 continue
-            depth = header.count("{") - header.count("}")
+            remainder = header[opener:]
+            depth = remainder.count("{") - remainder.count("}")
             while depth > 0 and index + 1 < len(lines):
                 index += 1
                 body_line = lines[index]
-                if depth == 1:
+                if depth == 1 and not was_test_configured:
                     method = IMPL_METHOD.match(body_line)
                     if method:
                         methods.setdefault(target, set()).add(method.group(1))
                 depth += body_line.count("{") - body_line.count("}")
+        elif CFG_TEST_ATTRIBUTE.match(line):
+            test_configured = True
+        elif not ATTRIBUTE_LINE.match(line) and line.strip():
+            test_configured = False
         index += 1
     return methods, failures
 
 
 def parse_macro_surface_types(text: str) -> set[str]:
-    """Type names handed to column-0 macro invocations.
+    """Type names handed to the column-0 method-minting macro invocations.
 
-    A macro that receives a type name is assumed able to add methods to it,
-    so these types keep their declared spine methods without a textual
-    source counterpart (the stale direction skips them). Doc-comment lines
+    These types keep their declared spine methods without a textual source
+    counterpart (the stale direction skips them). Only the macros in
+    METHOD_MINTING_MACROS qualify — an assertion or derive helper naming a
+    listed type mints nothing, so it earns no exemption. Doc-comment lines
     inside the invocation are dropped first so their prose contributes no
     names. Only parenthesized invocations are read; a brace or bracket form
     that mints public surface would need this parser extended.
     """
     names: set[str] = set()
     for invocation, arguments in MACRO_INVOCATION.findall(text):
-        if invocation.split("::")[-1] == "macro_rules":
+        if invocation.split("::")[-1] not in METHOD_MINTING_MACROS:
             continue
         names.update(CAPITALIZED_NAME.findall(DOC_COMMENT_LINE.sub("", arguments)))
     return names

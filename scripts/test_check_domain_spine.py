@@ -74,6 +74,20 @@ impl Hidden {
     }
 }
 
+/* A nested block comment stays a comment past its inner close:
+/* inner */
+impl Widget {
+    pub fn commented_out(&self) {}
+}
+*/
+
+#[cfg(test)]
+impl Widget {
+    pub fn test_only_helper(&self) -> u64 {
+        self.value
+    }
+}
+
 impl<Part> Blueprint<Part> {
     pub fn render(&self) -> &'static str {
         "unlisted generic type"
@@ -210,10 +224,11 @@ def main() -> int:
         root = Path(directory)
 
         # The baseline agrees everywhere: declared methods match source,
-        # accessor-comment declarations count, a doc-comment impl example and
-        # public methods on unlisted types (Hidden, generic Blueprint) are
-        # ignored, and the macro-surfaced Tag keeps its declared methods
-        # without a textual impl.
+        # accessor-comment declarations count, a doc-comment impl example, a
+        # nested-block-comment impl, a `#[cfg(test)]` impl, and public
+        # methods on unlisted types (Hidden, generic Blueprint) are ignored,
+        # and the macro-surfaced Tag keeps its declared methods without a
+        # textual impl.
         write_fixture(root)
         expect_pass(run_checker(root), "baseline")
 
@@ -273,6 +288,65 @@ def main() -> int:
             "macro exemption is invocation-driven",
             "'domain: widget' section declares Tag::try_new(), which source"
             " no longer defines as a public method",
+        )
+
+        # Only the method-minting macros exempt: an assertion naming the
+        # type mints nothing and rescues nothing.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "bounded_text!(\n"
+                "    /// One fixture bounded text.\n"
+                "    Tag\n"
+                ");\n",
+                "assert_fixture_contract!(\n"
+                "    /// One fixture bounded text.\n"
+                "    Tag\n"
+                ");\n",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "non-minting macro earns no exemption",
+            "'domain: widget' section declares Tag::try_new(), which source"
+            " no longer defines as a public method",
+        )
+
+        # An ABI-qualified method is public surface like any other.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "    fn double(&self) -> u64 {",
+                '    pub extern "C" fn raw_value(&self) -> u64 {\n'
+                "        self.value\n"
+                "    }\n"
+                "\n"
+                "    fn double(&self) -> u64 {",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "extern method surfaces",
+            "domain::widget::Widget has public method raw_value() with no"
+            " declaration in the 'domain: widget' section",
+        )
+
+        # A const-generic brace in the impl header is not the body opener;
+        # the body behind it is still scanned.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE
+            + "\nimpl Widget<{ 1 + 1 }> {\n"
+            "    pub fn shadow(&self) -> u64 {\n"
+            "        2\n"
+            "    }\n"
+            "}\n",
+        )
+        expect_failure(
+            run_checker(root),
+            "const-generic impl body is scanned",
+            "domain::widget::Widget has public method shadow() with no"
+            " declaration in the 'domain: widget' section",
         )
 
         # Methods declared in a section that does not export the type are
