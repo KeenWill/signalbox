@@ -8008,11 +8008,14 @@ fn validate_blob_upload_detail(detail: RejectionDetail) -> Result<(), FrameValid
         RejectionDetail::BlobUploadSizeExceeded {
             expected_length_bytes,
             actual_length_bytes,
-        } => actual_length_bytes.value() > expected_length_bytes.value(),
+        } => {
+            expected_length_bytes.value() > 0
+                && actual_length_bytes.value() > expected_length_bytes.value()
+        }
         RejectionDetail::BlobUploadLengthMismatch {
             expected_length_bytes,
             actual_length_bytes,
-        } => expected_length_bytes != actual_length_bytes,
+        } => expected_length_bytes.value() > 0 && expected_length_bytes != actual_length_bytes,
         RejectionDetail::BlobUploadDigestMismatch {
             expected_digest,
             actual_digest,
@@ -10851,6 +10854,48 @@ mod tests {
                 "{{\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"blob upload was rejected\",\"detail\":{{\"type\":\"blob_upload_digest_mismatch\",\"expected_digest\":\"{expected_digest}\",\"actual_digest\":\"{actual_digest}\"}}}}"
             ),
         )?;
+        Ok(())
+    }
+
+    /// INV-060: a size-exceeded refusal cannot claim the impossible zero
+    /// expected length that begin-upload admission rejects.
+    #[test]
+    fn inv060_blob_upload_size_exceeded_rejects_zero_expected_length()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("blob upload was rejected"),
+            detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadSizeExceeded {
+                expected_length_bytes: CanonicalU64::new(0),
+                actual_length_bytes: CanonicalU64::new(1),
+            }),
+        };
+
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message),
+            Err(FrameValidationError::BlobUploadShape)
+        );
+        Ok(())
+    }
+
+    /// INV-060: a length-mismatch refusal cannot claim the impossible zero
+    /// expected length that begin-upload admission rejects.
+    #[test]
+    fn inv060_blob_upload_length_mismatch_rejects_zero_expected_length()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("blob upload was rejected"),
+            detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadLengthMismatch {
+                expected_length_bytes: CanonicalU64::new(0),
+                actual_length_bytes: CanonicalU64::new(1),
+            }),
+        };
+
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message),
+            Err(FrameValidationError::BlobUploadShape)
+        );
         Ok(())
     }
 
