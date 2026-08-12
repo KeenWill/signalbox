@@ -4762,13 +4762,7 @@ async fn inv042_inv044_pending_successor_promotion_upgrades_existing_candidate()
     Ok(())
 }
 
-/// INV-001: the pending-promotion migration preserves the exact typed-record
-/// relations for every durable workspace and Git-remote command family.
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn inv001_pending_promotion_preserves_workspace_command_typed_records()
--> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+async fn insert_workspace_command_fixture(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
@@ -4788,6 +4782,11 @@ async fn inv001_pending_promotion_preserves_workspace_command_typed_records()
     .bind(uuid(REGISTER_WORKSPACE_COMMAND))
     .execute(&mut *transaction)
     .await?;
+    transaction.commit().await
+}
+
+async fn insert_git_remote_mint_command_fixture(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
@@ -4808,6 +4807,11 @@ async fn inv001_pending_promotion_preserves_workspace_command_typed_records()
     .bind(uuid(REGISTERED_WORKSPACE))
     .execute(&mut *transaction)
     .await?;
+    transaction.commit().await
+}
+
+async fn insert_git_remote_withdrawal_command_fixture(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
@@ -4826,23 +4830,74 @@ async fn inv001_pending_promotion_preserves_workspace_command_typed_records()
     .bind(uuid(WITHDRAW_GIT_REMOTE_COMMAND))
     .execute(&mut *transaction)
     .await?;
+    transaction.commit().await
+}
 
-    transaction.commit().await?;
-
-    let recorded_commands: i64 = sqlx::query_scalar(
-        "SELECT count(*)
-           FROM durable_command
-          WHERE command_id = ANY($1)",
+/// INV-001: the pending-promotion migration preserves the workspace command's
+/// exact typed-record relation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv001_pending_promotion_preserves_workspace_command_typed_record()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_workspace_command_fixture(&pool).await?;
+    let recorded: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM durable_command
+             WHERE command_id = $1 AND command_kind = 'register_workspace')",
     )
-    .bind(vec![
-        uuid(REGISTER_WORKSPACE_COMMAND),
-        uuid(MINT_GIT_REMOTE_COMMAND),
-        uuid(WITHDRAW_GIT_REMOTE_COMMAND),
-    ])
+    .bind(uuid(REGISTER_WORKSPACE_COMMAND))
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(recorded_commands, 3);
+    assert!(recorded);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001: the pending-promotion migration preserves the Git-remote mint
+/// command's exact typed-record relation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv001_pending_promotion_preserves_git_remote_mint_typed_record()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_workspace_command_fixture(&pool).await?;
+    insert_git_remote_mint_command_fixture(&pool).await?;
+    let recorded: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM durable_command
+             WHERE command_id = $1 AND command_kind = 'mint_git_remote')",
+    )
+    .bind(uuid(MINT_GIT_REMOTE_COMMAND))
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(recorded);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001: the pending-promotion migration preserves the Git-remote
+/// withdrawal command's exact typed-record relation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv001_pending_promotion_preserves_git_remote_withdrawal_typed_record()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_workspace_command_fixture(&pool).await?;
+    insert_git_remote_mint_command_fixture(&pool).await?;
+    insert_git_remote_withdrawal_command_fixture(&pool).await?;
+    let recorded: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM durable_command
+             WHERE command_id = $1 AND command_kind = 'withdraw_git_remote')",
+    )
+    .bind(uuid(WITHDRAW_GIT_REMOTE_COMMAND))
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(recorded);
     drop(pool);
     Ok(())
 }

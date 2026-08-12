@@ -93,9 +93,9 @@ The nil and max UUIDs are rejected as `DurableCommandId` values at two
 boundaries: checked command/request construction (`try_new` on
 `CreateSessionRequest`, `CreateSessionFromImportedFrontierRequest`,
 `ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`, and
-`SubmitInputRequest` and `UpdateSessionPlacementRequest` in
-`crates/application`, plus `DecideToolRequest` in `crates/domain`) and
-persistence decoding (`durable_command_id_from_uuid` in
+`SubmitInputRequest`, `UpdateSessionPlacementRequest`, and
+`PromotePendingRunnerRequest` in `crates/application`, plus `DecideToolRequest`
+in `crates/domain`) and persistence decoding (`durable_command_id_from_uuid` in
 `crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
 command can reach a transaction and claims no identifier. Why: sentinel-like
 values are common accidental defaults and would otherwise become permanent
