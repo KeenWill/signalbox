@@ -1,3 +1,5 @@
+//! PostgreSQL integration coverage for the immutable blob catalog.
+
 #![allow(
     clippy::expect_used,
     clippy::panic,
