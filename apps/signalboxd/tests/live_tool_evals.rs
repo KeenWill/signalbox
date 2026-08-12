@@ -10702,6 +10702,7 @@ impl CaseSnapshot {
                 | ProcessTranscriptEntry::DelegationMessage { .. }
                 | ProcessTranscriptEntry::DelegationResult { .. }
                 | ProcessTranscriptEntry::ModelIdentityChanged { .. }
+                | ProcessTranscriptEntry::RunnerPlacementChanged { .. }
                 | ProcessTranscriptEntry::ContextSummary { .. }
                 | ProcessTranscriptEntry::User { .. }
                 | ProcessTranscriptEntry::Assistant { .. }
