@@ -754,7 +754,7 @@ async fn await_while_guarded<T>(
 
 async fn disarm_staging_sweep_unless_guarded(
     database: &mut FencedHubDatabase,
-    registry: &mut Option<BlobStoreRegistry>,
+    registry: &mut Option<Arc<BlobStoreRegistry>>,
 ) {
     if database.check_guard().await.is_err()
         && let Some(registry) = registry.as_mut()
@@ -1368,7 +1368,7 @@ async fn run_hub(
             return Ok(ShutdownOutcome::GuardLost);
         }
     };
-    let blob_store_registry = blob_store_registry.map(Arc::new);
+    let mut blob_store_registry = blob_store_registry.map(Arc::new);
 
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
