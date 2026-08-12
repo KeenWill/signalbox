@@ -11,10 +11,9 @@ turn's authority resolves to were verified through PR #562
 (`agent/dispatch-session-goals`). The binding of an already-accepted turn to a
 generation was verified through PR #578 (`agent/commission-binding`). Resolving
 that authority again when a consumer commits is verified against this PR
-(`agent/judge-completion-recheck`). This
-bottom specification diff owns both stack slices. Identity and durable-command
-mechanics remain owned by [identity and commands](identity-and-commands.md),
-turn execution by
+(`agent/judge-completion-recheck`). This bottom specification diff owns both
+stack slices. Identity and durable-command mechanics remain owned by
+[identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
