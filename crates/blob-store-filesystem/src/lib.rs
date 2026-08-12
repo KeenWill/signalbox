@@ -27,7 +27,7 @@ use rustix::fs::{
     AtFlags, Mode, OFlags, RenameFlags, fchmod, open, openat, renameat, renameat_with, unlinkat,
 };
 #[cfg(target_os = "linux")]
-use rustix::fs::{RawDir, ResolveFlags, chmodat, mkdirat, openat2};
+use rustix::fs::{FlockOperation, RawDir, ResolveFlags, chmodat, flock, mkdirat, openat2};
 #[cfg(unix)]
 use rustix::process::geteuid;
 use sha2::{Digest, Sha256};
@@ -55,6 +55,18 @@ struct TemporaryBlobFile {
     directory: Arc<fs::File>,
     name: OsString,
     linked: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct PublicationDirectoryLock {
+    descriptor: fs::File,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PublicationDirectoryLock {
+    fn drop(&mut self) {
+        let _ = flock(&self.descriptor, FlockOperation::Unlock);
+    }
 }
 
 impl TemporaryBlobFile {
@@ -410,6 +422,15 @@ impl FilesystemBlobStore {
                 false
             };
 
+        #[cfg(target_os = "linux")]
+        let _publication_lock = acquire_publication_lock(
+            self.publication_directory.clone(),
+            FlockOperation::LockShared,
+        )
+        .await?;
+        #[cfg(not(target_os = "linux"))]
+        let _publication_lock =
+            acquire_publication_lock(self.publication_directory.clone(), ()).await?;
         let publication_directory = self.publication_directory.clone();
         let (temporary, standard_file) =
             tokio::task::spawn_blocking(move || create_temporary_blob_file(publication_directory))
@@ -1357,6 +1378,50 @@ fn prepare_publication_directory(root: &fs::File) -> io::Result<fs::File> {
 }
 
 #[cfg(target_os = "linux")]
+fn lock_publication_directory(
+    directory: &fs::File,
+    operation: FlockOperation,
+) -> io::Result<PublicationDirectoryLock> {
+    let descriptor = fs::File::from(
+        openat2(
+            directory,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .map_err(io::Error::from)?,
+    );
+    flock(&descriptor, operation).map_err(io::Error::from)?;
+    Ok(PublicationDirectoryLock { descriptor })
+}
+
+#[cfg(target_os = "linux")]
+async fn acquire_publication_lock(
+    directory: Arc<fs::File>,
+    operation: FlockOperation,
+) -> Result<PublicationDirectoryLock, BlobStoreError> {
+    tokio::task::spawn_blocking(move || lock_publication_directory(&directory, operation))
+        .await
+        .map_err(|source| BlobStoreError::io("join publication lock acquisition", source))?
+        .map_err(|source| BlobStoreError::io("acquire publication lock", source))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn acquire_publication_lock(
+    _directory: Arc<fs::File>,
+    _operation: (),
+) -> Result<(), BlobStoreError> {
+    Err(BlobStoreError::io(
+        "acquire publication lock",
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem blob publication locking requires Linux",
+        ),
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_staging_directory(root: &fs::File) -> io::Result<fs::File> {
     let created = match mkdirat(
         root,
@@ -1416,6 +1481,7 @@ fn prepare_publication_directory(_root: &fs::File) -> io::Result<fs::File> {
 
 #[cfg(target_os = "linux")]
 fn sweep_publication_directory(directory: &fs::File) -> io::Result<()> {
+    let _publication_lock = lock_publication_directory(directory, FlockOperation::LockExclusive)?;
     sweep_private_temporary_directory(directory)
 }
 
@@ -2026,5 +2092,58 @@ mod tests {
             .expect("the interrupted private temporary file is recoverable");
 
         assert!(!temporary_path.exists());
+    }
+
+    /// INV-059: recovery sweeps for one publication namespace serialize even
+    /// when a replacement process begins opening the same bound store.
+    #[test]
+    fn inv059_publication_recovery_waits_for_the_namespace_lock() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let publication_path = root.path().join(PUBLICATION_DIRECTORY);
+        fs::create_dir(&publication_path).expect("the publication directory is created");
+        fs::set_permissions(
+            &publication_path,
+            fs::Permissions::from_mode(DIRECTORY_MODE),
+        )
+        .expect("the publication directory is private");
+        let publication = fs::File::from(
+            open(
+                &publication_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("the publication directory opens"),
+        );
+        let publication_lock = lock_publication_directory(&publication, FlockOperation::LockShared)
+            .expect("the fixture holds an active publication lock");
+        let replacement_root = root.path().to_path_buf();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let replacement = std::thread::spawn(move || {
+            let outcome = open_bound_fixture(
+                &replacement_root,
+                PRIMARY_NAMESPACE,
+                NamespaceBindingState::New,
+            )
+            .map(|_| ());
+            sender
+                .send(outcome)
+                .expect("the replacement reports its construction outcome");
+        });
+
+        let blocked = receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect_err("the replacement cannot sweep while the lock is held");
+        assert_eq!(blocked, std::sync::mpsc::RecvTimeoutError::Timeout);
+
+        drop(publication_lock);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the replacement completes after the lock is released")
+            .expect("the replacement store opens");
+        replacement
+            .join()
+            .expect("the replacement construction thread completes");
     }
 }
