@@ -831,12 +831,15 @@ async fn serve_connection(
         };
         let acquired_bulk_ingest_at = import_permit.as_ref().map(|_| Instant::now());
         drop(import_waiter_permit);
+        let review_admission_deadline =
+            pending_bulk_ingest_deadline(&pending_import, &pending_blob_upload, true);
         let Some((frame_buffer_permit, review_command_permit)) =
             acquire_review_command_permit_while_buffered(
                 ReviewCommandAdmission::for_request(&request),
                 frame_buffer_permit,
                 Arc::clone(&services.review_command_budget),
                 &mut shutdown,
+                review_admission_deadline,
             )
             .await?
         else {
@@ -1156,13 +1159,19 @@ async fn acquire_review_command_permit_while_buffered(
     frame_buffer_permit: Option<OwnedSemaphorePermit>,
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
+    deadline: Option<Instant>,
 ) -> Result<
     Option<(Option<OwnedSemaphorePermit>, Option<OwnedSemaphorePermit>)>,
     ProcessConnectionError,
 > {
     let review_command_permit = match review_admission {
         ReviewCommandAdmission::Required => {
-            let Some(permit) = acquire_review_command_permit(budget, shutdown).await? else {
+            let permit = tokio::select! {
+                biased;
+                () = wait_for_deadline(deadline) => return Ok(None),
+                permit = acquire_review_command_permit(budget, shutdown) => permit?,
+            };
+            let Some(permit) = permit else {
                 return Ok(None);
             };
             Some(permit)
@@ -5427,27 +5436,12 @@ where
         )
         .await;
     };
-    if !(1..=registry.max_blob_bytes()).contains(&expected_length_bytes.value()) {
-        return write_blob_rejection(
-            writer,
-            version,
-            request_id,
-            RejectionDetail::BlobUploadLengthOutOfRange {
-                min_length_bytes: CanonicalU64::new(1),
-                max_length_bytes: CanonicalU64::new(registry.max_blob_bytes()),
-                declared_length_bytes: expected_length_bytes,
-            },
-        )
-        .await;
-    }
-    if pending.is_some() {
-        return write_blob_rejection(
-            writer,
-            version,
-            request_id,
-            RejectionDetail::BlobUploadAlreadyInProgress {},
-        )
-        .await;
+    if let Some(detail) = blob_upload_begin_preflight(
+        pending.is_some(),
+        expected_length_bytes,
+        registry.max_blob_bytes(),
+    ) {
+        return write_blob_rejection(writer, version, request_id, detail).await;
     }
     let expected =
         ExpectedBlob::try_new(expected_digest.into_digest(), expected_length_bytes.value())
@@ -5486,6 +5480,24 @@ where
             .await
         }
         Err(error) => write_blob_upload_error(writer, version, request_id, expected, error).await,
+    }
+}
+
+fn blob_upload_begin_preflight(
+    upload_is_active: bool,
+    expected_length_bytes: CanonicalU64,
+    max_blob_bytes: u64,
+) -> Option<RejectionDetail> {
+    if upload_is_active {
+        Some(RejectionDetail::BlobUploadAlreadyInProgress {})
+    } else if !(1..=max_blob_bytes).contains(&expected_length_bytes.value()) {
+        Some(RejectionDetail::BlobUploadLengthOutOfRange {
+            min_length_bytes: CanonicalU64::new(1),
+            max_length_bytes: CanonicalU64::new(max_blob_bytes),
+            declared_length_bytes: expected_length_bytes,
+        })
+    } else {
+        None
     }
 }
 
@@ -14750,11 +14762,12 @@ mod tests {
         acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
         acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
         acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
-        admit_snapshot_reader, admitted_user_content, canonical_review_request_digest,
-        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
-        foreground_peer_activity, handle_append_conversation_import,
-        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
+        admit_snapshot_reader, admitted_user_content, blob_upload_begin_preflight,
+        canonical_review_request_digest, claude_conversion_failure_disposition,
+        codex_conversion_failure_disposition, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
+        handle_append_conversation_import, handle_begin_conversation_import,
+        handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -15970,6 +15983,7 @@ mod tests {
             Some(frame_permit),
             Arc::clone(&review_budget),
             &mut shutdown_receiver,
+            None,
         );
         tokio::pin!(acquire);
 
@@ -15988,6 +16002,31 @@ mod tests {
         assert!(review_permit.is_some());
         assert_eq!(frame_budget.available_permits(), 0);
         drop(held_frame);
+        assert_eq!(frame_budget.available_permits(), 1);
+        Ok(())
+    }
+
+    /// INV-060: an expired active bulk-ingest deadline releases a frame held
+    /// while a review mutation waits for its separate admission budget.
+    #[tokio::test(start_paused = true)]
+    async fn inv060_expired_bulk_ingest_deadline_cancels_review_admission()
+    -> Result<(), Box<dyn Error>> {
+        let frame_budget = Arc::new(Semaphore::new(1));
+        let review_budget = Arc::new(Semaphore::new(1));
+        let _occupied_review = Arc::clone(&review_budget).acquire_owned().await?;
+        let frame_permit = Arc::clone(&frame_budget).acquire_owned().await?;
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+
+        let admission = acquire_review_command_permit_while_buffered(
+            ReviewCommandAdmission::Required,
+            Some(frame_permit),
+            review_budget,
+            &mut shutdown_receiver,
+            Some(Instant::now()),
+        )
+        .await?;
+
+        assert!(admission.is_none());
         assert_eq!(frame_budget.available_permits(), 1);
         Ok(())
     }
@@ -16350,6 +16389,18 @@ mod tests {
             super::pending_bulk_ingest_deadline(&pending, &None, false),
             Some(started_at + super::BULK_INGEST_SESSION_TIMEOUT),
         );
+        Ok(())
+    }
+
+    /// INV-060: an active upload classifies every second begin as the sole
+    /// nonterminal duplicate-begin refusal before inspecting its new length.
+    #[test]
+    fn inv060_active_blob_upload_precedes_duplicate_begin_length_validation()
+    -> Result<(), Box<dyn Error>> {
+        let detail = blob_upload_begin_preflight(true, CanonicalU64::new(0), 8)
+            .ok_or_else(|| io::Error::other("the active upload must reject a second begin"))?;
+
+        assert_eq!(detail, RejectionDetail::BlobUploadAlreadyInProgress {});
         Ok(())
     }
 
