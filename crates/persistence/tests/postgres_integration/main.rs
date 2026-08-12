@@ -3725,7 +3725,10 @@ fn announcement_for(
         | DispatchedOutboxEventKind::ContextCompacted { .. }
         | DispatchedOutboxEventKind::TurnReconciliationRequired { .. }
         | DispatchedOutboxEventKind::DelegationUpdate(_)
-        | DispatchedOutboxEventKind::DelegationWake(_) => AmbiguityAnnouncement::Unrelated,
+        | DispatchedOutboxEventKind::DelegationWake(_)
+        | DispatchedOutboxEventKind::RunnerStateTransition { .. } => {
+            AmbiguityAnnouncement::Unrelated
+        }
     }
 }
 
