@@ -641,18 +641,21 @@ this daemon's active runner is durably gone, requires the recorded active
 enrollment's connection to be durably lost and the pending candidate to be
 connected under its provisioning-only authority, then revokes the predecessor
 and constructs the active enrollment and validated registration from the exact
-pending facts in one transaction. Its immutable result retains the exact pending
-registration, candidate connected event, predecessor loss, and pending-to-active
-audit transition rather than depending on mutable later connection heads. It
-provisions no workspace, consumes no workspace receipt, touches no session
-placement, creates no lease, and fabricates no turn or frontier; a session
-pinned to the predecessor stays `RunnerLost` until its own user replacement
-runs. The command generalizes to multi-runner as the fact that one of this
-daemon's active runners is durably gone and a successor for it is pending, and
-stays user-initiated in both forms. Why: a deployment with no session, or one
-whose every placement is an unpinned capability-class request, offers no
-placement for a replacement command to target, so without this path its pending
-candidate would remain provisioning-only forever.
+pending facts in one transaction. A predecessor reconnect and later loss does
+not invalidate the immutable admission relation; promotion authenticates and
+retains that current loss while the relation continues to retain the earlier
+loss that admitted the candidate. Its immutable result retains the exact pending
+registration, candidate connected event, current predecessor loss, and
+pending-to-active audit transition rather than depending on mutable later
+connection heads. It provisions no workspace, consumes no workspace receipt,
+touches no session placement, creates no lease, and fabricates no turn or
+frontier; a session pinned to the predecessor stays `RunnerLost` until its own
+user replacement runs. The command generalizes to multi-runner as the fact that
+one of this daemon's active runners is durably gone and a successor for it is
+pending, and stays user-initiated in both forms. Why: a deployment with no
+session, or one whose every placement is an unpinned capability-class request,
+offers no placement for a replacement command to target, so without this path
+its pending candidate would remain provisioning-only forever.
 
 The process-protocol request and daemon handler for this transaction remain
 **committed unimplemented functionality**; no current operator surface can

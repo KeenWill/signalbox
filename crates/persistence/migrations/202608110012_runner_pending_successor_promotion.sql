@@ -316,8 +316,6 @@ BEGIN
           JOIN runner_connection_authority_head AS predecessor_authority
             ON predecessor_authority.enrollment_id =
                    pending.predecessor_enrollment_id
-           AND predecessor_authority.latest_loss_epoch =
-                   pending.predecessor_loss_epoch
           JOIN runner_connection_event AS predecessor_connection
             ON predecessor_connection.enrollment_id =
                    predecessor_authority.enrollment_id
@@ -334,7 +332,8 @@ BEGIN
            AND candidate_connection.state_kind = 'connected'
            AND pending.predecessor_enrollment_id =
                    NEW.predecessor_enrollment_id
-           AND pending.predecessor_loss_epoch = NEW.predecessor_loss_epoch
+           AND predecessor_authority.latest_loss_epoch =
+                   NEW.predecessor_loss_epoch
            AND predecessor_connection.state_kind = 'lost';
         IF matching_authority <> 1 THEN
             RAISE EXCEPTION
@@ -445,8 +444,6 @@ BEGIN
                  AND promotion_predecessor_connection.state_kind = 'lost'
                  AND promotion.predecessor_enrollment_id =
                         pending.predecessor_enrollment_id
-                 AND promotion.predecessor_loss_epoch =
-                        pending.predecessor_loss_epoch
            )
       INTO relation_count, valid_relation_count, applied_promotion_count
       FROM runner_pending_enrollment AS pending
