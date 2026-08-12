@@ -237,6 +237,16 @@ BEGIN
             OR (
                 prefix.context_frontier_id IS NOT NULL
                 AND frontier.member_count = prefix.member_count + 1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM context_frontier AS existing_successor
+                     WHERE existing_successor.owning_session_id =
+                               prefix.owning_session_id
+                       AND existing_successor.prefix_context_frontier_id =
+                               prefix.context_frontier_id
+                       AND existing_successor.context_frontier_id <>
+                               frontier.context_frontier_id
+                )
             )
        );
 
