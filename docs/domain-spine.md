@@ -9034,6 +9034,10 @@ impl LostPinnedRunnerPlacement {
     ) -> Self;
     // accessors: pinned(), source(), loss_registration_revision()
 }
+pub struct SameRunnerRegistrationRecovery {
+    pub loss_registration: ValidatedRunnerRegistration,
+    pub current_registration: ValidatedRunnerRegistration,
+}
 pub enum AbandonedRunnerPlacement {
     BeforePin(RunnerLostBeforePin),
     Pinned(Box<LostPinnedRunnerPlacement>),
@@ -9115,8 +9119,7 @@ impl SessionRunnerPlacement {
     pub fn replace_lost_runner_after_same_runner_registration_recovery(
         self,
         request: SessionRunnerPlacementRequest,
-        loss_registration: &ValidatedRunnerRegistration,
-        current_registration: &ValidatedRunnerRegistration,
+        recovery: SameRunnerRegistrationRecovery,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
@@ -10669,9 +10672,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 86                    |
+| domain: runner                                     | 87                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **788 (+12 free fn)** |
+| **signalbox-domain total**                         | **789 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

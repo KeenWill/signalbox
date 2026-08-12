@@ -2765,12 +2765,20 @@ impl LostPinnedRunnerPlacement {
     }
 
     const fn has_valid_source_evidence(&self) -> bool {
-        matches!(
-            (self.source, self.loss_registration_revision),
-            (RunnerPlacementLossSource::Connection, None)
-                | (RunnerPlacementLossSource::Registration, Some(_))
-        )
+        match self.source {
+            RunnerPlacementLossSource::Connection => self.loss_registration_revision.is_none(),
+            RunnerPlacementLossSource::Registration => self.loss_registration_revision.is_some(),
+        }
     }
+}
+
+/// Named historical and current registrations checked for same-runner recovery.
+#[derive(Clone, Debug)]
+pub struct SameRunnerRegistrationRecovery {
+    /// The exact registration revision that caused placement loss.
+    pub loss_registration: ValidatedRunnerRegistration,
+    /// The current registration that proposes to recover the placement.
+    pub current_registration: ValidatedRunnerRegistration,
 }
 
 /// Complete retained authority retired by explicit runner abandonment.
@@ -3106,19 +3114,22 @@ impl SessionRunnerPlacement {
     pub fn replace_lost_runner_after_same_runner_registration_recovery(
         self,
         request: SessionRunnerPlacementRequest,
-        loss_registration: &ValidatedRunnerRegistration,
-        current_registration: &ValidatedRunnerRegistration,
+        recovery: SameRunnerRegistrationRecovery,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
+        let SameRunnerRegistrationRecovery {
+            loss_registration,
+            current_registration,
+        } = recovery;
         self.replace_lost_runner_checked(
             request,
-            current_registration,
+            &current_registration,
             directory,
             workspace,
             prior_grant,
-            SameRunnerReplacement::RegistrationLoss(loss_registration),
+            SameRunnerReplacement::RegistrationLoss(&loss_registration),
         )
     }
 
@@ -7239,8 +7250,10 @@ mod tests {
         let replacement = lost
             .replace_lost_runner_after_same_runner_registration_recovery(
                 request.clone(),
-                &loss_registration,
-                &current_registration,
+                SameRunnerRegistrationRecovery {
+                    loss_registration: loss_registration.clone(),
+                    current_registration: current_registration.clone(),
+                },
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
@@ -7302,8 +7315,10 @@ mod tests {
         assert_eq!(
             lost.replace_lost_runner_after_same_runner_registration_recovery(
                 request,
-                &registration,
-                &registration,
+                SameRunnerRegistrationRecovery {
+                    loss_registration: registration.clone(),
+                    current_registration: registration.clone(),
+                },
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
@@ -7348,8 +7363,10 @@ mod tests {
         assert_eq!(
             lost.replace_lost_runner_after_same_runner_registration_recovery(
                 request,
-                &loss_registration,
-                &loss_registration,
+                SameRunnerRegistrationRecovery {
+                    loss_registration: loss_registration.clone(),
+                    current_registration: loss_registration.clone(),
+                },
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
