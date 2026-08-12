@@ -1686,6 +1686,10 @@ async fn prepare_attachment_admission(
     let rows = sqlx::query(
         "SELECT digest, byte_length FROM blob
           WHERE digest = ANY($1::bytea[])
+            AND EXISTS (
+                SELECT 1 FROM blob_replica
+                 WHERE blob_replica.digest = blob.digest
+            )
           ORDER BY digest",
     )
     .bind(&supplied)
