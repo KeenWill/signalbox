@@ -7,7 +7,9 @@ Placement-relative lease-offer fencing was verified against this PR
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
-(`agent/runner-event-outbox-persistence`).
+(`agent/runner-event-outbox-persistence`). The established-successor outbox
+source check was re-verified against this PR
+(`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
