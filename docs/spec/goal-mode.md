@@ -8,8 +8,10 @@ through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
 process, and terminal surfaces were verified through PR #384
 (`agent/goal-mode-runtime`). Dispatch-composed commissions and the generation a
 turn's authority resolves to were verified through PR #562
-(`agent/dispatch-session-goals`). Resolving that authority again when a consumer
-commits is verified against this PR (`agent/judge-completion-recheck`). This
+(`agent/dispatch-session-goals`). The binding of an already-accepted turn to a
+generation was verified through PR #578 (`agent/commission-binding`). Resolving
+that authority again when a consumer commits is verified against this PR
+(`agent/judge-completion-recheck`). This
 bottom specification diff owns both stack slices. Identity and durable-command
 mechanics remain owned by [identity and commands](identity-and-commands.md),
 turn execution by
@@ -88,13 +90,12 @@ above.
 **Implemented behavior.** Every goal turn records the generation it belongs to,
 and a consumer reading the authority a turn ran under reads that generation and
 not the session's current one, so a supersession while the turn is parked cannot
-broaden what that consumer sees. A turn the goal machinery did not schedule
-carries no such record, and a goal session runs those too. Such a turn reads the
-session's goal only when two conditions hold together: the lineage has exactly
-one generation, so no supersession can have broadened it; and that generation is
-still open, so a goal already stopped or achieved supplies no statement. Any
-other shape resolves to no statement, leaving the consumer to treat the
-authority as unsettled.
+broaden what that consumer sees. A turn with no such record resolves to no
+statement, leaving the consumer to treat the authority as unsettled. A goal
+session runs such turns — an ordinary input submitted into a session that
+already has a goal — and no generation states anything about them, so inferring
+one from the lineage's shape would let a goal attached after the turn already
+existed supply authority it never covered.
 
 **Implemented behavior.** The delegated tool-approval judge is the one consumer
 that binds its read to its commit. It resolves the statement again when it
@@ -235,6 +236,21 @@ projection (INV-048). Durable rules bind append, correlation, and provenance:
   and bind every scheduler failure event to the current unsuccessfully terminal
   goal turn.
 
+**Implemented behavior.** Migration `202608110013` supersedes the two rule
+functions `202608020013` installed for a goal turn's accepted input. A
+generation's turn is either scheduled by the goal machinery or bound to a turn a
+command already accepted. The machinery mints an accepted input with no
+accepting command and writes the statement, or the resume guidance, into it; the
+rule that a goal turn's input restate its immutable source verbatim applies to
+exactly that case, because it is what proves the machinery invented no text. A
+bound turn's text was authored by whoever issued its command — for
+repository-watch dispatch, the tagged context of the event dispatched on — so it
+carries that command instead. A goal turn therefore either restates its
+statement or names an accepting command, and never neither, and an accepted
+input with no command still requires exactly one goal source. Every other proof
+listed above is unchanged, and both relaxations only widen: no shape admitted
+before this migration stops being admitted, so it changes no stored row.
+
 **Implemented behavior.** The process protocol exposes attach, show, resume,
 stop, and supersede requests. Show returns the current generation and complete
 ordered event history, and the terminal client provides exactly the
@@ -267,19 +283,6 @@ failed goal turn into a silent retry or bypass execution-failure blocking.
 goal priority or more than one concurrent goal per session. Future extension
 must preserve immutable statements, full lineage, and the version-one rule that
 at most one generation is pursuing or blocked.
-
-**Committed unimplemented functionality.** No present surface binds a turn the
-goal machinery did not schedule to the generation it runs under. A generation
-attached after such a turn already existed is therefore still readable by it,
-and the one-generation and open conditions do not exclude that case. Ordering
-the commission before the turn would, but a turn's acceptance position is also
-its execution order, so commissioning first makes a dispatched session act
-before its triggering event arrives — a worse defect than the one it closes. The
-structural answer is to let the dispatched work turn carry a recorded
-generation, which requires relaxing the constraints that forbid a goal turn on
-an input carrying a command and force a goal turn's input to equal its statement
-verbatim. Until then the exposure is bounded by the statement being prompt
-context feeding an escalation instruction rather than a commit gate.
 
 **Committed unimplemented functionality.** No present judge record carries both
 what the provider recommended and what the repository committed. Escalating a

@@ -724,6 +724,16 @@ async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
     .await?;
     let request = requests[0];
     let statement = commission_fixture_session_goal(&pool, fixture.session, seed + 0xf0).await?;
+    // The checkpoint accepted the fixture turn's input as `seed + 9`; binding
+    // that turn to the generation is the dispatch shape whose authority the
+    // judge reads, now that an unrecorded turn resolves to no statement.
+    bind_commissioned_goal_to_turn(
+        &pool,
+        fixture.session,
+        fixture.turn,
+        AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+    )
+    .await?;
     let repository = model_repository.approval_judge_repository();
     let prepared = ready_approval_judge(
         repository
@@ -776,6 +786,44 @@ async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
 
     pool.close().await;
     drop(container);
+    Ok(())
+}
+
+/// Rebinds a commissioned generation's goal turn to an already-accepted turn.
+///
+/// Dispatch commissions a goal against the turn carrying its tagged context,
+/// so the judged work turn is the generation's own recorded goal turn.
+/// `commission_fixture_session_goal` mints a queued candidate instead, because
+/// the user-attach path cannot bind an existing turn; this rewrite restates
+/// the binding dispatch would have written. Triggers are disabled exactly as
+/// the declaration fixture below does: this states correlation facts, not
+/// lifecycle history.
+async fn bind_commissioned_goal_to_turn(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    accepted_input: AcceptedInputId,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE goal_turn DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    let rebound = sqlx::query(
+        "UPDATE goal_turn SET turn_id = $1, accepted_input_id = $2
+          WHERE session_id = $3 AND goal_generation = 1",
+    )
+    .bind(turn.into_uuid())
+    .bind(accepted_input.into_uuid())
+    .bind(session.into_uuid())
+    .execute(pool)
+    .await?
+    .rows_affected();
+    sqlx::query("ALTER TABLE goal_turn ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    assert_eq!(
+        rebound, 1,
+        "the commissioned generation has one goal turn to bind"
+    );
     Ok(())
 }
 
@@ -865,9 +913,17 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     .await?;
     let request = requests[0];
     let statement = commission_fixture_session_goal(&pool, fixture.session, seed + 0xf0).await?;
-    // `commission_fixture_session_goal` schedules its queued goal turn as
-    // `seed + 2` of the seed it is given.
-    let goal_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0xf2));
+    // The checkpoint accepted the fixture turn's input as `seed + 9`; binding
+    // that turn to the generation is the dispatch shape whose authority the
+    // judge reads, and it makes the judged turn the generation's current goal
+    // turn — the one a model declaration must come from.
+    bind_commissioned_goal_to_turn(
+        &pool,
+        fixture.session,
+        fixture.turn,
+        AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
+    )
+    .await?;
     let repository = model_repository.approval_judge_repository();
     let prepared = ready_approval_judge(
         repository
@@ -885,7 +941,7 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     insert_goal_declaration_request(
         &pool,
         fixture.session,
-        goal_turn,
+        fixture.turn,
         declaration_request,
         &report_text,
     )
@@ -900,7 +956,7 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     let achievement_session = fixture.session;
     let achievement_report =
         GoalReport::try_new(report_text.clone()).expect("the fixture report is admitted");
-    let achievement_provenance = GoalModelProvenance::new(goal_turn, declaration_request);
+    let achievement_provenance = GoalModelProvenance::new(fixture.turn, declaration_request);
     let achievement = tokio::spawn(async move {
         achievement_repository
             .declare_achieved(

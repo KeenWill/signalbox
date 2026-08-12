@@ -7,9 +7,9 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockProvenance,
-    GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind,
-    GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
+    AcceptedInputId, DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, Goal,
+    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent,
+    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport,
     GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
     GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
@@ -23,9 +23,9 @@ use crate::{
     commit_failure_is_ambiguous,
     goal_turn::{
         GoalTurnAcceptancePosition, GoalTurnCandidates, GoalTurnContinuationOutcome,
-        GoalTurnInsertion, GoalTurnTerminalState, continuation_exists, current_goal_turn,
-        goal_turn_frozen_alias_definition, goal_turn_generation, goal_turn_terminal_state,
-        insert_goal_turn, next_goal_turn_acceptance_position,
+        GoalTurnInsertion, GoalTurnTerminalState, bind_goal_turn, continuation_exists,
+        current_goal_turn, goal_turn_frozen_alias_definition, goal_turn_generation,
+        goal_turn_terminal_state, insert_goal_turn, next_goal_turn_acceptance_position,
         retired_queued_goal_turn_without_outbox,
     },
     mapping::{
@@ -689,7 +689,7 @@ fn scheduler_failure_rejection(
     }
 }
 
-/// Commissions a dispatched session's goal on the caller's open transaction.
+/// Commissions a dispatched session's goal against a turn the dispatch accepted.
 ///
 /// Repository-watch dispatch creates a session, its first input, and this goal
 /// at one commit boundary, so a dispatched session is never durably visible
@@ -697,19 +697,23 @@ fn scheduler_failure_rejection(
 /// session cannot perform this itself: only an existing goal admits a model
 /// declaration, so a session with no goal has no transition to make.
 ///
+/// The turn that carries the dispatch's tagged context is the generation's own
+/// first turn rather than a predecessor of one. Minting a separate turn for the
+/// statement would run the dispatched template a second time for one event, and
+/// scheduling that turn first would make the session act on the statement
+/// before the event it was dispatched for ever arrived, because a turn's
+/// acceptance position is also its execution order.
+///
 /// Every branch here is a fail-closed assertion rather than a recoverable
 /// outcome. The caller has just created this session inside this transaction,
 /// so a rejected commission, an absent session, or an occupied identity is a
 /// contradiction in durable state, not a race a dispatch could lose.
-pub(crate) async fn insert_fresh_commissioned_goal<SelectDefinition>(
+pub(crate) async fn insert_fresh_commissioned_goal(
     connection: &mut PgConnection,
     command: GoalUserCommand,
-    candidates: GoalTurnCandidates,
-    select_definition: SelectDefinition,
-) -> Result<(), GoalRepositoryError>
-where
-    SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-{
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+) -> Result<(), GoalRepositoryError> {
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
@@ -734,35 +738,18 @@ where
         return Err(GoalCorruption::Inconsistent("rejected dispatch goal commission").into());
     };
     lock_scheduler(connection, command.session()).await?;
-    let configuration =
-        match current_origin_configuration(connection, command.session(), select_definition).await?
-        {
-            CurrentOriginConfiguration::Selected(configuration) => configuration,
-            CurrentOriginConfiguration::UnknownAlias(_) => {
-                return Err(
-                    GoalCorruption::Inconsistent("dispatched goal turn model alias").into(),
-                );
-            }
-        };
-    let position = match next_goal_turn_acceptance_position(connection, command.session()).await? {
-        GoalTurnAcceptancePosition::Available(position) => position,
-        GoalTurnAcceptancePosition::Exhausted { .. } => {
-            return Err(GoalCorruption::Inconsistent("dispatched goal acceptance position").into());
-        }
-    };
     insert_command(connection, &command, &result).await?;
     insert_event(connection, command.session(), event).await?;
     let goal = load_goal_from_connection(connection, command.session())
         .await?
         .ok_or(GoalCorruption::Missing("dispatched goal"))?;
-    insert_goal_turn(
+    bind_goal_turn(
         connection,
         command.session(),
         goal.current().generation(),
         GoalTurnSource::UserEvent(event.ordinal()),
-        pursuit_input(&goal, event)?,
-        &configuration,
-        GoalTurnInsertion::new(position, candidates),
+        accepted_input,
+        turn,
     )
     .await
 }
