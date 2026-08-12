@@ -2618,6 +2618,7 @@ mod tests {
                 result_accepted_input: accepted_input,
                 result_turn: turn_id,
                 predecessor_origin: None,
+                non_accepted_predecessor: None,
                 accepted_command: command_id,
                 accepted_input,
                 accepted_session: session_id,

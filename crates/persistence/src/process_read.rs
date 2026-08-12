@@ -12,10 +12,10 @@ use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
     FrozenAliasDefinition, FrozenModelSelection, ImportedConversationId, ImportedSourceAttestation,
     ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
-    ModelSelectionRequest, ProviderModelIdentity, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision,
-    SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision, ToolAttemptId,
-    ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
+    ModelSelectionRequest, ProviderModelIdentity, ResolvedProviderTarget, RunnerGeneration,
+    RunnerId, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+    SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
+    ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
     TurnModelSettingsResolved, VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
@@ -450,6 +450,15 @@ pub enum ProcessTurnState {
         ended_attempt: TurnAttemptId,
         /// Ambiguous tool attempt awaiting recovery.
         recovery_attempt: ToolAttemptId,
+    },
+    /// The turn is parked on replacement of one exact lost runner placement.
+    ActiveAwaitingRunnerRecovery {
+        /// Runner whose durable loss owns this wait.
+        runner: RunnerId,
+        /// Positive placement revision against which loss was projected.
+        placement_revision: RunnerGeneration,
+        /// Physical tool attempt interrupted by loss, when one exists.
+        interrupted_tool_attempt: Option<ToolAttemptId>,
     },
     /// The turn terminalized as failed.
     Failed {
@@ -1729,7 +1738,7 @@ impl ProcessReadRepository {
                 transcript_approval.decision_kind AS transcript_decision_kind,
                 transcript_approval.decision_source AS transcript_decision_source,
                 transcript_approval.denial_reason AS transcript_denial_reason,
-                transcript_approval.owner_command_id AS transcript_user_command_id,
+                transcript_approval.user_command_id AS transcript_user_command_id,
                 transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
                 transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
                 transcript_approval.rationale AS transcript_decision_rationale
@@ -2438,6 +2447,9 @@ async fn load_next_transcript_turn(
             turn.active_tool_round_call_id,
             turn.approval_tool_request_id,
             turn.recovery_tool_attempt_id,
+            turn.runner_recovery_runner_id,
+            turn.runner_recovery_placement_revision,
+            turn.runner_recovery_tool_attempt_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
             turn.terminal_tool_attempt_id,
@@ -2992,6 +3004,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let active_tool_round_call: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
     let approval_tool_request: Option<Uuid> = row.try_get("approval_tool_request_id")?;
     let recovery_tool_attempt: Option<Uuid> = row.try_get("recovery_tool_attempt_id")?;
+    let runner_recovery_runner: Option<Uuid> = row.try_get("runner_recovery_runner_id")?;
+    let runner_recovery_revision: Option<Decimal> =
+        row.try_get("runner_recovery_placement_revision")?;
+    let runner_recovery_tool_attempt: Option<Uuid> =
+        row.try_get("runner_recovery_tool_attempt_id")?;
     let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
     let terminal_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
     let terminal_tool_attempt: Option<Uuid> = row.try_get("terminal_tool_attempt_id")?;
@@ -2999,6 +3016,15 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("terminal_model_call_disposition_kind")?;
     let terminal_call_provider_failure_cause: Option<String> =
         row.try_get("terminal_model_call_provider_failure_cause")?;
+    if active_phase.as_deref() != Some("awaiting_runner_recovery")
+        && (runner_recovery_runner.is_some()
+            || runner_recovery_revision.is_some()
+            || runner_recovery_tool_attempt.is_some())
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("runner recovery lifecycle payload").into(),
+        );
+    }
     if terminal_call_provider_failure_cause.is_some()
         && terminal_call_disposition.as_deref() != Some("known_failed")
     {
@@ -3030,6 +3056,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                 | "awaiting_tool_approval"
                 | "awaiting_child"
                 | "awaiting_tool_recovery"
+                | "awaiting_runner_recovery"
         )
     {
         return Err(ProcessReadCorruption::Unsupported {
@@ -3092,6 +3119,56 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     };
     let recovery_model_call_frontier =
         recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
+
+    if matches!(active_phase.as_deref(), Some("awaiting_runner_recovery")) {
+        let (Some(starting_frontier), Some(runner), Some(revision)) = (
+            starting_frontier,
+            runner_recovery_runner,
+            runner_recovery_revision,
+        ) else {
+            return Err(ProcessReadCorruption::Inconsistent("runner recovery wait shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || current_attempt.is_some()
+            || terminal_disposition.is_some()
+            || approval_tool_request.is_some()
+            || recovery_call.is_some()
+            || recovery_tool_attempt.is_some()
+            || child_wait_request.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+            || active_tool_round_call.is_some() != active_tool_round_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("runner recovery wait shape").into());
+        }
+        let latest_frontier = active_tool_round_frontier.unwrap_or(starting_frontier);
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::ActiveAwaitingRunnerRecovery {
+                        runner: RunnerId::from_uuid(runner),
+                        placement_revision: decode_runner_generation(
+                            revision,
+                            "runner recovery placement revision",
+                        )?,
+                        interrupted_tool_attempt: runner_recovery_tool_attempt
+                            .map(ToolAttemptId::from_uuid),
+                    },
+                },
+                start_lineage,
+                latest_frontier: Some(ContextFrontierId::from_uuid(latest_frontier)),
+            },
+            logical_terminal,
+        );
+    }
 
     if matches!(active_phase.as_deref(), Some("awaiting_child")) {
         let (
@@ -3819,7 +3896,7 @@ async fn open_transcript_entry_cursor(
             transcript_approval.decision_kind AS transcript_decision_kind,
             transcript_approval.decision_source AS transcript_decision_source,
             transcript_approval.denial_reason AS transcript_denial_reason,
-            transcript_approval.owner_command_id AS transcript_user_command_id,
+            transcript_approval.user_command_id AS transcript_user_command_id,
             transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
             transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
             transcript_approval.rationale AS transcript_decision_rationale
@@ -4877,6 +4954,14 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
     } else {
         Ok(value)
     }
+}
+
+fn decode_runner_generation(
+    value: Decimal,
+    field: &'static str,
+) -> Result<RunnerGeneration, ProcessReadCorruption> {
+    RunnerGeneration::try_from_u64(decode_nonnegative(value, field)?)
+        .ok_or(ProcessReadCorruption::InvalidOrdinal(field))
 }
 
 #[cfg(test)]
