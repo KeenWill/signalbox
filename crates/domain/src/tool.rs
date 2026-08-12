@@ -902,7 +902,8 @@ pub enum ToolApprovalDecision {
     Approve,
     /// Execution is permanently prohibited for this request.
     Deny {
-        /// Optional bounded user explanation rendered to the model.
+        /// Optional bounded denial explanation rendered to the model; its
+        /// author — user or judge — follows from the decision source.
         reason: Option<ToolDenialReason>,
     },
 }
@@ -1808,12 +1809,8 @@ mod tests {
         );
     }
 
-    /// A pre-derivation delegate denial stored no reason; reconstitution must
-    /// keep rendering none rather than deriving one the durable decision
-    /// never carried, and must reject a stored reason the rationale cannot
-    /// derive.
-    #[test]
-    fn delegate_reconstitution_preserves_the_stored_denial_reason() {
+    /// One delegate denial whose recorded rationale is "scope exceeded".
+    fn denied_delegate_fixture() -> DelegateToolApproval {
         const SUBJECT_REQUEST_SEED: u128 = 60;
         const SUBJECT_SESSION_SEED: u128 = 1;
         const SUBJECT_TURN_SEED: u128 = 2;
@@ -1836,28 +1833,38 @@ mod tests {
         )
         .with_approval_posture(ToolApprovalPosture::Delegated)
         .into_request();
-        let approval = || {
-            DelegateToolApproval::try_new(
-                &request,
-                DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED)),
-                model_call_id(JUDGE_CALL_SEED),
-                DelegateApprovalRecommendation::Deny,
-                ToolDecisionRationale::try_new(String::from(JUDGE_RATIONALE))
-                    .expect("fixture rationale is admitted"),
-            )
-            .expect("delegated authority may deny")
-        };
+        DelegateToolApproval::try_new(
+            &request,
+            DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED)),
+            model_call_id(JUDGE_CALL_SEED),
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from(JUDGE_RATIONALE))
+                .expect("fixture rationale is admitted"),
+        )
+        .expect("delegated authority may deny")
+    }
 
-        let legacy = ToolApprovalResolutionReconstitutionInput::delegate(approval(), None)
-            .reconstitute()
-            .expect("a legacy reason-free denial reconstitutes");
+    /// A pre-derivation delegate denial stored no reason; reconstitution must
+    /// keep rendering none rather than deriving one the durable decision
+    /// never carried.
+    #[test]
+    fn delegate_reconstitution_preserves_the_stored_denial_reason() {
+        let legacy =
+            ToolApprovalResolutionReconstitutionInput::delegate(denied_delegate_fixture(), None)
+                .reconstitute()
+                .expect("a legacy reason-free denial reconstitutes");
         assert_eq!(
             legacy.decision(),
             &ToolApprovalDecision::Deny { reason: None }
         );
+    }
 
+    /// A stored delegate denial reason the recorded rationale cannot derive
+    /// is corruption, not a decision to restore.
+    #[test]
+    fn delegate_reconstitution_rejects_an_unrelated_stored_reason() {
         let mismatched = ToolApprovalResolutionReconstitutionInput::delegate(
-            approval(),
+            denied_delegate_fixture(),
             Some(
                 ToolDenialReason::try_new(String::from("unrelated stored text"))
                     .expect("fixture reason is admitted"),

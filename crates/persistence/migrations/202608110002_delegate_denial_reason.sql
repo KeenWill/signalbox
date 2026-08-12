@@ -8,7 +8,13 @@
 
 -- The deny branch no longer enumerates decision sources: the source-shape
 -- constraint already restricts automatic sources to approvals, so every
--- admitted denial simply carries an absent or checked reason.
+-- admitted denial simply carries an absent or checked reason. The character
+-- checks name exact scalar sets rather than POSIX classes because the domain
+-- validator's sets are byte-precise while `[[:cntrl:]]`/`[[:space:]]` follow
+-- the database collation: a reason with an admitted Unicode separator at an
+-- edge (for example EM SPACE) must insert, not roll back the completing
+-- judge call. Control means C0, DEL, and C1; edge whitespace means exactly
+-- the six POSIX ASCII bytes.
 
 ALTER TABLE tool_approval_decision
     -- Supersedes tool_approval_decision_shape from
@@ -23,9 +29,10 @@ ALTER TABLE tool_approval_decision
                     denial_reason IS NULL
                     OR (
                         octet_length(denial_reason) BETWEEN 1 AND 1024
-                        AND denial_reason !~ '[[:cntrl:]]'
-                        AND denial_reason !~ '^[[:space:]]'
-                        AND denial_reason !~ '[[:space:]]$'
+                        AND denial_reason !~ e'[\\x01-\\x1f\\x7f]'
+                        AND denial_reason !~ e'[\\u0080-\\u009f]'
+                        AND denial_reason !~ e'^[ \\t\\n\\x0b\\x0c\\r]'
+                        AND denial_reason !~ e'[ \\t\\n\\x0b\\x0c\\r]$'
                     )
                 )
             )
