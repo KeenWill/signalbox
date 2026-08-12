@@ -1316,6 +1316,7 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("blob_read_tool_construction_failed"),
             );
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1328,6 +1329,8 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("blob_read_tool_catalog_conflict"),
             );
+            drop(blob_executor);
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1340,12 +1343,12 @@ async fn run_hub(
                     RuntimePhase::Configuration,
                     SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
                 );
+                drop(blob_executor);
+                drop(blob_store_registry);
                 let _ = database.close().await;
                 return Err(failure);
             }
         };
-    tool_executor = tool_executor.with_blob_executor(blob_executor);
-
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
@@ -1353,6 +1356,8 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
+            drop(blob_executor);
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1366,6 +1371,8 @@ async fn run_hub(
             RuntimePhase::StartupScan,
             SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
         );
+        drop(blob_executor);
+        drop(blob_store_registry);
         let _ = database.close().await;
         return Err(failure);
     }
@@ -1376,6 +1383,8 @@ async fn run_hub(
                 RuntimePhase::SocketBinding,
                 SanitizedStartupCause::Socket(&error),
             );
+            drop(blob_executor);
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1388,6 +1397,8 @@ async fn run_hub(
                 SanitizedStartupCause::Socket(&error),
             );
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1421,6 +1432,8 @@ async fn run_hub(
         );
         let _ = listener.cleanup();
         let _ = runner_listener.cleanup();
+        drop(blob_executor);
+        drop(blob_store_registry);
         let _ = database.close().await;
         return Err(failure);
     }
@@ -1445,12 +1458,15 @@ async fn run_hub(
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
+                drop(blob_executor);
+                drop(blob_store_registry);
                 let _ = database.close().await;
                 return Err(failure);
             }
         },
         None => None,
     };
+    tool_executor = tool_executor.with_blob_executor(blob_executor);
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
@@ -1466,7 +1482,7 @@ async fn run_hub(
         None => process_runtime,
     };
     let process_runtime = match blob_store_registry {
-        Some(registry) => process_runtime.with_blob_store_registry(registry),
+        Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
@@ -1634,12 +1650,19 @@ async fn run_hub(
     // immediately and the old fenced sessions must be terminated before
     // returning control to process exit.
     if outcome == ShutdownOutcome::GuardLost {
+        if let Some(registry) = blob_store_registry.as_ref() {
+            registry.disarm_staging_sweep();
+        }
+        drop(blob_store_registry);
         let _ = database.close().await;
-    } else if should_close_pool(&Ok(outcome))
-        && let Err(error) = database.close().await
-    {
-        report_database_close_failure(&error);
-        outcome = database_close_failure_outcome(outcome);
+    } else {
+        drop(blob_store_registry);
+        if should_close_pool(&Ok(outcome))
+            && let Err(error) = database.close().await
+        {
+            report_database_close_failure(&error);
+            outcome = database_close_failure_outcome(outcome);
+        }
     }
     Ok(outcome)
 }

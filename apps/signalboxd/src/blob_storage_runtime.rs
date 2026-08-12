@@ -11,7 +11,7 @@ use std::{
 use signalbox_blob_store::{BlobStore, BlobStoreError, BlobStoreName};
 use signalbox_blob_store_filesystem::{
     FilesystemBlobStaging, FilesystemBlobStore, FilesystemBlobStoreConstructionError,
-    FilesystemNamespaceIdentity, NamespaceBindingState,
+    FilesystemNamespaceIdentity, NamespaceBindingState, OpenedFilesystemBlobRoot,
 };
 use signalbox_blob_store_s3::{S3BlobStore, S3BlobStoreConstructionError, S3NamespaceBindingState};
 use signalbox_persistence::blob::{
@@ -79,56 +79,24 @@ impl BlobStoreRegistry {
         validate_recorded_bindings(configuration, &recorded)?;
         validate_s3_locators(configuration)?;
 
-        let staging = if require_local_backing {
-            FilesystemBlobStaging::try_new(configuration.staging_directory().to_path_buf())?
-        } else {
-            #[cfg(feature = "test-support")]
-            {
-                FilesystemBlobStaging::try_new_without_locality_check_for_test(
-                    configuration.staging_directory().to_path_buf(),
-                )?
-            }
-            #[cfg(not(feature = "test-support"))]
-            unreachable!("production initialization always requires local backing")
-        };
-        let mut identities = Vec::new();
-        let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
-        let mut namespace_ids = BTreeMap::new();
+        let staging_root = open_blob_root(
+            configuration.staging_directory().to_path_buf(),
+            require_local_backing,
+        )?;
+        let mut opened_stores = Vec::new();
+        let mut s3_stores = Vec::new();
         let mut bindings_to_register = BTreeSet::new();
-        let s3_deadline = tokio::time::Instant::now() + S3_STARTUP_DEADLINE;
         for (name, configured) in configuration.stores() {
             let recorded_binding = recorded.iter().any(|binding| binding.store() == name);
             let routed = is_routed(configuration, name);
-            let store: Arc<dyn BlobStore> = if let Some(root) = configured.filesystem_root() {
+            if let Some(root) = configured.filesystem_root() {
                 let state = if recorded_binding {
                     NamespaceBindingState::Recorded
                 } else {
                     NamespaceBindingState::New
                 };
-                let (store, identity) = if require_local_backing {
-                    FilesystemBlobStore::try_new_bound(
-                        root.to_path_buf(),
-                        configured.namespace_id(),
-                        state,
-                    )?
-                } else {
-                    #[cfg(feature = "test-support")]
-                    {
-                        FilesystemBlobStore::try_new_bound_for_conformance(
-                            root.to_path_buf(),
-                            configured.namespace_id(),
-                            state,
-                        )?
-                    }
-                    #[cfg(not(feature = "test-support"))]
-                    unreachable!("production initialization always requires local backing")
-                };
-                identities.push(OpenedNamespace {
-                    canonical_path: identity.canonical_path().to_path_buf(),
-                    device_inode: identity.device_inode(),
-                });
-                bindings_to_register.insert(name.clone());
-                Arc::new(store)
+                let opened = open_blob_root(root.to_path_buf(), require_local_backing)?;
+                opened_stores.push((name.clone(), configured.namespace_id(), state, opened));
             } else {
                 let (endpoint, region, bucket, credentials_file) = configured
                     .s3()
@@ -140,29 +108,53 @@ impl BlobStoreRegistry {
                     credentials_file.to_path_buf(),
                     format!("{}\n", configured.namespace_id()),
                 )?;
-                if routed {
-                    let state = if recorded_binding {
-                        S3NamespaceBindingState::Recorded
-                    } else {
-                        S3NamespaceBindingState::New
-                    };
-                    tokio::time::timeout_at(s3_deadline, store.prepare_namespace(state))
-                        .await
-                        .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
-                    tokio::time::timeout_at(s3_deadline, store.verify_multipart_lifecycle())
-                        .await
-                        .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
-                }
-                if routed || recorded_binding {
-                    bindings_to_register.insert(name.clone());
-                }
-                Arc::new(store)
-            };
-            stores.insert(name.clone(), store);
-            namespace_ids.insert(name.clone(), configured.namespace_id());
+                s3_stores.push((
+                    name.clone(),
+                    configured.namespace_id(),
+                    recorded_binding,
+                    routed,
+                    store,
+                ));
+            }
         }
-        let staging_identity = OpenedNamespace::from(staging.identity());
+        let staging_identity = OpenedNamespace::from(staging_root.identity());
+        let identities = opened_stores
+            .iter()
+            .map(|(_, _, _, opened)| OpenedNamespace::from(opened.identity()))
+            .collect::<Vec<_>>();
         validate_physical_namespaces(&staging_identity, &identities)?;
+
+        let staging = FilesystemBlobStaging::from_opened(staging_root)?;
+        let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
+        let mut namespace_ids = BTreeMap::new();
+        for (name, namespace_id, state, opened) in opened_stores {
+            let (store, _) = FilesystemBlobStore::from_opened_bound(opened, namespace_id, state)?;
+            bindings_to_register.insert(name.clone());
+            namespace_ids.insert(name.clone(), namespace_id);
+            stores.insert(name, Arc::new(store));
+        }
+
+        let s3_deadline = tokio::time::Instant::now() + S3_STARTUP_DEADLINE;
+        for (name, namespace_id, recorded_binding, routed, store) in s3_stores {
+            if routed {
+                let state = if recorded_binding {
+                    S3NamespaceBindingState::Recorded
+                } else {
+                    S3NamespaceBindingState::New
+                };
+                tokio::time::timeout_at(s3_deadline, store.prepare_namespace(state))
+                    .await
+                    .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
+                tokio::time::timeout_at(s3_deadline, store.verify_multipart_lifecycle())
+                    .await
+                    .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
+            }
+            if routed || recorded_binding {
+                bindings_to_register.insert(name.clone());
+            }
+            namespace_ids.insert(name.clone(), namespace_id);
+            stores.insert(name, Arc::new(store));
+        }
 
         for (name, configured) in configuration.stores() {
             if !bindings_to_register.contains(name) {
@@ -219,6 +211,26 @@ impl BlobStoreRegistry {
     pub const fn staging(&self) -> &FilesystemBlobStaging {
         &self.staging
     }
+
+    /// Prevents staging cleanup after the database singleton guard is lost.
+    pub fn disarm_staging_sweep(&self) {
+        self.staging.disarm_sweep_on_drop();
+    }
+}
+
+fn open_blob_root(
+    root: PathBuf,
+    require_local_backing: bool,
+) -> Result<OpenedFilesystemBlobRoot, FilesystemBlobStoreConstructionError> {
+    if require_local_backing {
+        return OpenedFilesystemBlobRoot::open(root);
+    }
+    #[cfg(feature = "test-support")]
+    {
+        OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)
+    }
+    #[cfg(not(feature = "test-support"))]
+    unreachable!("production initialization always requires local backing")
 }
 
 fn is_routed(configuration: &BlobStorageConfiguration, name: &BlobStoreName) -> bool {
@@ -251,6 +263,7 @@ fn validate_s3_locators(
 struct OpenedNamespace {
     canonical_path: PathBuf,
     device_inode: (u64, u64),
+    physical_path: PathBuf,
 }
 
 impl From<&FilesystemNamespaceIdentity> for OpenedNamespace {
@@ -258,6 +271,7 @@ impl From<&FilesystemNamespaceIdentity> for OpenedNamespace {
         Self {
             canonical_path: identity.canonical_path().to_path_buf(),
             device_inode: identity.device_inode(),
+            physical_path: identity.physical_path().to_path_buf(),
         }
     }
 }
@@ -283,6 +297,7 @@ fn validate_physical_namespaces(
     for (index, left) in stores.iter().enumerate() {
         if paths_overlap(&staging.canonical_path, &left.canonical_path)
             || staging.device_inode == left.device_inode
+            || physical_paths_overlap(staging, left)
         {
             return Err(BlobStoreRegistryError::StagingStoreOverlap);
         }
@@ -295,9 +310,17 @@ fn validate_physical_namespaces(
             if paths_overlap(&left.canonical_path, &right.canonical_path) {
                 return Err(BlobStoreRegistryError::NestedStoreRoots);
             }
+            if physical_paths_overlap(left, right) {
+                return Err(BlobStoreRegistryError::NestedStoreRoots);
+            }
         }
     }
     Ok(())
+}
+
+fn physical_paths_overlap(left: &OpenedNamespace, right: &OpenedNamespace) -> bool {
+    left.device_inode.0 == right.device_inode.0
+        && paths_overlap(&left.physical_path, &right.physical_path)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -482,6 +505,20 @@ generated_artifact = "primary"
         OpenedNamespace {
             canonical_path: path.into(),
             device_inode: (device, inode),
+            physical_path: path.into(),
+        }
+    }
+
+    fn mounted_namespace(
+        path: &str,
+        device: u64,
+        inode: u64,
+        physical_path: &str,
+    ) -> OpenedNamespace {
+        OpenedNamespace {
+            canonical_path: path.into(),
+            device_inode: (device, inode),
+            physical_path: physical_path.into(),
         }
     }
 
@@ -534,6 +571,17 @@ generated_artifact = "primary"
             error,
             BlobStoreRegistryError::PhysicalNamespaceAlias
         ));
+    }
+
+    #[test]
+    fn bind_mounted_descendant_fails_before_namespace_preparation() {
+        let staging = mounted_namespace("/staging", 1, 8, "/store/.publish-v1");
+        let store = mounted_namespace("/store", 1, 4, "/store");
+
+        let error = validate_physical_namespaces(&staging, &[store])
+            .expect_err("a bind-mounted descendant overlaps the store namespace");
+
+        assert!(matches!(error, BlobStoreRegistryError::StagingStoreOverlap));
     }
 
     #[test]
