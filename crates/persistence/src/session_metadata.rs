@@ -276,6 +276,7 @@ impl SessionMetadataRepository {
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -629,6 +630,7 @@ async fn existing_or_conflicting(
         | CommandKind::ReplaceSessionDefaults
         | CommandKind::SubmitInput
         | CommandKind::DecideToolRequest
+        | CommandKind::OverrideDeniedToolRequest
         | CommandKind::ReviewWorkflow
         | CommandKind::ReviewOrchestration
         | CommandKind::CompactSession

@@ -119,6 +119,7 @@ impl SessionPlacementRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -166,6 +167,7 @@ impl SessionPlacementRepository {
                     | CommandKind::ReplaceSessionMetadata
                     | CommandKind::SubmitInput
                     | CommandKind::DecideToolRequest
+                    | CommandKind::OverrideDeniedToolRequest
                     | CommandKind::ReviewWorkflow
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession

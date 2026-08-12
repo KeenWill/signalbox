@@ -8,9 +8,10 @@ use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
-    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    InProcessToolDispatchPermit, OperatorFailureClass, OverrideDeniedToolRequestTransaction,
+    PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
+    ToolExecutionTransaction,
 };
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
@@ -18,12 +19,13 @@ use signalbox_domain::{
     ChildWait, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, DelegationWait, EndedToolAttempt,
     FailedModelCallTurn, FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence,
-    ModelCallId, NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId,
-    SessionId, ToolApprovalPosture, ToolArgumentsKind, ToolAttemptCrashOutcome,
-    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation, ToolBatch,
-    ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
-    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
+    ModelCallId, NormalizedToolArguments, OverrideDeniedToolRequest, PreparedDecideToolRequest,
+    PreparedOverrideDeniedToolRequest, SemanticTranscriptEntryId, SessionId, ToolApprovalPosture,
+    ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
+    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultContent, ToolResultText,
+    ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -621,6 +623,37 @@ where
                 result => return result,
             }
         }
+    }
+}
+
+/// Application service for one durable delegate-denial override command.
+pub struct OverrideDeniedToolRequestService<Transaction> {
+    transaction: Transaction,
+}
+
+impl<Transaction> OverrideDeniedToolRequestService<Transaction> {
+    /// Wraps the authoritative transaction.
+    pub const fn new(transaction: Transaction) -> Self {
+        Self { transaction }
+    }
+
+    /// Returns the owned transaction role.
+    pub fn into_transaction(self) -> Transaction {
+        self.transaction
+    }
+}
+
+impl<Transaction> OverrideDeniedToolRequestService<Transaction>
+where
+    Transaction: OverrideDeniedToolRequestTransaction,
+{
+    /// Applies one override command; the transaction mints no fresh
+    /// identities, so no collision retry exists to run.
+    pub async fn execute(
+        &mut self,
+        command: OverrideDeniedToolRequest,
+    ) -> Result<PreparedOverrideDeniedToolRequest, Transaction::Error> {
+        self.transaction.override_denied(command).await
     }
 }
 

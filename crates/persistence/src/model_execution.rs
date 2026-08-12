@@ -564,12 +564,15 @@ impl PostgresModelCallRepository {
                         .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
+                        let armed_user_overrides =
+                            load_armed_user_overrides(&mut transaction, session).await?;
                         Ok((
                             false,
                             PrepareInitialModelCallOutcome::Ready {
                                 request: Box::new(request),
                                 credential_reference,
                                 dangerous_tool_auto_approval,
+                                armed_user_overrides,
                                 system_prompt,
                                 tool_entries,
                             },
@@ -4758,6 +4761,69 @@ async fn load_call_credential_reference(
     Ok(ModelCallCredentialReference::new(reference))
 }
 
+/// Loads the session's armed, not-yet-consumed user overrides of delegate
+/// denials, frozen for the prepared call in the same transaction as the
+/// dangerous blanket posture.
+///
+/// An override is consumed when a `tool_approval_decision` row names it, so
+/// the anti-join is the one-shot boundary. Ordering by denied-request
+/// identity keeps matching deterministic when several armed overrides name
+/// the same re-proposed command.
+async fn load_armed_user_overrides(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Box<[signalbox_domain::ArmedUserOverride]>, ModelCallRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT armed.command_id, armed.denied_request_id, armed.judge_model_call_id,
+                request.tool_name, request.arguments_kind, request.arguments_text
+           FROM tool_approval_user_override AS armed
+           JOIN tool_request AS request
+             ON request.request_id = armed.denied_request_id
+          WHERE armed.session_id = $1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM tool_approval_decision AS consumed
+                 WHERE consumed.override_denied_request_id = armed.denied_request_id
+            )
+          ORDER BY armed.denied_request_id",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let command: Uuid = row.try_get("command_id")?;
+            let denied_request: Uuid = row.try_get("denied_request_id")?;
+            let judge_call: Uuid = row.try_get("judge_model_call_id")?;
+            let tool = signalbox_domain::ToolName::try_new(row.try_get("tool_name")?)
+                .map_err(|_| ModelCallCorruption::Inconsistent("armed override tool name"))?;
+            let arguments_kind = match row.try_get::<String, _>("arguments_kind")?.as_str() {
+                "json" => signalbox_domain::ToolArgumentsKind::Json,
+                "undecodable" => signalbox_domain::ToolArgumentsKind::Undecodable,
+                _ => {
+                    return Err(
+                        ModelCallCorruption::Inconsistent("armed override arguments kind").into(),
+                    );
+                }
+            };
+            let arguments = signalbox_domain::NormalizedToolArguments::try_from_stored(
+                arguments_kind,
+                row.try_get("arguments_text")?,
+            )
+            .map_err(|_| ModelCallCorruption::Inconsistent("armed override arguments"))?;
+            Ok(signalbox_domain::ArmedUserOverride::new(
+                durable_command_id_from_uuid(command)
+                    .map_err(|_| ModelCallCorruption::Inconsistent("armed override command"))?,
+                session,
+                signalbox_domain::ToolRequestId::from_uuid(denied_request),
+                ModelCallId::from_uuid(judge_call),
+                tool,
+                arguments,
+            ))
+        })
+        .collect::<Result<Box<[_]>, ModelCallRepositoryError>>()
+}
+
 /// Loads the optional session system prompt from the exact immutable defaults
 /// epoch the calling turn froze at origin acceptance.
 ///
@@ -5472,18 +5538,44 @@ async fn persist_tool_round(
     for approval in round.automatic_approvals() {
         let (decision_kind, denial_reason) = encode_tool_approval(approval.decision());
         let source = encode_tool_decision_source(approval.source())?;
+        let override_denied_request = match (approval.source(), approval.decider()) {
+            (
+                ToolDecisionSource::UserOverride,
+                Some(signalbox_domain::ToolApprovalDecider::UserOverride {
+                    denied_request, ..
+                }),
+            ) => Some(tool_request_id_to_uuid(*denied_request)),
+            (ToolDecisionSource::UserOverride, _) => {
+                return Err(
+                    ModelCallCorruption::Inconsistent("user-override decision provenance").into(),
+                );
+            }
+            _ => None,
+        };
         sqlx::query(
             "INSERT INTO tool_approval_decision
                 (request_id, decision_kind, decision_source, denial_reason,
-                 user_command_id)
-             VALUES ($1, $2, $3, $4, NULL)",
+                 user_command_id, override_denied_request_id)
+             VALUES ($1, $2, $3, $4, NULL, $5)",
         )
         .bind(tool_request_id_to_uuid(approval.request()))
         .bind(decision_kind)
         .bind(source)
         .bind(denial_reason)
+        .bind(override_denied_request)
         .execute(&mut *connection)
         .await?;
+        if approval.source() == ToolDecisionSource::UserOverride {
+            outbox::append(
+                connection,
+                OutboxEvent::ToolApprovalDecided {
+                    session: round.session(),
+                    turn: round.turn(),
+                    request: approval.request(),
+                },
+            )
+            .await?;
+        }
     }
     insert_snapshot(connection, round.yielded_snapshot()).await?;
 
@@ -5812,6 +5904,7 @@ fn encode_tool_decision_source(
         ToolDecisionSource::UserCommand => ToolApprovalDecisionSourceStorageKind::UserCommand,
         ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
         ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+        ToolDecisionSource::UserOverride => ToolApprovalDecisionSourceStorageKind::UserOverride,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             return Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",

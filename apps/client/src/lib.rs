@@ -337,6 +337,9 @@ fn delegation_rejection_matches(
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
@@ -443,6 +446,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportBegun { .. }
         | ServerMessage::ConversationImportAppended { .. }
@@ -541,6 +545,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportAborted {}
         | ServerMessage::ImportedConversationStart { .. }

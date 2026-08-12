@@ -17,9 +17,9 @@ use std::{
 const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
-    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
-    AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
-    ContextFrontierProjection, ContextFrontierProjectionFailure,
+    AcceptedInputId, AmbiguousModelCallTurnIdentities, ArmedUserOverride, AssistantResponsePart,
+    AssistantText, AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange,
+    ContextFrontierId, ContextFrontierProjection, ContextFrontierProjectionFailure,
     CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DelegationContent,
     DelegationMessageId, DelegationOutcome, DelegationWaitMode, DirectModelSelection,
     FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
@@ -651,6 +651,9 @@ pub enum PrepareModelCallOutcome {
         credential_reference: ModelCallCredentialReference,
         /// Frozen dangerous blanket posture for initial request decisions.
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        /// Armed, not-yet-consumed user overrides of delegate denials, frozen
+        /// for this call in the same transaction as the blanket posture.
+        armed_user_overrides: Box<[ArmedUserOverride]>,
         /// Exact optional session system prompt on the turn's frozen epoch.
         system_prompt: Option<SessionSystemPrompt>,
         /// Exact durable authority for every tool-related frontier entry.
@@ -1516,6 +1519,7 @@ where
                     request,
                     credential_reference,
                     dangerous_tool_auto_approval,
+                    armed_user_overrides,
                     system_prompt,
                     tool_entries,
                 }) => {
@@ -1523,6 +1527,7 @@ where
                         request,
                         credential_reference,
                         dangerous_tool_auto_approval,
+                        armed_user_overrides,
                         system_prompt,
                         tool_entries,
                     );
@@ -1549,6 +1554,7 @@ where
             prepared,
             credential_reference,
             dangerous_tool_auto_approval,
+            armed_user_overrides,
             system_prompt,
             tool_entries,
         ) = prepared;
@@ -1673,6 +1679,7 @@ where
             observation.observation(),
             dangerous_tool_auto_approval,
             &advertised_tools,
+            &armed_user_overrides,
         );
         self.commit_terminal_observation(session, observation, tool_approvals)
             .await
@@ -1900,15 +1907,27 @@ where
         ModelCallTerminalIdentityCandidates::Exact(exact)
     }
 
+    /// Selects one initial approval per proposal, consuming armed user
+    /// overrides.
+    ///
+    /// An armed override substitutes for the judge only where the judge would
+    /// otherwise decide: the base selection must be `Delegated`, and the
+    /// proposal must re-propose the exact denied command. Each armed override
+    /// is consumed at most once per response — a second identical proposal
+    /// parks for the judge again — mirroring the one-shot uniqueness the
+    /// decision table enforces durably.
     fn tool_approvals(
         &self,
         observation: &ModelCallTerminalObservation,
         posture: DangerousToolAutoApproval,
         advertised_tools: &[ToolDefinition],
+        armed_user_overrides: &[ArmedUserOverride],
     ) -> Box<[InitialToolApproval]> {
         let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
             return Box::new([]);
         };
+        let mut remaining_overrides: Vec<&ArmedUserOverride> =
+            armed_user_overrides.iter().collect();
         response
             .parts()
             .iter()
@@ -1918,7 +1937,23 @@ where
                     let definition = advertised_tools
                         .iter()
                         .find(|definition| definition.name() == proposal.name());
-                    Some(initial_tool_approval(posture, definition))
+                    let base = initial_tool_approval(posture, definition);
+                    if base != InitialToolApproval::Delegated {
+                        return Some(base);
+                    }
+                    let matched = remaining_overrides
+                        .iter()
+                        .position(|armed| armed.matches_proposal(proposal));
+                    Some(match matched {
+                        Some(index) => {
+                            let armed = remaining_overrides.remove(index);
+                            InitialToolApproval::UserOverride {
+                                command: armed.command(),
+                                denied_request: armed.denied_request(),
+                            }
+                        }
+                        None => base,
+                    })
                 }
             })
             .collect()
@@ -2446,6 +2481,7 @@ mod tests {
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            armed_user_overrides: Box::new([]),
             system_prompt: None,
             tool_entries: Box::new([]),
         }
@@ -2461,6 +2497,7 @@ mod tests {
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            armed_user_overrides: Box::new([]),
             system_prompt: None,
             tool_entries,
         }
@@ -3690,6 +3727,161 @@ mod tests {
         );
     }
 
+    /// The seeds of the canonical armed-override fixture; arbitrary — they
+    /// only need to exist as one recorded arming.
+    const ARMED_COMMAND_SEED: u128 = 81;
+    const ARMED_DENIED_REQUEST_SEED: u128 = 82;
+    const ARMED_JUDGE_CALL_SEED: u128 = 83;
+
+    /// One armed override of a denied `guarded` proposal with `{}` arguments
+    /// in the canonical fixture session.
+    fn armed_guarded_override() -> signalbox_domain::ArmedUserOverride {
+        signalbox_domain::ArmedUserOverride::new(
+            identity(
+                ARMED_COMMAND_SEED,
+                signalbox_domain::DurableCommandId::from_uuid,
+            ),
+            identity(1, SessionId::from_uuid),
+            identity(ARMED_DENIED_REQUEST_SEED, ToolRequestId::from_uuid),
+            identity(ARMED_JUDGE_CALL_SEED, ModelCallId::from_uuid),
+            signalbox_domain::ToolName::try_new(String::from("guarded"))
+                .expect("fixture tool name is valid"),
+            signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid"),
+        )
+    }
+
+    /// One `guarded` proposal with the given provider argument text.
+    fn guarded_proposal(arguments: &str) -> AssistantResponsePart {
+        AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+            signalbox_domain::ToolName::try_new(String::from("guarded"))
+                .expect("fixture tool name is valid"),
+            signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from(
+                arguments,
+            ))
+            .expect("fixture arguments are valid"),
+        ))
+    }
+
+    /// One completed tool response containing exactly the supplied parts.
+    fn completed_with_tools(parts: Vec<AssistantResponsePart>) -> ModelCallTerminalObservation {
+        ModelCallTerminalObservation::CompletedWithTools {
+            response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
+                .expect("fixture response contains tools"),
+        }
+    }
+
+    /// Selects initial approvals for the parts through a service advertising
+    /// one `guarded` tool frozen at the given posture.
+    #[track_caller]
+    fn guarded_tool_approvals(
+        posture: signalbox_domain::ToolApprovalPosture,
+        parts: Vec<AssistantResponsePart>,
+        armed: &[signalbox_domain::ArmedUserOverride],
+    ) -> Box<[InitialToolApproval]> {
+        let schema =
+            crate::ToolInputSchema::try_new(String::from(r#"{"properties":{},"type":"object"}"#))
+                .expect("fixture schema is valid");
+        let definition = crate::ToolDefinition::new(
+            signalbox_domain::ToolName::try_new(String::from("guarded"))
+                .expect("fixture name is valid"),
+            String::from("Awaits its frozen approval posture."),
+            schema,
+            signalbox_domain::ToolPermissionDefault::Confirm,
+            signalbox_domain::ToolEffectClass::ExternalEffect,
+        )
+        .with_approval_posture(posture);
+        let catalog = crate::CompiledToolCatalog::try_new([crate::CompiledTool::new(
+            definition,
+            |_: &signalbox_domain::NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one tool is unambiguous");
+        let service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_tool_catalog(catalog);
+        let advertised_tools = service.catalog.definitions();
+        service.tool_approvals(
+            &completed_with_tools(parts),
+            DangerousToolAutoApproval::Disabled,
+            &advertised_tools,
+            armed,
+        )
+    }
+
+    /// S10 / INV-020: an armed override substitutes for the judge only on the
+    /// exact denied command — a proposal with other arguments still parks for
+    /// the judge — and the selected approval carries the arming command and
+    /// the overridden denial.
+    #[test]
+    fn s10_inv020_armed_override_substitutes_for_the_judge_on_the_exact_command() {
+        let armed = armed_guarded_override();
+        let approvals = guarded_tool_approvals(
+            signalbox_domain::ToolApprovalPosture::Delegated,
+            vec![
+                guarded_proposal("{}"),
+                guarded_proposal(r#"{"timezone":"UTC"}"#),
+            ],
+            std::slice::from_ref(&armed),
+        );
+
+        assert_eq!(
+            approvals.as_ref(),
+            [
+                InitialToolApproval::UserOverride {
+                    command: armed.command(),
+                    denied_request: armed.denied_request(),
+                },
+                InitialToolApproval::Delegated,
+            ]
+        );
+    }
+
+    /// S10 / INV-020: one armed override pre-approves at most one proposal
+    /// per response; a second identical proposal parks for the judge again.
+    #[test]
+    fn s10_inv020_armed_override_is_consumed_at_most_once_per_response() {
+        let armed = armed_guarded_override();
+        let approvals = guarded_tool_approvals(
+            signalbox_domain::ToolApprovalPosture::Delegated,
+            vec![guarded_proposal("{}"), guarded_proposal("{}")],
+            std::slice::from_ref(&armed),
+        );
+
+        assert_eq!(
+            approvals.as_ref(),
+            [
+                InitialToolApproval::UserOverride {
+                    command: armed.command(),
+                    denied_request: armed.denied_request(),
+                },
+                InitialToolApproval::Delegated,
+            ]
+        );
+    }
+
+    /// S10 / INV-020: an armed override substitutes only where the judge
+    /// would decide; a human-frozen selection is never overridden.
+    #[test]
+    fn s10_inv020_armed_override_never_bypasses_a_human_selection() {
+        let approvals = guarded_tool_approvals(
+            signalbox_domain::ToolApprovalPosture::Human,
+            vec![guarded_proposal("{}")],
+            &[armed_guarded_override()],
+        );
+
+        assert_eq!(approvals.as_ref(), [InitialToolApproval::Human]);
+    }
+
     /// S10 / INV-001 / INV-020: one identity is minted per ordered response
     /// part/request, approval stays pinned to the advertised catalog snapshot,
     /// mixed auto/confirm policy parks without a continuation attempt, and the
@@ -3732,6 +3924,7 @@ mod tests {
             &observation,
             DangerousToolAutoApproval::Disabled,
             &advertised_tools,
+            &[],
         );
         assert_eq!(
             approvals.as_ref(),
@@ -4677,6 +4870,7 @@ mod tests {
                     request: Box::new(request.clone()),
                     credential_reference: credential_reference(),
                     dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+                    armed_user_overrides: Box::new([]),
                     system_prompt: Some(prompt.clone()),
                     tool_entries: Box::new([]),
                 })]

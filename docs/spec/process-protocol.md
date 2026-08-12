@@ -268,6 +268,7 @@ that variant.
 | `reconcile_turn`                        | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay)                                                                                                           | Supply the user reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.                                                                                                                                                                                                                            |
 | `stop_turn`                             | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string), `model_settings` (settings overlay), `descendant_scope` (`parent_alone` or `parent_and_descendants`)                                          | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin and explicitly selecting delegated-child scope.                                                                                                                                                                                                          |
 | `decide_tool_request`                   | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                                                                                                                                              | Supply the user decision for one pending tool request through the canonical decision command.                                                                                                                                                                                                                                                                                   |
+| `override_denied_tool_request`          | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings)                                                                                                                                                                                                                                    | Arm one one-shot user override of the named delegate-denied tool request through the canonical override command.                                                                                                                                                                                                                                                                |
 | `read_session_defaults`                 | `session_id` (canonical UUID string), `defaults_version` (canonical decimal string or null)                                                                                                                                                                                                                   | Read one complete immutable defaults epoch: the current one for null, otherwise exactly the named one.                                                                                                                                                                                                                                                                          |
 | `list_conversations`                    | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                                                           | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                                                                                                                                                  |
 | `read_imported_conversation`            | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                                                            | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                                                                                                                                                  |
@@ -829,6 +830,20 @@ and a decision naming a later request while an earlier one is undecided records
 `tool_request_not_earliest_undecided` naming the exact request owed a decision
 first.
 
+`override_denied_tool_request` carries the canonical user override command for
+one delegate-denied tool request; its behavior is owned by
+[tool-loop](tool-loop.md#approval-policy-and-decision-sources). A claimed
+command identity reaches the durable replay boundary unconditionally (INV-012).
+Unlike `decide_tool_request`, the named session is part of the canonical payload
+— the armed override is a session-scoped standing fact consumed by a later
+proposal — so an other-session request is the transaction's recorded
+`tool_request_not_in_session` rejection, not a pre-command refusal. Every
+outcome is the recorded result of the canonical command: an applied override
+returns the `tool_denial_overridden` receipt; the recorded rejections are
+`tool_request_not_found`, `tool_request_not_in_session`,
+`tool_request_not_delegate_denied`, `tool_request_not_terminally_denied`, and
+`tool_denial_already_overridden`.
+
 Every implemented request in the tables above belongs to the single admitted
 vocabulary. The closed-enum decoder rejects any unknown request, response,
 event, or nested tagged member rather than interpreting it as an older shape.
@@ -873,9 +888,9 @@ Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted non-review mutation or conversation-import
 transport request — `create_session`, `create_session_from_template`,
 `create_session_from_imported_frontier`, `submit_input`, `reconcile_turn`,
-`stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, `compact_session`, `update_session_placement`,
-`import_conversation`, `begin_conversation_import`,
+`stop_turn`, `decide_tool_request`, `override_denied_tool_request`,
+`replace_session_metadata`, `replace_session_defaults`, `compact_session`,
+`update_session_placement`, `import_conversation`, `begin_conversation_import`,
 `append_conversation_import`, `commit_conversation_import`,
 `abort_conversation_import`, `spawn_session`, `await_session`,
 `send_session_message`, `replace_lost_runner`, `abandon_lost_runner`, or
@@ -900,6 +915,8 @@ transport request — `create_session`, `create_session_from_template`,
   `decision` object; the receipt mirrors the recorded applied result and
   intentionally echoes no session, because the session is not part of the
   canonical decision payload;
+- `tool_denial_overridden` with the overridden `tool_request_id`; the receipt
+  mirrors the recorded applied override result;
 - `session_metadata_replaced` with `session_id`, the complete `metadata`
   snapshot installed by that recorded handling, and its non-null `last_writer`;
 - `session_defaults_replaced` with `session_id`, the newly installed
@@ -1306,8 +1323,13 @@ A `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
-and `tool_request_not_in_session { session_id, tool_request_id }`. A delegation
-request admits `session_not_found`, `tool_request_not_found`, and
+and `tool_request_not_in_session { session_id, tool_request_id }`. An
+`override_denied_tool_request` rejection admits `tool_request_not_found` and
+`tool_request_not_in_session` with those same shapes, plus
+`tool_request_not_delegate_denied { tool_request_id }`,
+`tool_request_not_terminally_denied { tool_request_id }`, and
+`tool_denial_already_overridden { tool_request_id }`. A delegation request
+admits `session_not_found`, `tool_request_not_found`, and
 `tool_request_not_in_session` with those same shapes, plus
 `delegation_request_not_in_turn { session_id, turn_id, tool_request_id }` when
 the named request belongs to another turn, and
@@ -1449,20 +1471,21 @@ The protocol error-code set is:
 For `create_session`, `create_session_from_template`,
 `create_session_from_imported_frontier`, `submit_input`, `compact_session`,
 `reconcile_turn`, `stop_turn`, `decide_tool_request`,
-`replace_session_metadata`, `replace_session_defaults`, `replace_lost_runner`,
-`abandon_lost_runner`, `promote_pending_runner`, and every review mutation, a
-lost commit response maps to `commit_ambiguous`; the client retries the exact
-command identity and payload to discover the recorded outcome. A
-`reconcile_turn`, `decide_tool_request`, `replace_lost_runner`,
-`abandon_lost_runner`, or `promote_pending_runner` retry reaches that recorded
-outcome or resumes its exact claimed pending effect unconditionally, because a
-claimed command identity bypasses the precondition the first handling already
-satisfied. Replacement recovery reuses only its recorded workspace authorization
-and manifest receipt; it never starts another clone under the same claim. Once a
-review aggregate effect has been applied or recovered, any database failure
-during post-effect verification, typed-receipt insertion, or claim commit is
-likewise `commit_ambiguous`. A definitely pre-commit infrastructure failure maps
-to `unavailable`.
+`override_denied_tool_request`, `replace_session_metadata`,
+`replace_session_defaults`, `replace_lost_runner`, `abandon_lost_runner`,
+`promote_pending_runner`, and every review mutation, a lost commit response maps
+to `commit_ambiguous`; the client retries the exact command identity and payload
+to discover the recorded outcome. A `reconcile_turn`, `decide_tool_request`,
+`override_denied_tool_request`, `replace_lost_runner`, `abandon_lost_runner`, or
+`promote_pending_runner` retry reaches that recorded outcome or resumes its
+exact claimed pending effect unconditionally, because a claimed command identity
+bypasses the precondition the first handling already satisfied. Replacement
+recovery reuses only its recorded workspace authorization and manifest receipt;
+it never starts another clone under the same claim. Once a review aggregate
+effect has been applied or recovered, any database failure during post-effect
+verification, typed-receipt insertion, or claim commit is likewise
+`commit_ambiguous`. A definitely pre-commit infrastructure failure maps to
+`unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. Both the
@@ -2001,12 +2024,16 @@ and ignore the replacement activation.
 
 The `tool_approval_decided` decision is exactly `approve {}` or
 `deny { reason }`, where `reason` is required-nullable because delegate denials
-carry no user-authored reason. Its decider is exactly `user { command_id }` or
-`delegate { model_selection_id, model_call_id }`; `rationale` is
+carry no user-authored reason. Its decider is exactly `user { command_id }`,
+`delegate { model_selection_id, model_call_id }`, or
+`user_override { command_id, overridden_tool_request_id }`; `rationale` is
 required-nullable and present only for a delegate decision. A delegate denial
 has a null `reason`; its rationale is 1 through 4,096 UTF-8 bytes and contains
 no U+0000. A present user denial reason is nonempty, at most 1,024 UTF-8 bytes,
-contains no Unicode control scalar, and has no surrounding POSIX whitespace.
+contains no Unicode control scalar, and has no surrounding POSIX whitespace. A
+`user_override` decider is approve-only with a null `rationale`: it records the
+consumption of one armed override, naming the arming command and the overridden
+delegate-denied request.
 
 The protocol additionally admits
 `context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.

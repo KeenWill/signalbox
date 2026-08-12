@@ -307,12 +307,15 @@ pub use submit_input::{
     SubmitInputTurnOriginAppliedResult, SubmitInputTurnOriginReconstitutionInput,
 };
 pub use tool::{
-    AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
+    ArmedUserOverride, AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
-    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecider,
-    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
+    InitialToolApproval, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestAppliedResult, OverrideDeniedToolRequestConstructionError,
+    OverrideDeniedToolRequestPreparationError, OverrideDeniedToolRequestRejectedResult,
+    OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
+    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
     ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
     ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
     ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,

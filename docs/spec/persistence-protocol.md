@@ -122,8 +122,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-four files, `202607180001` through
-`202608100001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty-eight files, `202607180001` through
+`202608110003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -177,9 +177,9 @@ Implemented table families (across the forward-only migrations):
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `replace_session_metadata_command`,
   `submit_input_command`, `decide_tool_request_command`,
-  `replace_lost_runner_command`, `replace_lost_runner_result`,
-  `abandon_lost_runner_command`, `promote_pending_runner_command`, and
-  `goal_command`);
+  `override_denied_tool_request_command`, `replace_lost_runner_command`,
+  `replace_lost_runner_result`, `abandon_lost_runner_command`,
+  `promote_pending_runner_command`, and `goal_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`, plus the immutable
   `session_model_settings_changed` and `turn_model_settings_resolved` evidence
@@ -230,7 +230,15 @@ Implemented table families (across the forward-only migrations):
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly
-  one ordered lifecycle effect and outbox event atomically; and
+  one ordered lifecycle effect and outbox event atomically;
+- migration `202608110003` adds `tool_approval_user_override` — one armed,
+  append-only user override per delegate-denied request, linking the denied
+  request, its denying judge call, and the applied
+  `override_denied_tool_request_command` — and the UNIQUE
+  `tool_approval_decision.override_denied_request_id` consumption column; the
+  arming trigger requires a terminal delegate denial, and the authority trigger
+  admits a `user_override` approval only for a `delegated`-frozen request with
+  an armed override in its own session; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -535,25 +543,27 @@ identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `review_orchestration`, `compact_session`, `goal`,
-`update_session_placement`) and a kind-scoped `storage_version`. The gates above
-fix the current numbers: create-session records write version 7, imported-create
-records write version 5, replace-defaults records write version 4, and
-submit-input records write version 2; every other closed kind writes version 1.
-The four settings-bearing families require the migration's provider-default full
-settings or inherit-all overlay on every earlier supported version.
-Create-session records reconstitute version 1 with the disabled dangerous-tool
-posture, and versions 1 and 2 with no system prompt — a pre-version-three row
-carrying one fails closed in both the schema and every Rust reader. A
-pre-version-four create row carrying template provenance and a pre-version-six
-create row carrying path placement likewise fail closed. Imported-create version
-4 remains unsupported compatibility space for committed runner placement, so the
-model-settings writer skips it. Metadata, decision, review-workflow, compaction,
-and runner-recovery records use version 1. Each kind has one typed subordinate
-request record keyed by `command_id` that stores every caller-supplied semantic
-field in typed, `CHECK`-constrained columns. Every kind except runner
-replacement also stores the terminal `applied`/`rejected` result and typed
-result fields there. `replace_lost_runner_command` is the immutable request and
+`override_denied_tool_request`, `review_workflow`, `review_orchestration`,
+`compact_session`, `goal`, `update_session_placement`, `register_workspace`,
+`mint_git_remote`, `withdraw_git_remote`) and a kind-scoped `storage_version`.
+The gates above fix the current numbers: create-session records write version 7,
+imported-create records write version 5, replace-defaults records write version
+4, and submit-input records write version 2; every other closed kind writes
+version 1. The four settings-bearing families require the migration's
+provider-default full settings or inherit-all overlay on every earlier supported
+version. Create-session records reconstitute version 1 with the disabled
+dangerous-tool posture, and versions 1 and 2 with no system prompt — a
+pre-version-three row carrying one fails closed in both the schema and every
+Rust reader. A pre-version-four create row carrying template provenance and a
+pre-version-six create row carrying path placement likewise fail closed.
+Imported-create version 4 remains unsupported compatibility space for committed
+runner placement, so the model-settings writer skips it. Metadata, decision,
+review-workflow, compaction, and runner-recovery records use version 1. Each
+kind has one typed subordinate request record keyed by `command_id` that stores
+every caller-supplied semantic field in typed, `CHECK`-constrained columns.
+Every kind except runner replacement also stores the terminal
+`applied`/`rejected` result and typed result fields there.
+`replace_lost_runner_command` is the immutable request and
 provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
