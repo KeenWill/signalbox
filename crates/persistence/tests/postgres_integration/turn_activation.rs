@@ -2775,13 +2775,13 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     let forbidden_configuration = sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              acceptance_position, disposition_kind, origin_turn_id)
          VALUES
-            ($1, $2, $3, 'text', 'forbidden configuration',
+            ($1, $2, $3,
              'next_safe_point', $4, 1, 'use_session_default',
              NULL, NULL, NULL, 4, 'pending_steering', NULL)",
     )
@@ -2831,7 +2831,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x466))
     .execute(&mut *cross_wired)
@@ -2840,7 +2840,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2851,8 +2851,8 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
              result_unknown_alias_id, result_selected_defaults_version,
              result_last_position)
          VALUES
-            ($1, 'submit_input', 1, $2,
-             'user', NULL, NULL, 'text', 'cross-wired steering',
+            ($1, 'submit_input', 3, $2,
+             'user', NULL, NULL,
              'next_safe_point', $3, NULL, NULL, NULL, NULL, NULL,
              'applied', NULL, $2, $4, NULL, $3,
              NULL, NULL, NULL, NULL, NULL, NULL)",
@@ -2864,15 +2864,23 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     .execute(&mut *cross_wired)
     .await?;
     sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', 'cross-wired steering')",
+    )
+    .bind(Uuid::from_u128(0x466))
+    .execute(&mut *cross_wired)
+    .await?;
+    sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              acceptance_position, disposition_kind, origin_turn_id)
          VALUES
-            ($1, $2, $3, 'text', 'cross-wired steering',
+            ($1, $2, $3,
              'next_safe_point', $4, NULL, NULL, NULL, NULL, NULL,
              4, 'pending_steering', NULL)",
     )
@@ -2880,6 +2888,14 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     .bind(Uuid::from_u128(0x466))
     .bind(Uuid::from_u128(0x861))
     .bind(Uuid::from_u128(0xa61))
+    .execute(&mut *cross_wired)
+    .await?;
+    sqlx::query(
+        "INSERT INTO accepted_input_content_part
+            (accepted_input_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', 'cross-wired steering')",
+    )
+    .bind(Uuid::from_u128(0x966))
     .execute(&mut *cross_wired)
     .await?;
     let cross_wired_error = cross_wired

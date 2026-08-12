@@ -2662,14 +2662,20 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
         "the exhaustion receipt retains the maximum position"
     );
 
+    sqlx::query("ALTER TABLE accepted_input_content_part DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
     sqlx::query(
-        "UPDATE accepted_input
-            SET content_text = 'cross-wired'
-          WHERE accepting_command_id = $1",
+        "UPDATE accepted_input_content_part
+            SET text_value = 'cross-wired'
+          WHERE accepted_input_id = $1",
     )
-    .bind(Uuid::from_u128(0x332))
+    .bind(Uuid::from_u128(0x932))
     .execute(&pool)
     .await?;
+    sqlx::query("ALTER TABLE accepted_input_content_part ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
     let corrupt = repository
         .load(first.command_id())
         .await

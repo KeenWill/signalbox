@@ -230,7 +230,6 @@ const BULK_INGEST_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
-const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
 #[derive(Debug)]
@@ -7290,7 +7289,7 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             "type": "user",
             "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
             "turn_id": turn.into_uuid().hyphenated().to_string(),
-            "content": content,
+            "content": wire_user_content(content),
         }),
         ProcessTranscriptEntry::Assistant {
             entry_index,
@@ -11000,11 +10999,81 @@ where
 }
 
 fn admitted_user_content(content: UserInputContent) -> Result<UserContent, ()> {
-    let text = content.single_text().ok_or(())?;
-    if text.len() > MAX_SUBMITTED_INPUT_BYTES {
-        return Err(());
-    }
-    UserContent::try_text(text.to_owned()).map_err(|_| ())
+    let parts = content
+        .into_parts()
+        .into_iter()
+        .map(|part| match part {
+            signalbox_process_protocol::UserInputPart::Text { text } => {
+                signalbox_domain::UserContentPart::try_text(text).map_err(|_| ())
+            }
+            signalbox_process_protocol::UserInputPart::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => Ok(signalbox_domain::UserContentPart::Attachment {
+                digest: digest.into_digest(),
+                kind: match kind {
+                    signalbox_process_protocol::UserAttachmentKind::Image => {
+                        signalbox_domain::AttachmentKind::Image
+                    }
+                    signalbox_process_protocol::UserAttachmentKind::Document => {
+                        signalbox_domain::AttachmentKind::Document
+                    }
+                    signalbox_process_protocol::UserAttachmentKind::File => {
+                        signalbox_domain::AttachmentKind::File
+                    }
+                },
+                media_type: signalbox_domain::DeclaredMediaType::try_new(media_type)
+                    .map_err(|_| ())?,
+                display_filename: display_filename
+                    .map(signalbox_domain::AttachmentDisplayFilename::try_new)
+                    .transpose()
+                    .map_err(|_| ())?,
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    UserContent::try_parts(parts).map_err(|_| ())
+}
+
+pub(crate) fn wire_user_content(content: &UserContent) -> UserInputContent {
+    UserInputContent::from_parts(
+        content
+            .parts()
+            .iter()
+            .map(|part| match part {
+                signalbox_domain::UserContentPart::Text { value } => {
+                    signalbox_process_protocol::UserInputPart::Text {
+                        text: value.as_str().to_owned(),
+                    }
+                }
+                signalbox_domain::UserContentPart::Attachment {
+                    digest,
+                    kind,
+                    media_type,
+                    display_filename,
+                } => signalbox_process_protocol::UserInputPart::Attachment {
+                    digest: signalbox_process_protocol::CanonicalBlobDigest::from_digest(*digest),
+                    kind: match kind {
+                        signalbox_domain::AttachmentKind::Image => {
+                            signalbox_process_protocol::UserAttachmentKind::Image
+                        }
+                        signalbox_domain::AttachmentKind::Document => {
+                            signalbox_process_protocol::UserAttachmentKind::Document
+                        }
+                        signalbox_domain::AttachmentKind::File => {
+                            signalbox_process_protocol::UserAttachmentKind::File
+                        }
+                    },
+                    media_type: media_type.as_str().to_owned(),
+                    display_filename: display_filename
+                        .as_ref()
+                        .map(signalbox_domain::AttachmentDisplayFilename::as_str)
+                        .map(str::to_owned),
+                },
+            })
+            .collect(),
+    )
 }
 
 async fn handle_read_transcript<Writer>(
@@ -11659,7 +11728,9 @@ where
                 },
             )
             .await?;
-            write_content(writer, version, request_id, *entry_index, content).await
+            let content = serde_json::to_string(&wire_user_content(content))
+                .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+            write_content(writer, version, request_id, *entry_index, &content).await
         }
         ProcessTranscriptEntry::Assistant {
             entry_index,
@@ -12630,7 +12701,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             content,
         } => TurnState::Queued {
             accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-            content: UserInputContent::text(content.clone()),
+            content: wire_user_content(content),
         },
         ProcessTurnState::QueuedDelegated {
             spawning_request,
@@ -13821,7 +13892,7 @@ enum ProcessUpdateEvent {
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
         acceptance_position: u64,
-        content: String,
+        content: UserContent,
     },
     GoalTurnRetired {
         turn: signalbox_domain::TurnId,
@@ -14055,7 +14126,7 @@ impl ProcessUpdateEvent {
                 accepted_input_id: wire_uuid(accepted_input.into_uuid()),
                 turn_id: wire_uuid(turn.into_uuid()),
                 acceptance_position: CanonicalU64::new(*acceptance_position),
-                content: UserInputContent::text(content.clone()),
+                content: wire_user_content(content),
             },
             Self::GoalTurnRetired { turn } => SessionEvent::GoalTurnRetired {
                 turn_id: wire_uuid(turn.into_uuid()),
@@ -14583,19 +14654,19 @@ mod tests {
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
         MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError,
-        PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
-        ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
-        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
-        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
-        admit_snapshot_reader, admitted_user_content, canonical_review_request_digest,
-        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
-        foreground_peer_activity, handle_append_conversation_import,
-        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
+        MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError, PendingConversationImport,
+        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
+        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
+        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
+        canonical_review_request_digest, claude_conversion_failure_disposition,
+        codex_conversion_failure_disposition, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
+        handle_append_conversation_import, handle_begin_conversation_import,
+        handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -14716,7 +14787,10 @@ mod tests {
             accepted_input,
             turn,
             acceptance_position: SessionInputPosition::first(),
-            content: "synthetic prompt with tool arguments".to_owned(),
+            content: signalbox_domain::UserContent::try_text(
+                "synthetic prompt with tool arguments".to_owned(),
+            )
+            .expect("the telemetry fixture content is valid"),
         };
         let activation = DispatchedOutboxEventKind::TurnActivated {
             turn,
@@ -16893,7 +16967,8 @@ mod tests {
 
     #[test]
     fn process_submission_admits_the_exact_content_bound() {
-        let exact = UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
+        let exact =
+            UserInputContent::text("\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES));
         assert!(admitted_user_content(exact).is_ok());
     }
 
@@ -16901,7 +16976,7 @@ mod tests {
     fn process_submission_rejects_content_over_the_bound() {
         assert!(
             admitted_user_content(UserInputContent::text(
-                "x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1),
+                "x".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES + 1),
             ))
             .is_err()
         );
@@ -16918,7 +16993,9 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
-                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text(
+                        "\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES),
+                    ),
                 },
             },
         )?;
@@ -16938,7 +17015,9 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
                     turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 2)),
                     acceptance_position: CanonicalU64::new(u64::MAX),
-                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text(
+                        "\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES),
+                    ),
                 },
             },
         )?;
