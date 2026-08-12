@@ -2403,7 +2403,9 @@ impl RunnerProtocolStore {
         command: ReplaceLostRunner,
     ) -> Result<ReplaceLostRunnerBeforePinOutcome, RunnerProtocolStoreError> {
         let RunnerReplacementTarget::Runner(target_runner) = command.replacement() else {
-            return Err(RunnerProtocolStoreError::ReplacementTargetNotImplemented);
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
         };
         if command.command().as_uuid().is_nil() || command.command().as_uuid().is_max() {
             return Err(RunnerProtocolStoreError::Domain(
@@ -2528,9 +2530,9 @@ impl RunnerProtocolStore {
                                 None
                             }
                             SessionRunnerPlacementState::RunnerLost(_) => {
-                                return Err(
-                                    RunnerProtocolStoreError::ReplacementTargetNotImplemented,
-                                );
+                                return Err(RunnerProtocolStoreError::Domain(
+                                    RunnerDomainError::InvalidState,
+                                ));
                             }
                             SessionRunnerPlacementState::RunnerAbandoned(_) => {
                                 evidence.placement_state_kind = Some("runner_abandoned".to_owned());
@@ -2542,7 +2544,8 @@ impl RunnerProtocolStore {
                                 ReplaceLostRunnerBeforePinRejection::PlacementNotLost {
                                     session: command.session(),
                                     placement_revision: current_revision,
-                                    state: placement_recovery_state(placement.state()),
+                                    state: placement_recovery_state(placement.state())
+                                        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
                                 },
                             ),
                             Some(lost_runner) if lost_runner == target_runner => {
@@ -2605,7 +2608,7 @@ impl RunnerProtocolStore {
                                                 .await?;
                                             validate_placement_snapshot(
                                                 &replacement.placement,
-                                                Some(&registration),
+                                                Some(registration.as_ref()),
                                                 None,
                                                 history,
                                             )?;
@@ -2769,7 +2772,9 @@ impl RunnerProtocolStore {
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
-        Ok(DirectReplacementTargetAuthority::Current(registration))
+        Ok(DirectReplacementTargetAuthority::Current(Box::new(
+            registration,
+        )))
     }
 
     /// Terminalizes one exact lost placement after proving the active-turn slot empty.
@@ -4417,7 +4422,7 @@ impl ReplaceLostRunnerBeforePinTransaction for RunnerProtocolStore {
 }
 
 enum DirectReplacementTargetAuthority {
-    Current(StoredValidatedRunnerRegistration),
+    Current(Box<StoredValidatedRunnerRegistration>),
     Unavailable(RunnerReplacementTargetUnavailableReason),
 }
 
@@ -4444,16 +4449,16 @@ fn replacement_target_is_unavailable(error: &RunnerDomainError) -> bool {
     )
 }
 
-fn placement_recovery_state(state: &SessionRunnerPlacementState) -> RunnerPlacementRecoveryState {
+fn placement_recovery_state(
+    state: &SessionRunnerPlacementState,
+) -> Option<RunnerPlacementRecoveryState> {
     match state {
-        SessionRunnerPlacementState::Unpinned => RunnerPlacementRecoveryState::Unpinned,
-        SessionRunnerPlacementState::Pinned(_) => RunnerPlacementRecoveryState::Pinned,
+        SessionRunnerPlacementState::Unpinned => Some(RunnerPlacementRecoveryState::Unpinned),
+        SessionRunnerPlacementState::Pinned(_) => Some(RunnerPlacementRecoveryState::Pinned),
         SessionRunnerPlacementState::RunnerLostBeforePin(_)
-        | SessionRunnerPlacementState::RunnerLost(_) => {
-            unreachable!("lost placements are handled before non-lost state projection")
-        }
+        | SessionRunnerPlacementState::RunnerLost(_) => None,
         SessionRunnerPlacementState::RunnerAbandoned(_) => {
-            RunnerPlacementRecoveryState::RunnerAbandoned
+            Some(RunnerPlacementRecoveryState::RunnerAbandoned)
         }
     }
 }
@@ -10148,8 +10153,6 @@ pub enum RunnerProtocolStoreError {
     Domain(RunnerDomainError),
     /// Enrollment or resume input conflicts with durable request authority.
     EnrollmentRequest(RunnerEnrollmentRequestFailure),
-    /// The replacement target belongs to a later transaction slice.
-    ReplacementTargetNotImplemented,
 }
 
 impl fmt::Display for RunnerProtocolStoreError {
@@ -10165,8 +10168,6 @@ impl fmt::Display for RunnerProtocolStoreError {
             Self::Corruption(error) => error.fmt(formatter),
             Self::Domain(error) => write!(formatter, "runner-protocol domain failure: {error:?}"),
             Self::EnrollmentRequest(error) => error.fmt(formatter),
-            Self::ReplacementTargetNotImplemented => formatter
-                .write_str("runner replacement target is not implemented by this transaction"),
         }
     }
 }
@@ -10177,7 +10178,7 @@ impl Error for RunnerProtocolStoreError {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Corruption(error) => Some(error),
             Self::EnrollmentRequest(error) => Some(error),
-            Self::Domain(_) | Self::ReplacementTargetNotImplemented => None,
+            Self::Domain(_) => None,
         }
     }
 }

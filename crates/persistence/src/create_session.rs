@@ -1212,8 +1212,7 @@ fn map_runner_store_error(
         }
         crate::runner_protocol::RunnerProtocolStoreError::Corruption(_)
         | crate::runner_protocol::RunnerProtocolStoreError::Domain(_)
-        | crate::runner_protocol::RunnerProtocolStoreError::EnrollmentRequest(_)
-        | crate::runner_protocol::RunnerProtocolStoreError::ReplacementTargetNotImplemented => {
+        | crate::runner_protocol::RunnerProtocolStoreError::EnrollmentRequest(_) => {
             CreateSessionCorruption::Inconsistent("initial runner placement").into()
         }
     }
