@@ -482,9 +482,6 @@ BEGIN
             ON lease_event.lease_id = current_lease.lease_id
            AND lease_event.generation = current_lease.generation
            AND lease_event.event_ordinal = current_lease.event_ordinal
-          JOIN runner_connection_authority_head AS authority
-            ON authority.enrollment_id =
-                generation.registration_enrollment_id
          WHERE lease_event.state_kind = 'offered'
     ) THEN
         RAISE EXCEPTION
