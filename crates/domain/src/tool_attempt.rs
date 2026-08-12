@@ -134,6 +134,8 @@ pub enum ToolExecutionErrorKind {
     UnknownTool,
     /// Arguments were undecodable or outside the selected tool's schema.
     InvalidArguments,
+    /// A typed request-scoped resource or visibility check refused dispatch.
+    PreauthorizationRejected,
     /// The executor reported a definitive failure.
     ExecutionFailed,
     /// Successful content exceeded its admission bound.

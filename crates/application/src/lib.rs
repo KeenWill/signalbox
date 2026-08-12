@@ -146,12 +146,14 @@ pub use tool_loop::{
     ToolCatalog, ToolCatalogValidationFailure, ToolDefinition, ToolExecutionIdGenerator,
     ToolExecutionInvocation, ToolExecutionService, ToolExecutionServiceError,
     ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition, ToolExecutorEvidence,
-    ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
+    ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, ToolPreauthorization,
+    UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationOutcome,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
+    ToolExecutionTransaction,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

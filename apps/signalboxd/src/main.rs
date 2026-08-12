@@ -38,6 +38,7 @@ use signalbox_model_runtime_anthropic::{
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
+    blob::BlobCatalogRepository,
     conversation_import::backfill_imported_conversation_display_titles, migrate,
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::PostgresRepoWatchDispatchStore, scheduler::PostgresEligibilitySweep,
@@ -49,7 +50,7 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
+    ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
     CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, DaemonToolCatalog,
     DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
     FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
@@ -1217,7 +1218,7 @@ async fn run_hub(
             model_configuration.web_fetch_egress_policy(),
         ),
     };
-    let (tool_catalog, tool_executor) = match tools {
+    let (mut tool_catalog, mut tool_executor) = match tools {
         Ok(tools) => tools.into_parts(),
         Err(error) => {
             let failure = erase_startup_cause(
@@ -1228,19 +1229,6 @@ async fn run_hub(
             return Err(failure);
         }
     };
-
-    let tool_catalog =
-        match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
-                );
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        };
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
@@ -1316,7 +1304,47 @@ async fn run_hub(
                 let _ = database.close().await;
                 return Err(failure);
             }
+        }
+        .map(Arc::new);
+    let blob_tools = match BlobTools::try_new(
+        BlobCatalogRepository::new(pool.clone()),
+        blob_store_registry.clone(),
+    ) {
+        Ok(tools) => tools,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("blob_read_tool_construction_failed"),
+            );
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
+    let (blob_catalog, blob_executor) = blob_tools.into_parts();
+    tool_catalog = match tool_catalog.with_compiled_catalog(blob_catalog) {
+        Ok(catalog) => catalog,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("blob_read_tool_catalog_conflict"),
+            );
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
+    tool_catalog =
+        match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
         };
+    tool_executor = tool_executor.with_blob_executor(blob_executor);
 
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
@@ -1438,7 +1466,7 @@ async fn run_hub(
         None => process_runtime,
     };
     let process_runtime = match blob_store_registry {
-        Some(registry) => process_runtime.with_blob_store_registry(Arc::new(registry)),
+        Some(registry) => process_runtime.with_blob_store_registry(registry),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());

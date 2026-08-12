@@ -75,6 +75,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     FileCredentialAccess, PostgresConversationIntrospection,
+    blob_tools::{BLOB_METADATA_NAME, BLOB_READ_NAME, BLOB_TOOL_NAMES, BlobToolExecutor},
     goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor, GoalDeclarationTool},
     session_delegation::DaemonSessionDelegationPort,
 };
@@ -1231,6 +1232,7 @@ where
                 plan,
                 delegation,
                 goal: goal.map(|(_, executor)| executor),
+                blob: None,
             },
         })
     }
@@ -1413,6 +1415,30 @@ impl DaemonToolCatalog {
         }
         Ok(self)
     }
+
+    /// Extends the immutable daemon registry with one compiled family.
+    pub fn with_compiled_catalog(
+        mut self,
+        catalog: CompiledToolCatalog,
+    ) -> Result<Self, DaemonToolsConstructionError> {
+        for definition in catalog.definitions() {
+            let name = definition.name().clone();
+            if self
+                .entries
+                .insert(
+                    name.clone(),
+                    DaemonToolCatalogEntry {
+                        definition,
+                        catalog: catalog.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(DaemonToolsConstructionError::Duplicate);
+            }
+        }
+        Ok(self)
+    }
 }
 
 fn configured_composition_contains(name: &ToolName, composition: DaemonToolComposition) -> bool {
@@ -1440,6 +1466,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
         || CODE_HOST_TOOL_NAMES.contains(&name)
         || PLAN_TOOL_NAMES.contains(&name)
         || SESSION_DELEGATION_TOOL_NAMES.contains(&name)
+        || BLOB_TOOL_NAMES.contains(&name)
         || mapped_family_contains
 }
 
@@ -1494,6 +1521,18 @@ impl ToolCatalog for DaemonToolCatalog {
             .ok_or(ToolCatalogValidationFailure::UnknownTool)?
             .catalog
             .validate_arguments(name, arguments)
+    }
+
+    fn preauthorization(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<signalbox_application::ToolPreauthorization, ToolCatalogValidationFailure> {
+        self.entries
+            .get(name)
+            .ok_or(ToolCatalogValidationFailure::UnknownTool)?
+            .catalog
+            .preauthorization(name, arguments)
     }
 }
 
@@ -2156,6 +2195,44 @@ pub struct DaemonToolExecutor<
     plan: PlanExecutor<PlanPort>,
     delegation: SessionDelegationExecutor<DaemonSessionDelegationPort>,
     goal: Option<GoalDeclarationExecutor>,
+    blob: Option<BlobToolExecutor>,
+}
+
+impl<
+    Clock,
+    Transport,
+    SearchTransport,
+    Writer,
+    Credentials,
+    HostTransport,
+    GitHubTransportType,
+    FileSystem,
+    ConversationPort,
+    PlanPort,
+    ExecRunner,
+>
+    DaemonToolExecutor<
+        Clock,
+        Transport,
+        SearchTransport,
+        Writer,
+        Credentials,
+        HostTransport,
+        GitHubTransportType,
+        FileSystem,
+        ConversationPort,
+        PlanPort,
+        ExecRunner,
+    >
+where
+    FileSystem: WorkspaceMutationFileSystem,
+    ExecRunner: ProcessRunner,
+{
+    /// Installs the executor matching the composed blob-read declarations.
+    pub fn with_blob_executor(mut self, executor: BlobToolExecutor) -> Self {
+        self.blob = Some(executor);
+        self
+    }
 }
 
 /// Sanitized aggregate executor failure.
@@ -2319,6 +2396,13 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if PLAN_TOOL_NAMES.contains(&name) => self
                 .plan
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            BLOB_METADATA_NAME | BLOB_READ_NAME => self
+                .blob
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
