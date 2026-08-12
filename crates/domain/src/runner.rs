@@ -195,6 +195,9 @@ impl CredentialProfileName {
 pub struct RunnerWorkingDirectory(String);
 
 impl RunnerWorkingDirectory {
+    /// Maximum UTF-8 bytes admitted by an exact runner working directory.
+    pub const MAX_BYTES: usize = EXACT_VALUE_MAX_BYTES;
+
     /// Validates and constructs exact runner working-directory text.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
         validate_exact(value).map(Self)
