@@ -2935,6 +2935,176 @@ async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
     Ok(())
 }
 
+/// INV-012: durable submit replay compares the exact ordered multipart value,
+/// including attachment metadata, and mirrors it into the accepted projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_multipart_submit_replay_counts_order_and_attachment_metadata()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x324, 0x724, direct(0x824)))
+        .await?;
+
+    let digest = BlobDigest::digest(b"multipart attachment");
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('multipart_test', $1)",
+    )
+    .bind(Uuid::from_u128(0xb24))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
+        .bind(digest.as_bytes().as_slice())
+        .bind(Decimal::from(20_u8))
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'multipart_test', 'multipart/object')",
+    )
+    .bind(digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before.clone(), attachment.clone(), after.clone()])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
+        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let repository = SubmitInputRepository::new(pool.clone());
+    let first = repository
+        .handle(
+            command.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x925)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa25))),
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .handle(
+                command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x926)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa26))),
+            )
+            .await?,
+        first
+    );
+    assert_eq!(
+        repository
+            .load(command.command_id())
+            .await?
+            .expect("the multipart command is complete")
+            .command(),
+        &command
+    );
+
+    let reordered = SubmitInput::new(
+        command.command_id(),
+        command.session(),
+        UserContent::try_parts(vec![after, attachment, before])
+            .expect("the reordered fixture parts are canonical"),
+        command.delivery(),
+    );
+    assert_eq!(
+        repository
+            .handle(
+                reordered,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x927)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa27))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::ConflictingReuse {
+            command_id: command.command_id(),
+        }
+    );
+
+    let changed_attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("changed.pdf"))
+                .expect("the changed fixture filename is valid"),
+        ),
+    };
+    let changed_metadata = SubmitInput::new(
+        command.command_id(),
+        command.session(),
+        UserContent::try_parts(vec![
+            UserContentPart::try_text(String::from("before"))
+                .expect("the fixture leading text is valid"),
+            changed_attachment,
+            UserContentPart::try_text(String::from("after"))
+                .expect("the fixture trailing text is valid"),
+        ])
+        .expect("the changed-metadata fixture parts are canonical"),
+        command.delivery(),
+    );
+    assert_eq!(
+        repository
+            .handle(
+                changed_metadata,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x928)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa28))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::ConflictingReuse {
+            command_id: command.command_id(),
+        }
+    );
+
+    let mirrored: (Value, Value) = sqlx::query_as(
+        "SELECT
+            (SELECT jsonb_agg(
+                jsonb_build_array(position, part_kind, text_value,
+                    encode(blob_digest, 'hex'), attachment_kind,
+                    declared_media_type, display_filename)
+                ORDER BY position)
+               FROM submit_input_command_content_part
+              WHERE command_id = $1),
+            (SELECT jsonb_agg(
+                jsonb_build_array(position, part_kind, text_value,
+                    encode(blob_digest, 'hex'), attachment_kind,
+                    declared_media_type, display_filename)
+                ORDER BY position)
+               FROM accepted_input_content_part AS part
+               JOIN accepted_input AS accepted
+                 ON accepted.accepted_input_id = part.accepted_input_id
+              WHERE accepted.accepting_command_id = $1)",
+    )
+    .bind(Uuid::from_u128(0x325))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(mirrored.0, mirrored.1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S01 / INV-005 / INV-008 / INV-010 / INV-012 / INV-028: first acceptance
 /// commits the complete exact receipt and immutable queued origin; equal
 /// replay and a restarted adapter return that receipt without consulting new
