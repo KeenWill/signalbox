@@ -90,7 +90,7 @@ mod tests {
     /// S32 / INV-001: reserved durable-command identities fail before the
     /// pending-runner promotion transaction can observe a request.
     #[test]
-    fn s32_inv001_promotion_request_rejects_reserved_command_identifiers() {
+    fn inv001_promotion_request_rejects_reserved_command_identifiers() {
         let pending = RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(1));
 
         assert_eq!(
