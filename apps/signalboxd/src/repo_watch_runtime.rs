@@ -731,7 +731,8 @@ struct GitHubRepositoryPoller {
     // dropping the future aborts them and releases the lock, but they stay
     // joinable, and whoever runs next — the following attempt, or the
     // repository task on its way out — joins them before proceeding.
-    fetches: tokio::sync::Mutex<JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>>,
+    fetches:
+        tokio::sync::Mutex<JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>>,
 }
 
 struct PullRequestFreshness {
@@ -3138,6 +3139,15 @@ mod tests {
         }
     }
 
+    /// The request line a scripted response answers. Distinct from
+    /// [`ResponseBody`] because the two travel through the same constructors:
+    /// with both as plain strings, a transposed pair still compiles and is
+    /// caught only by the server rejecting the request.
+    struct RequestTarget(String);
+
+    /// The payload a scripted response returns. See [`RequestTarget`].
+    struct ResponseBody(String);
+
     struct ScriptedResponse {
         method: &'static str,
         target: String,
@@ -3150,49 +3160,49 @@ mod tests {
     }
 
     impl ScriptedResponse {
-        fn ok(target: impl Into<String>, body: impl Into<String>) -> Self {
+        fn ok(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "GET",
-                target: target.into(),
+                target: target.0,
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
-                body: body.into(),
+                body: body.0,
                 delay: Duration::ZERO,
             }
         }
 
-        fn ok_with_next(target: impl Into<String>, body: impl Into<String>) -> Self {
+        fn ok_with_next(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "GET",
-                target: target.into(),
+                target: target.0,
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: Some(NEXT_PAGE_LINK),
-                body: body.into(),
+                body: body.0,
                 delay: Duration::ZERO,
             }
         }
 
-        fn conditional_ok(target: impl Into<String>, body: impl Into<String>) -> Self {
+        fn conditional_ok(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "GET",
-                target: target.into(),
+                target: target.0,
                 validator: Some(ENTITY_TAG),
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
-                body: body.into(),
+                body: body.0,
                 delay: Duration::ZERO,
             }
         }
 
-        fn not_modified(target: impl Into<String>) -> Self {
+        fn not_modified(target: RequestTarget) -> Self {
             Self {
                 method: "GET",
-                target: target.into(),
+                target: target.0,
                 validator: Some(ENTITY_TAG),
                 status: "304 Not Modified",
                 entity_tag: None,
@@ -3207,15 +3217,15 @@ mod tests {
             self
         }
 
-        fn post(target: impl Into<String>, body: impl Into<String>) -> Self {
+        fn post(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "POST",
-                target: target.into(),
+                target: target.0,
                 validator: None,
                 status: "200 OK",
                 entity_tag: None,
                 link: None,
-                body: body.into(),
+                body: body.0,
                 delay: Duration::ZERO,
             }
         }
@@ -3461,37 +3471,91 @@ mod tests {
 
     fn complete_poll_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, EMPTY_WORKFLOW_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(EMPTY_WORKFLOW_LIST.to_owned()),
+            ),
         ]
     }
 
     fn conditional_poll_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::not_modified(PULLS_TARGET),
-            ScriptedResponse::not_modified(BRANCHES_TARGET),
-            ScriptedResponse::not_modified(WORKFLOWS_TARGET),
+            ScriptedResponse::not_modified(RequestTarget(PULLS_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(BRANCHES_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(WORKFLOWS_TARGET.to_owned())),
         ]
     }
 
     fn complete_typed_observation_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::ok(PULLS_TARGET, pulls_with_one()),
-            ScriptedResponse::ok(PULL_DETAIL_TARGET, pull_detail()),
-            ScriptedResponse::ok(CHECK_SUITES_TARGET, check_suites()),
-            ScriptedResponse::ok(COMPLETED_SUITE_CHECK_RUNS_TARGET, check_runs()),
-            ScriptedResponse::ok(QUEUED_SUITE_CHECK_RUNS_TARGET, empty_check_runs()),
-            ScriptedResponse::ok(REVIEWS_TARGET, reviews()),
-            ScriptedResponse::post(THREADS_TARGET, threads()),
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, pull_reactions()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, issue_comments()),
-            ScriptedResponse::ok(ISSUE_COMMENT_REACTIONS_TARGET, issue_comment_reactions()),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, review_comments()),
-            ScriptedResponse::ok(REVIEW_COMMENT_REACTIONS_TARGET, review_comment_reactions()),
-            ScriptedResponse::ok(BRANCHES_TARGET, branches()),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, workflows()),
-            ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, main_workflow_run()),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                ResponseBody(pull_detail()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(CHECK_SUITES_TARGET.to_owned()),
+                ResponseBody(check_suites()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(check_runs()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(QUEUED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(empty_check_runs().to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(threads()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(pull_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(issue_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(issue_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(review_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(review_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(workflows()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
         ]
     }
 
@@ -3544,74 +3608,146 @@ mod tests {
         let head_sha = minimal_pull_head_sha(number);
         vec![
             ScriptedResponse::ok(
-                format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}"),
-                minimal_pull_detail(number),
+                RequestTarget(format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}")),
+                ResponseBody(minimal_pull_detail(number)),
             )
             .delayed(CONCURRENT_FETCH_DELAY),
             ScriptedResponse::ok(
-                format!(
+                RequestTarget(format!(
                     "/repos/{WATCHED_REPOSITORY}/commits/{head_sha}/check-suites?filter=all&per_page=100&page=1"
-                ),
-                EMPTY_CHECK_SUITE_LIST,
+                )),
+                ResponseBody(EMPTY_CHECK_SUITE_LIST.to_owned()),
             ),
             ScriptedResponse::ok(
-                format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}/reviews?per_page=100&page=1"),
-                EMPTY_LIST,
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{number}/reviews?per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
             ),
-            ScriptedResponse::post(THREADS_TARGET, empty_threads()),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(empty_threads()),
+            ),
             ScriptedResponse::ok(
-                format!(
+                RequestTarget(format!(
                     "/repos/{WATCHED_REPOSITORY}/issues/{number}/reactions?per_page=100&page=1"
-                ),
-                EMPTY_LIST,
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
             ),
             ScriptedResponse::ok(
-                format!("/repos/{WATCHED_REPOSITORY}/issues/{number}/comments?per_page=100&page=1"),
-                EMPTY_LIST,
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/issues/{number}/comments?per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
             ),
             ScriptedResponse::ok(
-                format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}/comments?per_page=100&page=1"),
-                EMPTY_LIST,
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{number}/comments?per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
             ),
         ]
     }
 
     fn settled_typed_observation_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::ok(PULLS_TARGET, pulls_with_one()),
-            ScriptedResponse::ok(PULL_DETAIL_TARGET, pull_detail()),
-            ScriptedResponse::ok(CHECK_SUITES_TARGET, settled_check_suites()),
-            ScriptedResponse::ok(COMPLETED_SUITE_CHECK_RUNS_TARGET, settled_check_runs()),
-            ScriptedResponse::ok(REVIEWS_TARGET, reviews()),
-            ScriptedResponse::post(THREADS_TARGET, threads()),
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, pull_reactions()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, issue_comments()),
-            ScriptedResponse::ok(ISSUE_COMMENT_REACTIONS_TARGET, issue_comment_reactions()),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, review_comments()),
-            ScriptedResponse::ok(REVIEW_COMMENT_REACTIONS_TARGET, review_comment_reactions()),
-            ScriptedResponse::ok(BRANCHES_TARGET, branches()),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, workflows()),
-            ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, main_workflow_run()),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                ResponseBody(pull_detail()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(CHECK_SUITES_TARGET.to_owned()),
+                ResponseBody(settled_check_suites()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(settled_check_runs()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(threads()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(pull_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(issue_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(issue_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(review_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(review_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(workflows()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
         ]
     }
 
     fn skipped_pull_request_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::conditional_ok(PULLS_TARGET, pulls_with_one()),
-            ScriptedResponse::conditional_ok(PULL_REACTIONS_TARGET, pull_reactions()),
-            ScriptedResponse::conditional_ok(ISSUE_COMMENTS_TARGET, issue_comments()),
             ScriptedResponse::conditional_ok(
-                ISSUE_COMMENT_REACTIONS_TARGET,
-                issue_comment_reactions(),
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(pulls_with_one()),
             ),
-            ScriptedResponse::conditional_ok(REVIEW_COMMENTS_TARGET, review_comments()),
             ScriptedResponse::conditional_ok(
-                REVIEW_COMMENT_REACTIONS_TARGET,
-                review_comment_reactions(),
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(pull_reactions()),
             ),
-            ScriptedResponse::conditional_ok(BRANCHES_TARGET, branches()),
-            ScriptedResponse::conditional_ok(WORKFLOWS_TARGET, workflows()),
-            ScriptedResponse::conditional_ok(MAIN_WORKFLOW_TARGET, main_workflow_run()),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(issue_comments()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(issue_comment_reactions()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(review_comments()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(review_comment_reactions()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(workflows()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
         ]
     }
 
@@ -3621,8 +3757,8 @@ mod tests {
             .map(|response| {
                 if response.target == PULL_DETAIL_TARGET {
                     ScriptedResponse::ok(
-                        PULL_DETAIL_TARGET,
-                        pull_detail_with_pending_mergeability(),
+                        RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                        ResponseBody(pull_detail_with_pending_mergeability()),
                     )
                 } else {
                     response
@@ -3635,7 +3771,10 @@ mod tests {
         responses
             .into_iter()
             .map(|response| match response.entity_tag {
-                Some(_) => ScriptedResponse::conditional_ok(response.target, response.body),
+                Some(_) => ScriptedResponse::conditional_ok(
+                    RequestTarget(response.target),
+                    ResponseBody(response.body),
+                ),
                 None => response,
             })
             .collect()
@@ -3753,10 +3892,22 @@ mod tests {
     #[tokio::test]
     async fn workflow_listing_follows_the_link_after_a_full_page() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok_with_next(WORKFLOWS_TARGET, full_workflow_page()),
-            ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok_with_next(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(full_workflow_page()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(SECOND_WORKFLOWS_PAGE_TARGET.to_owned()),
+                ResponseBody(EMPTY_WORKFLOW_LIST.to_owned()),
+            ),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3769,9 +3920,18 @@ mod tests {
     #[tokio::test]
     async fn workflow_listing_accepts_a_full_terminal_page_without_a_link() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(full_workflow_page()),
+            ),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3785,13 +3945,25 @@ mod tests {
     #[tokio::test]
     async fn cached_full_terminal_page_probes_one_bounded_successor() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
-            ScriptedResponse::not_modified(PULLS_TARGET),
-            ScriptedResponse::not_modified(BRANCHES_TARGET),
-            ScriptedResponse::not_modified(WORKFLOWS_TARGET),
-            ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(full_workflow_page()),
+            ),
+            ScriptedResponse::not_modified(RequestTarget(PULLS_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(BRANCHES_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(WORKFLOWS_TARGET.to_owned())),
+            ScriptedResponse::ok(
+                RequestTarget(SECOND_WORKFLOWS_PAGE_TARGET.to_owned()),
+                ResponseBody(EMPTY_WORKFLOW_LIST.to_owned()),
+            ),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3814,8 +3986,8 @@ mod tests {
     #[tokio::test]
     async fn branch_projection_skips_a_fork_run_with_the_same_branch_name() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            MAIN_WORKFLOW_TARGET,
-            foreign_then_watched_workflow_runs(),
+            RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+            ResponseBody(foreign_then_watched_workflow_runs()),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3838,8 +4010,8 @@ mod tests {
     #[tokio::test]
     async fn active_rerun_retains_the_previous_completed_workflow_baseline() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            MAIN_WORKFLOW_TARGET,
-            active_rerun_then_stale_workflow_run(),
+            RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+            ResponseBody(active_rerun_then_stale_workflow_run()),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3867,8 +4039,8 @@ mod tests {
     #[tokio::test]
     async fn active_run_does_not_hide_a_newer_completed_workflow_baseline() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            MAIN_WORKFLOW_TARGET,
-            active_rerun_then_stale_workflow_run(),
+            RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+            ResponseBody(active_rerun_then_stale_workflow_run()),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3896,8 +4068,14 @@ mod tests {
     #[tokio::test]
     async fn branch_projection_follows_a_full_page_of_fork_runs() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok_with_next(MAIN_WORKFLOW_TARGET, full_foreign_workflow_run_page()),
-            ScriptedResponse::ok(SECOND_MAIN_WORKFLOW_PAGE_TARGET, main_workflow_run()),
+            ScriptedResponse::ok_with_next(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(full_foreign_workflow_run_page()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(SECOND_MAIN_WORKFLOW_PAGE_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -3922,13 +4100,16 @@ mod tests {
         let responses = complete_poll_responses()
             .into_iter()
             .chain([ScriptedResponse::conditional_ok(
-                PULLS_TARGET,
-                MALFORMED_JSON,
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(MALFORMED_JSON.to_owned()),
             )])
             .chain([
-                ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-                ScriptedResponse::not_modified(BRANCHES_TARGET),
-                ScriptedResponse::not_modified(WORKFLOWS_TARGET),
+                ScriptedResponse::ok(
+                    RequestTarget(PULLS_TARGET.to_owned()),
+                    ResponseBody(EMPTY_LIST.to_owned()),
+                ),
+                ScriptedResponse::not_modified(RequestTarget(BRANCHES_TARGET.to_owned())),
+                ScriptedResponse::not_modified(RequestTarget(WORKFLOWS_TARGET.to_owned())),
             ])
             .collect();
         let server = ScriptedServer::start(responses).await;
@@ -4273,8 +4454,11 @@ mod tests {
     #[tokio::test]
     async fn draining_after_a_cancelled_fetch_joins_every_child() {
         let server = ConcurrentScriptedServer::start(vec![
-            ScriptedResponse::ok(PULL_DETAIL_TARGET, minimal_pull_detail(7))
-                .delayed(CANCELLED_FETCH_DELAY),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                ResponseBody(minimal_pull_detail(7)),
+            )
+            .delayed(CANCELLED_FETCH_DELAY),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4311,8 +4495,8 @@ mod tests {
     #[tokio::test]
     async fn every_check_run_member_the_decoder_requires_exists_in_the_provider_payload() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            COMPLETED_SUITE_CHECK_RUNS_TARGET,
-            provider_defined_check_runs(),
+            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            ResponseBody(provider_defined_check_runs()),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4336,8 +4520,8 @@ mod tests {
     #[tokio::test]
     async fn a_completed_check_run_without_a_completion_time_is_an_invalid_response() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            COMPLETED_SUITE_CHECK_RUNS_TARGET,
-            completed_check_run_without_a_completion_time(),
+            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            ResponseBody(completed_check_run_without_a_completion_time()),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4381,8 +4565,8 @@ mod tests {
     #[tokio::test]
     async fn a_deleted_review_author_reuses_the_prior_review_identity() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            REVIEWS_TARGET,
-            identity_less_review(RETAINED_REVIEW_IDS[0]),
+            RequestTarget(REVIEWS_TARGET.to_owned()),
+            ResponseBody(identity_less_review(RETAINED_REVIEW_IDS[0])),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4401,8 +4585,8 @@ mod tests {
     #[tokio::test]
     async fn a_new_review_without_an_author_identity_is_omitted() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            REVIEWS_TARGET,
-            identity_less_review(RETAINED_REVIEW_IDS[0]),
+            RequestTarget(REVIEWS_TARGET.to_owned()),
+            ResponseBody(identity_less_review(RETAINED_REVIEW_IDS[0])),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4457,9 +4641,18 @@ mod tests {
     #[tokio::test]
     async fn a_reaction_without_an_actor_identity_is_omitted() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(identity_less_reaction()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4477,9 +4670,18 @@ mod tests {
     #[tokio::test]
     async fn a_reaction_without_an_actor_identity_retains_prior_subject_reactions() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(identity_less_reaction()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4504,9 +4706,18 @@ mod tests {
     #[tokio::test]
     async fn a_changed_signal_reviewer_filter_drops_identity_less_prior_reactions() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(identity_less_reaction()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
         ])
         .await;
         let current_reviewer = RepoWatchAuthorLogin::try_new(String::from(AMBIENT_REACTOR))
