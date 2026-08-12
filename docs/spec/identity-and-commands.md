@@ -19,7 +19,10 @@ transaction mechanics, locking, and the reconstitution seam are owned by
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
 [configuration-and-credentials](configuration-and-credentials.md). The
-model-settings command version boundaries were verified through this PR
+deployment-scoped `promote_pending_runner` command payload, application
+boundary, and typed terminal record were verified against this PR
+(`agent/runner-pending-successor-activation`). The model-settings command
+version boundaries were verified through this PR
 (`agent/model-settings-persistence`). The tool-attributed metadata command and
 reconstitution surface was verified through PR #265 (`agent/tool-batch-tier0`).
 The failed tool-attempt telemetry fields were verified through PR #285
@@ -90,9 +93,9 @@ The nil and max UUIDs are rejected as `DurableCommandId` values at two
 boundaries: checked command/request construction (`try_new` on
 `CreateSessionRequest`, `CreateSessionFromImportedFrontierRequest`,
 `ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`, and
-`SubmitInputRequest` and `UpdateSessionPlacementRequest` in
-`crates/application`, plus `DecideToolRequest` in `crates/domain`) and
-persistence decoding (`durable_command_id_from_uuid` in
+`SubmitInputRequest`, `UpdateSessionPlacementRequest`, and
+`PromotePendingRunnerRequest` in `crates/application`, plus `DecideToolRequest`
+in `crates/domain`) and persistence decoding (`durable_command_id_from_uuid` in
 `crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
 command can reach a transaction and claims no identifier. Why: sentinel-like
 values are common accidental defaults and would otherwise become permanent

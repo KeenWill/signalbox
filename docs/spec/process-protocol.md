@@ -12,6 +12,9 @@ against this PR (`agent/runner-awaiting-recovery-persistence`).
 The `runner_placement_changed` transcript entry and daemon/client projection
 were verified against this PR (`agent/runner-placement-semantic-persistence`).
 
+The deployment-scoped pending-successor promotion rejection vocabulary was
+verified against this PR (`agent/runner-pending-successor-activation`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -1411,7 +1414,7 @@ session and admits `no_pending_runner_enrollment {}`,
 `pending_request_mismatch { pending_request_id }`,
 `pending_request_disconnected { pending_request_id }`, and
 `active_runner_not_lost { runner_id, connection_state }` for a daemon whose
-active runner is still connected or only suspect. Every admitted runner
+active runner is still connected, suspect, or shut down. Every admitted runner
 rejection is a recorded durable result; equal replay returns it even after
 runner state changes.
 

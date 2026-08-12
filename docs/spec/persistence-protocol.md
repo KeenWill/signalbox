@@ -12,13 +12,15 @@ startup resumption of every pending cursor were verified against this PR
 (`agent/runner-loss-daemon-propagation`). The registration-reconciliation
 cursor, exact registration-loss cause, and per-session transaction were verified
 against this PR (`agent/runner-registration-reconciliation`). Pending-successor
-enrollment admission and exact receipt replay were verified against this PR
-(`agent/runner-pending-successor-promotion`). Creation-command runner placement
-and revision-one readback were verified against this PR
+enrollment admission and exact receipt replay were verified against the parent
+slice (`agent/runner-pending-successor-promotion`). Creation-command runner
+placement and revision-one readback were verified against this PR
 (`agent/runner-creation-placement-persistence`). The reference-only
 placement-change entry, successor-placement foreign key, and exact final-member
 frontier link were verified against this PR
-(`agent/runner-placement-semantic-persistence`).
+(`agent/runner-placement-semantic-persistence`). The deployment-scoped
+pending-successor activation transaction was verified against this PR
+(`agent/runner-pending-successor-activation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -148,8 +150,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-seven files, `202607180001` through
-`202608110011` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — seventy-eight files, `202607180001` through
+`202608110012` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -411,6 +413,25 @@ Representation rules, all enforced in the schema:
   physical connection; later advertisement mutation remains refused. Existing
   request receipts migrate as active authority. Promotion is not part of this
   migration and remains a separate command-authorized transaction.
+- Migration `202608110012` adds the typed `promote_pending_runner` command and
+  atomically activates one connected pending candidate only while its exact
+  predecessor remains durably lost. A reconnect and later loss leaves the
+  immutable admission relation intact; activation checks and records the
+  predecessor's current loss rather than requiring the admission loss to remain
+  current. The durable command claim precedes the runner lock subsequence; the
+  transaction then locks both enrollments in canonical identity order, both
+  connection heads in runner-identity order, and the pending candidate's
+  registration head. Success appends the predecessor revocation and candidate
+  activation audit rows, advances both enrollment heads, and records the
+  complete promoted-runner receipt together. The applied receipt retains the
+  exact pending-request registration, candidate connected event, and predecessor
+  loss epoch and source event checked by the transaction; deferred checks
+  require the candidate's revision-one pending and revision-two active audit
+  facts. Every refusal is a terminal typed command result, so equal replay is
+  independent of later connection changes. The immutable pending relation
+  remains as admission history, while an applied command is required for every
+  pending-to-active state. No session scheduler, placement, grant, lease,
+  workspace, turn, or frontier row participates.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -635,24 +656,26 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `review_orchestration`, `compact_session`, `goal`,
-`update_session_placement`) and a kind-scoped `storage_version`. The gates above
-fix the current numbers: create-session records write version 7, imported-create
-records write version 5, replace-defaults records write version 4, and
-submit-input records write version 2; every other closed kind writes version 1.
-The four settings-bearing families require the migration's provider-default full
-settings or inherit-all overlay on every earlier supported version.
-Create-session records reconstitute version 1 with the disabled dangerous-tool
-posture, and versions 1 and 2 with no system prompt — a pre-version-three row
-carrying one fails closed in both the schema and every Rust reader. A
-pre-version-four create row carrying template provenance and a pre-version-six
-create row carrying path placement likewise fail closed. Imported-create version
-4 remains unsupported compatibility space for committed runner placement, so the
-model-settings writer skips it. Metadata, decision, review-workflow, compaction,
-and runner-recovery records use version 1. Each kind has one typed subordinate
-request record keyed by `command_id` that stores every caller-supplied semantic
-field in typed, `CHECK`-constrained columns. Every kind except runner
-replacement also stores the terminal `applied`/`rejected` result and typed
-result fields there. `replace_lost_runner_command` is the immutable request and
+`update_session_placement`, `register_workspace`, `mint_git_remote`,
+`withdraw_git_remote`, `promote_pending_runner`) and a kind-scoped
+`storage_version`. The gates above fix the current numbers: create-session
+records write version 8, imported-create records write version 6,
+replace-defaults records write version 4, and submit-input records write version
+2; every other closed kind writes version 1. The four settings-bearing families
+require the migration's provider-default full settings or inherit-all overlay on
+every earlier supported version. Create-session records reconstitute version 1
+with the disabled dangerous-tool posture, and versions 1 and 2 with no system
+prompt — a pre-version-three row carrying one fails closed in both the schema
+and every Rust reader. A pre-version-four create row carrying template
+provenance and a pre-version-six create row carrying path placement likewise
+fail closed. Imported-create version 4 remains unsupported compatibility space
+for committed runner placement, so the model-settings writer skips it. Metadata,
+decision, review-workflow, compaction, and runner-recovery records use version
+1\. Each kind has one typed subordinate request record keyed by `command_id` that
+stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns. Every kind except runner replacement also stores the terminal
+`applied`/`rejected` result and typed result fields there.
+`replace_lost_runner_command` is the immutable request and
 provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
@@ -694,7 +717,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-five explicit lock statements
+`crates/persistence/src/lock_inventory.rs`. Twenty-six explicit lock statements
 live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
@@ -744,7 +767,12 @@ live in the schema instead:
 - the pending-successor registration and connection guards in migration
   `202608110008` take `FOR SHARE` or `FOR UPDATE`, respectively, on the
   candidate enrollment before admitting its first registration or a physical
-  connection.
+  connection; and
+- the pending-successor admission guard in migration `202608110012` checks the
+  predecessor's exact current lost connection head under `FOR SHARE` when
+  inserting the immutable relation. Later activation uses the reviewed Rust lock
+  subsequence above; the relation remains historical if the predecessor
+  reconnects.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here

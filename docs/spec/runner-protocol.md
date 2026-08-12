@@ -25,6 +25,11 @@ session transcript and frontier mechanics remain owned by
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
+Pending enrollment admission was verified against the parent slice
+(`agent/runner-pending-successor-promotion`); its deployment-scoped activation
+transaction is verified against this PR
+(`agent/runner-pending-successor-activation`).
+
 The connection-loss persistence transaction was verified against this PR
 (`agent/runner-loss-session-transaction`). Daemon paging of its durable cursors
 and startup resumption were verified against this PR
@@ -607,9 +612,11 @@ replay returns its original identities, registration, advertisement, and
 authority while opening a fresh connection epoch.
 
 **Committed unimplemented functionality.** No present pending enrollment can
-perform the one future user-command-bound workspace operation. The following
-same-runner recovery, pending promotion, and replacement-command paragraphs are
-also unimplemented; no present daemon or runner command surface provides them.
+perform the one future user-command-bound workspace operation. Same-runner
+recovery and replacement-command handling are also unimplemented; no present
+daemon or runner command surface provides them. The deployment-scoped promotion
+transaction below is implemented at the domain, application, and persistence
+boundary, but no present process-protocol handler invokes it yet.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
@@ -628,21 +635,31 @@ moment of recovery, so demanding a second runner would leave the only state that
 produced this loss permanently unrecoverable.
 
 A pending successor may also be promoted with no lost session placement
-involved. `promote_pending_runner` is the user command for the deployment-scoped
-fact that this daemon's active runner is durably gone: it requires the recorded
-active enrollment's connection to be durably lost and the pending candidate to
-be connected under its provisioning-only authority, then revokes the predecessor
+involved. The implemented `promote_pending_runner` transaction is the
+deployment-scoped mutation for the future user command: it acts on the fact that
+this daemon's active runner is durably gone, requires the recorded active
+enrollment's connection to be durably lost and the pending candidate to be
+connected under its provisioning-only authority, then revokes the predecessor
 and constructs the active enrollment and validated registration from the exact
-pending facts in one transaction. It provisions no workspace, consumes no
-workspace receipt, touches no session placement, creates no lease, and
-fabricates no turn or frontier; a session pinned to the predecessor stays
-`RunnerLost` until its own user replacement runs. The command generalizes to
-multi-runner as the fact that one of this daemon's active runners is durably
-gone and a successor for it is pending, and stays user-initiated in both forms.
-Why: a deployment with no session, or one whose every placement is an unpinned
-capability-class request, offers no placement for a replacement command to
-target, so without this path its pending candidate would remain
-provisioning-only forever.
+pending facts in one transaction. A predecessor reconnect and later loss does
+not invalidate the immutable admission relation; promotion authenticates and
+retains that current loss while the relation continues to retain the earlier
+loss that admitted the candidate. Its immutable result retains the exact pending
+registration, candidate connected event, current predecessor loss, and
+pending-to-active audit transition rather than depending on mutable later
+connection heads. It provisions no workspace, consumes no workspace receipt,
+touches no session placement, creates no lease, and fabricates no turn or
+frontier; a session pinned to the predecessor stays `RunnerLost` until its own
+user replacement runs. The command generalizes to multi-runner as the fact that
+one of this daemon's active runners is durably gone and a successor for it is
+pending, and stays user-initiated in both forms. Why: a deployment with no
+session, or one whose every placement is an unpinned capability-class request,
+offers no placement for a replacement command to target, so without this path
+its pending candidate would remain provisioning-only forever.
+
+The process-protocol request and daemon handler for this transaction remain
+**committed unimplemented functionality**; no current operator surface can
+submit it.
 
 For a pinned repository-backed loss, `replace_lost_runner` first durably claims
 the user command and its complete request, then creates one single-use

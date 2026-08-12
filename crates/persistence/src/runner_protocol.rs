@@ -21,9 +21,9 @@ use signalbox_domain::{
     LostPinnedRunnerPlacement, PinnedRunnerPlacement, ProvisionedWorkspace, RunnerAdvertisement,
     RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
-    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentRequestId, RunnerEnrollmentState,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
+    RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
     RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
     RunnerPrePinReplacementHistory, RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector,
     RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
@@ -53,11 +53,14 @@ use crate::lock_inventory::{
 };
 use crate::mapping::{
     RunnerLossPropagationStateStorageKind, ToolAttemptDispositionStorageKind,
+    runner_connection_state_from_str, runner_connection_state_to_str,
+    runner_enrollment_state_from_str, runner_enrollment_state_to_str,
     runner_loss_propagation_state_from_str, runner_loss_propagation_state_to_str,
     runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
     runner_sandbox_from_str, runner_sandbox_to_str, tool_attempt_disposition_to_str,
     tool_permission_default_from_str, tool_permission_default_to_str,
 };
+
 use crate::outbox::{
     self, DispatchedRunnerState, OutboxEvent, RunnerConnectionOutboxSource, RunnerStateOutboxEvent,
     RunnerStateOutboxSource,
@@ -465,27 +468,6 @@ impl RunnerConnectionTransitionEffect {
 pub struct StoredValidatedRunnerRegistration {
     revision: RunnerRegistrationRevision,
     registration: ValidatedRunnerRegistration,
-}
-
-/// Stable runner-created identity for one pristine enrollment request.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RunnerEnrollmentRequestId(Uuid);
-
-impl RunnerEnrollmentRequestId {
-    /// Creates an enrollment-request identity from its UUID value.
-    pub const fn from_uuid(value: Uuid) -> Self {
-        Self(value)
-    }
-
-    /// Borrows the UUID value.
-    pub const fn as_uuid(&self) -> &Uuid {
-        &self.0
-    }
-
-    /// Returns the UUID value.
-    pub const fn into_uuid(self) -> Uuid {
-        self.0
-    }
 }
 
 /// Identities issued by the daemon for one logical runner enrollment.
@@ -1023,7 +1005,7 @@ impl RunnerProtocolStore {
                 .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
         )
         .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
-        let (state, cause, state_kind, cause_kind) = connection_transition_values(transition)
+        let (state, cause, cause_kind) = connection_transition_values(transition)
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         sqlx::query(
             "INSERT INTO runner_connection_event
@@ -1034,7 +1016,7 @@ impl RunnerProtocolStore {
         .bind(enrollment.into_uuid())
         .bind(Decimal::from(epoch.get()))
         .bind(Decimal::from(event_ordinal.get()))
-        .bind(state_kind)
+        .bind(runner_connection_state_to_str(state))
         .bind(cause_kind)
         .execute(&mut *transaction)
         .await?;
@@ -1925,12 +1907,18 @@ impl RunnerProtocolStore {
     ) -> Result<Option<PendingRunnerEnrollment>, RunnerProtocolStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
         let relation = sqlx::query(
-            "SELECT enrollment_id, predecessor_enrollment_id,
-                    predecessor_loss_epoch
-               FROM runner_pending_enrollment
-              WHERE request_id = $1",
+            "SELECT pending.enrollment_id, pending.predecessor_enrollment_id,
+                    pending.predecessor_loss_epoch
+               FROM runner_pending_enrollment AS pending
+               JOIN runner_enrollment AS candidate
+                 ON candidate.enrollment_id = pending.enrollment_id
+                AND candidate.state_kind = $2
+              WHERE pending.request_id = $1",
         )
         .bind(request.into_uuid())
+        .bind(runner_enrollment_state_to_str(
+            RunnerEnrollmentState::Pending,
+        ))
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(relation) = relation else {
@@ -2016,9 +2004,15 @@ impl RunnerProtocolStore {
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let authority = match enrollment.state() {
+            RunnerEnrollmentState::Pending => RunnerEnrollmentAuthority::ReplacementPending,
+            RunnerEnrollmentState::Active | RunnerEnrollmentState::Revoked => {
+                RunnerEnrollmentAuthority::Active
+            }
+        };
         let receipt = RunnerEnrollmentReceipt {
             request,
-            authority: stored.authority,
+            authority,
             enrollment,
             registration,
         };
@@ -2084,7 +2078,7 @@ impl RunnerProtocolStore {
                 let registration = pending.commit().map_err(RunnerProtocolStoreError::Domain)?;
                 Ok(RunnerEnrollmentReceipt {
                     request,
-                    authority: stored.authority,
+                    authority,
                     enrollment,
                     registration: StoredValidatedRunnerRegistration {
                         revision,
@@ -2136,13 +2130,19 @@ impl RunnerProtocolStore {
         Ok(loaded)
     }
 
-    /// Applies terminal enrollment revocation under the enrollment row lock.
+    /// Applies terminal enrollment revocation under singleton then enrollment locks.
     pub async fn revoke_enrollment(
         &self,
         enrollment: &mut RunnerEnrollment,
     ) -> Result<bool, RunnerProtocolStoreError> {
         let enrollment_id = enrollment.enrollment();
         let mut transaction = self.pool.begin().await?;
+        // Pristine admission and pending-successor promotion take this
+        // temporary singleton lock before any enrollment row. Revocation must
+        // enter through the same order to avoid a table-lock upgrade cycle.
+        sqlx::query("LOCK TABLE runner_enrollment IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await?;
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)
@@ -2161,38 +2161,56 @@ impl RunnerProtocolStore {
             ));
         }
         terminalize_connection_for_revocation(&mut transaction, enrollment_id).await?;
+        let current_revision: Decimal = sqlx::query_scalar(
+            "SELECT revision
+               FROM runner_enrollment
+              WHERE enrollment_id = $1",
+        )
+        .bind(enrollment_id.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let current_revision = decode_u64(current_revision)?;
+        let revoked_revision = current_revision
+            .checked_add(1)
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
         let runner = enrollment.runner();
         let authentication = enrollment.authentication();
         let classes: Vec<_> = enrollment.allowed_classes().cloned().collect();
+        let revoked_state = runner_enrollment_state_to_str(RunnerEnrollmentState::Revoked);
         sqlx::query(
             "INSERT INTO runner_enrollment_audit
                 (enrollment_id, revision, runner_id,
                  authentication_reference_id, allowed_class_count, state_kind)
-             VALUES ($1, 2, $2, $3, $4, 'revoked')",
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(enrollment_id.into_uuid())
+        .bind(Decimal::from(revoked_revision))
         .bind(runner.into_uuid())
         .bind(authentication.into_uuid())
         .bind(count_decimal(classes.len())?)
+        .bind(revoked_state)
         .execute(&mut *transaction)
         .await?;
         for class in classes {
             sqlx::query(
                 "INSERT INTO runner_enrollment_audit_allowed_class
                     (enrollment_id, revision, capability_class)
-                 VALUES ($1, 2, $2)",
+                 VALUES ($1, $2, $3)",
             )
             .bind(enrollment_id.into_uuid())
+            .bind(Decimal::from(revoked_revision))
             .bind(class.as_str())
             .execute(&mut *transaction)
             .await?;
         }
         sqlx::query(
             "UPDATE runner_enrollment
-                SET revision = 2, state_kind = 'revoked'
+                SET revision = $2, state_kind = $3
               WHERE enrollment_id = $1",
         )
         .bind(enrollment_id.into_uuid())
+        .bind(Decimal::from(revoked_revision))
+        .bind(revoked_state)
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
@@ -2621,7 +2639,9 @@ impl RunnerProtocolStore {
         .bind(enrollment.into_uuid())
         .fetch_one(&mut *transaction)
         .await?;
-        match decode_enrollment_state(&enrollment_state)? {
+        match runner_enrollment_state_from_str(&enrollment_state)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+        {
             RunnerEnrollmentState::Active => {}
             RunnerEnrollmentState::Pending => {
                 return Err(RunnerProtocolStoreError::Domain(
@@ -4282,54 +4302,42 @@ enum PristineEnrollmentAdmission {
 
 fn connection_transition_values(
     transition: RunnerConnectionTransition,
-) -> Option<(
-    RunnerConnectionState,
-    RunnerConnectionCause,
-    &'static str,
-    &'static str,
-)> {
+) -> Option<(RunnerConnectionState, RunnerConnectionCause, &'static str)> {
     match transition {
         RunnerConnectionTransition::Observe => None,
         RunnerConnectionTransition::HeartbeatRecovered => Some((
             RunnerConnectionState::Connected,
             RunnerConnectionCause::HeartbeatRecovered,
-            "connected",
             "heartbeat_recovered",
         )),
         RunnerConnectionTransition::HeartbeatMissed => Some((
             RunnerConnectionState::Suspect,
             RunnerConnectionCause::HeartbeatMissed,
-            "suspect",
             "heartbeat_missed",
         )),
         RunnerConnectionTransition::DaemonShutdown => Some((
             RunnerConnectionState::Shutdown,
             RunnerConnectionCause::DaemonShutdown,
-            "shutdown",
             "daemon_shutdown",
         )),
         RunnerConnectionTransition::RunnerShutdown => Some((
             RunnerConnectionState::Shutdown,
             RunnerConnectionCause::RunnerShutdown,
-            "shutdown",
             "runner_shutdown",
         )),
         RunnerConnectionTransition::HeartbeatTimeout => Some((
             RunnerConnectionState::Lost,
             RunnerConnectionCause::HeartbeatTimeout,
-            "lost",
             "heartbeat_timeout",
         )),
         RunnerConnectionTransition::TransportClosed => Some((
             RunnerConnectionState::Lost,
             RunnerConnectionCause::TransportClosed,
-            "lost",
             "transport_closed",
         )),
         RunnerConnectionTransition::ProtocolFailure => Some((
             RunnerConnectionState::Lost,
             RunnerConnectionCause::ProtocolFailure,
-            "lost",
             "protocol_failure",
         )),
     }
@@ -4358,13 +4366,8 @@ async fn load_connection_head_in(
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         let state_kind: String = row.decode_column("state_kind")?;
         let cause_kind: String = row.decode_column("cause_kind")?;
-        let state = match state_kind.as_str() {
-            "connected" => RunnerConnectionState::Connected,
-            "suspect" => RunnerConnectionState::Suspect,
-            "shutdown" => RunnerConnectionState::Shutdown,
-            "lost" => RunnerConnectionState::Lost,
-            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-        };
+        let state = runner_connection_state_from_str(&state_kind)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         let cause = match cause_kind.as_str() {
             "established" => RunnerConnectionCause::Established,
             "heartbeat_recovered" => RunnerConnectionCause::HeartbeatRecovered,
@@ -4525,6 +4528,10 @@ async fn load_enrollment_request_receipt_in(
             RunnerEnrollmentAuthority::ReplacementPending,
             RunnerEnrollmentState::Pending,
             true
+        ) | (
+            RunnerEnrollmentAuthority::ReplacementPending,
+            RunnerEnrollmentState::Active | RunnerEnrollmentState::Revoked,
+            true
         )
     ) {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
@@ -4540,7 +4547,12 @@ async fn load_enrollment_request_receipt_in(
     .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     Ok(Some(RunnerEnrollmentReceipt {
         request,
-        authority: stored.authority,
+        authority: match enrollment.state() {
+            RunnerEnrollmentState::Pending => RunnerEnrollmentAuthority::ReplacementPending,
+            RunnerEnrollmentState::Active | RunnerEnrollmentState::Revoked => {
+                RunnerEnrollmentAuthority::Active
+            }
+        },
         enrollment,
         registration,
     }))
@@ -4607,7 +4619,7 @@ async fn insert_enrollment_rows(
     enrollment: &RunnerEnrollment,
 ) -> Result<(), RunnerProtocolStoreError> {
     let classes: Vec<_> = enrollment.allowed_classes().collect();
-    let state = encode_enrollment_state(enrollment.state());
+    let state = runner_enrollment_state_to_str(enrollment.state());
     sqlx::query(
         "INSERT INTO runner_enrollment_audit
             (enrollment_id, revision, runner_id,
@@ -4716,11 +4728,13 @@ async fn load_enrollment_in(
     }
     let classes = decode_classes(&class_rows)?;
     let audit_classes = decode_classes(&audit_class_rows)?;
-    let state = decode_enrollment_state(row.decode_column("state_kind")?)?;
+    let state = runner_enrollment_state_from_str(row.decode_column("state_kind")?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     let audit_state = row
         .decode_column::<Option<String>>("audit_state_kind")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?;
-    let audit_state = decode_enrollment_state(&audit_state)?;
+    let audit_state = runner_enrollment_state_from_str(&audit_state)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     let registration_revision = row
         .decode_column::<Option<Decimal>>("registration_revision")?
         .map(decode_generation)
@@ -8494,23 +8508,6 @@ fn decode_lease_state(value: String) -> Result<RunnerLeaseState, RunnerProtocolS
     }
 }
 
-fn decode_enrollment_state(value: &str) -> Result<RunnerEnrollmentState, RunnerProtocolStoreError> {
-    match value {
-        "pending" => Ok(RunnerEnrollmentState::Pending),
-        "active" => Ok(RunnerEnrollmentState::Active),
-        "revoked" => Ok(RunnerEnrollmentState::Revoked),
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
-}
-
-const fn encode_enrollment_state(state: RunnerEnrollmentState) -> &'static str {
-    match state {
-        RunnerEnrollmentState::Pending => "pending",
-        RunnerEnrollmentState::Active => "active",
-        RunnerEnrollmentState::Revoked => "revoked",
-    }
-}
-
 fn decode_enrollment_authority(
     value: String,
 ) -> Result<RunnerEnrollmentAuthority, RunnerProtocolStoreError> {
@@ -8521,7 +8518,9 @@ fn decode_enrollment_authority(
     }
 }
 
-const fn encode_enrollment_authority(authority: RunnerEnrollmentAuthority) -> &'static str {
+pub(crate) const fn encode_enrollment_authority(
+    authority: RunnerEnrollmentAuthority,
+) -> &'static str {
     match authority {
         RunnerEnrollmentAuthority::Active => "active",
         RunnerEnrollmentAuthority::ReplacementPending => "replacement_pending",

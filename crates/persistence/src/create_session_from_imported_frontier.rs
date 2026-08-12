@@ -388,7 +388,8 @@ impl ImportedSessionRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::PromotePendingRunner,
             ) => Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -437,7 +438,8 @@ async fn existing_outcome(
         | CommandKind::UpdateSessionPlacement
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
-        | CommandKind::WithdrawGitRemote => {
+        | CommandKind::WithdrawGitRemote
+        | CommandKind::PromotePendingRunner => {
             return Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

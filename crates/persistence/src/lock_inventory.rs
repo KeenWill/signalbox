@@ -69,6 +69,41 @@ pub(crate) const REPLACE_SESSION_DEFAULTS_CURRENT: &str = "SELECT current_versio
           WHERE session_id = $1
           FOR UPDATE";
 
+pub(crate) const PROMOTE_PENDING_RUNNER_ENROLLMENTS: &str = "SELECT
+            enrollment_id, runner_id, authentication_reference_id,
+            allowed_class_count, revision, state_kind
+       FROM runner_enrollment
+      WHERE enrollment_id = ANY($1)
+      ORDER BY enrollment_id
+      FOR UPDATE";
+
+pub(crate) const PROMOTE_PENDING_RUNNER_CONNECTION: &str = "SELECT
+            authority.connection_epoch, authority.connection_event_ordinal,
+            connection.state_kind
+       FROM runner_connection_authority_head AS authority
+       JOIN runner_connection_event AS connection
+         ON connection.enrollment_id = authority.enrollment_id
+        AND connection.connection_epoch = authority.connection_epoch
+        AND connection.event_ordinal = authority.connection_event_ordinal
+      WHERE authority.enrollment_id = $1
+      FOR UPDATE OF authority";
+
+pub(crate) const PROMOTE_PENDING_RUNNER_REGISTRATION: &str = "SELECT
+            current_registration.registration_revision,
+            registration.runner_id
+       FROM runner_current_registration AS current_registration
+       JOIN runner_registration AS registration
+         ON registration.enrollment_id = current_registration.enrollment_id
+        AND registration.registration_revision =
+            current_registration.registration_revision
+       JOIN runner_enrollment_request_receipt AS receipt
+         ON receipt.enrollment_id = current_registration.enrollment_id
+        AND receipt.registration_revision =
+            current_registration.registration_revision
+      WHERE current_registration.enrollment_id = $1
+        AND receipt.request_id = $2
+      FOR UPDATE OF current_registration";
+
 pub(crate) const CONTEXT_COMPACTION_LIFECYCLE_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 

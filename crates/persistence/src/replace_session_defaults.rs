@@ -312,7 +312,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::PromotePendingRunner,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
@@ -359,7 +360,8 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::UpdateSessionPlacement
                     | CommandKind::RegisterWorkspace
                     | CommandKind::MintGitRemote
-                    | CommandKind::WithdrawGitRemote,
+                    | CommandKind::WithdrawGitRemote
+                    | CommandKind::PromotePendingRunner,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -470,7 +472,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::UpdateSessionPlacement
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
+                | CommandKind::WithdrawGitRemote
+                | CommandKind::PromotePendingRunner,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }
