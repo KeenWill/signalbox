@@ -2542,22 +2542,36 @@ mod tests {
         assert!(APPROVAL_JUDGE_SYSTEM_PROMPT.contains("keeps its human approval path"));
     }
 
-    /// Human-reserved actions and truncated-context boundaries route to
-    /// escalation before the deny rule can reach them, and the configured
-    /// remote is never judged as unnamed-host egress.
+    /// A human-reserved action escalates before the deny rule can reach it,
+    /// honoring the preamble's never-approve-or-deny requirement.
     #[test]
-    fn the_judge_system_prompt_orders_escalation_guards_before_denial() {
+    fn the_judge_system_prompt_orders_the_human_reserved_guard_before_denial() {
         let deny_rule = APPROVAL_JUDGE_SYSTEM_PROMPT
             .find("2. deny")
             .expect("the deny rule is present");
         let human_reserved = APPROVAL_JUDGE_SYSTEM_PROMPT
             .find("reserves to the user or another human")
             .expect("the human-reserved guard is present");
+        assert!(human_reserved < deny_rule);
+    }
+
+    /// A boundary read from truncated context escalates before the deny rule
+    /// can settle it, because the omitted text may qualify the boundary.
+    #[test]
+    fn the_judge_system_prompt_orders_the_truncation_guard_before_denial() {
+        let deny_rule = APPROVAL_JUDGE_SYSTEM_PROMPT
+            .find("2. deny")
+            .expect("the deny rule is present");
         let truncation_guard = APPROVAL_JUDGE_SYSTEM_PROMPT
             .find("truncation marker")
             .expect("the truncation guard is present");
-        assert!(human_reserved < deny_rule);
         assert!(truncation_guard < deny_rule);
+    }
+
+    /// A push or fetch tool operating on the configured remote is judged by
+    /// its branch scope, never as unnamed-host egress.
+    #[test]
+    fn the_judge_system_prompt_exempts_configured_remotes_from_unnamed_host_denial() {
         assert!(
             APPROVAL_JUDGE_SYSTEM_PROMPT
                 .contains("judged by its branch scope, not as unnamed-host egress")
