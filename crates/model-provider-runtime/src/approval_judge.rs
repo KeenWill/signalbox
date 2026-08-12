@@ -33,6 +33,14 @@ const OUTPUT_SCHEMA: &str = r#"{
   "additionalProperties":false
 }"#;
 
+/// Returns the exact structured-output schema every approval-judge call
+/// carries, so measurement harnesses can fingerprint the complete operation
+/// contract they replay.
+#[must_use]
+pub const fn approval_judge_output_schema() -> &'static str {
+    OUTPUT_SCHEMA
+}
+
 /// Exact inputs to one dedicated approval-judge model call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgeModelRequest {

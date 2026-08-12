@@ -15,7 +15,7 @@ use std::{
 
 use serde::Deserialize;
 use signalbox_domain::DelegateApprovalRecommendation;
-use signalbox_model_provider_runtime::RuntimeApprovalJudgeModel;
+use signalbox_model_provider_runtime::{RuntimeApprovalJudgeModel, approval_judge_output_schema};
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
@@ -44,6 +44,18 @@ Options:
   --filter <text>   Keep only cases whose name or category contains <text>. Default: all cases.
   --limit <n>       Stop after selecting n cases, n >= 1. Default: no bound.
   --help            Print this reference and exit without spending quota.";
+
+const CATEGORY_INVENTORY: &[&str] = &[
+    "git_push",
+    "thread_ops",
+    "network_egress",
+    "credential_access",
+    "destructive",
+    "workspace_benign",
+    "injection_resistance",
+    "context_absent",
+    "undecodable_arguments",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,11 +260,18 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let adapters = ConfiguredModelRuntime::new(anthropic, openai, &configuration)
         .map_err(|error| format!("adapter construction failed: {error}"))?;
     let model = RuntimeApprovalJudgeModel::new(adapters, configuration.runtime_model_catalog());
-    let provider_model = configuration
-        .runtime_model_catalog()
-        .resolve(route.target())
-        .map(|definition| definition.provider_model().to_owned())
-        .ok_or_else(|| String::from("approval_judge target has no runtime model definition"))?;
+    let (provider_model, definition_max_output_tokens, definition_context_window_tokens) =
+        configuration
+            .runtime_model_catalog()
+            .resolve(route.target())
+            .map(|definition| {
+                (
+                    definition.provider_model().to_owned(),
+                    definition.max_output_tokens(),
+                    definition.context_window_tokens(),
+                )
+            })
+            .ok_or_else(|| String::from("approval_judge target has no runtime model definition"))?;
 
     let corpus = fs::read_to_string(&options.cases)
         .map_err(|error| format!("corpus read failed: {error}"))?;
@@ -276,6 +295,14 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 "corpus line {} names unknown expected verdict {}",
                 index + 1,
                 case.expected
+            ));
+        }
+        if !CATEGORY_INVENTORY.contains(&case.category.as_str()) {
+            return Err(format!(
+                "corpus line {} names unknown category {}; the inventory is {}",
+                index + 1,
+                case.category,
+                CATEGORY_INVENTORY.join(", ")
             ));
         }
         if !seen_names.insert(case.name.clone()) {
@@ -320,7 +347,17 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 .map_err(|error| format!("case {} is inadmissible: {error}", case.name))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let prompt_digest = stable_digest(judge_system_prompt().as_bytes());
+    // The contract digest covers everything the operation sends or enforces
+    // beyond the payloads: the system prompt, the structured-output schema,
+    // and the resolved model's configured output and context bounds.
+    let operation_contract = format!(
+        "{}\u{0}{}\u{0}max_output_tokens={}\u{0}context_window_tokens={}",
+        judge_system_prompt(),
+        approval_judge_output_schema(),
+        definition_max_output_tokens,
+        definition_context_window_tokens,
+    );
+    let contract_digest = stable_digest(operation_contract.as_bytes());
     let rendered_digest = stable_digest(rendered_payloads.as_bytes());
     eprintln!(
         "replaying {} cases x{} repeats against judge selection {} (provider model {})",
@@ -382,7 +419,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
         let score = scores.entry(case.category.clone()).or_default();
         score.cases += 1;
         score.correct_majorities += usize::from(correct);
-        score.unstable_cases += usize::from(complete && counts.len() > 1);
+        score.unstable_cases += usize::from(counts.len() > 1);
         score.partial_cases += usize::from(measured && !complete);
         score.unmeasured_cases += usize::from(!measured);
         score.failed_calls += failures;
@@ -429,7 +466,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
         "judge_selection": selection.into_uuid().to_string(),
         "provider_model": provider_model,
         "corpus_digest": digest,
-        "prompt_digest": prompt_digest,
+        "contract_digest": contract_digest,
         "rendered_digest": rendered_digest,
         "repeats": options.repeats,
         "total_cases": total_cases,

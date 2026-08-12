@@ -14,6 +14,7 @@ mod context_compaction;
 pub use approval_judge::{
     ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
     ApprovalJudgeModelResult, PreparedApprovalJudgeModelCall, RuntimeApprovalJudgeModel,
+    approval_judge_output_schema,
 };
 pub use context_compaction::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
