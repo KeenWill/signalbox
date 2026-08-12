@@ -5918,7 +5918,7 @@ impl ReplaceLostRunnerBeforePinRequest {
         command: DurableCommandId,
         session: SessionId,
         expected_placement_revision: RunnerGeneration,
-        replacement: RunnerReplacementTarget,
+        replacement: RunnerId,
     ) -> Result<Self, InvalidDurableCommandId>;
     // accessors: command(), session(), expected_placement_revision(), replacement()
 }

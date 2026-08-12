@@ -347,9 +347,12 @@ Representation rules, all enforced in the schema:
   active-turn slot empty, and the pre-pin replacement transaction installs an
   ordinary unpinned successor only for a different exact active runner whose
   current registration is connected and advertises every retained request axis.
-  **Committed unimplemented functionality.** Pending-enrollment activation,
-  same-runner recovery, and pinned replacement remain for later dedicated
-  transactions. Direct snapshot storage cannot stand in for any of them.
+  Its applied receipt retains and reads back that exact enrollment, registration
+  revision, connection epoch, and connected event rather than trusting mutable
+  current heads on replay. **Committed unimplemented functionality.**
+  Pending-enrollment activation, same-runner recovery, and pinned replacement
+  remain for later dedicated transactions. Direct snapshot storage cannot stand
+  in for any of them.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,

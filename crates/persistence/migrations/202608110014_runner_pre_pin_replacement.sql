@@ -84,6 +84,10 @@ CREATE TABLE replace_lost_runner_result (
     prior_runner_id uuid,
     new_runner_id uuid,
     sandbox_profile text,
+    target_enrollment_id uuid,
+    target_registration_revision numeric(20, 0),
+    target_connection_epoch numeric(20, 0),
+    target_connection_event_ordinal numeric(20, 0),
 
     CONSTRAINT replace_lost_runner_result_kind_closed
         CHECK (result_kind IN ('applied', 'rejected')),
@@ -118,6 +122,24 @@ CREATE TABLE replace_lost_runner_result (
             OR placement_event_ordinal BETWEEN 1 AND 18446744073709551615)
         AND (placement_revision IS NULL
             OR placement_revision BETWEEN 1 AND 18446744073709551615)
+        AND (target_registration_revision IS NULL
+            OR target_registration_revision BETWEEN 1 AND 18446744073709551615)
+        AND (target_connection_epoch IS NULL
+            OR target_connection_epoch BETWEEN 1 AND 18446744073709551615)
+        AND (target_connection_event_ordinal IS NULL
+            OR target_connection_event_ordinal BETWEEN 1 AND 18446744073709551615)
+    ),
+    CONSTRAINT replace_lost_runner_result_target_authority_shape CHECK (
+        (result_kind = 'applied'
+            AND target_enrollment_id IS NOT NULL
+            AND target_registration_revision IS NOT NULL
+            AND target_connection_epoch IS NOT NULL
+            AND target_connection_event_ordinal IS NOT NULL)
+        OR (result_kind = 'rejected'
+            AND target_enrollment_id IS NULL
+            AND target_registration_revision IS NULL
+            AND target_connection_epoch IS NULL
+            AND target_connection_event_ordinal IS NULL)
     ),
     CONSTRAINT replace_lost_runner_result_shape CHECK (
         (result_kind = 'applied'
@@ -192,6 +214,23 @@ CREATE TABLE replace_lost_runner_result (
         )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT replace_lost_runner_result_target_registration_fk
+        FOREIGN KEY (target_enrollment_id, target_registration_revision)
+        REFERENCES runner_registration (enrollment_id, registration_revision)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT replace_lost_runner_result_target_connection_fk
+        FOREIGN KEY (
+            target_enrollment_id, target_connection_epoch,
+            target_connection_event_ordinal
+        )
+        REFERENCES runner_connection_event (
+            enrollment_id, connection_epoch, event_ordinal
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
 
@@ -206,6 +245,8 @@ DECLARE
     session_exists boolean;
     target_enrollment uuid;
     target_registration numeric(20, 0);
+    target_connection_epoch numeric(20, 0);
+    target_connection_event_ordinal numeric(20, 0);
     target_connection_state text;
     target_is_advertised boolean;
 BEGIN
@@ -260,7 +301,10 @@ BEGIN
               INTO target_registration
               FROM runner_current_registration AS current_registration
              WHERE current_registration.enrollment_id = target_enrollment;
-            SELECT connection.state_kind INTO target_connection_state
+            SELECT authority.connection_epoch, authority.connection_event_ordinal,
+                   connection.state_kind
+              INTO target_connection_epoch, target_connection_event_ordinal,
+                   target_connection_state
               FROM runner_connection_authority_head AS authority
               JOIN runner_connection_event AS connection
                 ON connection.enrollment_id = authority.enrollment_id
@@ -315,7 +359,13 @@ BEGIN
                            AND tool.tool_name = permission_override.tool_name
                    )
             );
-        IF NOT target_is_advertised THEN
+        IF target_enrollment IS DISTINCT FROM NEW.target_enrollment_id
+           OR target_registration IS DISTINCT FROM NEW.target_registration_revision
+           OR target_connection_epoch IS DISTINCT FROM NEW.target_connection_epoch
+           OR target_connection_event_ordinal IS DISTINCT FROM
+                NEW.target_connection_event_ordinal
+           OR NOT target_is_advertised
+        THEN
             RAISE EXCEPTION 'applied pre-pin replacement lacks live advertised target authority'
                 USING ERRCODE = '23514';
         END IF;

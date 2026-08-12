@@ -4,7 +4,7 @@ use std::future::Future;
 
 use signalbox_domain::{
     DurableCommandId, ReplaceLostRunner, ReplaceLostRunnerBeforePinResult, RunnerGeneration,
-    RunnerReplacementTarget, SessionId,
+    RunnerId, RunnerReplacementTarget, SessionId,
 };
 
 use crate::InvalidDurableCommandId;
@@ -15,7 +15,7 @@ pub struct ReplaceLostRunnerBeforePinRequest {
     command: DurableCommandId,
     session: SessionId,
     expected_placement_revision: RunnerGeneration,
-    replacement: RunnerReplacementTarget,
+    replacement: RunnerId,
 }
 
 impl ReplaceLostRunnerBeforePinRequest {
@@ -24,7 +24,7 @@ impl ReplaceLostRunnerBeforePinRequest {
         command: DurableCommandId,
         session: SessionId,
         expected_placement_revision: RunnerGeneration,
-        replacement: RunnerReplacementTarget,
+        replacement: RunnerId,
     ) -> Result<Self, InvalidDurableCommandId> {
         if command.as_uuid().is_nil() {
             return Err(InvalidDurableCommandId::Nil);
@@ -56,7 +56,7 @@ impl ReplaceLostRunnerBeforePinRequest {
     }
 
     /// Returns the exact user-selected successor target.
-    pub const fn replacement(&self) -> RunnerReplacementTarget {
+    pub const fn replacement(&self) -> RunnerId {
         self.replacement
     }
 }
@@ -104,7 +104,7 @@ impl<Transaction: ReplaceLostRunnerBeforePinTransaction>
                 request.command,
                 request.session,
                 request.expected_placement_revision,
-                request.replacement,
+                RunnerReplacementTarget::Runner(request.replacement),
             ))
             .await
     }
@@ -112,9 +112,7 @@ impl<Transaction: ReplaceLostRunnerBeforePinTransaction>
 
 #[cfg(test)]
 mod tests {
-    use signalbox_domain::{
-        DurableCommandId, RunnerGeneration, RunnerId, RunnerReplacementTarget, SessionId,
-    };
+    use signalbox_domain::{DurableCommandId, RunnerGeneration, RunnerId, SessionId};
     use uuid::Uuid;
 
     use super::ReplaceLostRunnerBeforePinRequest;
@@ -126,7 +124,7 @@ mod tests {
     fn inv001_pre_pin_replacement_request_rejects_reserved_command_identifiers() {
         let session = SessionId::from_uuid(Uuid::from_u128(1));
         let revision = RunnerGeneration::try_from_u64(1).expect("positive fixture revision");
-        let target = RunnerReplacementTarget::Runner(RunnerId::from_uuid(Uuid::from_u128(2)));
+        let target = RunnerId::from_uuid(Uuid::from_u128(2));
 
         assert_eq!(
             ReplaceLostRunnerBeforePinRequest::try_new(

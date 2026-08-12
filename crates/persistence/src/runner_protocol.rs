@@ -2570,7 +2570,8 @@ impl RunnerProtocolStore {
                                         },
                                     )
                                 }
-                                DirectReplacementTargetAuthority::Current(registration) => {
+                                DirectReplacementTargetAuthority::Current(target_authority) => {
+                                    let registration = &target_authority.registration;
                                     let mut replacement_request = placement.request().clone();
                                     replacement_request.selector =
                                         RunnerSelector::Identity(target_runner);
@@ -2608,7 +2609,7 @@ impl RunnerProtocolStore {
                                                 .await?;
                                             validate_placement_snapshot(
                                                 &replacement.placement,
-                                                Some(registration.as_ref()),
+                                                Some(registration),
                                                 None,
                                                 history,
                                             )?;
@@ -2680,6 +2681,18 @@ impl RunnerProtocolStore {
                                                 sandbox: Some(
                                                     replacement.placement.request().sandbox,
                                                 ),
+                                                target_enrollment: Some(
+                                                    target_authority.enrollment,
+                                                ),
+                                                target_registration_revision: Some(
+                                                    target_authority.registration_revision,
+                                                ),
+                                                target_connection_epoch: Some(
+                                                    target_authority.connection_epoch,
+                                                ),
+                                                target_connection_event_ordinal: Some(
+                                                    target_authority.connection_event_ordinal,
+                                                ),
                                             };
                                             ReplaceLostRunnerBeforePinResult::Applied(
                                                 ReplacedLostRunnerBeforePin::new(
@@ -2736,18 +2749,27 @@ impl RunnerProtocolStore {
             .bind(enrollment.into_uuid())
             .fetch_optional(&mut **transaction)
             .await?;
-        let connected = connection
+        let connection = connection
             .map(|row| {
                 let state: String = row.decode_column("state_kind")?;
-                Ok::<_, RunnerProtocolStoreError>(
+                Ok::<_, RunnerProtocolStoreError>((
+                    RunnerConnectionEpoch::try_from_u64(decode_u64(
+                        row.decode_column("connection_epoch")?,
+                    )?)
+                    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+                    decode_u64(row.decode_column("connection_event_ordinal")?)?,
                     runner_connection_state_from_str(&state)
-                        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
-                        == RunnerConnectionState::Connected,
-                )
+                        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+                ))
             })
-            .transpose()?
-            .unwrap_or(false);
-        if !connected {
+            .transpose()?;
+        let Some((connection_epoch, connection_event_ordinal, connection_state)) = connection
+        else {
+            return Ok(DirectReplacementTargetAuthority::Unavailable(
+                RunnerReplacementTargetUnavailableReason::NotConnected,
+            ));
+        };
+        if connection_state != RunnerConnectionState::Connected {
             return Ok(DirectReplacementTargetAuthority::Unavailable(
                 RunnerReplacementTargetUnavailableReason::NotConnected,
             ));
@@ -2773,7 +2795,13 @@ impl RunnerProtocolStore {
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
         Ok(DirectReplacementTargetAuthority::Current(Box::new(
-            registration,
+            DirectReplacementTargetEvidence {
+                enrollment,
+                registration_revision: revision,
+                connection_epoch,
+                connection_event_ordinal,
+                registration,
+            },
         )))
     }
 
@@ -4422,8 +4450,16 @@ impl ReplaceLostRunnerBeforePinTransaction for RunnerProtocolStore {
 }
 
 enum DirectReplacementTargetAuthority {
-    Current(Box<StoredValidatedRunnerRegistration>),
+    Current(Box<DirectReplacementTargetEvidence>),
     Unavailable(RunnerReplacementTargetUnavailableReason),
+}
+
+struct DirectReplacementTargetEvidence {
+    enrollment: RunnerEnrollmentId,
+    registration_revision: RunnerRegistrationRevision,
+    connection_epoch: RunnerConnectionEpoch,
+    connection_event_ordinal: u64,
+    registration: StoredValidatedRunnerRegistration,
 }
 
 #[derive(Default)]
@@ -4434,6 +4470,10 @@ struct ReplacementRecordEvidence {
     prior_runner: Option<RunnerId>,
     new_runner: Option<RunnerId>,
     sandbox: Option<RunnerSandboxProfile>,
+    target_enrollment: Option<RunnerEnrollmentId>,
+    target_registration_revision: Option<RunnerRegistrationRevision>,
+    target_connection_epoch: Option<RunnerConnectionEpoch>,
+    target_connection_event_ordinal: Option<u64>,
 }
 
 fn replacement_target_is_unavailable(error: &RunnerDomainError) -> bool {
@@ -4577,8 +4617,11 @@ async fn insert_replacement_result(
             (command_id, session_id, result_kind, rejection_kind,
              target_unavailable_reason, placement_event_ordinal,
              placement_revision, placement_state_kind, prior_runner_id,
-             new_runner_id, sandbox_profile)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             new_runner_id, sandbox_profile, target_enrollment_id,
+             target_registration_revision, target_connection_epoch,
+             target_connection_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                 $14, $15)",
     )
     .bind(command.command().into_uuid())
     .bind(command.session().into_uuid())
@@ -4595,6 +4638,22 @@ async fn insert_replacement_result(
     .bind(evidence.prior_runner.map(RunnerId::into_uuid))
     .bind(evidence.new_runner.map(RunnerId::into_uuid))
     .bind(evidence.sandbox.map(runner_sandbox_to_str))
+    .bind(
+        evidence
+            .target_enrollment
+            .map(RunnerEnrollmentId::into_uuid),
+    )
+    .bind(
+        evidence
+            .target_registration_revision
+            .map(|revision| Decimal::from(revision.get())),
+    )
+    .bind(
+        evidence
+            .target_connection_epoch
+            .map(|epoch| Decimal::from(epoch.get())),
+    )
+    .bind(evidence.target_connection_event_ordinal.map(Decimal::from))
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -4612,11 +4671,25 @@ async fn load_replacement_record(
                 result.rejection_kind, result.target_unavailable_reason,
                 result.placement_revision, result.placement_state_kind,
                 result.prior_runner_id, result.new_runner_id,
-                result.sandbox_profile
+                result.sandbox_profile, result.target_enrollment_id,
+                result.target_registration_revision,
+                result.target_connection_epoch,
+                result.target_connection_event_ordinal,
+                target_registration.runner_id AS target_registration_runner_id,
+                target_connection.state_kind AS target_connection_state_kind
            FROM replace_lost_runner_command AS command
            JOIN replace_lost_runner_result AS result
              ON result.command_id = command.command_id
             AND result.session_id = command.session_id
+           LEFT JOIN runner_registration AS target_registration
+             ON target_registration.enrollment_id = result.target_enrollment_id
+            AND target_registration.registration_revision =
+                result.target_registration_revision
+           LEFT JOIN runner_connection_event AS target_connection
+             ON target_connection.enrollment_id = result.target_enrollment_id
+            AND target_connection.connection_epoch = result.target_connection_epoch
+            AND target_connection.event_ordinal =
+                result.target_connection_event_ordinal
           WHERE command.command_id = $1",
     )
     .bind(command_id.into_uuid())
@@ -4640,6 +4713,24 @@ async fn load_replacement_record(
             let sandbox: String = row.decode_column("sandbox_profile")?;
             let sandbox = runner_sandbox_from_str(&sandbox)
                 .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            let _: Uuid = row.decode_column("target_enrollment_id")?;
+            let _ =
+                decode_registration_revision(row.decode_column("target_registration_revision")?)?;
+            let _ = RunnerConnectionEpoch::try_from_u64(decode_u64(
+                row.decode_column("target_connection_epoch")?,
+            )?)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            let _ = decode_u64(row.decode_column("target_connection_event_ordinal")?)?;
+            let target_registration_runner =
+                runner_id(row.decode_column("target_registration_runner_id")?);
+            let target_connection_state: String =
+                row.decode_column("target_connection_state_kind")?;
+            if target_registration_runner != new_runner
+                || runner_connection_state_from_str(&target_connection_state)
+                    != Some(RunnerConnectionState::Connected)
+            {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
             ReplaceLostRunnerBeforePinResult::Applied(ReplacedLostRunnerBeforePin::new(
                 session,
                 prior_runner,

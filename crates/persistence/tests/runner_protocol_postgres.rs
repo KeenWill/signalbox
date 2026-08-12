@@ -14802,8 +14802,8 @@ async fn s32_inv001_inv002_inv044_pre_pin_replacement_applies_and_replays()
     append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
     let successor = replacement_enrollment();
     store.insert_enrollment(&successor).await?;
-    store.register(&successor, advertisement()).await?;
-    store.open_connection(successor.enrollment()).await?;
+    let successor_registration = store.register(&successor, advertisement()).await?;
+    let successor_connection = store.open_connection(successor.enrollment()).await?;
     let command = ReplaceLostRunner::new(
         DurableCommandId::from_uuid(uuid(REPLACE_LOST_RUNNER_COMMAND)),
         placement.session(),
@@ -14827,11 +14827,15 @@ async fn s32_inv001_inv002_inv044_pre_pin_replacement_applies_and_replays()
         .load_placement(placement.session())
         .await?
         .expect("the successor placement reads back");
-    let result_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM replace_lost_runner_result WHERE command_id = $1")
-            .bind(command.command().into_uuid())
-            .fetch_one(&pool)
-            .await?;
+    let result_authority: (Uuid, Decimal, Decimal, Decimal) = sqlx::query_as(
+        "SELECT target_enrollment_id, target_registration_revision,
+                target_connection_epoch, target_connection_event_ordinal
+           FROM replace_lost_runner_result
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(applied, expected);
     assert_eq!(replayed, expected);
@@ -14846,7 +14850,19 @@ async fn s32_inv001_inv002_inv044_pre_pin_replacement_applies_and_replays()
     );
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
-    assert_eq!(result_rows, 1);
+    assert_eq!(result_authority.0, successor.enrollment().into_uuid());
+    assert_eq!(
+        result_authority.1,
+        Decimal::from(successor_registration.revision().get())
+    );
+    assert_eq!(
+        result_authority.2,
+        Decimal::from(successor_connection.epoch().get())
+    );
+    assert_eq!(
+        result_authority.3,
+        Decimal::from(successor_connection.event_ordinal())
+    );
     drop(pool);
     Ok(())
 }
