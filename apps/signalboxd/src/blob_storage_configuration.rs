@@ -578,22 +578,32 @@ generated_artifact = "archive"
     }
 
     #[test]
-    fn s3_endpoint_rejects_credential_query_and_non_loopback_http() {
+    fn s3_endpoint_rejects_userinfo() {
         let credential = VALID.replace(
             "https://objects.example.test",
             "https://user:secret@objects.example.test",
         );
+
+        assert!(parse(&credential).is_err());
+    }
+
+    #[test]
+    fn s3_endpoint_rejects_a_query() {
         let query = VALID.replace(
             "https://objects.example.test",
             "https://objects.example.test?secret=value",
         );
+
+        assert!(parse(&query).is_err());
+    }
+
+    #[test]
+    fn s3_endpoint_rejects_non_loopback_http() {
         let plain_http = VALID.replace(
             "https://objects.example.test",
             "http://objects.example.test",
         );
 
-        assert!(parse(&credential).is_err());
-        assert!(parse(&query).is_err());
         assert!(parse(&plain_http).is_err());
     }
 
