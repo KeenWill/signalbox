@@ -347,7 +347,11 @@ impl GoalState {
         }
     }
 
-    fn is_open(&self) -> bool {
+    /// Whether this generation still admits work toward its statement.
+    ///
+    /// A closed generation has had its authority withdrawn or discharged, so a
+    /// consumer deciding what a session is allowed to do must not read one.
+    pub const fn is_open(&self) -> bool {
         match self {
             Self::Pursuing | Self::Blocked { .. } => true,
             Self::Achieved { .. } | Self::UserStopped | Self::Superseded { .. } => false,
