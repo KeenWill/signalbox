@@ -53,7 +53,8 @@ use crate::lock_inventory::{
 };
 use crate::mapping::{
     ToolAttemptDispositionStorageKind, runner_connection_state_from_str,
-    runner_connection_state_to_str, runner_placement_loss_source_from_str,
+    runner_connection_state_to_str, runner_enrollment_state_from_str,
+    runner_enrollment_state_to_str, runner_placement_loss_source_from_str,
     runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
     tool_attempt_disposition_to_str, tool_permission_default_from_str,
     tool_permission_default_to_str,
@@ -2620,7 +2621,9 @@ impl RunnerProtocolStore {
         .bind(enrollment.into_uuid())
         .fetch_one(&mut *transaction)
         .await?;
-        match decode_enrollment_state(&enrollment_state)? {
+        match runner_enrollment_state_from_str(&enrollment_state)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+        {
             RunnerEnrollmentState::Active => {}
             RunnerEnrollmentState::Pending => {
                 return Err(RunnerProtocolStoreError::Domain(
@@ -4595,7 +4598,7 @@ async fn insert_enrollment_rows(
     enrollment: &RunnerEnrollment,
 ) -> Result<(), RunnerProtocolStoreError> {
     let classes: Vec<_> = enrollment.allowed_classes().collect();
-    let state = encode_enrollment_state(enrollment.state());
+    let state = runner_enrollment_state_to_str(enrollment.state());
     sqlx::query(
         "INSERT INTO runner_enrollment_audit
             (enrollment_id, revision, runner_id,
@@ -4704,11 +4707,13 @@ async fn load_enrollment_in(
     }
     let classes = decode_classes(&class_rows)?;
     let audit_classes = decode_classes(&audit_class_rows)?;
-    let state = decode_enrollment_state(row.decode_column("state_kind")?)?;
+    let state = runner_enrollment_state_from_str(row.decode_column("state_kind")?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     let audit_state = row
         .decode_column::<Option<String>>("audit_state_kind")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?;
-    let audit_state = decode_enrollment_state(&audit_state)?;
+    let audit_state = runner_enrollment_state_from_str(&audit_state)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     let registration_revision = row
         .decode_column::<Option<Decimal>>("registration_revision")?
         .map(decode_generation)
@@ -8479,23 +8484,6 @@ fn decode_lease_state(value: String) -> Result<RunnerLeaseState, RunnerProtocolS
         "lost_claimed" => Ok(RunnerLeaseState::LostClaimed),
         "lost_execution_possible" => Ok(RunnerLeaseState::LostExecutionPossible),
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
-}
-
-fn decode_enrollment_state(value: &str) -> Result<RunnerEnrollmentState, RunnerProtocolStoreError> {
-    match value {
-        "pending" => Ok(RunnerEnrollmentState::Pending),
-        "active" => Ok(RunnerEnrollmentState::Active),
-        "revoked" => Ok(RunnerEnrollmentState::Revoked),
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
-}
-
-const fn encode_enrollment_state(state: RunnerEnrollmentState) -> &'static str {
-    match state {
-        RunnerEnrollmentState::Pending => "pending",
-        RunnerEnrollmentState::Active => "active",
-        RunnerEnrollmentState::Revoked => "revoked",
     }
 }
 

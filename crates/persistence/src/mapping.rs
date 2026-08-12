@@ -15,7 +15,7 @@ use signalbox_domain::{
     GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
     GoalUserAction, MergeableState, ModelChangeAdjustment, ModelSettingSource,
     ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
+    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, RunnerEnrollmentState,
     RunnerPlacementLossSource, RunnerSandboxProfile, ServiceTier,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
     SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
@@ -707,6 +707,25 @@ pub(crate) fn runner_non_lost_connection_state_from_str(
         "connected" => Some(signalbox_domain::RunnerNonLostConnectionState::Connected),
         "suspect" => Some(signalbox_domain::RunnerNonLostConnectionState::Suspect),
         "shutdown" => Some(signalbox_domain::RunnerNonLostConnectionState::Shutdown),
+        _ => None,
+    }
+}
+
+/// Encodes one durable runner-enrollment state spelling.
+pub(crate) const fn runner_enrollment_state_to_str(value: RunnerEnrollmentState) -> &'static str {
+    match value {
+        RunnerEnrollmentState::Pending => "pending",
+        RunnerEnrollmentState::Active => "active",
+        RunnerEnrollmentState::Revoked => "revoked",
+    }
+}
+
+/// Decodes one durable runner-enrollment state spelling.
+pub(crate) fn runner_enrollment_state_from_str(value: &str) -> Option<RunnerEnrollmentState> {
+    match value {
+        "pending" => Some(RunnerEnrollmentState::Pending),
+        "active" => Some(RunnerEnrollmentState::Active),
+        "revoked" => Some(RunnerEnrollmentState::Revoked),
         _ => None,
     }
 }
@@ -2061,6 +2080,7 @@ mod tests {
         repo_watch_review_state_from_str, repo_watch_review_state_to_str,
         repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
         runner_connection_state_from_str, runner_connection_state_to_str,
+        runner_enrollment_state_from_str, runner_enrollment_state_to_str,
         runner_non_lost_connection_state_from_str, runner_non_lost_connection_state_to_str,
         runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
         runner_sandbox_from_str, runner_sandbox_to_str, session_creation_cause_from_str,
@@ -2996,7 +3016,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_runner_promotion_result_mappings_are_closed() {
+    fn pending_runner_promotion_result_mapping_is_closed() {
         assert_eq!(
             promote_pending_runner_result_from_str(promote_pending_runner_result_to_str(
                 PromotePendingRunnerResultStorageKind::Applied,
@@ -3009,6 +3029,11 @@ mod tests {
             )),
             Some(PromotePendingRunnerResultStorageKind::Rejected)
         );
+        assert_eq!(promote_pending_runner_result_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn pending_runner_promotion_rejection_mapping_is_closed() {
         assert_eq!(
             promote_pending_runner_rejection_from_str(promote_pending_runner_rejection_to_str(
                 PromotePendingRunnerRejectionStorageKind::NoPendingRunnerEnrollment,
@@ -3033,6 +3058,11 @@ mod tests {
             )),
             Some(PromotePendingRunnerRejectionStorageKind::ActiveRunnerNotLost)
         );
+        assert_eq!(promote_pending_runner_rejection_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn runner_non_lost_connection_state_mapping_is_closed() {
         assert_eq!(
             runner_non_lost_connection_state_from_str(runner_non_lost_connection_state_to_str(
                 signalbox_domain::RunnerNonLostConnectionState::Connected,
@@ -3051,9 +3081,11 @@ mod tests {
             )),
             Some(signalbox_domain::RunnerNonLostConnectionState::Shutdown)
         );
-        assert_eq!(promote_pending_runner_result_from_str("unknown"), None);
-        assert_eq!(promote_pending_runner_rejection_from_str("unknown"), None);
         assert_eq!(runner_non_lost_connection_state_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn runner_connection_state_mapping_is_closed() {
         assert_eq!(
             runner_connection_state_from_str(runner_connection_state_to_str(
                 crate::runner_protocol::RunnerConnectionState::Connected,
@@ -3079,6 +3111,29 @@ mod tests {
             Some(crate::runner_protocol::RunnerConnectionState::Lost)
         );
         assert_eq!(runner_connection_state_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn runner_enrollment_state_mapping_is_closed() {
+        assert_eq!(
+            runner_enrollment_state_from_str(runner_enrollment_state_to_str(
+                signalbox_domain::RunnerEnrollmentState::Pending,
+            )),
+            Some(signalbox_domain::RunnerEnrollmentState::Pending)
+        );
+        assert_eq!(
+            runner_enrollment_state_from_str(runner_enrollment_state_to_str(
+                signalbox_domain::RunnerEnrollmentState::Active,
+            )),
+            Some(signalbox_domain::RunnerEnrollmentState::Active)
+        );
+        assert_eq!(
+            runner_enrollment_state_from_str(runner_enrollment_state_to_str(
+                signalbox_domain::RunnerEnrollmentState::Revoked,
+            )),
+            Some(signalbox_domain::RunnerEnrollmentState::Revoked)
+        );
+        assert_eq!(runner_enrollment_state_from_str("unknown"), None);
     }
 
     #[test]

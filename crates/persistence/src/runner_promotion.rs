@@ -7,7 +7,8 @@ use signalbox_application::{PromotePendingRunnerOutcome, PromotePendingRunnerTra
 use signalbox_domain::{
     DurableCommandId, PromotePendingRunner, PromotePendingRunnerRejection,
     PromotePendingRunnerResult, PromotedRunnerEnrollment, RunnerEnrollmentId,
-    RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerNonLostConnectionState,
+    RunnerEnrollmentRequestId, RunnerEnrollmentState, RunnerGeneration, RunnerId,
+    RunnerNonLostConnectionState,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -22,6 +23,7 @@ use crate::{
         durable_command_id_to_uuid, promote_pending_runner_rejection_from_str,
         promote_pending_runner_rejection_to_str, promote_pending_runner_result_from_str,
         promote_pending_runner_result_to_str, runner_connection_state_from_str,
+        runner_enrollment_state_from_str, runner_enrollment_state_to_str,
         runner_non_lost_connection_state_from_str, runner_non_lost_connection_state_to_str,
     },
     runner_protocol::RunnerConnectionState,
@@ -199,7 +201,7 @@ struct EnrollmentRow {
     authentication: Uuid,
     allowed_class_count: Decimal,
     revision: u64,
-    state: String,
+    state: RunnerEnrollmentState,
 }
 
 async fn load_current_pending(
@@ -211,10 +213,13 @@ async fn load_current_pending(
            FROM runner_pending_enrollment AS pending
            JOIN runner_enrollment AS candidate
              ON candidate.enrollment_id = pending.enrollment_id
-            AND candidate.state_kind = 'pending'
+            AND candidate.state_kind = $2
           WHERE pending.request_id = $1",
     )
     .bind(request.into_uuid())
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Pending,
+    ))
     .fetch_optional(&mut *connection)
     .await?;
     if let Some(row) = exact {
@@ -229,9 +234,12 @@ async fn load_current_pending(
               FROM runner_pending_enrollment AS pending
               JOIN runner_enrollment AS candidate
                 ON candidate.enrollment_id = pending.enrollment_id
-               AND candidate.state_kind = 'pending'
+               AND candidate.state_kind = $1
         )",
     )
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Pending,
+    ))
     .fetch_one(&mut *connection)
     .await?;
     Ok(if another {
@@ -275,9 +283,9 @@ async fn apply_or_reject_promotion(
         .ok_or(PromotePendingRunnerRepositoryError::Corruption(
             "active predecessor missing",
         ))?;
-    if candidate.state != "pending"
+    if candidate.state != RunnerEnrollmentState::Pending
         || candidate.revision != 1
-        || predecessor.state != "active"
+        || predecessor.state != RunnerEnrollmentState::Active
         || !matches!(predecessor.revision, 1 | 2)
     {
         return Err(PromotePendingRunnerRepositoryError::Corruption(
@@ -345,27 +353,39 @@ async fn apply_or_reject_promotion(
         connection,
         &predecessor,
         predecessor_revoked_revision,
-        "revoked",
+        RunnerEnrollmentState::Revoked,
     )
     .await?;
-    append_enrollment_audit(connection, &candidate, 2, "active").await?;
+    append_enrollment_audit(connection, &candidate, 2, RunnerEnrollmentState::Active).await?;
     let predecessor_updated = sqlx::query(
         "UPDATE runner_enrollment
-            SET revision = $2, state_kind = 'revoked'
-          WHERE enrollment_id = $1 AND revision = $3 AND state_kind = 'active'",
+            SET revision = $2, state_kind = $4
+          WHERE enrollment_id = $1 AND revision = $3 AND state_kind = $5",
     )
     .bind(predecessor.enrollment.into_uuid())
     .bind(Decimal::from(predecessor_revoked_revision))
     .bind(Decimal::from(predecessor.revision))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Revoked,
+    ))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Active,
+    ))
     .execute(&mut *connection)
     .await?
     .rows_affected();
     let candidate_updated = sqlx::query(
         "UPDATE runner_enrollment
-            SET revision = 2, state_kind = 'active'
-          WHERE enrollment_id = $1 AND revision = 1 AND state_kind = 'pending'",
+            SET revision = 2, state_kind = $2
+          WHERE enrollment_id = $1 AND revision = 1 AND state_kind = $3",
     )
     .bind(candidate.enrollment.into_uuid())
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Active,
+    ))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Pending,
+    ))
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -394,7 +414,9 @@ fn decode_enrollment_row(row: PgRow) -> Result<EnrollmentRow, PromotePendingRunn
         authentication: row.try_get("authentication_reference_id")?,
         allowed_class_count: row.try_get("allowed_class_count")?,
         revision: decode_u64(row.try_get("revision")?)?,
-        state: row.try_get("state_kind")?,
+        state: runner_enrollment_state_from_str(row.try_get("state_kind")?).ok_or(
+            PromotePendingRunnerRepositoryError::Corruption("enrollment state discriminator"),
+        )?,
     })
 }
 
@@ -419,7 +441,7 @@ async fn append_enrollment_audit(
     connection: &mut PgConnection,
     enrollment: &EnrollmentRow,
     revision: u64,
-    state: &str,
+    state: RunnerEnrollmentState,
 ) -> Result<(), PromotePendingRunnerRepositoryError> {
     sqlx::query(
         "INSERT INTO runner_enrollment_audit
@@ -432,7 +454,7 @@ async fn append_enrollment_audit(
     .bind(enrollment.runner.into_uuid())
     .bind(enrollment.authentication)
     .bind(enrollment.allowed_class_count)
-    .bind(state)
+    .bind(runner_enrollment_state_to_str(state))
     .execute(&mut *connection)
     .await?;
     sqlx::query(

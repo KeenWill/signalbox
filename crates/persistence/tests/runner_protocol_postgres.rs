@@ -4118,7 +4118,7 @@ async fn s30_inv042_pending_successor_migration_preserves_active_request_receipt
 /// only while its exact predecessor remains durably lost.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_inv044_pending_successor_promotion_round_trips() -> Result<(), Box<dyn Error>> {
+async fn inv042_inv044_pending_successor_promotion_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = pending_promotion_fixture(pool.clone()).await?;
     fixture
@@ -4224,8 +4224,7 @@ async fn s32_inv042_inv044_pending_successor_promotion_round_trips() -> Result<(
 /// lost predecessor of a later pending successor and promote it at revision three.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_inv044_promoted_runner_can_precede_later_promotion()
--> Result<(), Box<dyn Error>> {
+async fn inv042_inv044_promoted_runner_can_precede_later_promotion() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = pending_promotion_fixture(pool.clone()).await?;
     let first_connection = fixture
@@ -4315,7 +4314,7 @@ async fn s32_inv042_inv044_promoted_runner_can_precede_later_promotion()
 /// rejection even if it connects before equal replay.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_pending_successor_promotion_records_disconnected_rejection()
+async fn inv042_pending_successor_promotion_records_disconnected_rejection()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = pending_promotion_fixture(pool.clone()).await?;
@@ -4356,7 +4355,7 @@ async fn s32_inv042_pending_successor_promotion_records_disconnected_rejection()
 /// replay does not reinterpret a later terminal connection transition.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_pending_successor_promotion_records_active_predecessor()
+async fn inv042_pending_successor_promotion_records_active_predecessor()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = pending_promotion_fixture(pool.clone()).await?;
@@ -4401,8 +4400,8 @@ async fn s32_inv042_pending_successor_promotion_records_active_predecessor()
 /// returns that result without consulting later state.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv001_inv042_pending_successor_promotion_records_no_pending()
--> Result<(), Box<dyn Error>> {
+async fn inv001_inv042_pending_successor_promotion_records_no_pending() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let repository = PromotePendingRunnerRepository::new(pool.clone());
     let pending_request = RunnerEnrollmentRequestId::from_uuid(uuid(PENDING_ENROLLMENT_REQUEST));
@@ -4437,7 +4436,7 @@ async fn s32_inv001_inv042_pending_successor_promotion_records_no_pending()
 /// mismatch and equal replay returns it unchanged.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv001_inv042_pending_successor_promotion_records_request_mismatch()
+async fn inv001_inv042_pending_successor_promotion_records_request_mismatch()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = pending_promotion_fixture(pool.clone()).await?;
@@ -4472,7 +4471,7 @@ async fn s32_inv001_inv042_pending_successor_promotion_records_request_mismatch(
 /// predecessor relation and makes that exact candidate promotable.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_inv044_pending_successor_promotion_upgrades_existing_candidate()
+async fn inv042_inv044_pending_successor_promotion_upgrades_existing_candidate()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR
@@ -4518,7 +4517,7 @@ async fn s32_inv042_inv044_pending_successor_promotion_upgrades_existing_candida
 /// relations for every durable workspace and Git-remote command family.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv001_pending_promotion_preserves_workspace_command_typed_records()
+async fn inv001_pending_promotion_preserves_workspace_command_typed_records()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
@@ -4603,7 +4602,7 @@ async fn s32_inv001_pending_promotion_preserves_workspace_command_typed_records(
 /// to omit an applied registration revision or a rejected result discriminator.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv001_pending_promotion_terminal_rows_require_nonnull_discriminators()
+async fn inv001_pending_promotion_terminal_rows_require_nonnull_discriminators()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let missing_revision = sqlx::query(
@@ -4640,8 +4639,7 @@ async fn s32_inv001_pending_promotion_terminal_rows_require_nonnull_discriminato
 /// lacks the exact applied deployment-scoped command.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_pending_successor_cannot_activate_without_command() -> Result<(), Box<dyn Error>>
-{
+async fn inv042_pending_successor_cannot_activate_without_command() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = pending_promotion_fixture(pool.clone()).await?;
 
@@ -4656,7 +4654,7 @@ async fn s32_inv042_pending_successor_cannot_activate_without_command() -> Resul
 /// command transaction activates the candidate and revokes the predecessor.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_pending_successor_prevents_independent_predecessor_revocation()
+async fn inv042_pending_successor_prevents_independent_predecessor_revocation()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = pending_promotion_fixture(pool.clone()).await?;
@@ -4690,8 +4688,8 @@ async fn s32_inv042_pending_successor_prevents_independent_predecessor_revocatio
 /// before its enrollment row, matching pending-successor promotion's order.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn s32_inv042_enrollment_revocation_takes_singleton_lock_before_row()
--> Result<(), Box<dyn Error>> {
+async fn inv042_enrollment_revocation_takes_singleton_lock_before_row() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let active = store
@@ -4752,8 +4750,7 @@ async fn s32_inv042_enrollment_revocation_takes_singleton_lock_before_row()
 /// an ordinary active enrollment and registration cannot counterfeit it.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_applied_promotion_rejects_nonpending_enrollment() -> Result<(), Box<dyn Error>>
-{
+async fn inv042_applied_promotion_rejects_nonpending_enrollment() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let active = store
