@@ -19,7 +19,7 @@ const MAX_S3_LOCATION_BYTES: usize = 255;
 /// Semantic purpose used only to select the store for a new write.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BlobStorageClass {
-    /// Bytes supplied as user message attachments.
+    /// Bytes attached to a user-role message.
     UserAttachment,
     /// Bytes produced or retained by a tool.
     ToolArtifact,
