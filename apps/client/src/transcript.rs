@@ -72,6 +72,7 @@ impl TranscriptSnapshot {
                         | TurnState::ActiveAwaitingToolApproval { .. }
                         | TurnState::ActiveAwaitingChild { .. }
                         | TurnState::ActiveAwaitingToolRecovery { .. }
+                        | TurnState::ActiveAwaitingRunnerRecovery { .. }
                 )
             {
                 return Ok(Some(turn.turn_id));

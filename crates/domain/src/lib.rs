@@ -284,7 +284,8 @@ pub use session_template::{
     SessionTemplateNameFailure, SessionTemplateProvenance, SessionTemplateVersion,
 };
 pub use submit_input::{
-    GoalTurnOriginConstructionInput, PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
+    GoalTurnOriginConstructionInput, NonAcceptedTurnPredecessorReconstitutionInput,
+    PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
     SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,

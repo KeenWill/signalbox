@@ -13,20 +13,18 @@ use signalbox_application::{
     RepoWatchTemplateResolver, UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CommitSha, DangerousToolAutoApproval, DirectModelSelection,
-    DurableCommandId, GoalCommandResult, GoalNeed, GoalSchedulerProvenance, GoalStatement,
-    GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionRequest, PullRequestBody,
+    BranchName, CommitSha, DangerousToolAutoApproval, DirectModelSelection, GoalNeed,
+    GoalSchedulerProvenance, GoalStatement, MergeableState, ModelSelectionRequest, PullRequestBody,
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
     SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
     SessionTemplateName, SessionTemplateProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
-    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
-    goal_turn::GoalTurnCandidates,
+    goal::{GoalRepository, GoalTransitionOutcome},
     local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
@@ -252,27 +250,49 @@ fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
     matches!(outcome, RepoWatchRuleEvaluationOutcome::Dispatched { .. })
 }
 
-fn command(value: u128) -> DurableCommandId {
-    DurableCommandId::from_uuid(Uuid::from_u128(value))
-}
-
-fn goal_turn_candidates(value: u128) -> GoalTurnCandidates {
-    GoalTurnCandidates::new(
-        AcceptedInputId::from_uuid(Uuid::from_u128(value)),
-        TurnId::from_uuid(Uuid::from_u128(value + 1)),
-    )
-}
-
-fn assert_applied_goal_command(outcome: GoalCommandHandlingOutcome) {
-    let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) = outcome else {
-        panic!("fixture goal command must apply");
-    };
-}
-
 fn assert_applied_goal_transition(outcome: GoalTransitionOutcome) {
     let GoalTransitionOutcome::Applied(_) = outcome else {
         panic!("fixture goal transition must apply");
     };
+}
+
+/// Drives the goal dispatch commissioned for one session to a terminal state.
+///
+/// A dispatched session is commissioned at creation, and both its pursuing goal
+/// and its queued goal turn hold the batch's singleton. A test whose subject is
+/// the release mechanism itself therefore has to retire them first; leaving the
+/// dispatched work turn alone keeps that turn the one whose completion the test
+/// is exercising.
+///
+/// Call this while the work turn is still queued. The blocking event it appends
+/// fires the terminal-goal release trigger, which runs the release check with no
+/// completed turn; a queued work turn is what makes that check decline, leaving
+/// the release for the caller's own completion to produce. Calling it after the
+/// work turn is terminal would let the trigger insert the release instead, which
+/// silently changes what a test measuring release timing observes.
+async fn terminalize_dispatched_goal(
+    pool: &PgPool,
+    session: SessionId,
+    identity_seed: u128,
+) -> Result<(), Box<dyn Error>> {
+    let goal_turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>("SELECT turn_id FROM goal_turn WHERE session_id = $1")
+            .bind(session.as_uuid())
+            .fetch_one(pool)
+            .await?,
+    );
+    mark_queued_turn_failed(pool, session, goal_turn, None, identity_seed).await?;
+    assert_applied_goal_transition(
+        GoalRepository::new(pool.clone())
+            .block_execution_failure(
+                session,
+                GoalNeed::try_new(String::from("repair the failed goal turn"))
+                    .expect("fixture goal need is valid"),
+                GoalSchedulerProvenance::new(goal_turn),
+            )
+            .await?,
+    );
+    Ok(())
 }
 
 async fn mark_queued_turn_failed(
@@ -388,6 +408,14 @@ struct DispatchFixture {
     store: PostgresRepoWatchDispatchStore,
     dispatch_id: signalbox_domain::RepoWatchDispatchId,
     sessions: Box<[SessionId]>,
+}
+
+impl DispatchFixture {
+    /// The session this dispatch created for the action at the given ordinal.
+    #[track_caller]
+    fn session(&self, action_ordinal: usize) -> SessionId {
+        self.sessions[action_ordinal]
+    }
 }
 
 async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
@@ -543,6 +571,70 @@ async fn equal_event_rule_recovery_replays_the_original_sessions() -> Result<(),
             sessions: fixture.sessions,
         }
     );
+    Ok(())
+}
+
+/// The goal a dispatch synthesizes is committed with the session itself.
+///
+/// A dispatched session declares nothing about itself, so without this it
+/// reaches its first turn with no statement of the authority it was created
+/// under, and every consumer that reads session authority — the approval judge
+/// above all — has nothing to read.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn dispatched_sessions_are_commissioned_with_their_synthesized_goal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let expected = synthesized_dispatch_goal(&fixture)?;
+
+    assert_eq!(fixture.sessions.len(), fixture.rule.actions().len());
+    assert_commissioned_with(&fixture, fixture.session(0), &expected).await?;
+    assert_commissioned_with(&fixture, fixture.session(1), &expected).await?;
+    Ok(())
+}
+
+/// The dispatched work turn carries the tagged context through submit-input,
+/// which owns its accepted input, so that turn is deliberately not a goal
+/// turn. This pins the shape the judge's unrecorded-turn resolution exists
+/// for; changing it means revisiting that resolution.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_dispatched_work_turn_is_not_itself_a_goal_turn() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+
+    let work_turns_bound_to_a_goal: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_dispatch_delivery AS delivery
+           JOIN goal_turn ON goal_turn.turn_id = delivery.turn_id
+          WHERE delivery.dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(work_turns_bound_to_a_goal, 0);
+    Ok(())
+}
+
+fn synthesized_dispatch_goal(fixture: &DispatchFixture) -> Result<GoalStatement, Box<dyn Error>> {
+    let actions = fixture.rule.actions_for_event(&fixture.event)?;
+    // One variant, so this destructuring is irrefutable rather than a branch.
+    let RepoWatchActionV1::DispatchSession(action) = &actions[0];
+    Ok(action.synthesized_goal_statement(fixture.rule.id())?)
+}
+
+async fn assert_commissioned_with(
+    fixture: &DispatchFixture,
+    session: SessionId,
+    expected: &GoalStatement,
+) -> Result<(), Box<dyn Error>> {
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .ok_or("a dispatched session is commissioned when it is created")?;
+
+    assert_eq!(goal.current().statement(), expected);
+    assert_eq!(goal.generations().len(), 1);
     Ok(())
 }
 
@@ -706,21 +798,10 @@ async fn pursuing_goal_holds_singleton_until_its_terminal_transition() -> Result
         .fetch_one(&fixture.pool)
         .await?,
     );
-    let goal_turn = goal_turn_candidates(0x2_000);
-    assert_applied_goal_command(
-        GoalRepository::new(fixture.pool.clone())
-            .handle_user_command(
-                GoalUserCommand::new(
-                    command(0x3_000),
-                    session,
-                    GoalUserAction::Attach(
-                        GoalStatement::try_new(String::from("finish repository ownership"))
-                            .expect("fixture goal statement is valid"),
-                    ),
-                ),
-                Some(goal_turn),
-                |_| None,
-            )
+    let goal_turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>("SELECT turn_id FROM goal_turn WHERE session_id = $1")
+            .bind(session.as_uuid())
+            .fetch_one(&fixture.pool)
             .await?,
     );
     mark_queued_turn_failed(&fixture.pool, session, initial_turn, None, 0x4_000).await?;
@@ -729,12 +810,12 @@ async fn pursuing_goal_holds_singleton_until_its_terminal_transition() -> Result
     mark_queued_turn_failed(
         &fixture.pool,
         session,
-        goal_turn.turn(),
+        goal_turn,
         Some(initial_turn),
         0x6_000,
     )
     .await?;
-    check_completed_turn_for_release(&fixture.pool, session, goal_turn.turn()).await?;
+    check_completed_turn_for_release(&fixture.pool, session, goal_turn).await?;
     assert_eq!(release_count(&fixture).await?, 0);
     assert_applied_goal_transition(
         GoalRepository::new(fixture.pool.clone())
@@ -742,7 +823,7 @@ async fn pursuing_goal_holds_singleton_until_its_terminal_transition() -> Result
                 session,
                 GoalNeed::try_new(String::from("repair the failed goal turn"))
                     .expect("fixture goal need is valid"),
-                GoalSchedulerProvenance::new(goal_turn.turn()),
+                GoalSchedulerProvenance::new(goal_turn),
             )
             .await?,
     );
@@ -760,6 +841,7 @@ async fn release_timestamp_is_sampled_after_dispatch_lock_wait() -> Result<(), B
     .bind(fixture.dispatch_id.as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
+    terminalize_dispatched_goal(&fixture.pool, fixture.sessions[0], 0x20_000).await?;
     let mut dispatch_lock = fixture.pool.begin().await?;
     sqlx::query("SELECT 1 FROM repo_watch_dispatch_batch WHERE dispatch_id = $1 FOR UPDATE")
         .bind(fixture.dispatch_id.as_uuid())
@@ -811,6 +893,8 @@ async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<
     .bind(fixture.dispatch_id.as_uuid())
     .fetch_all(&fixture.pool)
     .await?;
+    terminalize_dispatched_goal(&fixture.pool, fixture.sessions[0], 0x30_000).await?;
+    terminalize_dispatched_goal(&fixture.pool, fixture.sessions[1], 0x40_000).await?;
     mark_queued_turn_failed(
         &fixture.pool,
         fixture.sessions[0],
