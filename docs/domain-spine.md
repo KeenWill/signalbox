@@ -8564,6 +8564,36 @@ impl RunnerAdvertisement {
     pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry>;
 }
 
+pub enum RunnerReplacementTarget {
+    Runner(RunnerId),
+    PendingEnrollment(RunnerEnrollmentRequestId),
+    SameRunnerReenrollment(RunnerId),
+}
+pub struct ReplaceLostRunner { /* private */ }
+impl ReplaceLostRunner {
+    pub const fn new(
+        command: DurableCommandId,
+        session: SessionId,
+        expected_placement_revision: RunnerGeneration,
+        replacement: RunnerReplacementTarget,
+    ) -> Self;
+    pub const fn command(&self) -> DurableCommandId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn expected_placement_revision(&self) -> RunnerGeneration;
+    pub const fn replacement(&self) -> RunnerReplacementTarget;
+}
+pub struct AbandonLostRunner { /* private */ }
+impl AbandonLostRunner {
+    pub const fn new(
+        command: DurableCommandId,
+        session: SessionId,
+        expected_placement_revision: RunnerGeneration,
+    ) -> Self;
+    pub const fn command(&self) -> DurableCommandId;
+    pub const fn session(&self) -> SessionId;
+    pub const fn expected_placement_revision(&self) -> RunnerGeneration;
+}
+
 pub struct PromotePendingRunner { /* private */ }
 impl PromotePendingRunner {
     pub const fn new(
@@ -10468,9 +10498,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 75                    |
+| domain: runner                                     | 78                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **777 (+12 free fn)** |
+| **signalbox-domain total**                         | **780 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

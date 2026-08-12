@@ -32,9 +32,9 @@ verified through PR #288 (`agent/audit-fix-docs-coherence`); the
 context-compaction command lifecycle was verified through PR #314
 (`agent/context-compaction-protocol`). The checked placement-update request
 boundary and path-scoped placement command family were verified through PR #400
-(`agent/scoped-visibility-wiring`). The runner recovery command families are the
-foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests.
+(`agent/scoped-visibility-wiring`). The session-scoped runner replacement and
+abandonment command payloads and their replay equality are verified against this
+PR (`agent/runner-replacement-domain-contract`).
 
 ## Identity model
 
@@ -316,11 +316,12 @@ startup catalog and constructs the complete defaults-and-provenance payload.
 Structural equality (hand-written `PartialEq` on `CreateSession`,
 `CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, `SubmitInput`,
 `ReplaceSessionMetadata`, `DecideToolRequest`, and `UpdateSessionPlacement` in
-`crates/domain`) covers every caller-supplied semantic field and excludes
-`DurableCommandId`. Why: the identifier is the lookup key that names the
-payload, not part of the meaning it names. The optional session runner placement
-is such a field in both creation families, so it participates in that equality
-in both creation modes — including template-derived creation, whose
+`crates/domain`, plus `ReplaceLostRunner` and `AbandonLostRunner` in
+`crates/domain::runner`) covers every caller-supplied semantic field and
+excludes `DurableCommandId`. Why: the identifier is the lookup key that names
+the payload, not part of the meaning it names. The optional session runner
+placement is such a field in both creation families, so it participates in that
+equality in both creation modes — including template-derived creation, whose
 daemon-resolved defaults are excluded — and a replay carrying a different
 placement, or a placement where the first handling had none, is conflicting
 reuse.

@@ -20,6 +20,137 @@ use crate::{
     ToolName, ToolPermissionDefault, WorkspaceManifestId,
 };
 
+/// Exact user-selected successor for one lost session placement.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerReplacementTarget {
+    /// A different runner currently registered on a live connection.
+    Runner(RunnerId),
+    /// The one provisioning-only pending enrollment request.
+    PendingEnrollment(RunnerEnrollmentRequestId),
+    /// The lost runner re-enrolled after its registration-triggered loss.
+    SameRunnerReenrollment(RunnerId),
+}
+
+/// Complete session-scoped request to replace one exact lost placement.
+#[derive(Clone, Copy, Debug)]
+pub struct ReplaceLostRunner {
+    command: DurableCommandId,
+    session: SessionId,
+    expected_placement_revision: RunnerGeneration,
+    replacement: RunnerReplacementTarget,
+}
+
+/// Comparison equality covers the complete caller payload except its command identity.
+impl PartialEq for ReplaceLostRunner {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.expected_placement_revision == other.expected_placement_revision
+            && self.replacement == other.replacement
+    }
+}
+
+impl Eq for ReplaceLostRunner {}
+
+impl Hash for ReplaceLostRunner {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.session.hash(state);
+        self.expected_placement_revision.hash(state);
+        self.replacement.hash(state);
+    }
+}
+
+impl ReplaceLostRunner {
+    /// Labels the durable command, exact lost placement, and selected successor.
+    pub const fn new(
+        command: DurableCommandId,
+        session: SessionId,
+        expected_placement_revision: RunnerGeneration,
+        replacement: RunnerReplacementTarget,
+    ) -> Self {
+        Self {
+            command,
+            session,
+            expected_placement_revision,
+            replacement,
+        }
+    }
+
+    /// Returns the user-global durable command identity.
+    pub const fn command(&self) -> DurableCommandId {
+        self.command
+    }
+
+    /// Returns the exact session whose lost placement is targeted.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the placement revision the caller observed.
+    pub const fn expected_placement_revision(&self) -> RunnerGeneration {
+        self.expected_placement_revision
+    }
+
+    /// Returns the exact selected successor.
+    pub const fn replacement(&self) -> RunnerReplacementTarget {
+        self.replacement
+    }
+}
+
+/// Complete session-scoped request to abandon one exact lost placement.
+#[derive(Clone, Copy, Debug)]
+pub struct AbandonLostRunner {
+    command: DurableCommandId,
+    session: SessionId,
+    expected_placement_revision: RunnerGeneration,
+}
+
+/// Comparison equality covers the complete caller payload except its command identity.
+impl PartialEq for AbandonLostRunner {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.expected_placement_revision == other.expected_placement_revision
+    }
+}
+
+impl Eq for AbandonLostRunner {}
+
+impl Hash for AbandonLostRunner {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.session.hash(state);
+        self.expected_placement_revision.hash(state);
+    }
+}
+
+impl AbandonLostRunner {
+    /// Labels the durable command and exact lost placement to retire.
+    pub const fn new(
+        command: DurableCommandId,
+        session: SessionId,
+        expected_placement_revision: RunnerGeneration,
+    ) -> Self {
+        Self {
+            command,
+            session,
+            expected_placement_revision,
+        }
+    }
+
+    /// Returns the user-global durable command identity.
+    pub const fn command(&self) -> DurableCommandId {
+        self.command
+    }
+
+    /// Returns the exact session whose lost placement is targeted.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the placement revision the caller observed.
+    pub const fn expected_placement_revision(&self) -> RunnerGeneration {
+        self.expected_placement_revision
+    }
+}
+
 /// Complete deployment-scoped request to activate one pending runner.
 #[derive(Clone, Copy, Debug)]
 pub struct PromotePendingRunner {
@@ -3917,6 +4048,17 @@ mod tests {
     const ATTEMPT: u128 = 0x7500;
     const RETRY_ATTEMPT: u128 = 0x7501;
     const SESSION: u128 = 0x7600;
+    const OTHER_SESSION: u128 = 0x7601;
+    /// Arbitrary durable command identity for the replacement-command fixture.
+    const REPLACEMENT_COMMAND: u128 = 0x7c00;
+    /// Arbitrary distinct identity for equal replacement-command replay.
+    const REPLACEMENT_REPLAY_COMMAND: u128 = 0x7c01;
+    /// Arbitrary pending-enrollment request selected by a replacement fixture.
+    const PENDING_REPLACEMENT_REQUEST: u128 = 0x7d00;
+    /// Arbitrary durable command identity for the abandonment-command fixture.
+    const ABANDONMENT_COMMAND: u128 = 0x7e00;
+    /// Arbitrary distinct identity for equal abandonment-command replay.
+    const ABANDONMENT_REPLAY_COMMAND: u128 = 0x7e01;
     /// Arbitrary empty context-frontier identity for complete batch fixtures.
     const YIELDED_FRONTIER: u128 = 0x7a00;
 
@@ -4521,6 +4663,124 @@ mod tests {
             approvals: grant.approvals,
             state: grant.state,
         }
+    }
+
+    fn durable_command(seed: u128) -> DurableCommandId {
+        DurableCommandId::from_uuid(uuid::Uuid::from_u128(seed))
+    }
+
+    fn pending_enrollment_request(seed: u128) -> RunnerEnrollmentRequestId {
+        RunnerEnrollmentRequestId::from_uuid(uuid::Uuid::from_u128(seed))
+    }
+
+    #[test]
+    fn inv012_replace_lost_runner_semantic_equality_excludes_command_identity() {
+        let expected_revision =
+            RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
+        let replacement = RunnerReplacementTarget::Runner(runner_id(REPLACEMENT_RUNNER));
+        let session = session_id(SESSION);
+        let first = ReplaceLostRunner::new(
+            durable_command(REPLACEMENT_COMMAND),
+            session,
+            expected_revision,
+            replacement,
+        );
+        let replay = ReplaceLostRunner::new(
+            durable_command(REPLACEMENT_REPLAY_COMMAND),
+            session,
+            expected_revision,
+            replacement,
+        );
+
+        assert_eq!(first, replay);
+        assert_ne!(first.command(), replay.command());
+        assert_eq!(first.session(), session);
+        assert_eq!(first.expected_placement_revision(), expected_revision);
+        assert_eq!(first.replacement(), replacement);
+    }
+
+    #[test]
+    fn inv012_replace_lost_runner_semantic_equality_includes_complete_payload() {
+        let expected_revision =
+            RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
+        let next_revision =
+            RunnerGeneration::try_from_u64(8).expect("the fixture successor revision is positive");
+        let command = durable_command(REPLACEMENT_COMMAND);
+        let session = session_id(SESSION);
+        let target = RunnerReplacementTarget::Runner(runner_id(REPLACEMENT_RUNNER));
+        let canonical = ReplaceLostRunner::new(command, session, expected_revision, target);
+        let different_session = ReplaceLostRunner::new(
+            command,
+            session_id(OTHER_SESSION),
+            expected_revision,
+            target,
+        );
+        let different_revision = ReplaceLostRunner::new(command, session, next_revision, target);
+        let different_target = ReplaceLostRunner::new(
+            command,
+            session,
+            expected_revision,
+            RunnerReplacementTarget::PendingEnrollment(pending_enrollment_request(
+                PENDING_REPLACEMENT_REQUEST,
+            )),
+        );
+
+        assert_ne!(canonical, different_session);
+        assert_ne!(canonical, different_revision);
+        assert_ne!(canonical, different_target);
+    }
+
+    #[test]
+    fn runner_replacement_target_retains_each_closed_selector() {
+        let runner = runner_id(REPLACEMENT_RUNNER);
+        let direct = RunnerReplacementTarget::Runner(runner);
+        let pending = RunnerReplacementTarget::PendingEnrollment(pending_enrollment_request(
+            PENDING_REPLACEMENT_REQUEST,
+        ));
+        let same_runner = RunnerReplacementTarget::SameRunnerReenrollment(runner);
+
+        assert_ne!(direct, pending);
+        assert_ne!(direct, same_runner);
+        assert_ne!(pending, same_runner);
+    }
+
+    #[test]
+    fn inv012_abandon_lost_runner_semantic_equality_excludes_command_identity() {
+        let expected_revision =
+            RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
+        let session = session_id(SESSION);
+        let first = AbandonLostRunner::new(
+            durable_command(ABANDONMENT_COMMAND),
+            session,
+            expected_revision,
+        );
+        let replay = AbandonLostRunner::new(
+            durable_command(ABANDONMENT_REPLAY_COMMAND),
+            session,
+            expected_revision,
+        );
+
+        assert_eq!(first, replay);
+        assert_ne!(first.command(), replay.command());
+        assert_eq!(first.session(), session);
+        assert_eq!(first.expected_placement_revision(), expected_revision);
+    }
+
+    #[test]
+    fn inv012_abandon_lost_runner_semantic_equality_includes_complete_payload() {
+        let expected_revision =
+            RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
+        let next_revision =
+            RunnerGeneration::try_from_u64(8).expect("the fixture successor revision is positive");
+        let command = durable_command(ABANDONMENT_COMMAND);
+        let session = session_id(SESSION);
+        let canonical = AbandonLostRunner::new(command, session, expected_revision);
+        let different_session =
+            AbandonLostRunner::new(command, session_id(OTHER_SESSION), expected_revision);
+        let different_revision = AbandonLostRunner::new(command, session, next_revision);
+
+        assert_ne!(canonical, different_session);
+        assert_ne!(canonical, different_revision);
     }
 
     #[test]
