@@ -28,39 +28,14 @@ ALTER TABLE runner_session_placement_record
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
--- Placement loss did not constrain production dispatch before this migration.
--- Preserve every existing row as authorized after the latest migrated loss;
--- only losses committed after this representation exists may fence it.
--- Completeness was checked when each row was current; its constraint triggers
--- intentionally reject replay against historical placement rows.
-ALTER TABLE runner_session_placement_record
-    DISABLE TRIGGER runner_session_placement_record_is_append_only;
-ALTER TABLE runner_session_placement_record
-    DISABLE TRIGGER runner_session_placement_requires_tools;
-ALTER TABLE runner_session_placement_record
-    DISABLE TRIGGER runner_session_placement_requires_permission_overrides;
-
-UPDATE runner_session_placement_record AS placement
-   SET loss_fence_enrollment_id = enrollment.enrollment_id,
-       observed_runner_loss_epoch = current_loss.loss_epoch
-  FROM runner_enrollment AS enrollment
-  LEFT JOIN runner_current_connection_loss AS current_loss
-    ON current_loss.enrollment_id = enrollment.enrollment_id
- WHERE enrollment.runner_id = COALESCE(
-        placement.pinned_runner_id,
-        placement.selector_runner_id,
-        placement.lost_runner_id
-    );
-
-SET CONSTRAINTS runner_session_placement_loss_fence_enrollment_fk,
-    runner_session_placement_observed_loss_fk IMMEDIATE;
-
-ALTER TABLE runner_session_placement_record
-    ENABLE TRIGGER runner_session_placement_record_is_append_only;
-ALTER TABLE runner_session_placement_record
-    ENABLE TRIGGER runner_session_placement_requires_tools;
-ALTER TABLE runner_session_placement_record
-    ENABLE TRIGGER runner_session_placement_requires_permission_overrides;
+DO $migration$
+BEGIN
+    IF EXISTS (SELECT 1 FROM runner_session_placement_record) THEN
+        RAISE EXCEPTION
+            'runner placement loss fence requires empty placement history';
+    END IF;
+END;
+$migration$;
 
 CREATE FUNCTION set_runner_placement_loss_baseline()
 RETURNS trigger
