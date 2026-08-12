@@ -9,8 +9,8 @@ functionality and carries only its stated compatibility constraint.
 The blob digest and external spelling, deterministic object-key producer,
 streaming whole-object and ranged store contract, filesystem publication,
 verification, and corrupt-object repair behavior, and shared store conformance
-suite are verified against PR #555 (`agent/blob-storage-substrate`; via PR #581
-`agent/blob-storage-catalog`).
+suite are verified against PR #555 (`agent/blob-storage-substrate`; merge commit
+`1ac7301a2`).
 
 The append-only identity, store-binding, and verified-replica catalog and its
 transactional registration behavior are verified against this implementing
