@@ -443,26 +443,58 @@ generated_artifact = "archive"
         content
     }
 
-    #[test]
-    fn valid_catalog_preserves_stores_routes_and_bounds() {
-        let configuration = parse(VALID)
+    fn configuration_fixture() -> BlobStorageConfiguration {
+        parse(VALID)
             .expect("the complete catalog is valid")
-            .expect("the section is present");
+            .expect("the section is present")
+    }
+
+    #[test]
+    fn valid_catalog_preserves_the_blob_limit() {
+        let configuration = configuration_fixture();
+
+        assert_eq!(configuration.max_blob_bytes(), MAX_BYTES_FIXTURE);
+    }
+
+    #[test]
+    fn valid_catalog_preserves_the_user_attachment_route() {
+        let configuration = configuration_fixture();
         let primary =
             BlobStoreName::try_new(PRIMARY_NAME_FIXTURE).expect("the fixture name is valid");
 
-        assert_eq!(configuration.max_blob_bytes(), MAX_BYTES_FIXTURE);
         assert_eq!(
             configuration.route(BlobStorageClass::UserAttachment).0,
             &primary
         );
+    }
+
+    #[test]
+    fn valid_catalog_preserves_the_filesystem_root() {
+        let configuration = configuration_fixture();
+        let primary =
+            BlobStoreName::try_new(PRIMARY_NAME_FIXTURE).expect("the fixture name is valid");
+
         assert_eq!(
             configuration
                 .store(&primary)
                 .and_then(|store| store.filesystem_root()),
             Some(std::path::Path::new(PRIMARY_ROOT_FIXTURE))
         );
+    }
+
+    #[test]
+    fn valid_catalog_preserves_the_store_count() {
+        let configuration = configuration_fixture();
+
         assert_eq!(configuration.stores().count(), STORE_COUNT_FIXTURE);
+    }
+
+    #[test]
+    fn valid_catalog_resolves_a_recorded_store() {
+        let configuration = configuration_fixture();
+        let primary =
+            BlobStoreName::try_new(PRIMARY_NAME_FIXTURE).expect("the fixture name is valid");
+
         assert!(configuration.resolves_recorded_stores([&primary]));
     }
 
@@ -528,11 +560,16 @@ generated_artifact = "archive"
     }
 
     #[test]
-    fn catalog_rejects_duplicate_and_dangling_store_names() {
+    fn catalog_rejects_a_duplicate_store_name() {
         let duplicate = VALID.replace("name = \"archive\"", "name = \"primary\"");
-        let dangling = VALID.replace("tool_artifact = \"archive\"", "tool_artifact = \"missing\"");
 
         assert!(parse(&duplicate).is_err());
+    }
+
+    #[test]
+    fn catalog_rejects_a_dangling_route_store_name() {
+        let dangling = VALID.replace("tool_artifact = \"archive\"", "tool_artifact = \"missing\"");
+
         assert!(parse(&dangling).is_err());
     }
 
@@ -547,17 +584,22 @@ generated_artifact = "archive"
     }
 
     #[test]
-    fn catalog_rejects_noncanonical_namespace_identity_text() {
+    fn catalog_rejects_an_uppercase_namespace_identity() {
         let uppercase = VALID.replace(
             "5a100001-0000-0000-0000-000000000001",
             "5A100001-0000-0000-0000-000000000001",
         );
+
+        assert!(parse(&uppercase).is_err());
+    }
+
+    #[test]
+    fn catalog_rejects_a_compact_namespace_identity() {
         let compact = VALID.replace(
             "5a100001-0000-0000-0000-000000000001",
             "5a100001000000000000000000000001",
         );
 
-        assert!(parse(&uppercase).is_err());
         assert!(parse(&compact).is_err());
     }
 
@@ -571,14 +613,19 @@ generated_artifact = "archive"
     }
 
     #[test]
-    fn catalog_requires_absolute_paths_and_complete_routes() {
+    fn catalog_requires_an_absolute_staging_path() {
         let relative = VALID.replace(
             "staging_directory = \"/var/lib/signalbox/blob-staging\"",
             "staging_directory = \"blob-staging\"",
         );
-        let incomplete = VALID.replace("generated_artifact = \"archive\"", "");
 
         assert!(parse(&relative).is_err());
+    }
+
+    #[test]
+    fn catalog_requires_every_semantic_route() {
+        let incomplete = VALID.replace("generated_artifact = \"archive\"", "");
+
         assert!(parse(&incomplete).is_err());
     }
 
