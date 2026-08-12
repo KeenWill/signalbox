@@ -3,6 +3,7 @@
 //! This crate coordinates domain decisions and external effects while
 //! depending inward on `signalbox-domain`.
 
+mod abandon_lost_runner;
 mod approval_judge;
 mod conversation_import;
 mod create_session;
@@ -29,6 +30,10 @@ mod tool_loop;
 mod tool_loop_ports;
 mod update_session_placement;
 
+pub use abandon_lost_runner::{
+    AbandonLostRunnerOutcome, AbandonLostRunnerRequest, AbandonLostRunnerService,
+    AbandonLostRunnerTransaction,
+};
 pub use approval_judge::ApprovalJudgeAuthorization;
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
