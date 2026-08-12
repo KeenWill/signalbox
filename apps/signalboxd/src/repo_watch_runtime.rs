@@ -3275,11 +3275,19 @@ mod tests {
         }
 
         /// Waits until the server holds a request in flight, so a caller can
-        /// cancel a fetch that is demonstrably mid-request.
+        /// cancel a fetch that is demonstrably mid-request. Bounded, so a
+        /// regression that keeps the fetch from ever reaching the listener
+        /// fails the test locally instead of hanging it until the job times
+        /// out.
         async fn request_in_flight(&self) {
-            while self.state.in_flight.load(Ordering::SeqCst) == 0 {
-                sleep(Duration::from_millis(1)).await;
-            }
+            let arrival = async {
+                while self.state.in_flight.load(Ordering::SeqCst) == 0 {
+                    sleep(Duration::from_millis(1)).await;
+                }
+            };
+            tokio::time::timeout(SCRIPTED_SERVER_TIMEOUT, arrival)
+                .await
+                .expect("a scripted request goes in flight before the deadline");
         }
 
         async fn finish(self) -> usize {
