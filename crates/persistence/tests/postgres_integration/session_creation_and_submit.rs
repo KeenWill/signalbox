@@ -3399,18 +3399,18 @@ async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier
         attachment_content(first_digest),
         delivery,
     );
-    assert!(matches!(
-        repository
-            .handle(
-                first,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = repository
+        .handle(
+            first,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?
+    else {
+        panic!("the first bounded input must remain queued");
+    };
     let second = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
         session,
@@ -3530,18 +3530,18 @@ async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    assert!(matches!(
-        repository
-            .handle(
-                queued,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = repository
+        .handle(
+            queued,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?
+    else {
+        panic!("the first queued attachment remains within the bound");
+    };
     let steering = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
         session,
