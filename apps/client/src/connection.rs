@@ -225,6 +225,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ReplaceSessionMetadata { .. }
         | ClientRequest::ReplaceSessionDefaults { .. }
         | ClientRequest::PromotePendingRunner { .. }
+        | ClientRequest::AbandonLostRunner { .. }
         | ClientRequest::ReadSessionDefaults { .. }
         | ClientRequest::BeginConversationImport { .. }
         | ClientRequest::AppendConversationImport { .. }

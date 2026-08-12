@@ -282,7 +282,11 @@ fn delegation_rejection_matches(
             tool_request_id, ..
         } => tool_request_id == expected.tool_request,
         RejectionDetail::SessionNotFound { session_id } => session_id == expected.session,
-        RejectionDetail::NoPendingRunnerEnrollment {}
+        RejectionDetail::RunnerPlacementNotFound { .. }
+        | RejectionDetail::PlacementRevisionMismatch { .. }
+        | RejectionDetail::PlacementNotLost { .. }
+        | RejectionDetail::ActiveTurnRequiresExistingControl { .. }
+        | RejectionDetail::NoPendingRunnerEnrollment {}
         | RejectionDetail::PendingRequestMismatch { .. }
         | RejectionDetail::PendingRequestDisconnected { .. }
         | RejectionDetail::ActiveRunnerNotLost { .. } => false,
@@ -447,6 +451,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionMetadataReplaced { .. }
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::RunnerPromoted { .. }
+        | ServerMessage::RunnerAbandoned { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
         | ServerMessage::SessionCompacted { .. }
@@ -546,6 +551,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionMetadataReplaced { .. }
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::RunnerPromoted { .. }
+        | ServerMessage::RunnerAbandoned { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
         | ServerMessage::SessionCompacted { .. }

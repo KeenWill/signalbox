@@ -8,7 +8,8 @@ use std::{
 use signalbox_process_protocol::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
     ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
-    OpenAiServiceTier, ReasoningLevel, RejectionDetail, RunnerNonLostConnectionState, ServiceTier,
+    OpenAiServiceTier, ReasoningLevel, RejectionDetail, RunnerNonLostConnectionState,
+    RunnerPlacementRecoveryState, ServiceTier,
 };
 
 #[derive(Debug)]
@@ -333,6 +334,14 @@ const fn runner_non_lost_connection_state_name(
     }
 }
 
+const fn runner_placement_recovery_state_name(state: RunnerPlacementRecoveryState) -> &'static str {
+    match state {
+        RunnerPlacementRecoveryState::Unpinned => "unpinned",
+        RunnerPlacementRecoveryState::Pinned => "pinned",
+        RunnerPlacementRecoveryState::RunnerAbandoned => "runner_abandoned",
+    }
+}
+
 struct RejectionDisplay(RejectionDetail);
 
 impl fmt::Display for RejectionDisplay {
@@ -360,6 +369,37 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::RunnerPlacementNotFound { session_id } => {
+                write!(formatter, "runner_placement_not_found session={session_id}")
+            }
+            RejectionDetail::PlacementRevisionMismatch {
+                session_id,
+                expected,
+                current,
+            } => write!(
+                formatter,
+                "placement_revision_mismatch session={session_id} expected={} current={}",
+                expected.value(),
+                current.value()
+            ),
+            RejectionDetail::PlacementNotLost {
+                session_id,
+                placement_revision,
+                state,
+            } => write!(
+                formatter,
+                "placement_not_lost session={session_id} placement_revision={} state={}",
+                placement_revision.value(),
+                runner_placement_recovery_state_name(state)
+            ),
+            RejectionDetail::ActiveTurnRequiresExistingControl {
+                session_id,
+                active_turn_id,
+            } => write!(
+                formatter,
+                "active_turn_requires_existing_control session={session_id} \
+                 active_turn={active_turn_id}"
+            ),
             RejectionDetail::NoPendingRunnerEnrollment {} => {
                 formatter.write_str("no_pending_runner_enrollment")
             }

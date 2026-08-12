@@ -41,10 +41,12 @@ use signalbox_domain::{
     ReplaceSessionMetadataResult, ResolvedProviderTarget, RunnerAdvertisement,
     RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerEnrollmentId,
     RunnerEnrollmentRequestId, RunnerId, RunnerRepositoryEntry, RunnerSandboxProfile,
-    RunnerToolDeclaration, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent, ToolCallProposal,
-    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TurnId, WorkspaceCapability,
+    RunnerSelector, RunnerToolDeclaration, RunnerToolPermissionOverrides, RunnerWorkingDirectory,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionId, SessionMetadataContent, SessionRunnerPlacement, SessionRunnerPlacementRequest,
+    ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId, WorkingDirectorySelection,
+    WorkspaceCapability, WorkspaceRequirement,
 };
 use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
@@ -88,10 +90,10 @@ use signalbox_process_protocol::{
     ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
     ReviewOrchestrationState, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent,
-    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
-    encode_client_line,
+    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, RunnerPlacementRevision, ServerFrame,
+    ServerMessage, SessionEvent, SessionMetadata, SessionPlacement, SettingOverlay,
+    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -504,6 +506,88 @@ async fn seed_pending_runner_promotion(
     })
 }
 
+#[derive(Clone, Copy)]
+struct LostRunnerAbandonmentFixture {
+    session: CanonicalUuid,
+    placement_revision: RunnerPlacementRevision,
+}
+
+impl LostRunnerAbandonmentFixture {
+    fn request(self, command_id: CommandId) -> ClientRequest {
+        ClientRequest::AbandonLostRunner {
+            command_id,
+            session_id: self.session,
+            expected_placement_revision: self.placement_revision,
+        }
+    }
+
+    fn receipt(self) -> ServerMessage {
+        ServerMessage::RunnerAbandoned {
+            session_id: self.session,
+            placement_revision: self.placement_revision,
+        }
+    }
+}
+
+async fn seed_lost_runner_abandonment(
+    pool: &PgPool,
+    session: CanonicalUuid,
+) -> Result<LostRunnerAbandonmentFixture, Box<dyn Error>> {
+    let store = RunnerProtocolStore::new(pool.clone(), empty_runner_catalog());
+    let enrollment = store
+        .enroll_pristine(PristineRunnerEnrollmentRequest::new(
+            RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(0x9401)),
+            IssuedRunnerEnrollmentIdentities::new(
+                RunnerEnrollmentId::from_uuid(Uuid::from_u128(0x9402)),
+                RunnerId::from_uuid(Uuid::from_u128(0x9403)),
+                RunnerAuthenticationId::from_uuid(Uuid::from_u128(0x9404)),
+            ),
+            Vec::<RunnerCapabilityClass>::new(),
+            empty_runner_advertisement(),
+        ))
+        .await?;
+    let connection = store
+        .open_connection(enrollment.receipt().enrollment().enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(session.into_uuid()),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(enrollment.receipt().enrollment().runner()),
+            working_directory: WorkingDirectorySelection::Exact(
+                RunnerWorkingDirectory::try_new(String::from("/workspace/abandonment"))
+                    .expect("the fixture runner working directory is valid"),
+            ),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: RunnerToolPermissionOverrides::try_new([])
+                .expect("the empty fixture permission inventory is valid"),
+        },
+    );
+    let placement_revision = RunnerPlacementRevision::try_new(placement.revision().get())
+        .expect("domain placement revisions are positive");
+    store.store_placement(&placement, None, None).await?;
+    store
+        .transition_connection(
+            enrollment.receipt().enrollment().enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(enrollment.receipt().enrollment().enrollment())
+        .await?
+        .expect("the terminal fixture connection owns a loss cursor");
+    store
+        .propagate_connection_loss_session(loss, SessionId::from_uuid(session.into_uuid()))
+        .await?;
+    store.complete_connection_loss_propagation(loss).await?;
+    Ok(LostRunnerAbandonmentFixture {
+        session,
+        placement_revision,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionCreatedFacts {
     session_id: CanonicalUuid,
@@ -714,7 +798,11 @@ impl RunningRuntime {
             InProcessToolDispatchGate::default(),
             model_configuration,
             template_configuration,
-        );
+        )
+        .with_runner_protocol_store(RunnerProtocolStore::new(
+            pool.clone(),
+            empty_runner_catalog(),
+        ));
         if let Some(compaction_model) = compaction_model {
             runtime = runtime.with_context_compaction_model(RuntimeContextCompactionModel::new(
                 compaction_model,
@@ -769,7 +857,11 @@ impl RunningRuntime {
             InProcessToolDispatchGate::default(),
             model_configuration,
             template_configuration,
-        );
+        )
+        .with_runner_protocol_store(RunnerProtocolStore::new(
+            self.pool.clone(),
+            empty_runner_catalog(),
+        ));
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         self.shutdown = shutdown;
@@ -2894,6 +2986,72 @@ async fn inv042_process_request_replays_no_pending_runner_rejection() -> Result<
     connection.request(23, request.clone()).await?;
     let rejected = response_within(&mut connection).await?;
     connection.request(24, request).await?;
+    let replayed = response_within(&mut connection).await?;
+
+    assert_eq!(rejected.message(), &expected);
+    assert_eq!(replayed.message(), &expected);
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-001 / INV-032 / INV-044: the process request terminalizes the exact
+/// lost runner placement and equal replay returns the original receipt.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv001_inv032_inv044_process_request_abandons_lost_runner_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session = create_alias_session(&mut connection).await?;
+    let fixture = seed_lost_runner_abandonment(&runtime.pool, session).await?;
+    let abandonment_command = command()?;
+    let expected = fixture.receipt();
+
+    connection
+        .request(25, fixture.request(abandonment_command))
+        .await?;
+    let applied = response_within(&mut connection).await?;
+    connection
+        .request(26, fixture.request(abandonment_command))
+        .await?;
+    let replayed = response_within(&mut connection).await?;
+
+    assert_eq!(applied.message(), &expected);
+    assert_eq!(replayed.message(), &expected);
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-044: an abandonment request for a session without runner placement
+/// records and exactly replays its typed rejection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv044_process_request_replays_missing_runner_placement_rejection()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session = create_alias_session(&mut connection).await?;
+    let abandonment_command = command()?;
+    let placement_revision =
+        RunnerPlacementRevision::try_new(1).expect("the fixture placement revision is positive");
+    let request = ClientRequest::AbandonLostRunner {
+        command_id: abandonment_command,
+        session_id: session,
+        expected_placement_revision: placement_revision,
+    };
+    let expected = ServerMessage::Error {
+        code: ErrorCode::Rejected,
+        message: String::from("the command was rejected by current durable state"),
+        detail: signalbox_process_protocol::ErrorDetail::rejected(
+            RejectionDetail::RunnerPlacementNotFound {
+                session_id: session,
+            },
+        ),
+    };
+
+    connection.request(27, request.clone()).await?;
+    let rejected = response_within(&mut connection).await?;
+    connection.request(28, request).await?;
     let replayed = response_within(&mut connection).await?;
 
     assert_eq!(rejected.message(), &expected);

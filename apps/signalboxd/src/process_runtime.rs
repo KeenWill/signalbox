@@ -11,6 +11,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use signalbox_application::{
+    AbandonLostRunnerOutcome, AbandonLostRunnerRequest, AbandonLostRunnerService,
     ClassifyOperatorFailure, ConversationListCursor, ConversationListItem, ConversationListQuery,
     ConversationOriginFilter, ConversationPageReader, CreateSessionError,
     CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
@@ -39,8 +40,9 @@ use signalbox_conversation_import_codex::{
     CodexRolloutJsonlConverter,
 };
 use signalbox_domain::{
-    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
+    AbandonLostRunnerRejection, AbandonLostRunnerResult, AcceptedInputId, Actor,
+    CancelledModelCallTurnIdentities, ContextCompactionId, ContextCompactionTokenUsage,
+    ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegationMessageDirection as DomainDelegationMessageDirection,
     DelegationOutcomeKind as DomainDelegationOutcomeKind,
@@ -74,8 +76,9 @@ use signalbox_domain::{
     ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunId, ReviewRunRef,
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
-    ReviewWorkflowKind, RunnerEnrollmentRequestId,
+    ReviewWorkflowKind, RunnerEnrollmentRequestId, RunnerGeneration,
     RunnerNonLostConnectionState as DomainRunnerNonLostConnectionState,
+    RunnerPlacementRecoveryState as DomainRunnerPlacementRecoveryState,
     RunnerSandboxProfile as DomainRunnerSandboxProfile, RunnerSelector, SemanticTranscriptEntryId,
     ServiceTier as DomainServiceTier, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
@@ -133,6 +136,7 @@ use signalbox_persistence::{
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
     runner_promotion::{PromotePendingRunnerRepository, PromotePendingRunnerRepositoryError},
+    runner_protocol::{RunnerProtocolStore, RunnerProtocolStoreError},
     session_delegation::{
         DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
         ProcessDelegationRequestRejection,
@@ -181,6 +185,7 @@ use signalbox_process_protocol::{
     RunnerConnectionHealth as WireRunnerConnectionHealth,
     RunnerCredentialProfileName as WireRunnerCredentialProfileName,
     RunnerNonLostConnectionState as WireRunnerNonLostConnectionState,
+    RunnerPlacementRecoveryState as WireRunnerPlacementRecoveryState,
     RunnerPlacementRevision as WireRunnerPlacementRevision,
     RunnerProjection as WireRunnerProjection,
     RunnerProjectionSelector as WireRunnerProjectionSelector,
@@ -265,6 +270,7 @@ impl ContextCompactionModel for UnavailableContextCompactionModel {
 struct ConnectionServices {
     recovery_reporter: Option<FatalRecoveryReporter>,
     pool: PgPool,
+    runner_protocol_store: Option<RunnerProtocolStore>,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
@@ -313,6 +319,7 @@ pub struct ProcessRuntime {
     recovery_reporter: Option<FatalRecoveryReporter>,
     listener: LocalProcessListener,
     pool: PgPool,
+    runner_protocol_store: Option<RunnerProtocolStore>,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
@@ -347,6 +354,13 @@ impl ProcessRuntime {
         )
     }
 
+    /// Installs the daemon's shared runner-protocol persistence authority.
+    #[must_use]
+    pub fn with_runner_protocol_store(mut self, store: RunnerProtocolStore) -> Self {
+        self.runner_protocol_store = Some(store);
+        self
+    }
+
     /// Composes the guarded runtime with startup-resolved session templates.
     pub fn new_with_templates(
         listener: LocalProcessListener,
@@ -362,6 +376,7 @@ impl ProcessRuntime {
             recovery_reporter: None,
             listener,
             pool,
+            runner_protocol_store: None,
             eligibility_nudge,
             tool_dispatch_gate,
             model_configuration,
@@ -417,6 +432,7 @@ impl ProcessRuntime {
         let connection_dependencies = ConnectionDependencies {
             recovery_reporter: self.recovery_reporter,
             pool: self.pool.clone(),
+            runner_protocol_store: self.runner_protocol_store,
             eligibility_nudge: self.eligibility_nudge.clone(),
             tool_dispatch_gate: self.tool_dispatch_gate,
             model_configuration: self.model_configuration,
@@ -582,6 +598,7 @@ fn observe_model_call_metrics(metrics: &TelemetryMetrics, state: DispatchedModel
 struct ConnectionDependencies {
     recovery_reporter: Option<FatalRecoveryReporter>,
     pool: PgPool,
+    runner_protocol_store: Option<RunnerProtocolStore>,
     eligibility_nudge: InProcessEligibilityNudge,
     tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
@@ -601,6 +618,7 @@ async fn serve_connections(
     let services = ConnectionServices {
         recovery_reporter: dependencies.recovery_reporter,
         pool: dependencies.pool,
+        runner_protocol_store: dependencies.runner_protocol_store,
         eligibility_nudge: dependencies.eligibility_nudge,
         tool_dispatch_gate: dependencies.tool_dispatch_gate,
         model_configuration: Arc::new(dependencies.model_configuration),
@@ -900,6 +918,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::ReplaceSessionMetadata { .. }
         | ClientRequest::ReplaceSessionDefaults { .. }
         | ClientRequest::PromotePendingRunner { .. }
+        | ClientRequest::AbandonLostRunner { .. }
         | ClientRequest::ReadSessionDefaults { .. }
         | ClientRequest::AppendConversationImport { .. }
         | ClientRequest::CommitConversationImport {}
@@ -1075,6 +1094,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ReplaceSessionMetadata { .. }
             | ClientRequest::ReplaceSessionDefaults { .. }
             | ClientRequest::PromotePendingRunner { .. }
+            | ClientRequest::AbandonLostRunner { .. }
             | ClientRequest::ReadSessionDefaults { .. }
             | ClientRequest::ImportConversation { .. }
             | ClientRequest::BeginConversationImport { .. }
@@ -1730,6 +1750,22 @@ where
                 command_id.into_uuid(),
                 pending_request_id,
                 &services.pool,
+            )
+            .await
+        }
+        ClientRequest::AbandonLostRunner {
+            command_id,
+            session_id,
+            expected_placement_revision,
+        } => {
+            handle_abandon_lost_runner(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                expected_placement_revision,
+                services.runner_protocol_store.as_ref(),
             )
             .await
         }
@@ -9064,6 +9100,212 @@ where
     }
 }
 
+async fn handle_abandon_lost_runner<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    expected_placement_revision: WireRunnerPlacementRevision,
+    store: Option<&RunnerProtocolStore>,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let Some(expected_revision) =
+        RunnerGeneration::try_from_u64(expected_placement_revision.value())
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let request = AbandonLostRunnerRequest::try_new(
+        DurableCommandId::from_uuid(command_id),
+        SessionId::from_uuid(session_id.into_uuid()),
+        expected_revision,
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let Some(store) = store else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            internal_protocol_error(
+                Some(session_id.into_uuid()),
+                InternalDiagnostic::RunnerAbandonmentUnavailable,
+            ),
+        )
+        .await;
+    };
+    let mut service = AbandonLostRunnerService::new(store.clone());
+    match service.execute(request).await {
+        Ok(AbandonLostRunnerOutcome::Recorded(AbandonLostRunnerResult::Applied(applied))) => {
+            let Some(placement_revision) =
+                WireRunnerPlacementRevision::try_new(applied.placement_revision().get())
+            else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    internal_protocol_error(
+                        Some(session_id.into_uuid()),
+                        InternalDiagnostic::RunnerAbandonmentCorruption,
+                    ),
+                )
+                .await;
+            };
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::RunnerAbandoned {
+                    session_id: wire_uuid(applied.session().into_uuid()),
+                    placement_revision,
+                },
+            )
+            .await
+        }
+        Ok(AbandonLostRunnerOutcome::Recorded(AbandonLostRunnerResult::Rejected(rejection))) => {
+            let detail = match rejection {
+                AbandonLostRunnerRejection::SessionNotFound { session } => {
+                    RejectionDetail::SessionNotFound {
+                        session_id: wire_uuid(session.into_uuid()),
+                    }
+                }
+                AbandonLostRunnerRejection::RunnerPlacementNotFound { session } => {
+                    RejectionDetail::RunnerPlacementNotFound {
+                        session_id: wire_uuid(session.into_uuid()),
+                    }
+                }
+                AbandonLostRunnerRejection::PlacementRevisionMismatch {
+                    session,
+                    expected,
+                    current,
+                } => {
+                    let (Some(expected), Some(current)) = (
+                        WireRunnerPlacementRevision::try_new(expected.get()),
+                        WireRunnerPlacementRevision::try_new(current.get()),
+                    ) else {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            internal_protocol_error(
+                                Some(session_id.into_uuid()),
+                                InternalDiagnostic::RunnerAbandonmentCorruption,
+                            ),
+                        )
+                        .await;
+                    };
+                    RejectionDetail::PlacementRevisionMismatch {
+                        session_id: wire_uuid(session.into_uuid()),
+                        expected,
+                        current,
+                    }
+                }
+                AbandonLostRunnerRejection::PlacementNotLost {
+                    session,
+                    placement_revision,
+                    state,
+                } => {
+                    let Some(placement_revision) =
+                        WireRunnerPlacementRevision::try_new(placement_revision.get())
+                    else {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            internal_protocol_error(
+                                Some(session_id.into_uuid()),
+                                InternalDiagnostic::RunnerAbandonmentCorruption,
+                            ),
+                        )
+                        .await;
+                    };
+                    RejectionDetail::PlacementNotLost {
+                        session_id: wire_uuid(session.into_uuid()),
+                        placement_revision,
+                        state: match state {
+                            DomainRunnerPlacementRecoveryState::Unpinned => {
+                                WireRunnerPlacementRecoveryState::Unpinned
+                            }
+                            DomainRunnerPlacementRecoveryState::Pinned => {
+                                WireRunnerPlacementRecoveryState::Pinned
+                            }
+                            DomainRunnerPlacementRecoveryState::RunnerAbandoned => {
+                                WireRunnerPlacementRecoveryState::RunnerAbandoned
+                            }
+                        },
+                    }
+                }
+                AbandonLostRunnerRejection::ActiveTurnRequiresExistingControl {
+                    session,
+                    active_turn,
+                } => RejectionDetail::ActiveTurnRequiresExistingControl {
+                    session_id: wire_uuid(session.into_uuid()),
+                    active_turn_id: wire_uuid(active_turn.into_uuid()),
+                },
+            };
+            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+        Ok(AbandonLostRunnerOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(RunnerProtocolStoreError::Database(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(RunnerProtocolStoreError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
+        }
+        Err(
+            RunnerProtocolStoreError::Corruption(_)
+            | RunnerProtocolStoreError::Domain(_)
+            | RunnerProtocolStoreError::EnrollmentRequest(_),
+        ) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::RunnerAbandonmentCorruption,
+                ),
+            )
+            .await
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the complete defaults replacement remains explicit at the wire adapter"
@@ -12526,6 +12768,8 @@ enum InternalDiagnostic {
     SessionDefaultsCommitAmbiguous,
     SessionDefaultsCommandKindMismatch,
     SessionDefaultsCorruption,
+    RunnerAbandonmentUnavailable,
+    RunnerAbandonmentCorruption,
     RunnerPromotionCorruption,
     SessionDelegationDatabase,
     SessionDelegationCorruption,
@@ -12574,6 +12818,7 @@ impl InternalDiagnostic {
             | Self::SessionCreationCommandKindMismatch
             | Self::SessionMetadataCommandKindMismatch
             | Self::SessionDefaultsCommandKindMismatch
+            | Self::RunnerAbandonmentUnavailable
             | Self::SessionDelegationContract
             | Self::ContextCompactionUnconfiguredTarget
             | Self::SystemPromptMemberMissing
@@ -12604,6 +12849,7 @@ impl InternalDiagnostic {
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
             | Self::SessionDefaultsCorruption
+            | Self::RunnerAbandonmentCorruption
             | Self::RunnerPromotionCorruption
             | Self::SessionDelegationCorruption
             | Self::SubmitInputCorruption
@@ -12664,6 +12910,8 @@ impl InternalDiagnostic {
             Self::SessionDefaultsCommitAmbiguous => "session_defaults_commit_ambiguous",
             Self::SessionDefaultsCommandKindMismatch => "session_defaults_command_kind_mismatch",
             Self::SessionDefaultsCorruption => "session_defaults_corruption",
+            Self::RunnerAbandonmentUnavailable => "runner_abandonment_unavailable",
+            Self::RunnerAbandonmentCorruption => "runner_abandonment_corruption",
             Self::RunnerPromotionCorruption => "runner_promotion_corruption",
             Self::SessionDelegationDatabase => "session_delegation_database",
             Self::SessionDelegationCorruption => "session_delegation_corruption",
