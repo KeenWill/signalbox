@@ -10627,6 +10627,47 @@ async fn s32_inv044_generic_store_rejects_pre_pin_replacement_without_command_au
     Ok(())
 }
 
+/// INV-043 / INV-044: initial pinning is a multi-aggregate transaction; the
+/// generic placement writer cannot bypass its connection and lease authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_generic_store_rejects_initial_pin_without_lease_authority()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the current registration prepares an initial pin");
+    let rejected = store
+        .store_placement(&pin.placement, Some(&registration), None)
+        .await
+        .expect_err("the generic writer cannot invent initial-pin lease authority");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_abandoned_pre_pin_placement_round_trips_terminal_state()

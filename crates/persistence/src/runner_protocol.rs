@@ -1552,7 +1552,8 @@ impl RunnerProtocolStore {
         // snapshot writer must not fabricate the multi-aggregate transaction.
         if matches!(
             event_kind,
-            "runner_lost_before_pin"
+            "pinned"
+                | "runner_lost_before_pin"
                 | "pre_pin_replaced"
                 | "runner_lost"
                 | "runner_replaced"
