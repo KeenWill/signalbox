@@ -635,10 +635,10 @@ produced this loss permanently unrecoverable.
 
 A pending successor may also be promoted with no lost session placement
 involved. The implemented `promote_pending_runner` transaction is the
-deployment-scoped mutation for the future user command: it acts on the fact that
-this daemon's active runner is durably gone, requires the recorded active
-enrollment's connection to be durably lost and the pending candidate to be
-connected under its provisioning-only authority, then revokes the predecessor
+deployment-scoped mutation for explicit user-initiated promotion: it acts on the
+fact that this daemon's active runner is durably gone, requires the recorded
+active enrollment's connection to be durably lost and the pending candidate to
+be connected under its provisioning-only authority, then revokes the predecessor
 and constructs the active enrollment and validated registration from the exact
 pending facts in one transaction. A predecessor reconnect and later loss does
 not invalidate the immutable admission relation; promotion authenticates and
