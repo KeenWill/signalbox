@@ -43,15 +43,26 @@ revisions to runs. Every run records the compiled digest and frame-contract
 version it started under and finishes on that exact artifact; re-registration of
 a name creates a new revision and never rebinds an in-flight run. Upgrading a
 long-lived program is a deliberate act: cancel the old run, start the new
-revision.
+revision. A frame-contract change is handled the same way, per the pre-alpha
+rule in `AGENTS.md`: no retired contract version is decoded by a newer host —
+that would be compatibility machinery for deployments that do not exist — so a
+run whose pinned contract version the current host no longer speaks is faulted
+terminally at its next wake with a deterministic, journaled `contract_retired`
+fault, and closing or continuing outstanding runs before a contract-changing
+upgrade is an operational courtesy, not a spec obligation.
 
 **Committed unimplemented functionality.** No present surface performs
 registration-time type-checking. Two registration paths exist with one trust
-boundary. The operator path runs in the CLI: `tsc --strict` against the SDK's
-shipped declarations, strip, digest, insert. The agent path is a gated daemon
-tool on the ordinary tool surface: a session submits the source, the stripped
-artifact, requested grants, and digests; the daemon verifies the digests against
-the submitted bytes, parses the artifact without executing it, enforces the
+boundary. The executable artifact is never accepted on trust: both paths derive
+it from the submitted source with one pinned, deterministic type-strip transform
+— parse and erase types, no checking — embedded identically in the CLI and the
+daemon, so the artifact bytes are a pure function of the source bytes and the
+reviewed source *is* the executed code; a submitted artifact whose digest
+differs from the derived artifact's digest is rejected. The operator path runs
+in the CLI: `tsc --strict` against the SDK's shipped declarations, then the
+pinned strip, digest, insert. The agent path is a gated daemon tool on the
+ordinary tool surface: a session submits the source, requested grants, and
+digests; the daemon re-derives the artifact, verifies digests, enforces the
 import allowlist and size bounds, and records which party claims the type-check
 (`cli` or `registrant`). The daemon never type-checks. Type-checking is an
 authoring aid, not a security boundary: a mistyped program can only fault inside
@@ -70,7 +81,10 @@ closed vocabulary owned by this page; the initial vocabulary is `time`,
 program may register programs only when explicitly granted). A capability absent
 from the grant list does not exist for that program: the host refuses the effect
 before any authority is exercised. Grants are least-privilege from the first
-registered program.
+registered program, and `register` attenuates: a program registering a program
+may request for the child only a subset of its own grants, so no chain of
+program-initiated registrations can mint a capability its root was never granted
+— any expansion goes through the user-authorized registration paths.
 
 ## Execution, journal, and replay
 
@@ -96,12 +110,19 @@ discipline.
 effects. Every nondeterministic act crosses the frame protocol and is recorded
 as append-only journal rows. Requests (what the program asked, in program order)
 and deliveries (what the host answered, in delivery order) are both journaled.
-The frame vocabulary is: `now`, `random`, `sleep`, `await_event`, `effect`,
-`scope`, and `terminal` requests; `answer`, `wake`, `cancel`, and `fault`
-deliveries. Capability calls are `effect` frames named by capability and method,
-so capability growth never changes the frame contract. Effect failures are
-ordinary answer values a program branches on; only `fault` (timeout, memory,
-nondeterminism) terminates a run from outside, and faults are themselves
+Every request carries a per-run monotone request ordinal, and every `answer` and
+`wake` names the request ordinal it resolves, so a delivery is unambiguous under
+concurrency: delivery order fixes the interleaving, and the named ordinal fixes
+which promise each delivery resolves — the same association during live
+execution and replay. The frame vocabulary is: `now`, `random`, `sleep`,
+`await_event`, `effect`, `scope`, and `terminal` requests; `answer`, `wake`,
+`cancel`, and `fault` deliveries. Capability calls are `effect` frames named by
+capability and method, so capability growth never changes the frame contract.
+Effect failures are ordinary answer values a program branches on; only `fault`
+terminates a run from outside, from its own closed cause set: `timeout`,
+`memory`, `nondeterminism`, `program_error` (an uncaught exception or unhandled
+promise rejection before `terminal`, carrying bounded, replay-stable evidence of
+the error), `contract_retired`, and `journal_bound`. Faults are themselves
 journaled so even a kill replays.
 
 **Committed unimplemented functionality.** No present surface synchronizes
@@ -141,28 +162,31 @@ restricting the language.
 growth. A long-lived program does not accumulate one unbounded journal:
 `terminal` carries a `continue` outcome that ends the run and starts a successor
 run row — same pinned artifact, explicit continuation arguments, predecessor
-identity recorded — with a fresh journal. Replay cost is therefore bounded per
-run, not per program lifetime, and the built-in dispatch program described below
-continues after each handled event. This is the substrate's only
-journal-bounding mechanism: no checkpointing or journal truncation exists,
-because a journal that can be rewritten is not a journal. Why: continuation
-keeps replay linear in one run's work while every historical run remains a
-complete, immutable record.
+identity recorded — with a fresh journal, and the built-in dispatch program
+described below continues after each handled event. Continuation is voluntary,
+so the bound is enforced by the host, not assumed of the program: a configured
+per-run frame bound terminates any run that reaches it with a deterministic,
+journaled `journal_bound` fault, making the per-run replay bound a property of
+every program, cooperative or not. No checkpointing or journal truncation
+exists, because a journal that can be rewritten is not a journal. Why:
+continuation keeps replay linear in one run's work while every historical run
+remains a complete, immutable record, and the fault keeps that claim true for
+programs that never continue.
 
 **Committed unimplemented functionality.** No present surface parks program
 runs. A run sleeping on a timer or subscription holds no isolate and no memory
 beyond its rows; wake builds a fresh isolate and replays. Sleeping runs survive
 daemon restarts by construction. Frame payloads inline below a fixed threshold;
-offloading larger payloads by digest depends on the artifact foundation whose
-aggregate boundary is recorded as undecided in
-[open-questions](../open-questions.md#general-purpose-artifacts), so until that
-foundation lands, a payload above the threshold is an effect error and no
-payload-store shape is committed here. A session outcome journals as the session
-identity, the exact turn and accepted-input identity that produced it, and an
-outcome digest — never transcript content — because sessions are already durable
-and the journal is thin coordination state only; the recorded turn identity is
-what lets replay authenticate which of a session's turns supplied a delivered
-answer.
+a larger payload is stored as an immutable SHA-256-addressed blob under the
+contract [blob storage](blob-storage.md) owns, journaled by digest, with the
+storage class it travels under owned by that page's class-routing vocabulary. No
+named-artifact aggregate is required or committed for payload offload: the
+journal references immutable bytes by digest only. A session outcome journals as
+the session identity, the exact turn and accepted-input identity that produced
+it, and an outcome digest — never transcript content — because sessions are
+already durable and the journal is thin coordination state only; the recorded
+turn identity is what lets replay authenticate which of a session's turns
+supplied a delivered answer.
 
 **Committed unimplemented functionality.** No present surface re-executes
 evaluation trials. Replay of a run's own journal (resume) and a sibling run with
@@ -176,41 +200,50 @@ resumes.
 **Committed unimplemented functionality.** No present surface subscribes
 programs to events. `await_event` records a durable subscription row naming an
 event kind and filter over the vocabulary that [repository watch](repo-watch.md)
-already stores durably; after a poll's events commit, matching subscriptions
-produce wake rows, and the scheduler resumes the subscribed runs. Program
-subscription identity, delivery, and cancellation are decided by this page; the
-previously open standing-subscription foundation question is narrowed in the
-same diff to the client-facing callback surface it still owns. This constrains
-repository-watch storage now: its cursor and event rows are the substrate's
-event source and must remain readable by subscription matching. The present
-structured-rule dispatch surface is committed to converge onto this mechanism —
-the dispatch action becomes a built-in program, cut over after one shadowed live
-event — after which rules are subscriptions.
+already stores durably, together with an activation frontier fixed at
+registration strictly after the current durable event tail — the same watermark
+discipline the structured-rule contract already uses — so a subscription can
+never match an event at or before its activation. After a poll's events commit,
+matching subscriptions produce wake rows keyed by the unique
+subscription-and-event identity, so recovery re-matching is idempotent: an event
+wakes a subscription exactly once, with no historical, missed, or duplicate wake
+at the registration or recovery boundary. The scheduler resumes the woken runs.
+Program subscription identity, delivery, and cancellation are decided by this
+page; the previously open standing-subscription foundation question is narrowed
+in the same diff to the client-facing callback surface it still owns. This
+constrains repository-watch storage now: its cursor and event rows are the
+substrate's event source and must remain readable by subscription matching. The
+present structured-rule dispatch surface is committed to converge onto this
+mechanism — the dispatch action becomes a built-in program, cut over after one
+shadowed live event — after which rules are subscriptions.
 
 **Committed unimplemented functionality.** No present surface cancels program
 runs. Cancellation is a user command pair on the
 [process protocol](process-protocol.md) from the substrate's first protocol
-release: a cancel command naming the run and a receipt confirming the terminal
-`cancelled` state, with the same durable-command identity mechanics as every
-user command in [identity and commands](identity-and-commands.md). Cancel
-authority is user authority; a delivered cancel is journaled as a `cancel`
-frame, so a cancelled run replays to its cancellation. Programs receive no
-notice beyond the journal: cancellation is terminal, not advisory.
+release: a cancel command naming the run, answered from a closed outcome set —
+applied (the run is now `cancelled`), `not_found` (no such run), or
+`already_terminal` naming the standing terminal state and result the command
+found — with the same durable-command identity mechanics as every user command
+in [identity and commands](identity-and-commands.md). A cancel never overwrites
+a terminal outcome: the race against a run's own `terminal` is resolved by
+whichever committed first, and the receipt reports the truth it found. Cancel
+authority is user authority; an applied cancel is journaled as a `cancel` frame,
+so a cancelled run replays to its cancellation. Programs receive no notice
+beyond the journal: cancellation is terminal, not advisory.
 
 ## Driving sessions
 
 **Committed unimplemented functionality.** No present surface lets programs
 create sessions. The session capability composes the existing create-session,
 input-submission, and turn-scheduling services, extended where the present
-contracts have no room for program agency. Two extensions are committed here and
-owned by the pages they change. First, attribution: the present input surface
-records user issuance, and the closed actor algebra has no program arm, so
-program-issued input carries a verified program issuance — naming the run
-identity — through the actor contract of
-[identity and commands](identity-and-commands.md); a program-driven turn is
-never recorded as user-issued. Second, provenance: program-created sessions
-carry new creation-cause variants (`workflow`, and `eval` per the
-[evaluation system](eval-system.md)) in the stored vocabulary of
+contracts have no room for program agency. Two extensions are committed in the
+pages that own them. First, attribution: the committed program-issuance
+extension to the closed actor algebra is recorded in its owning contract,
+[identity and commands](identity-and-commands.md); this page adds only the
+program-specific constraint that program-issued input names the issuing run
+identity and is never recorded as user-issued. Second, provenance:
+program-created sessions carry new creation-cause variants (`workflow`, and
+`eval` per the [evaluation system](eval-system.md)) in the stored vocabulary of
 [sessions and the transcript](sessions-and-transcript.md). Programs drive
 sessions turn by turn: submit input, await that turn's outcome as a typed
 payload, then branch. The [model-runtime substrate](runtime-substrate.md)

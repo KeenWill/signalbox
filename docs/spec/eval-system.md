@@ -57,12 +57,13 @@ expectations. Expectations are one typed grammar over three check kinds —
 closed-vocabulary labels, typed numeric constraints (exact-within-tolerance,
 range, count, boolean), and reference-artifact comparisons by named continuous
 metric with thresholds — declared per case, each check optional. A case with a
-missing reference degrades that check to `unmeasured` and never loses its row.
-Reference-artifact checks depend on the artifact foundation whose aggregate
-boundary is recorded as undecided in
-[open-questions](../open-questions.md#general-purpose-artifacts); they are
-committed as grammar and sequenced strictly behind that foundation, and this
-page commits no artifact-store shape.
+missing reference degrades that check to `unmeasured` and never loses its row. A
+reference artifact is an immutable blob a case pins by digest under the contract
+[blob storage](blob-storage.md) owns; no named-artifact aggregate is required —
+mutable aliases, producer provenance, and ownership above a blob remain the open
+aggregate question recorded in
+[open-questions](../open-questions.md#general-purpose-artifacts), and nothing in
+this grammar depends on it.
 
 ## Trials, stages, and recording
 
@@ -70,19 +71,25 @@ page commits no artifact-store shape.
 results. An evaluation run records: run identity with the pinned program digest,
 corpus digest, and configuration; one trial row per case and repeat ordinal; and
 one stage row per trial stage with a status from the closed set `scored`,
-`skipped`, `infrastructure`, `unmeasured`, plus metrics, error, and duration.
-Durable cost is recorded per model call with the model and rate version that
-priced that call — an evaluation may score with one model and judge with
-another, and the configured rate catalog versions each model's rates
-independently, so no single run-level rate version exists; run-level cost is an
-aggregation grouped by model and rate version, never a stored scalar that
-forgets its pricing. Stages order cheap to expensive, and a stage failure is
-recorded on its row without discarding the trial's other stages. Aggregation —
-accuracy by slice, stability across repeats, thresholded pass rates,
-run-versus-run comparison — is derived by SQL views over these rows, never
-stored as opaque summaries alone. Repeats are fresh-journal repeats, so verdict
-stability is measured against genuinely re-sampled nondeterminism, while an
-interrupted run resumes by replay without re-spending a model call.
+`skipped`, `infrastructure`, `unmeasured`, plus metrics, error, and duration;
+and one check-outcome row per declared check per scoring stage, recording the
+check kind, its target, the expected value or threshold as resolved from the
+corpus, the measured value, and the check's own outcome from the same closed
+status set. The check-outcome rows are what make the promised views derivable
+without reopening external corpus content: a stage mixing measured and
+missing-reference checks is represented check by check, and its single stage
+status summarizes without substituting. Durable cost is recorded per model call
+with the model and rate version that priced that call — an evaluation may score
+with one model and judge with another, and the configured rate catalog versions
+each model's rates independently, so no single run-level rate version exists;
+run-level cost is an aggregation grouped by model and rate version, never a
+stored scalar that forgets its pricing. Stages order cheap to expensive, and a
+stage failure is recorded on its row without discarding the trial's other
+stages. Aggregation — accuracy by slice, stability across repeats, thresholded
+pass rates, run-versus-run comparison — is derived by SQL views over these rows,
+never stored as opaque summaries alone. Repeats are fresh-journal repeats, so
+verdict stability is measured against genuinely re-sampled nondeterminism, while
+an interrupted run resumes by replay without re-spending a model call.
 
 **Committed unimplemented functionality.** No present surface executes
 evaluation stage code. Heavyweight subject-under-test execution — building a
@@ -95,14 +102,16 @@ host-side; executor failure is a recorded stage status, never a run fault. The
 isolate never runs subject code, and executors never touch the database or hold
 credentials.
 
-**Committed unimplemented functionality.** The judge-evaluation recording pair
-`approval_judge_eval_run` and `approval_judge_eval_call` is superseded by the
-rows above: once judge evaluations run on the substrate, both tables and their
-recorded data are dropped without migration — the recorded runs are reproducible
-measurements, not history that binds. Per the pre-alpha rule in `AGENTS.md`,
-this destruction is deliberate and carries no compatibility ceremony. Until that
-drop, the pair remains the only recording surface for the standalone
-judge-evaluation binary and constrains nothing else.
+**Committed unimplemented functionality.** No present surface records
+judge-evaluation runs in the database; the standalone judge-evaluation harness
+emits scorecard output only, and an in-flight change proposes judge-specific
+recording tables ahead of this system. Whatever judge-specific recording surface
+exists when the substrate's rows land is superseded by them: once judge
+evaluations run on the substrate, any such tables and their recorded data are
+dropped without migration — those recorded runs are reproducible measurements,
+not history that binds. Per the pre-alpha rule in `AGENTS.md`, this destruction
+is deliberate and carries no compatibility ceremony, and nothing may build on a
+judge-specific recording surface in a way that outlives it.
 
 ## Open edges
 

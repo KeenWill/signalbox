@@ -113,6 +113,41 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  /// INV-033 / INV-044: an authoritative snapshot publishes the runner fact
+  /// from its cursor boundary together with the transcript records.
+  func testAuthoritativeSnapshotPublishesRunnerProjection() throws {
+    var transport = try SynchronizationFixture.transport()
+    _ = transport.send(.start)
+    _ = transport.send(.connected(generation: SynchronizationFixture.initialGeneration))
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.runnerSnapshotStart(
+          cursor: SynchronizationFixture.initialCursor
+        )
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 0,
+          entryCount: 0
+        )
+      )
+    )
+    let snapshot = try SynchronizationFixture.publishedSnapshot(in: effects)
+
+    XCTAssertEqual(snapshot.runner, try SynchronizationFixture.runnerProjection())
+  }
+
   func testS24INV032ReplayDeduplicatesSnapshotCursor() throws {
     let snapshotCursor = SynchronizationFixture.initialCursor
     let laterCursor = SynchronizationFixture.laterCursor
@@ -843,6 +878,84 @@ final class SessionSynchronizationTests: XCTestCase {
         cursor: SignalboxCanonicalUInt64(rawValue: bufferedCursor),
         refreshID: nil
       )
+    )
+  }
+
+  /// INV-033 / INV-044: a side snapshot carries its cursor-bound runner fact
+  /// into the merge offered to the native projection layer.
+  func testSideSnapshotMergeCarriesRunnerProjection() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedEvent(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    _ = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.runnerSnapshotStart(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    _ = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    let effects = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor,
+          turnCount: 0,
+          entryCount: 0
+        )
+      )
+    )
+    let expectedSnapshot = SignalboxSynchronizationSnapshot(
+      sessionID: try SynchronizationFixture.sessionID(),
+      cursor: SignalboxCanonicalUInt64(
+        rawValue: SynchronizationFixture.sideRefreshTriggerCursor
+      ),
+      runner: try SynchronizationFixture.runnerProjection(),
+      records: []
+    )
+    let expectedTrigger = SignalboxFollowedSessionEvent(
+      cursor: SignalboxCanonicalUInt64(
+        rawValue: SynchronizationFixture.sideRefreshTriggerCursor
+      ),
+      sessionID: try SynchronizationFixture.sessionID(),
+      event: .turnCompleted(
+        turnID: try SignalboxCanonicalUUID(validating: SynchronizationFixture.turn),
+        modelCallID: try SignalboxCanonicalUUID(validating: SynchronizationFixture.modelCall),
+        completionEntryID: try SignalboxCanonicalUUID(validating: SynchronizationFixture.entry),
+        terminalFrontierID: try SignalboxCanonicalUUID(
+          validating: SynchronizationFixture.frontier
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      effects,
+      [
+        .cancelDeadline(
+          .sideHistory(
+            generation: SynchronizationFixture.initialGeneration,
+            refreshID: SynchronizationFixture.firstRefreshID
+          )
+        ),
+        .mergeSideSnapshot(snapshot: expectedSnapshot, trigger: expectedTrigger),
+      ]
     )
   }
 
@@ -1666,6 +1779,54 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(
       transport.machine.phase,
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testRunnerProjectionConsumesOneSnapshotRecord() throws {
+    var transport = try SynchronizationFixture.transportInRunnerHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 0,
+        maximumUTF8Bytes: SynchronizationFixture.runnerProjectionUTF8Bytes
+      )
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testRunnerProjectionConsumesSnapshotUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportInRunnerHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 1,
+        maximumUTF8Bytes: SynchronizationFixture.runnerProjectionUTF8Bytes - 1
+      )
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
     )
     XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
   }
@@ -2945,6 +3106,14 @@ private enum SynchronizationFixture {
   static let modelCallUsageCostUTF8Bytes = UInt(
     modelCallUsageCostAmountUSD.utf8.count + modelCallUsageCostRateVersion.utf8.count
   )
+  static let runnerCapabilityClass = "linux.workspace"
+  static let runnerCredentialProfile = "readonly"
+  static let runnerRepository = "primary"
+  static let runnerWorkingDirectory = "workspace/project"
+  static let runnerProjectionUTF8Bytes = UInt(
+    runnerCapabilityClass.utf8.count + runnerCredentialProfile.utf8.count
+      + runnerRepository.utf8.count + runnerWorkingDirectory.utf8.count
+  )
   static let entry = "66666666-6666-4666-8666-666666666666"
   static let frontier = "77777777-7777-4777-8777-777777777777"
   static let attempt = "88888888-8888-4888-8888-888888888888"
@@ -3075,6 +3244,22 @@ private enum SynchronizationFixture {
     return result
   }
 
+  static func transportInRunnerHistory(
+    cursor: UInt64,
+    snapshotCapacity: SignalboxSynchronizationSnapshotCapacity
+  ) throws -> ScriptedSynchronizationTransport {
+    var result = try transport(snapshotCapacity: snapshotCapacity)
+    _ = result.send(.start)
+    _ = result.send(.connected(generation: initialGeneration))
+    _ = result.send(
+      .frame(
+        generation: initialGeneration,
+        message: try runnerSnapshotStart(cursor: cursor)
+      )
+    )
+    return result
+  }
+
   static func transportAtReplay(
     cursor: UInt64
   ) throws -> ScriptedSynchronizationTransport {
@@ -3173,9 +3358,51 @@ private enum SynchronizationFixture {
       {
         "type":"transcript_snapshot_start",
         "session_id":"\(session)",
-        "cursor":"\(cursor)"
+        "cursor":"\(cursor)",
+        "runner":null
       }
       """
+    )
+  }
+
+  static func runnerSnapshotStart(cursor: UInt64) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_snapshot_start",
+        "session_id":"\(session)",
+        "cursor":"\(cursor)",
+        "runner":{
+          "selector":{"type":"capability_class","name":"\(runnerCapabilityClass)"},
+          "runner_id":"\(earlierModelCall)",
+          "placement_revision":"3",
+          "sandbox_profile":"workspace-restricted",
+          "credential_profile":"\(runnerCredentialProfile)",
+          "repository":"\(runnerRepository)",
+          "working_directory":"\(runnerWorkingDirectory)",
+          "connection_health":null,
+          "state":"runner_lost"
+        }
+      }
+      """
+    )
+  }
+
+  static func runnerProjection() throws -> SignalboxRunnerProjection {
+    try SignalboxRunnerProjection(
+      selector: .capabilityClass(
+        name: SignalboxRunnerCapabilityClass(validating: runnerCapabilityClass)
+      ),
+      runnerID: SignalboxCanonicalUUID(validating: earlierModelCall),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 3),
+      sandboxProfile: .workspaceRestricted,
+      credentialProfile: SignalboxRunnerCredentialProfileName(
+        validating: runnerCredentialProfile
+      ),
+      repository: SignalboxRunnerRepositoryKey(validating: runnerRepository),
+      workingDirectory: SignalboxRunnerWorkingDirectory(validating: runnerWorkingDirectory),
+      connectionHealth: nil,
+      state: .runnerLost
     )
   }
 
@@ -3185,7 +3412,8 @@ private enum SynchronizationFixture {
       {
         "type":"transcript_snapshot_start",
         "session_id":17,
-        "cursor":"10"
+        "cursor":"10",
+        "runner":null
       }
       """
     )

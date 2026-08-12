@@ -4,6 +4,10 @@ The user-vocabulary surface on this page was re-verified through this PR
 (`agent/storage-vocabulary-rename`), which renamed the stored actor and issuer
 discriminators this page states.
 
+The `SubmitInput` multipart storage-version boundary below is the foundation
+proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
+with its implementing child stack.
+
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity
 kinds and command family and the tool-loop identity kinds and decision command,
@@ -272,21 +276,25 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 from recorded domain rejection.
 
 New `CreateSession` records use storage version 7, new
-`CreateSessionFromImportedFrontier` records use version 5, new
-`ReplaceSessionDefaults` records use version 4, and new `SubmitInput` records
-use version 2. Those versions introduce the commands' model-settings member;
-earlier supported versions accept only the provider-default full settings or
-inherit-all overlay backfilled by the migration. Imported-creation version 4
-remains committed-unimplemented compatibility space for that command family's
-optional runner-placement payload: no present writer or decoder provides it. All
-three defaults-bearing creation and replacement families reconstitute version 1
-with dangerous blanket approval disabled and versions 1 and 2 with no system
-prompt. Create-session versions 1 through 3 carry no template provenance;
-version 4 and every later supported version require provenance for template mode
-and require its absence for explicit mode. Create-session version 5 reserves the
-optional session runner placement and remains unsupported until that payload's
-decoder lands; version 6 adds path-scoped placement, and version 7 composes
-model settings with that implemented shape. Each field is absent before its
+`CreateSessionFromImportedFrontier` records use version 5, and new
+`ReplaceSessionDefaults` records use version 4. Those versions introduce the
+commands' model-settings member; earlier supported versions accept only the
+provider-default full settings or inherit-all overlay backfilled by the
+migration. New `SubmitInput` records use version 3, whose payload authority is
+the ordered content-part satellites. The one-time satellite migration rewrites
+every version 1 or 2 `SubmitInput` record to version 3 after backfilling its
+single text part; the `SubmitInput` decoder accepts only version 3 and has no
+rolling compatibility path. Imported-creation version 4 remains
+committed-unimplemented compatibility space for that command family's optional
+runner-placement payload: no present writer or decoder provides it. All three
+defaults-bearing creation and replacement families reconstitute version 1 with
+dangerous blanket approval disabled and versions 1 and 2 with no system prompt.
+Create-session versions 1 through 3 carry no template provenance; version 4 and
+every later supported version require provenance for template mode and require
+its absence for explicit mode. Create-session version 5 reserves the optional
+session runner placement and remains unsupported until that payload's decoder
+lands; version 6 adds path-scoped placement, and version 7 composes model
+settings with that implemented shape. Each field is absent before its
 introducing version, so an older reader rejects a newer creation record instead
 of discarding either decision. `ReplaceSessionMetadata` and `DecideToolRequest`
 use version 1. `CreateSession` records applied results only (its one preparation
@@ -430,6 +438,18 @@ terminalizations) has adopted an attribution field. See Open edges. Actor
 answers who issued one command; `SessionCreationCause` answers why a session
 exists — they are independent facts, and neither substitutes for the other (see
 [sessions-and-transcript](sessions-and-transcript.md)).
+
+**Committed unimplemented functionality.** No present surface constructs a
+program actor. The closed actor algebra gains a program-issuance arm — a
+verified reference to the issuing program run, constructible only by the
+[program substrate](program-substrate.md)'s host-side session capability, with
+the same validated-reference, no-conferred-authority semantics as every other
+arm — and `SubmitInput` gains a program admissibility path fixing that actor, so
+a program-driven turn is never recorded as user-issued. This constrains present
+change: the actor storage convention (closed `actor_kind` discriminator,
+variant-shaped reference columns, replay-equality inclusion) must remain
+extensible to that arm, and nothing may assume the `SubmitInput` actor is always
+`user`.
 
 ## Durable-command telemetry correlation
 
