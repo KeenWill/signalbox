@@ -109,6 +109,13 @@ struct PhysicalAttemptFacts {
     turn: u128,
 }
 
+#[derive(sqlx::FromRow)]
+struct LeaseOfferAuthorityRow {
+    offer_connection_epoch: Decimal,
+    offer_connection_event_ordinal: Decimal,
+    offer_loss_epoch: Decimal,
+}
+
 const INITIAL_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
     attempt: ATTEMPT,
     request: 0x9700,
@@ -3390,7 +3397,7 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
         .load_current_connection_loss(expected_enrollment.enrollment())
         .await?
         .expect("the migrated terminal connection has a loss fence");
-    let lease_offer_authority: (Decimal, Decimal, Decimal) = sqlx::query_as(
+    let lease_offer_authority: LeaseOfferAuthorityRow = sqlx::query_as(
         "SELECT offer_connection_epoch,
                 offer_connection_event_ordinal,
                 offer_loss_epoch
@@ -3406,8 +3413,16 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     assert_eq!(loaded.connection_epoch().get(), 1);
     assert_eq!(loaded.connection_event_ordinal(), 2);
     assert_eq!(
-        lease_offer_authority,
-        (Decimal::ONE, Decimal::from(2_u64), Decimal::ONE)
+        lease_offer_authority.offer_connection_epoch,
+        Decimal::from(loaded.connection_epoch().get())
+    );
+    assert_eq!(
+        lease_offer_authority.offer_connection_event_ordinal,
+        Decimal::from(loaded.connection_event_ordinal())
+    );
+    assert_eq!(
+        lease_offer_authority.offer_loss_epoch,
+        Decimal::from(loaded.loss_epoch().get())
     );
     drop(pool);
     Ok(())
@@ -3430,15 +3445,6 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         no_permission_overrides(),
         "effect_free",
     )
-    .await?;
-    sqlx::query(
-        "INSERT INTO runner_connection_event
-            (enrollment_id, connection_epoch, event_ordinal,
-             state_kind, cause_kind)
-         VALUES ($1, 1, 1, 'connected', 'established')",
-    )
-    .bind(registration.registration().enrollment().into_uuid())
-    .execute(&pool)
     .await?;
     store.store_pin(&pin, &registration).await?;
     let refusal = migrate(&pool)
