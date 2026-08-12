@@ -22,7 +22,9 @@ frontier link were verified against this PR
 pending-successor activation transaction was verified against this PR
 (`agent/runner-pending-successor-activation`). The different-live-runner pre-pin
 replacement command and result transaction were verified against this PR
-(`agent/runner-pre-pin-replacement`).
+(`agent/runner-pre-pin-replacement`). Pending-enrollment activation inside that
+transaction was verified against this PR
+(`agent/runner-pending-pre-pin-replacement`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -349,10 +351,15 @@ Representation rules, all enforced in the schema:
   current registration is connected and advertises every retained request axis.
   Its applied receipt retains and reads back that exact enrollment, registration
   revision, connection epoch, and connected event rather than trusting mutable
-  current heads on replay. **Committed unimplemented functionality.**
-  Pending-enrollment activation, same-runner recovery, and pinned replacement
-  remain for later dedicated transactions. Direct snapshot storage cannot stand
-  in for any of them.
+  current heads on replay. The pending-target arm additionally locks the exact
+  provisioning-only request and candidate, requires its connected registration
+  to advertise every retained request axis, then activates the candidate,
+  revokes its recorded predecessor, and installs the same unpinned successor in
+  one terminal commit. A mismatch or disconnected candidate is a typed durable
+  rejection and leaves the pending authority intact. **Committed unimplemented
+  functionality.** Pending-enrollment activation for a pinned placement,
+  same-runner recovery, and pinned replacement remain for later dedicated
+  transactions. Direct snapshot storage cannot stand in for any of them.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
