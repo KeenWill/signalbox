@@ -665,8 +665,8 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `update_session_placement`, `register_workspace`, `mint_git_remote`,
 `withdraw_git_remote`, `promote_pending_runner`, `abandon_lost_runner`,
 `replace_lost_runner`) and a kind-scoped `storage_version`. The gates above fix
-the current numbers: create-session records write version 7, imported-create
-records write version 5, replace-defaults records write version 4, and
+the current numbers: create-session records write version 8, imported-create
+records write version 6, replace-defaults records write version 4, and
 submit-input records write version 2; every other closed kind writes version 1.
 The four settings-bearing families require the migration's provider-default full
 settings or inherit-all overlay on every earlier supported version.

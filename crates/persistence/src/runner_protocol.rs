@@ -28,9 +28,9 @@ use signalbox_domain::{
     ReplacedLostRunnerBeforePin, RunnerAdvertisement, RunnerAuthenticationId,
     RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
-    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentRequestId, RunnerEnrollmentState,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
+    RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
     RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
     RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerReplacementTarget,
     RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
@@ -85,7 +85,6 @@ use crate::outbox::{
     self, DispatchedRunnerState, OutboxEvent, RunnerConnectionOutboxSource, RunnerStateOutboxEvent,
     RunnerStateOutboxSource,
 };
-pub use signalbox_domain::RunnerEnrollmentRequestId;
 
 #[derive(Clone, Copy)]
 enum PlacementProjectionAuthority {
@@ -1933,10 +1932,13 @@ impl RunnerProtocolStore {
                FROM runner_pending_enrollment AS pending
                JOIN runner_enrollment AS candidate
                  ON candidate.enrollment_id = pending.enrollment_id
-                AND candidate.state_kind = 'pending'
+                AND candidate.state_kind = $2
               WHERE pending.request_id = $1",
         )
         .bind(request.into_uuid())
+        .bind(runner_enrollment_state_to_str(
+            RunnerEnrollmentState::Pending,
+        ))
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(relation) = relation else {
