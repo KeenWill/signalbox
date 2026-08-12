@@ -142,6 +142,7 @@ impl BlobStoreRegistry {
 struct OpenedNamespace {
     canonical_path: PathBuf,
     device_inode: (u64, u64),
+    physical_path: PathBuf,
 }
 
 impl From<&FilesystemNamespaceIdentity> for OpenedNamespace {
@@ -149,6 +150,7 @@ impl From<&FilesystemNamespaceIdentity> for OpenedNamespace {
         Self {
             canonical_path: identity.canonical_path().to_path_buf(),
             device_inode: identity.device_inode(),
+            physical_path: identity.physical_path().to_path_buf(),
         }
     }
 }
@@ -174,6 +176,7 @@ fn validate_physical_namespaces(
     for (index, left) in stores.iter().enumerate() {
         if paths_overlap(&staging.canonical_path, &left.canonical_path)
             || staging.device_inode == left.device_inode
+            || physical_paths_overlap(staging, left)
         {
             return Err(BlobStoreRegistryError::StagingStoreOverlap);
         }
@@ -186,9 +189,17 @@ fn validate_physical_namespaces(
             if paths_overlap(&left.canonical_path, &right.canonical_path) {
                 return Err(BlobStoreRegistryError::NestedStoreRoots);
             }
+            if physical_paths_overlap(left, right) {
+                return Err(BlobStoreRegistryError::NestedStoreRoots);
+            }
         }
     }
     Ok(())
+}
+
+fn physical_paths_overlap(left: &OpenedNamespace, right: &OpenedNamespace) -> bool {
+    left.device_inode.0 == right.device_inode.0
+        && paths_overlap(&left.physical_path, &right.physical_path)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -315,6 +326,20 @@ generated_artifact = "primary"
         OpenedNamespace {
             canonical_path: path.into(),
             device_inode: (device, inode),
+            physical_path: path.into(),
+        }
+    }
+
+    fn mounted_namespace(
+        path: &str,
+        device: u64,
+        inode: u64,
+        physical_path: &str,
+    ) -> OpenedNamespace {
+        OpenedNamespace {
+            canonical_path: path.into(),
+            device_inode: (device, inode),
+            physical_path: physical_path.into(),
         }
     }
 
@@ -356,6 +381,17 @@ generated_artifact = "primary"
             error,
             BlobStoreRegistryError::PhysicalNamespaceAlias
         ));
+    }
+
+    #[test]
+    fn bind_mounted_descendant_fails_before_namespace_preparation() {
+        let staging = mounted_namespace("/staging", 1, 8, "/store/.publish-v1");
+        let store = mounted_namespace("/store", 1, 4, "/store");
+
+        let error = validate_physical_namespaces(&staging, &[store])
+            .expect_err("a bind-mounted descendant overlaps the store namespace");
+
+        assert!(matches!(error, BlobStoreRegistryError::StagingStoreOverlap));
     }
 
     #[test]

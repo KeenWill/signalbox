@@ -475,6 +475,29 @@ in
 
         config_path = Path(sys.argv[1])
         document = tomlkit.parse(config_path.read_text())
+        blob_storage = document.get("blob_storage")
+        migrated_blob_paths = False
+        if isinstance(blob_storage, Mapping):
+            if blob_storage.get("staging_directory") == "/var/lib/signalbox/blob-staging":
+                blob_storage["staging_directory"] = str(Path(sys.argv[2]).absolute())
+                migrated_blob_paths = True
+            stores = blob_storage.get("stores", [])
+            primary = next(
+                (
+                    entry
+                    for entry in stores
+                    if isinstance(entry, Mapping) and entry.get("name") == "primary"
+                ),
+                None,
+            )
+            if (
+                primary is not None
+                and primary.get("root_directory") == "/var/lib/signalbox/blobs-primary"
+            ):
+                primary["root_directory"] = str(Path(sys.argv[3]).absolute())
+                migrated_blob_paths = True
+        if migrated_blob_paths:
+            config_path.write_text(tomlkit.dumps(document))
         profiles = document.get("credential_profiles", [])
         mappings = document.get("adapter_mappings", [])
         legacy_profile = any(
@@ -494,7 +517,8 @@ in
                 "adapter_mappings to match config/signalboxd.example.toml, "
                 "or move the file aside so the dev instance can reseed it"
             )
-      ''} ${shellArg daemonConfigFile}
+      ''} ${shellArg daemonConfigFile} ${shellArg daemonBlobStagingDirectory} \
+        ${shellArg daemonBlobPrimaryDirectory}
 
       if [ ! -f ${shellArg daemonTemplateConfigFile} ]; then
         echo "dev instance: seeding" ${shellArg daemonTemplateConfigFile} \

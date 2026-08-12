@@ -17,6 +17,7 @@ use std::{
     ffi::CString,
     io::{Seek as _, SeekFrom},
     mem::MaybeUninit,
+    os::unix::ffi::OsStringExt,
 };
 
 #[cfg(unix)]
@@ -45,9 +46,11 @@ const PERMISSION_MASK: u32 = 0o7777;
 const PUBLICATION_DIRECTORY: &str = ".publish-v1";
 const UPLOADS_DIRECTORY: &str = "uploads-v1";
 const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
+const NAMESPACE_MARKER_TEMPORARY: &str = ".signalbox-blob-namespace-v1.tmp";
 const MAX_NAMESPACE_MARKER_BYTES: u64 = 128;
 const TEMPORARY_NAME_ATTEMPTS: usize = 16;
 const MAX_BACKING_DEVICE_NODES: usize = 64;
+const MAX_MOUNTINFO_BYTES: u64 = 1_048_576;
 
 struct TemporaryBlobFile {
     directory: Arc<fs::File>,
@@ -140,6 +143,7 @@ pub struct FilesystemNamespaceIdentity {
     canonical_path: PathBuf,
     device: u64,
     inode: u64,
+    physical_path: PathBuf,
 }
 
 /// Validated filesystem root retained unopened-for-mutation until namespaces are compared.
@@ -251,6 +255,12 @@ impl FilesystemNamespaceIdentity {
     /// Returns the opened directory's device and inode identity.
     pub const fn device_inode(&self) -> (u64, u64) {
         (self.device, self.inode)
+    }
+
+    /// Returns the path within the underlying mounted filesystem, resolving
+    /// bind-mount aliases to their shared physical ancestry.
+    pub fn physical_path(&self) -> &Path {
+        &self.physical_path
     }
 }
 
@@ -919,6 +929,8 @@ fn open_validated_root(
     .map_err(inspect)?;
     let canonical_metadata = canonical_descriptor.metadata().map_err(inspect)?;
     let (device, inode) = metadata_device_inode(&metadata);
+    let mount_id = descriptor_mount_id(&root_descriptor).map_err(inspect)?;
+    let physical_path = physical_namespace_path(&canonical_path, mount_id).map_err(inspect)?;
     if metadata_device_inode(&canonical_metadata) != (device, inode) {
         return Err(FilesystemBlobStoreConstructionError::UnstableIdentity {
             root: root.to_path_buf(),
@@ -930,7 +942,132 @@ fn open_validated_root(
             canonical_path,
             device,
             inode,
+            physical_path,
         },
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_mount_id(descriptor: &fs::File) -> io::Result<u64> {
+    let facts = rustix::fs::statx(
+        descriptor,
+        "",
+        AtFlags::EMPTY_PATH,
+        rustix::fs::StatxFlags::MNT_ID,
+    )
+    .map_err(io::Error::from)?;
+    if facts.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() != 0 {
+        Ok(facts.stx_mnt_id)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem mount identity is unavailable",
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn physical_namespace_path(canonical_path: &Path, mount_id: u64) -> io::Result<PathBuf> {
+    let mut mountinfo = fs::File::open("/proc/self/mountinfo")?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut mountinfo)
+        .take(MAX_MOUNTINFO_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    let byte_length = u64::try_from(bytes.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mount inventory byte count is unrepresentable",
+        )
+    })?;
+    if byte_length > MAX_MOUNTINFO_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mount inventory exceeds its startup bound",
+        ));
+    }
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let fields = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .collect::<Vec<_>>();
+        if fields.len() < 6 || parse_decimal_u64(fields[0]) != Some(mount_id) {
+            continue;
+        }
+        let root = PathBuf::from(OsString::from_vec(decode_mountinfo_path(fields[3])?));
+        let mount_point = PathBuf::from(OsString::from_vec(decode_mountinfo_path(fields[4])?));
+        let relative = canonical_path.strip_prefix(&mount_point).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "opened namespace is outside its reported mount point",
+            )
+        })?;
+        return Ok(root.join(relative));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "opened namespace mount is absent from the process mount inventory",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    bytes.iter().try_fold(0_u64, |value, byte| {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        value.checked_mul(10)?.checked_add(u64::from(digit))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_path(encoded: &[u8]) -> io::Result<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        if encoded[index] != b'\\' {
+            decoded.push(encoded[index]);
+            index += 1;
+            continue;
+        }
+        let Some(octal) = encoded.get(index + 1..index + 4) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mount inventory contains a truncated path escape",
+            ));
+        };
+        let value = octal.iter().try_fold(0_u8, |value, digit| {
+            value
+                .checked_mul(8)?
+                .checked_add(digit.checked_sub(b'0').filter(|digit| *digit < 8)?)
+        });
+        let Some(value) = value else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mount inventory contains an invalid path escape",
+            ));
+        };
+        decoded.push(value);
+        index += 4;
+    }
+    Ok(decoded)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn descriptor_mount_id(_descriptor: &fs::File) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem mount identity requires Linux statx",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn physical_namespace_path(_canonical_path: &Path, _mount_id: u64) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem mount ancestry requires Linux mount inventory",
     ))
 }
 
@@ -963,32 +1100,55 @@ fn initialize_namespace_marker(
 fn create_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
     let mut marker = match openat(
         root,
-        NAMESPACE_MARKER,
+        NAMESPACE_MARKER_TEMPORARY,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::RUSR | Mode::WUSR,
     ) {
         Ok(marker) => fs::File::from(marker),
         Err(source) if source == rustix::io::Errno::EXIST => {
-            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            unlinkat(root, NAMESPACE_MARKER_TEMPORARY, AtFlags::empty())
+                .map_err(io::Error::from)?;
+            root.sync_all()?;
+            fs::File::from(
+                openat(
+                    root,
+                    NAMESPACE_MARKER_TEMPORARY,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::RUSR | Mode::WUSR,
+                )
+                .map_err(io::Error::from)?,
+            )
         }
         Err(source) => return Err(io::Error::from(source)),
     };
-    let outcome = (|| {
-        fchmod(&marker, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
-        if !private_regular_file_metadata(&marker.metadata()?) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "namespace marker is not a private regular file",
-            ));
-        }
-        marker.write_all(expected)?;
-        marker.sync_all()?;
-        root.sync_all()
-    })();
-    if outcome.is_err() {
-        let _ = unlinkat(root, NAMESPACE_MARKER, AtFlags::empty());
+    fchmod(&marker, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
+    if !private_regular_file_metadata(&marker.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "temporary namespace marker is not a private regular file",
+        ));
     }
-    outcome
+    marker.write_all(expected)?;
+    marker.sync_all()?;
+    match renameat_with(
+        root,
+        NAMESPACE_MARKER_TEMPORARY,
+        root,
+        NAMESPACE_MARKER,
+        RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => root.sync_all(),
+        Err(source) if source == rustix::io::Errno::EXIST => {
+            unlinkat(root, NAMESPACE_MARKER_TEMPORARY, AtFlags::empty())
+                .map_err(io::Error::from)?;
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        }
+        Err(source) => Err(io::Error::from(source)),
+    }
 }
 
 fn verify_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
@@ -1607,6 +1767,26 @@ mod tests {
 
         assert_eq!(marker, expected_marker.as_bytes());
         assert_eq!(recorded_identity, created_identity);
+    }
+
+    #[test]
+    fn inv059_interrupted_namespace_marker_is_replaced_before_atomic_publication() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let temporary = root.path().join(NAMESPACE_MARKER_TEMPORARY);
+        fs::write(&temporary, b"partial").expect("the fixture writes an interrupted marker");
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the interrupted marker is private");
+
+        open_bound_fixture(root.path(), PRIMARY_NAMESPACE, NamespaceBindingState::New)
+            .expect("new startup replaces only its reserved interrupted marker");
+        let marker =
+            fs::read(root.path().join(NAMESPACE_MARKER)).expect("the final marker is readable");
+        let expected_marker = format!("{}\n", Uuid::from_u128(PRIMARY_NAMESPACE));
+
+        assert_eq!(marker, expected_marker.as_bytes());
+        assert!(!temporary.exists());
     }
 
     #[test]
