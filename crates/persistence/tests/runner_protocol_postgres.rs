@@ -4200,6 +4200,13 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
     }
 
+    struct LeaseAdmissionOutcome {
+        replacement_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        blocker_commit: Result<Result<(), sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
+    }
+
     let (_container, pool) = migrated_postgres().await?;
     let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
         let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
@@ -4240,23 +4247,20 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
             };
             let (lease_result, (lease_observation, blocker_commit)) =
                 tokio::join!(lease_store, release_blocker);
-            (
+            LeaseAdmissionOutcome {
                 replacement_observation,
                 lease_observation,
                 blocker_commit,
                 lease_result,
-            )
+            }
         };
-        let (
-            replacement_result,
-            (replacement_observation, lease_observation, blocker_commit, lease_result),
-        ) = tokio::join!(replacement, lease_admission);
+        let (replacement_result, lease_admission) = tokio::join!(replacement, lease_admission);
         Ok::<_, Box<dyn Error>>(SerializationOutcome {
             replacement_result,
-            replacement_observation,
-            lease_observation,
-            blocker_commit,
-            lease_result,
+            replacement_observation: lease_admission.replacement_observation,
+            lease_observation: lease_admission.lease_observation,
+            blocker_commit: lease_admission.blocker_commit,
+            lease_result: lease_admission.lease_result,
         })
     })
     .await;
