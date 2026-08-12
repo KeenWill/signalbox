@@ -63,7 +63,8 @@ use signalbox_domain::{
     DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
     DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport, FrozenModelSelection,
-    GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand, InitialToolApproval,
+    GoalCommandRejection, GoalCommandResult, GoalModelProvenance, GoalReport, GoalStatement,
+    GoalUserAction, GoalUserCommand, InitialToolApproval,
     ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
     ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
@@ -101,7 +102,7 @@ use signalbox_persistence::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
     disposable_test_container_labels,
-    goal::{GoalCommandHandlingOutcome, GoalRepository},
+    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::{
@@ -3474,6 +3475,39 @@ fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
             panic!("the fixture goal command identity is already used: {command_id:?}")
         }
     }
+}
+
+/// The fixture check helper above branches over the three command outcomes,
+/// so its rejected classification carries its own test
+/// (`docs/agents/testing-style.md` rule 16).
+#[test]
+fn assert_goal_command_applied_names_a_rejection() {
+    let panic = std::panic::catch_unwind(|| {
+        assert_goal_command_applied(GoalCommandHandlingOutcome::Recorded(
+            GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound),
+        ))
+    })
+    .expect_err("a rejected fixture goal command must fail its fixture");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some("the fixture goal command was rejected: SessionNotFound")
+    );
+}
+
+/// The fixture check helper above branches over the three command outcomes,
+/// so its conflicting-reuse classification carries its own test
+/// (`docs/agents/testing-style.md` rule 16).
+#[test]
+fn assert_goal_command_applied_names_a_conflicting_reuse() {
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x60a1));
+    let panic = std::panic::catch_unwind(|| {
+        assert_goal_command_applied(GoalCommandHandlingOutcome::ConflictingReuse { command_id })
+    })
+    .expect_err("a reused fixture goal command identity must fail its fixture");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some(format!("the fixture goal command identity is already used: {command_id:?}").as_str())
+    );
 }
 
 async fn insert_completed_judge(
