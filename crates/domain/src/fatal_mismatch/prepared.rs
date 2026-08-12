@@ -132,7 +132,8 @@ impl PostEvidenceFatalMismatchFacts {
             ActiveTurnPhase::Running { current_attempt } => current_attempt.clone(),
             ActiveTurnPhase::AwaitingApproval { .. }
             | ActiveTurnPhase::AwaitingChild { .. }
-            | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+            | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+            | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
                 return Err(PreparedFatalMismatchBindingError::new(
                     self,
                     source_phase,
