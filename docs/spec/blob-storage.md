@@ -111,17 +111,19 @@ Configured store entries must also name distinct physical namespaces. After
 initializing filesystem roots, startup resolves each opened directory's
 canonical path and `(st_dev, st_ino)` identity and rejects equality on either,
 so symlink, relative-component, and bind-mount aliases cannot manufacture
-replica diversity; an identity that cannot be proved distinct fails startup. For
-S3, the namespace locator is the parsed endpoint's canonical URL serialization
-with default-port and empty-path variance removed, paired with the exact bucket;
-startup rejects a duplicate locator even when store names, namespace UUIDs,
-regions, or credentials differ. One physical namespace is represented by one
-store binding. The bucket marker below additionally detects physical aliases
-whose canonical locators differ. The canonical staging-directory path must be
-disjoint from every filesystem-store root: neither path may equal, contain, or
-be contained by the other. This also excludes every store's reserved
-`.publish-v1` subtree from staging ownership and prevents either startup sweep
-from encountering the other's files.
+replica diversity; it also rejects any pair of canonical filesystem roots where
+either contains the other, so one store's control or deterministic object
+namespace cannot occupy another's. An identity that cannot be proved distinct
+fails startup. For S3, the namespace locator is the parsed endpoint's canonical
+URL serialization with default-port and empty-path variance removed, paired with
+the exact bucket; startup rejects a duplicate locator even when store names,
+namespace UUIDs, regions, or credentials differ. One physical namespace is
+represented by one store binding. The bucket marker below additionally detects
+physical aliases whose canonical locators differ. The canonical
+staging-directory path must be disjoint from every filesystem-store root:
+neither path may equal, contain, or be contained by the other. This also
+excludes every store's reserved `.publish-v1` subtree from staging ownership and
+prevents either startup sweep from encountering the other's files.
 
 Each filesystem root also owns a private exact-mode-0600
 `.signalbox-blob-namespace-v1` marker whose complete bytes are the configured

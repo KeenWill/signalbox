@@ -879,16 +879,16 @@ profile map, as specified by
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
 that model catalog, before connecting. It then acquires the single-daemon guard,
-fences the prior pool incarnation, migrates and resolves the one-time imported
-display-title backfill
-([conversation-import](conversation-import.md#derived-display-titles)),
-completes the generic recovery scan, marks every prior-process nonterminal
-runner connection lost, initializes every configured blob store against its
-recorded namespace binding, and verifies every currently routed S3 namespace
-marker and multipart lifecycle rule under the blob contract's aggregate startup
-deadline. Blob initialization failure stops startup before either socket binds
-or scheduling begins; unrouted historical S3 bindings retain their lazy runtime
-check. It then — once the credential-pool child is composed — establishes each
+fences the prior pool incarnation, migrates, and completes the generic recovery
+scan. It then initializes every configured blob store against its recorded
+namespace binding, verifies every currently routed S3 namespace marker and
+multipart lifecycle rule under the blob contract's aggregate startup deadline,
+resolves the one-time imported display-title backfill
+([conversation-import](conversation-import.md#derived-display-titles)), and
+marks every prior-process nonterminal runner connection lost. Blob
+initialization failure stops startup before the backfill, either socket binding,
+or scheduling; unrouted historical S3 bindings retain their lazy runtime check.
+It then — once the credential-pool child is composed — establishes each
 `codex_home` profile's credential-home identity, resolves every prior-process
 capacity reservation, resolves every retained OAuth refresh-in-progress marker
 to a replacement token or a quarantine, scavenges every crash-left OAuth scratch
