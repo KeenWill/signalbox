@@ -8,9 +8,9 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_process_protocol::{
-    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationMessageDirection,
-    DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
-    DelegationWaitMode, DescendantTerminationScope, FailedModelCallCause,
+    BoundChildAction, CanonicalBlobDigest, CanonicalUuid, CurrentModelCallState,
+    DelegationMessageDirection, DelegationOutcome, DelegationPolicy, DelegationProvenance,
+    DelegationReason, DelegationWaitMode, DescendantTerminationScope, FailedModelCallCause,
     FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
     GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
     ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
@@ -967,6 +967,23 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "inserted imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn blob_uploaded(
+        &mut self,
+        digest: CanonicalBlobDigest,
+        byte_length: u64,
+        already_present: bool,
+    ) -> io::Result<()> {
+        let status = if already_present {
+            "already_present"
+        } else {
+            "committed"
+        };
+        writeln!(
+            self.stdout,
+            "{status} digest={digest} byte_length={byte_length}"
         )
     }
 
