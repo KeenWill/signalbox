@@ -755,10 +755,10 @@ async fn await_while_guarded<T>(
 
 async fn disarm_staging_sweep_unless_guarded(
     database: &mut FencedHubDatabase,
-    registry: &mut Option<BlobStoreRegistry>,
+    registry: &Option<Arc<BlobStoreRegistry>>,
 ) {
     if database.check_guard().await.is_err()
-        && let Some(registry) = registry.as_mut()
+        && let Some(registry) = registry.as_ref()
     {
         registry.disarm_staging_sweep();
     }
@@ -1408,7 +1408,7 @@ async fn run_hub(
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1427,7 +1427,7 @@ async fn run_hub(
                 SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
             );
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1450,7 +1450,7 @@ async fn run_hub(
                 SanitizedStartupCause::Socket(&error),
             );
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1465,7 +1465,7 @@ async fn run_hub(
             );
             let _ = runner_listener.cleanup();
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1506,7 +1506,7 @@ async fn run_hub(
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1545,7 +1545,7 @@ async fn run_hub(
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
                 drop(blob_executor);
-                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
                 drop(blob_store_registry);
                 let _ = database.close().await;
                 return Err(failure);
