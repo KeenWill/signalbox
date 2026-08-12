@@ -622,9 +622,7 @@ authority while opening a fresh connection epoch.
 **Committed unimplemented functionality.** No present pending enrollment can
 perform the one future user-command-bound workspace operation. Same-runner
 recovery and replacement-command handling are also unimplemented; no present
-daemon or runner command surface provides them. The deployment-scoped promotion
-transaction below is implemented at the domain, application, and persistence
-boundary, but no present process-protocol handler invokes it yet.
+daemon or runner command surface provides them.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
