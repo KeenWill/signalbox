@@ -1,5 +1,7 @@
 -- Activate one pending runner through an atomic deployment-scoped command.
 
+-- Supersedes the durable-command kind and storage-version constraints from
+-- 202608100001_workspace_and_git_remote_authority.sql.
 ALTER TABLE durable_command
     DROP CONSTRAINT durable_command_kind_closed,
     DROP CONSTRAINT durable_command_storage_version_supported,
@@ -62,6 +64,10 @@ ALTER TABLE runner_pending_enrollment
     ADD CONSTRAINT runner_pending_enrollment_request_predecessor_key
         UNIQUE (request_id, predecessor_enrollment_id);
 
+ALTER TABLE runner_enrollment_request_receipt
+    ADD CONSTRAINT runner_enrollment_request_receipt_pending_registration_key
+        UNIQUE (request_id, enrollment_id, registration_revision);
+
 CREATE OR REPLACE FUNCTION guard_runner_enrollment_change()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -118,6 +124,10 @@ CREATE TABLE promote_pending_runner_command (
     result_enrollment_id uuid,
     result_runner_id uuid,
     result_registration_revision numeric(20, 0),
+    result_connection_epoch numeric(20, 0),
+    result_connection_event_ordinal numeric(20, 0),
+    predecessor_enrollment_id uuid,
+    predecessor_loss_epoch numeric(20, 0),
     active_enrollment_id uuid,
     active_runner_id uuid,
     active_connection_state text,
@@ -147,6 +157,14 @@ CREATE TABLE promote_pending_runner_command (
             AND result_runner_id IS NOT NULL
             AND result_registration_revision IS NOT NULL
             AND result_registration_revision BETWEEN 1 AND 18446744073709551615
+            AND result_connection_epoch IS NOT NULL
+            AND result_connection_epoch BETWEEN 1 AND 18446744073709551615
+            AND result_connection_event_ordinal IS NOT NULL
+            AND result_connection_event_ordinal
+                BETWEEN 1 AND 18446744073709551615
+            AND predecessor_enrollment_id IS NOT NULL
+            AND predecessor_loss_epoch IS NOT NULL
+            AND predecessor_loss_epoch BETWEEN 1 AND 18446744073709551615
             AND active_enrollment_id IS NULL
             AND active_runner_id IS NULL
             AND active_connection_state IS NULL
@@ -161,6 +179,10 @@ CREATE TABLE promote_pending_runner_command (
             AND result_enrollment_id IS NULL
             AND result_runner_id IS NULL
             AND result_registration_revision IS NULL
+            AND result_connection_epoch IS NULL
+            AND result_connection_event_ordinal IS NULL
+            AND predecessor_enrollment_id IS NULL
+            AND predecessor_loss_epoch IS NULL
             AND active_enrollment_id IS NULL
             AND active_runner_id IS NULL
             AND active_connection_state IS NULL
@@ -172,6 +194,10 @@ CREATE TABLE promote_pending_runner_command (
             AND result_enrollment_id IS NULL
             AND result_runner_id IS NULL
             AND result_registration_revision IS NULL
+            AND result_connection_epoch IS NULL
+            AND result_connection_event_ordinal IS NULL
+            AND predecessor_enrollment_id IS NULL
+            AND predecessor_loss_epoch IS NULL
             AND active_enrollment_id IS NOT NULL
             AND active_runner_id IS NOT NULL
             AND active_connection_state IS NOT NULL
@@ -184,6 +210,20 @@ CREATE TABLE promote_pending_runner_command (
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT promote_pending_runner_command_applied_request_fk
+        FOREIGN KEY (
+            pending_request_id,
+            result_enrollment_id,
+            result_registration_revision
+        )
+        REFERENCES runner_enrollment_request_receipt (
+            request_id,
+            enrollment_id,
+            registration_revision
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT promote_pending_runner_command_applied_pending_fk
         FOREIGN KEY (pending_request_id, result_enrollment_id)
         REFERENCES runner_pending_enrollment (request_id, enrollment_id)
         ON UPDATE RESTRICT
@@ -200,6 +240,35 @@ CREATE TABLE promote_pending_runner_command (
             registration_revision,
             runner_id
         )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT promote_pending_runner_command_applied_connection_fk
+        FOREIGN KEY (
+            result_enrollment_id,
+            result_connection_epoch,
+            result_connection_event_ordinal
+        )
+        REFERENCES runner_connection_event (
+            enrollment_id,
+            connection_epoch,
+            event_ordinal
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT promote_pending_runner_command_predecessor_pending_fk
+        FOREIGN KEY (pending_request_id, predecessor_enrollment_id)
+        REFERENCES runner_pending_enrollment (
+            request_id,
+            predecessor_enrollment_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT promote_pending_runner_command_predecessor_loss_fk
+        FOREIGN KEY (predecessor_enrollment_id, predecessor_loss_epoch)
+        REFERENCES runner_connection_loss_epoch (enrollment_id, loss_epoch)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
@@ -223,6 +292,65 @@ CREATE TABLE promote_pending_runner_command (
 CREATE UNIQUE INDEX promote_pending_runner_one_applied_result
     ON promote_pending_runner_command (result_enrollment_id)
     WHERE result_kind = 'applied';
+
+CREATE FUNCTION require_promote_pending_runner_connection_authority()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_authority bigint;
+BEGIN
+    IF NEW.result_kind = 'applied' THEN
+        SELECT count(*)
+          INTO matching_authority
+          FROM runner_pending_enrollment AS pending
+          JOIN runner_connection_authority_head AS candidate_authority
+            ON candidate_authority.enrollment_id = pending.enrollment_id
+          JOIN runner_connection_event AS candidate_connection
+            ON candidate_connection.enrollment_id =
+                   candidate_authority.enrollment_id
+           AND candidate_connection.connection_epoch =
+                   candidate_authority.connection_epoch
+           AND candidate_connection.event_ordinal =
+                   candidate_authority.connection_event_ordinal
+          JOIN runner_connection_authority_head AS predecessor_authority
+            ON predecessor_authority.enrollment_id =
+                   pending.predecessor_enrollment_id
+           AND predecessor_authority.latest_loss_epoch =
+                   pending.predecessor_loss_epoch
+          JOIN runner_connection_event AS predecessor_connection
+            ON predecessor_connection.enrollment_id =
+                   predecessor_authority.enrollment_id
+           AND predecessor_connection.connection_epoch =
+                   predecessor_authority.connection_epoch
+           AND predecessor_connection.event_ordinal =
+                   predecessor_authority.connection_event_ordinal
+         WHERE pending.request_id = NEW.pending_request_id
+           AND pending.enrollment_id = NEW.result_enrollment_id
+           AND candidate_authority.connection_epoch =
+                   NEW.result_connection_epoch
+           AND candidate_authority.connection_event_ordinal =
+                   NEW.result_connection_event_ordinal
+           AND candidate_connection.state_kind = 'connected'
+           AND pending.predecessor_enrollment_id =
+                   NEW.predecessor_enrollment_id
+           AND pending.predecessor_loss_epoch = NEW.predecessor_loss_epoch
+           AND predecessor_connection.state_kind = 'lost';
+        IF matching_authority <> 1 THEN
+            RAISE EXCEPTION
+                'applied runner promotion lacks exact connection authority'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER promote_pending_runner_connection_is_authorized
+AFTER INSERT ON promote_pending_runner_command
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_promote_pending_runner_connection_authority();
 
 CREATE TRIGGER promote_pending_runner_command_is_append_only
 BEFORE UPDATE OR DELETE ON promote_pending_runner_command
@@ -294,18 +422,31 @@ BEGIN
            count(*) FILTER (
                WHERE receipt.authority_kind = 'replacement_pending'
                  AND loss.loss_epoch = pending.predecessor_loss_epoch
+                 AND pending_audit.state_kind = 'pending'
                  AND (
                     (candidate_state = 'pending'
-                        AND predecessor.state_kind = 'active')
+                        AND predecessor.state_kind = 'active'
+                        AND active_audit.enrollment_id IS NULL)
                     OR (candidate_state IN ('active', 'revoked')
-                        AND predecessor.state_kind = 'revoked')
+                        AND predecessor.state_kind = 'revoked'
+                        AND active_audit.state_kind = 'active')
                  )
            ),
            count(*) FILTER (
                WHERE promotion.result_kind = 'applied'
                  AND promotion.pending_request_id = pending.request_id
                  AND promotion.result_enrollment_id = pending.enrollment_id
+                 AND promotion.result_registration_revision =
+                        receipt.registration_revision
+                 AND pending_audit.state_kind = 'pending'
+                 AND active_audit.state_kind = 'active'
                  AND predecessor.state_kind = 'revoked'
+                 AND promotion_candidate_connection.state_kind = 'connected'
+                 AND promotion_predecessor_connection.state_kind = 'lost'
+                 AND promotion.predecessor_enrollment_id =
+                        pending.predecessor_enrollment_id
+                 AND promotion.predecessor_loss_epoch =
+                        pending.predecessor_loss_epoch
            )
       INTO relation_count, valid_relation_count, applied_promotion_count
       FROM runner_pending_enrollment AS pending
@@ -315,12 +456,37 @@ BEGIN
       JOIN runner_connection_loss_epoch AS loss
         ON loss.enrollment_id = pending.predecessor_enrollment_id
        AND loss.loss_epoch = pending.predecessor_loss_epoch
+      JOIN runner_enrollment_audit AS pending_audit
+        ON pending_audit.enrollment_id = pending.enrollment_id
+       AND pending_audit.revision = 1
+      LEFT JOIN runner_enrollment_audit AS active_audit
+        ON active_audit.enrollment_id = pending.enrollment_id
+       AND active_audit.revision = 2
       JOIN runner_enrollment AS predecessor
         ON predecessor.enrollment_id = pending.predecessor_enrollment_id
       LEFT JOIN promote_pending_runner_command AS promotion
         ON promotion.pending_request_id = pending.request_id
        AND promotion.result_enrollment_id = pending.enrollment_id
        AND promotion.result_kind = 'applied'
+      LEFT JOIN runner_connection_event AS promotion_candidate_connection
+        ON promotion_candidate_connection.enrollment_id =
+            promotion.result_enrollment_id
+       AND promotion_candidate_connection.connection_epoch =
+            promotion.result_connection_epoch
+       AND promotion_candidate_connection.event_ordinal =
+            promotion.result_connection_event_ordinal
+      LEFT JOIN runner_connection_loss_epoch AS promotion_predecessor_loss
+        ON promotion_predecessor_loss.enrollment_id =
+            promotion.predecessor_enrollment_id
+       AND promotion_predecessor_loss.loss_epoch =
+            promotion.predecessor_loss_epoch
+      LEFT JOIN runner_connection_event AS promotion_predecessor_connection
+        ON promotion_predecessor_connection.enrollment_id =
+            promotion_predecessor_loss.enrollment_id
+       AND promotion_predecessor_connection.connection_epoch =
+            promotion_predecessor_loss.connection_epoch
+       AND promotion_predecessor_connection.event_ordinal =
+            promotion_predecessor_loss.connection_event_ordinal
      WHERE pending.enrollment_id = checked_enrollment;
 
     IF relation_count = 0 AND candidate_state <> 'pending' THEN

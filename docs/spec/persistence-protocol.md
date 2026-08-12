@@ -420,12 +420,15 @@ Representation rules, all enforced in the schema:
   canonical identity order, both connection heads in runner-identity order, and
   the pending candidate's registration head. Success appends the predecessor
   revocation and candidate activation audit rows, advances both enrollment
-  heads, and records the complete promoted-runner receipt together. Every
-  refusal is a terminal typed command result, so equal replay is independent of
-  later connection changes. The immutable pending relation remains as admission
-  history, while an applied command is required for every pending-to-active
-  state. No session scheduler, placement, grant, lease, workspace, turn, or
-  frontier row participates.
+  heads, and records the complete promoted-runner receipt together. The applied
+  receipt retains the exact pending-request registration, candidate connected
+  event, and predecessor loss epoch and source event checked by the transaction;
+  deferred checks require the candidate's revision-one pending and revision-two
+  active audit facts. Every refusal is a terminal typed command result, so equal
+  replay is independent of later connection changes. The immutable pending
+  relation remains as admission history, while an applied command is required
+  for every pending-to-active state. No session scheduler, placement, grant,
+  lease, workspace, turn, or frontier row participates.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,

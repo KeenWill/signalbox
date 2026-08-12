@@ -23,8 +23,9 @@ use crate::{
         durable_command_id_to_uuid, promote_pending_runner_rejection_from_str,
         promote_pending_runner_rejection_to_str, promote_pending_runner_result_from_str,
         promote_pending_runner_result_to_str, runner_connection_state_from_str,
-        runner_enrollment_state_from_str, runner_enrollment_state_to_str,
-        runner_non_lost_connection_state_from_str, runner_non_lost_connection_state_to_str,
+        runner_connection_state_to_str, runner_enrollment_state_from_str,
+        runner_enrollment_state_to_str, runner_non_lost_connection_state_from_str,
+        runner_non_lost_connection_state_to_str,
     },
     runner_protocol::RunnerConnectionState,
 };
@@ -480,6 +481,10 @@ async fn insert_record(
     let mut result_enrollment = None;
     let mut result_runner = None;
     let mut result_revision = None;
+    let mut result_connection_epoch: Option<Decimal> = None;
+    let mut result_connection_event_ordinal: Option<Decimal> = None;
+    let mut predecessor_enrollment: Option<Uuid> = None;
+    let mut predecessor_loss_epoch: Option<Decimal> = None;
     let mut active_enrollment: Option<Uuid> = None;
     let mut active_runner: Option<Uuid> = None;
     let mut active_state = None;
@@ -488,6 +493,53 @@ async fn insert_record(
             result_enrollment = Some(applied.enrollment().into_uuid());
             result_runner = Some(applied.runner().into_uuid());
             result_revision = Some(Decimal::from(applied.registration_revision().get()));
+            let evidence = sqlx::query(
+                "SELECT candidate_authority.connection_epoch,
+                        candidate_authority.connection_event_ordinal,
+                        pending.predecessor_enrollment_id,
+                        pending.predecessor_loss_epoch
+                   FROM runner_pending_enrollment AS pending
+                   JOIN runner_connection_authority_head AS candidate_authority
+                     ON candidate_authority.enrollment_id = pending.enrollment_id
+                   JOIN runner_connection_event AS candidate_connection
+                     ON candidate_connection.enrollment_id =
+                            candidate_authority.enrollment_id
+                    AND candidate_connection.connection_epoch =
+                            candidate_authority.connection_epoch
+                    AND candidate_connection.event_ordinal =
+                            candidate_authority.connection_event_ordinal
+                   JOIN runner_connection_authority_head AS predecessor_authority
+                     ON predecessor_authority.enrollment_id =
+                            pending.predecessor_enrollment_id
+                    AND predecessor_authority.latest_loss_epoch =
+                            pending.predecessor_loss_epoch
+                   JOIN runner_connection_event AS predecessor_connection
+                     ON predecessor_connection.enrollment_id =
+                            predecessor_authority.enrollment_id
+                    AND predecessor_connection.connection_epoch =
+                            predecessor_authority.connection_epoch
+                    AND predecessor_connection.event_ordinal =
+                            predecessor_authority.connection_event_ordinal
+                  WHERE pending.request_id = $1
+                    AND pending.enrollment_id = $2
+                    AND candidate_connection.state_kind = $3
+                    AND predecessor_connection.state_kind = $4",
+            )
+            .bind(command.pending_request().into_uuid())
+            .bind(applied.enrollment().into_uuid())
+            .bind(runner_connection_state_to_str(
+                RunnerConnectionState::Connected,
+            ))
+            .bind(runner_connection_state_to_str(RunnerConnectionState::Lost))
+            .fetch_optional(&mut *connection)
+            .await?
+            .ok_or(PromotePendingRunnerRepositoryError::Corruption(
+                "applied promotion connection evidence",
+            ))?;
+            result_connection_epoch = Some(evidence.try_get("connection_epoch")?);
+            result_connection_event_ordinal = Some(evidence.try_get("connection_event_ordinal")?);
+            predecessor_enrollment = Some(evidence.try_get("predecessor_enrollment_id")?);
+            predecessor_loss_epoch = Some(evidence.try_get("predecessor_loss_epoch")?);
             PromotePendingRunnerResultStorageKind::Applied
         }
         PromotePendingRunnerResult::Rejected(reason) => {
@@ -531,8 +583,11 @@ async fn insert_record(
             (command_id, command_kind, storage_version, pending_request_id,
              result_kind, rejection_kind, result_enrollment_id,
              result_runner_id, result_registration_revision,
+             result_connection_epoch, result_connection_event_ordinal,
+             predecessor_enrollment_id, predecessor_loss_epoch,
              active_enrollment_id, active_runner_id, active_connection_state)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14, $15, $16)",
     )
     .bind(durable_command_id_to_uuid(command.command()))
     .bind(PROMOTE_PENDING_RUNNER_KIND)
@@ -543,6 +598,10 @@ async fn insert_record(
     .bind(result_enrollment)
     .bind(result_runner)
     .bind(result_revision)
+    .bind(result_connection_epoch)
+    .bind(result_connection_event_ordinal)
+    .bind(predecessor_enrollment)
+    .bind(predecessor_loss_epoch)
     .bind(active_enrollment)
     .bind(active_runner)
     .bind(active_state)
@@ -562,8 +621,59 @@ async fn load_record(
         "SELECT pending_request_id, result_kind, rejection_kind,
                 result_enrollment_id, result_runner_id,
                 result_registration_revision, active_runner_id,
-                active_connection_state
-           FROM promote_pending_runner_command
+                active_connection_state,
+                CASE
+                    WHEN command.result_kind <> 'applied' THEN TRUE
+                    ELSE EXISTS (
+                        SELECT 1
+                          FROM runner_enrollment_request_receipt AS receipt
+                          JOIN runner_pending_enrollment AS pending
+                            ON pending.request_id = receipt.request_id
+                           AND pending.enrollment_id = receipt.enrollment_id
+                          JOIN runner_connection_event AS candidate_connection
+                            ON candidate_connection.enrollment_id =
+                                   command.result_enrollment_id
+                           AND candidate_connection.connection_epoch =
+                                   command.result_connection_epoch
+                           AND candidate_connection.event_ordinal =
+                                   command.result_connection_event_ordinal
+                          JOIN runner_connection_loss_epoch AS predecessor_loss
+                            ON predecessor_loss.enrollment_id =
+                                   command.predecessor_enrollment_id
+                           AND predecessor_loss.loss_epoch =
+                                   command.predecessor_loss_epoch
+                          JOIN runner_connection_event AS predecessor_connection
+                            ON predecessor_connection.enrollment_id =
+                                   predecessor_loss.enrollment_id
+                           AND predecessor_connection.connection_epoch =
+                                   predecessor_loss.connection_epoch
+                           AND predecessor_connection.event_ordinal =
+                                   predecessor_loss.connection_event_ordinal
+                          JOIN runner_enrollment_audit AS pending_audit
+                            ON pending_audit.enrollment_id =
+                                   command.result_enrollment_id
+                           AND pending_audit.revision = 1
+                           AND pending_audit.state_kind = 'pending'
+                          JOIN runner_enrollment_audit AS active_audit
+                            ON active_audit.enrollment_id =
+                                   command.result_enrollment_id
+                           AND active_audit.revision = 2
+                           AND active_audit.state_kind = 'active'
+                         WHERE receipt.request_id = command.pending_request_id
+                           AND receipt.enrollment_id =
+                                   command.result_enrollment_id
+                           AND receipt.registration_revision =
+                                   command.result_registration_revision
+                           AND receipt.authority_kind = 'replacement_pending'
+                           AND pending.predecessor_enrollment_id =
+                                   command.predecessor_enrollment_id
+                           AND pending.predecessor_loss_epoch =
+                                   command.predecessor_loss_epoch
+                           AND candidate_connection.state_kind = 'connected'
+                           AND predecessor_connection.state_kind = 'lost'
+                    )
+                END AS applied_evidence_valid
+           FROM promote_pending_runner_command AS command
           WHERE command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -577,6 +687,12 @@ fn decode_record(
     row: PgRow,
 ) -> Result<(PromotePendingRunner, PromotePendingRunnerResult), PromotePendingRunnerRepositoryError>
 {
+    let applied_evidence_valid: bool = required(&row, "applied_evidence_valid")?;
+    if !applied_evidence_valid {
+        return Err(PromotePendingRunnerRepositoryError::Corruption(
+            "applied promotion evidence",
+        ));
+    }
     let request = RunnerEnrollmentRequestId::from_uuid(row.try_get("pending_request_id")?);
     let result_kind: String = row.try_get("result_kind")?;
     let result_kind = promote_pending_runner_result_from_str(&result_kind).ok_or(
