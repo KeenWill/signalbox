@@ -163,18 +163,22 @@ application admission: rejection drops it before awaiting response output, and
 acceptance reuses the decoded allocation. Conversation-import source bytes and
 blob chunks likewise move directly into one bulk-ingest admission path. At most
 one in-progress or single-shot conversation import or blob upload holds the
-process-wide bulk-ingest permit. One of the eight inbound-frame slots is
-reserved for the connection that owns the active chunked operation; other
-connections share the remaining seven. An admitted begin that must wait for the
-permit first enters a shared seven-waiter bound, then releases its small decoded
-frame slot before waiting. Further begins retain a general frame slot until a
-waiter place opens. A source-bearing single-shot import retains its frame slot
-while waiting. The reservation preserves frame progress for the active append or
-commit without allowing queued sources to escape the aggregate raw-frame bound.
-Once admitted, each append moves its decoded chunk from the inbound frame into
-the disk-backed blob spool or per-connection import assembly and releases the
-frame slot. The configured total bounds limit the active assembly, so retained
-bulk-ingest assembly storage is at most the larger of `max_blob_bytes` and
+process-wide bulk-ingest permit. A connection that already owns the permit for a
+chunked operation rejects any cross-kind begin or single-shot import with
+`bulk_ingest_already_in_progress` before entering the waiter queue; the
+connection's sequential handler therefore never waits on its own permit. One of
+the eight inbound-frame slots is reserved for the connection that owns the
+active chunked operation; other connections share the remaining seven. An
+admitted begin that must wait for the permit first enters a shared seven-waiter
+bound, then releases its small decoded frame slot before waiting. Further begins
+retain a general frame slot until a waiter place opens. A source-bearing
+single-shot import retains its frame slot while waiting. The reservation
+preserves frame progress for the active append or commit without allowing queued
+sources to escape the aggregate raw-frame bound. Once admitted, each append
+moves its decoded chunk from the inbound frame into the disk-backed blob spool
+or per-connection import assembly and releases the frame slot. The configured
+total bounds limit the active assembly, so retained bulk-ingest assembly storage
+is at most the larger of `max_blob_bytes` and
 `conversation_import.max_source_bytes`, plus one bounded inbound chunk. During
 filesystem publication, its store-local temporary file may coexist with the
 completed staging spool, so the maximum transient blob disk footprint is twice
@@ -944,14 +948,15 @@ availability is `unavailable`, an all-missing recorded replica set is
 `blob_missing`, a definitively corrupt set with no unavailable candidate is
 `blob_corrupt`, an S3 publication whose acceptance remains unknowable after its
 single reconciliation pass is `publication_ambiguous`, and an ambiguous catalog
-commit is `commit_ambiguous`. `publication_ambiguous` terminally discards the
+commit is `commit_ambiguous`. Either ambiguity terminally discards the
 connection-local staging state and releases the bulk-ingest permit without
-claiming success. The terminal client's high-level upload retries by beginning
-the same digest, length, and bytes again rather than retrying commit alone; live
-verification of the deterministic routed key then returns already-present or
-repairs it before registration. When no replica succeeds, `unavailable` takes
-precedence over `blob_corrupt`, which takes precedence over `blob_missing`,
-because an unavailable candidate prevents a definitive integrity conclusion.
+claiming success. The terminal client's high-level upload handles
+`publication_ambiguous` and `commit_ambiguous` by beginning the same digest,
+length, and bytes again rather than retrying commit alone; live verification of
+the deterministic routed key then returns already-present or repairs it before
+registration. When no replica succeeds, `unavailable` takes precedence over
+`blob_corrupt`, which takes precedence over `blob_missing`, because an
+unavailable candidate prevents a definitive integrity conclusion.
 
 ## Server messages
 
@@ -1538,6 +1543,13 @@ closed classes are `empty_source`, `blank_line`, `invalid_utf8`, `invalid_json`,
 `invalid_message_envelope`, `invalid_message_role`, `message_role_mismatch`,
 `invalid_message_content`, `invalid_content_block`, `invalid_tool_result_block`,
 `invalid_reasoning`, `invalid_tool_call`, and `invalid_tool_result`.
+
+Before either type-specific list applies, a cross-kind bulk-ingest request on a
+connection that owns the process-wide permit uses
+`bulk_ingest_already_in_progress { active_kind }`, where `active_kind` is
+exactly `conversation_import` or `blob_upload`. It leaves the owning chunked
+operation available for append, commit, or abort and never enters the permit
+waiter queue.
 
 Blob refusals use `code = "invalid_request"` with exactly one of these required
 typed details: `blob_upload_already_in_progress {}`;
