@@ -2827,12 +2827,12 @@ async fn inv012_enforces_metadata_command_identity() -> Result<(), Box<dyn Error
     runtime.stop().await
 }
 
-/// S32 / INV-042: the process request activates the exact pending successor and
+/// INV-042: the process request activates the exact pending successor and
 /// equal replay returns the original deployment-scoped receipt.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s32_inv042_process_request_promotes_pending_runner_and_replays()
--> Result<(), Box<dyn Error>> {
+async fn inv042_process_request_promotes_pending_runner_and_replays() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start().await?;
     let fixture = seed_pending_runner_promotion(&runtime.pool).await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -2854,12 +2854,12 @@ async fn s32_inv042_process_request_promotes_pending_runner_and_replays()
     runtime.stop().await
 }
 
-/// S32 / INV-042: a promotion request with no pending successor records and
+/// INV-042: a promotion request with no pending successor records and
 /// exactly replays its closed deployment-scoped rejection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s32_inv042_process_request_replays_no_pending_runner_rejection()
--> Result<(), Box<dyn Error>> {
+async fn inv042_process_request_replays_no_pending_runner_rejection() -> Result<(), Box<dyn Error>>
+{
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let promotion_command = command()?;

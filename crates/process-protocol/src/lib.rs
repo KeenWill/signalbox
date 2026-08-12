@@ -15554,8 +15554,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_runner_promotion_request_and_receipt_round_trip()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn pending_runner_promotion_request_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
             request(1)?,
             ClientRequest::PromotePendingRunner {
@@ -15564,6 +15563,11 @@ mod tests {
             },
             r#"{"type":"promote_pending_runner","command_id":"00000000-0000-0000-0000-000000000002","pending_request_id":"00000000-0000-0000-0000-000000000003"}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn pending_runner_promotion_receipt_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::RunnerPromoted {
@@ -15578,7 +15582,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_runner_promotion_rejections_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    fn no_pending_runner_enrollment_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -15588,6 +15593,11 @@ mod tests {
             },
             r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"no_pending_runner_enrollment"}}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn pending_request_mismatch_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -15599,6 +15609,12 @@ mod tests {
             },
             r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"pending_request_mismatch","pending_request_id":"00000000-0000-0000-0000-000000000002"}}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn pending_request_disconnected_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
@@ -15610,6 +15626,11 @@ mod tests {
             },
             r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"pending_request_disconnected","pending_request_id":"00000000-0000-0000-0000-000000000002"}}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn active_runner_not_lost_rejection_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {
