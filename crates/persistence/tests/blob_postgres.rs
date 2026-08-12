@@ -8,7 +8,7 @@
 
 use std::{error::Error, sync::Arc};
 
-use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob};
+use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob, MAX_BLOB_STORES};
 use signalbox_domain::BlobDigest;
 use signalbox_persistence::{
     blob::{
@@ -32,6 +32,8 @@ const OTHER_CONTENT: &[u8] = b"another immutable blob";
 const PRIMARY_STORE: &str = "primary";
 const PRIMARY_NAMESPACE: u128 = 0x5a10_0001;
 const SECONDARY_NAMESPACE: u128 = 0x5a10_0002;
+const BOUNDARY_NAMESPACE_A: u128 = 0x5a10_0031;
+const BOUNDARY_NAMESPACE_B: u128 = 0x5a10_0032;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -112,6 +114,53 @@ async fn inv057_matching_blob_store_binding_registration_is_idempotent()
 
     assert_eq!(first, primary);
     assert_eq!(repeated, primary);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-057: concurrent new store names cannot exceed the durable store bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv057_concurrent_store_binding_admission_preserves_the_catalog_bound()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = BlobCatalogRepository::new(pool.clone());
+    let seed_count =
+        i64::try_from(MAX_BLOB_STORES - 1).expect("the bounded deployment store count fits i64");
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         SELECT 'seed-' || ordinal,
+                ('5a100001-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid
+           FROM generate_series(1, $1) AS ordinal",
+    )
+    .bind(seed_count)
+    .execute(&pool)
+    .await?;
+    let first_repository = repository.clone();
+    let second_repository = repository.clone();
+
+    let (first, second) = tokio::join!(
+        first_repository.register_store_binding(binding("boundary-a", BOUNDARY_NAMESPACE_A,)),
+        second_repository.register_store_binding(binding("boundary-b", BOUNDARY_NAMESPACE_B,)),
+    );
+    let first_reached_limit = first.as_ref().err().and_then(|error| error.corruption())
+        == Some(BlobCatalogCorruption::StoreLimitExceeded);
+    let second_reached_limit = second.as_ref().err().and_then(|error| error.corruption())
+        == Some(BlobCatalogCorruption::StoreLimitExceeded);
+    let binding_count: i64 = sqlx::query_scalar("SELECT count(*) FROM blob_store_binding")
+        .fetch_one(&pool)
+        .await?;
+    let maximum_store_count =
+        i64::try_from(MAX_BLOB_STORES).expect("the bounded deployment store count fits i64");
+
+    assert_eq!(u8::from(first.is_ok()) + u8::from(second.is_ok()), 1);
+    assert_eq!(
+        u8::from(first_reached_limit) + u8::from(second_reached_limit),
+        1
+    );
+    assert_eq!(binding_count, maximum_store_count);
 
     pool.close().await;
     drop(container);
