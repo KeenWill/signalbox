@@ -5,15 +5,15 @@ use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Dura
 use rustix::process::geteuid;
 use signalbox_domain::{
     CredentialProfileName, CredentialProfilePolicy, RunnerAuthenticationId, RunnerCapabilityClass,
-    RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerId,
+    RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerId,
 };
 use signalbox_persistence::runner_protocol::{
     AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
     PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
     RunnerConnectionState, RunnerConnectionTransition, RunnerConnectionTransitionEffect,
     RunnerConnectionTransitionOutcome, RunnerEnrollmentAuthority, RunnerEnrollmentDisposition,
-    RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId, RunnerProtocolStore,
-    RunnerProtocolStoreError, RunnerRegistrationRevision,
+    RunnerEnrollmentRequestFailure, RunnerProtocolStore, RunnerProtocolStoreError,
+    RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
