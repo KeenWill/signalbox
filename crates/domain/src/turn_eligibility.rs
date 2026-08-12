@@ -4049,6 +4049,7 @@ fn reconstitute_inner(
     let mut steering_by_input = BTreeMap::new();
     let mut model_identity_by_turn = BTreeMap::new();
     let mut summary_by_call = BTreeMap::new();
+    let mut runner_placement_by_revision = BTreeMap::new();
     let mut assistant_by_call = BTreeMap::<crate::ModelCallId, BTreeSet<_>>::new();
     let mut completion_by_turn = BTreeMap::new();
     let mut cancellation_by_turn = BTreeMap::new();
@@ -4095,7 +4096,23 @@ fn reconstitute_inner(
                     );
                 }
             }
-            InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged { .. } => {}
+            InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                placement_revision,
+            } => {
+                if runner_placement_by_revision
+                    .insert(
+                        (candidate.source_session(), *placement_revision),
+                        entry_reference,
+                    )
+                    .is_some()
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntryForSubject {
+                            entry: candidate.identity(),
+                        },
+                    );
+                }
+            }
             InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
                 let Some(turn) = accepted_input_turns.get(accepted_input).copied() else {
                     return Err(
@@ -8060,14 +8077,15 @@ mod tests {
         ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
         ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
         ModelSelectionRequest, NormalizedToolArguments, PerInputConfigurationChoices,
-        ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionCreationProvenance, SessionPlacement, SessionPlacementVersion,
-        SessionReconstitutionInput, ToolApprovalDecision,
-        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
-        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
-        ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        ToolResultContent, ToolResultText, VersionedSessionPlacement,
+        ResolvedProviderTarget, RunnerGeneration, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+        SessionPlacement, SessionPlacementVersion, SessionReconstitutionInput,
+        ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
+        ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, ToolResultContent, ToolResultText,
+        VersionedSessionPlacement,
         test_support::{
             accepted_input_id, command_id, context_frontier_id, delegation_message_id, direct,
             imported_conversation_id, imported_transcript_entry_id, model_call_id,
@@ -15694,6 +15712,46 @@ mod tests {
             failure,
             AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntryForSubject {
                 entry: second_origin_entry.id(),
+            }
+        );
+    }
+
+    /// S32 / INV-015 / INV-044: one placement revision owns exactly one
+    /// semantic boundary in a complete scheduling projection.
+    #[test]
+    fn s32_inv015_inv044_reconstitution_rejects_duplicate_runner_placement_revision() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let first_entry = semantic_entry(31);
+        let second_entry = semantic_entry(32);
+        let revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let mut input = queued_input(&session, queued);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                first_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                second_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntryForSubject {
+                entry: second_entry.id(),
             }
         );
     }

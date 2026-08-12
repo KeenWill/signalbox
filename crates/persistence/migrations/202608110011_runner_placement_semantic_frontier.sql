@@ -210,6 +210,9 @@ BEGIN
         ON frontier.owning_session_id = pointer.session_id
        AND frontier.context_frontier_id = pointer.context_frontier_id
        AND frontier.member_count >= 1
+      LEFT JOIN context_frontier AS prefix
+        ON prefix.owning_session_id = frontier.owning_session_id
+       AND prefix.context_frontier_id = frontier.prefix_context_frontier_id
       JOIN context_frontier_member AS member
         ON member.owning_session_id = frontier.owning_session_id
        AND member.context_frontier_id = frontier.context_frontier_id
@@ -217,11 +220,27 @@ BEGIN
        AND member.source_session_id = entry.source_session_id
        AND member.semantic_entry_id = entry.semantic_entry_id
      WHERE pointer.session_id = checked_session_id
-       AND pointer.placement_revision = checked_placement_revision;
+       AND pointer.placement_revision = checked_placement_revision
+       AND (
+            (
+                frontier.prefix_context_frontier_id IS NULL
+                AND frontier.member_count = 1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM semantic_transcript_entry AS prior_entry
+                     WHERE prior_entry.source_session_id = pointer.session_id
+                       AND prior_entry.semantic_entry_id <> entry.semantic_entry_id
+                )
+            )
+            OR (
+                prefix.context_frontier_id IS NOT NULL
+                AND frontier.member_count = prefix.member_count + 1
+            )
+       );
 
     IF matching_boundaries <> 1 THEN
         RAISE EXCEPTION
-            'runner placement frontier requires one exact successor boundary'
+            'runner placement frontier requires one exact prefix-extending successor boundary'
             USING ERRCODE = '23514',
                 CONSTRAINT = 'runner_placement_frontier_boundary_required';
     END IF;
