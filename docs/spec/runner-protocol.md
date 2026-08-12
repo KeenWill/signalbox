@@ -34,11 +34,12 @@ PostgreSQL command transaction are verified against this PR
 verified against this PR (`agent/runner-abandonment-process`). The closed
 pre-pin replacement result and rejection payloads, application transaction
 boundary, and atomic PostgreSQL transaction for a different exact live runner
-are verified against this PR (`agent/runner-pre-pin-replacement`). **Committed
-unimplemented functionality.** No current adapter handles a pending-enrollment
-target, same-runner re-enrollment, pinned replacement staging, or the
-replacement process request; the contracts below remain compatibility
-constraints for those slices.
+are verified against this PR (`agent/runner-pre-pin-replacement`).
+
+**Committed unimplemented functionality.** No current adapter handles a
+pending-enrollment target, same-runner re-enrollment, pinned replacement
+staging, or the replacement process request. Future adapters must preserve the
+closed constraints below for those slices.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
