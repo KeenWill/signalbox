@@ -420,27 +420,6 @@ impl PostgresApprovalJudgeRepository {
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
-        // Resolved under the completion lock rather than trusted from the
-        // prepared binding: the session was unlocked for the whole provider
-        // round-trip, which is exactly when a user stopping the goal lands.
-        //
-        // This runs before the terminal branch so a replay normalizes the same
-        // way the committed call did, and compares the value that was actually
-        // stored. A closed generation never reopens — a stop is terminal and a
-        // supersession leaves its predecessor superseded forever — so the
-        // normalization a replay computes is the one the commit computed.
-        let in_force = load_judged_turn_authority_in_force(
-            &mut transaction,
-            prepared.request.session(),
-            prepared.request.turn(),
-        )
-        .await?;
-        let recommendation =
-            if read_authority_still_stands(prepared.session_context.goal(), in_force.as_ref()) {
-                recommendation
-            } else {
-                DelegateApprovalRecommendation::EscalateToHuman
-            };
         if state == ApprovalJudgeStateStorageKind::Terminal {
             let outcome = exact_completed(
                 &mut transaction,
@@ -459,6 +438,26 @@ impl PostgresApprovalJudgeRepository {
         if state != ApprovalJudgeStateStorageKind::InFlight {
             return Err(ApprovalJudgeCorruption::Inconsistent("judge completion state").into());
         }
+        // Resolved under the completion lock rather than trusted from the
+        // prepared binding: the session was unlocked for the whole provider
+        // round-trip, which is exactly when a user stopping the goal lands.
+        // This runs only for a completion that has not committed yet, so a
+        // replay never recomputes a decision against authority that moved after
+        // the decision was already durable.
+        let in_force = load_judged_turn_authority_in_force(
+            &mut transaction,
+            prepared.request.session(),
+            prepared.request.turn(),
+        )
+        .await?;
+        let recommendation = if read_authority_still_stands(JudgedTurnAuthority {
+            read: prepared.session_context.goal(),
+            in_force: in_force.as_ref(),
+        }) {
+            recommendation
+        } else {
+            DelegateApprovalRecommendation::EscalateToHuman
+        };
         let batch = load_active_batch_from_connection(
             &mut transaction,
             prepared.request.session(),
@@ -937,15 +936,26 @@ fn judged_turn_authority_in_force(
 /// authority the recommendation was formed under. A judge that read no
 /// statement decided without one, so a goal appearing since revokes nothing and
 /// leaves that decision alone — this pins withdrawal, not novelty.
-fn read_authority_still_stands(
-    read: Option<&GoalStatement>,
-    in_force: Option<&GoalStatement>,
-) -> bool {
-    match (read, in_force) {
+fn read_authority_still_stands(authority: JudgedTurnAuthority<'_>) -> bool {
+    match (authority.read, authority.in_force) {
         (Some(read), Some(in_force)) => read == in_force,
         (Some(_), None) => false,
         (None, _) => true,
     }
+}
+
+/// The two statements a completion compares, named because their roles differ.
+///
+/// Both are `Option<&GoalStatement>` and the comparison is asymmetric —
+/// withdrawn authority is `read` present and `in_force` absent, while the
+/// reverse preserves the decision — so transposing them would reverse the commit
+/// decision without a type error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct JudgedTurnAuthority<'statement> {
+    /// What the judge read while it was prepared, and decided under.
+    read: Option<&'statement GoalStatement>,
+    /// What resolves for the same turn under the completion lock.
+    in_force: Option<&'statement GoalStatement>,
 }
 
 /// Selects which generation's statement states the judged turn's authority.
@@ -1081,9 +1091,16 @@ async fn exact_completed(
     .await?;
     let terminal_disposition: String = required(&row, "terminal_disposition_kind")?;
     let stored_recommendation: String = required(&row, "recommendation_kind")?;
+    // What the completion committed, which is not always what its caller
+    // offered: a completion whose authority closed during the provider
+    // round-trip stored an escalation in place of the provider's
+    // recommendation. A retry after an uncertain response still carries the
+    // original value, so the replay is judged against the stored decision.
+    let stored = approval_judge_recommendation_from_str(&stored_recommendation);
     let exact = approval_judge_terminal_disposition_from_str(&terminal_disposition)
         == Some(ApprovalJudgeTerminalDispositionStorageKind::Completed)
-        && approval_judge_recommendation_from_str(&stored_recommendation) == Some(recommendation)
+        && (stored == Some(recommendation)
+            || stored == Some(DelegateApprovalRecommendation::EscalateToHuman))
         && required::<String>(&row, "rationale")? == rationale.as_str()
         && row.try_get::<Option<Decimal>, _>("input_tokens")? == encoded.input
         && row.try_get::<Option<Decimal>, _>("output_tokens")? == encoded.output
@@ -1093,13 +1110,13 @@ async fn exact_completed(
     if !exact {
         return Ok(None);
     }
-    let continuation_exact = recommendation == DelegateApprovalRecommendation::EscalateToHuman
+    let continuation_exact = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
         || exact_completion_continuation(connection, prepared, continuation_attempt).await?;
-    Ok(continuation_exact.then_some(match recommendation {
-        DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny => {
+    Ok(continuation_exact.then_some(match stored {
+        Some(DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny) => {
             CompleteApprovalJudgeOutcome::Decided
         }
-        DelegateApprovalRecommendation::EscalateToHuman => {
+        Some(DelegateApprovalRecommendation::EscalateToHuman) | None => {
             CompleteApprovalJudgeOutcome::EscalatedToHuman
         }
     }))
@@ -1402,8 +1419,8 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, judged_turn_authority_in_force,
-        judged_turn_goal_statement, read_authority_still_stands,
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, JudgedTurnAuthority,
+        judged_turn_authority_in_force, judged_turn_goal_statement, read_authority_still_stands,
     };
 
     /// A goal commissioned with the given statement, as dispatch commissions it.
@@ -1579,7 +1596,10 @@ mod tests {
     fn an_unchanged_statement_still_stands_at_completion() {
         let statement = goal_statement("land the reviewer fixes");
 
-        let stands = read_authority_still_stands(Some(&statement), Some(&statement));
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: Some(&statement),
+            in_force: Some(&statement),
+        });
 
         assert!(stands);
     }
@@ -1591,7 +1611,10 @@ mod tests {
     fn a_statement_that_stopped_no_longer_stands() {
         let read = goal_statement("land the reviewer fixes");
 
-        let stands = read_authority_still_stands(Some(&read), None);
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: Some(&read),
+            in_force: None,
+        });
 
         assert!(!stands);
     }
@@ -1604,7 +1627,10 @@ mod tests {
         let read = goal_statement("land the reviewer fixes");
         let in_force = goal_statement("land anything at all");
 
-        let stands = read_authority_still_stands(Some(&read), Some(&in_force));
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: Some(&read),
+            in_force: Some(&in_force),
+        });
 
         assert!(!stands);
     }
@@ -1616,7 +1642,10 @@ mod tests {
     fn a_goal_appearing_after_an_absent_read_still_stands() {
         let in_force = goal_statement("land the reviewer fixes");
 
-        let stands = read_authority_still_stands(None, Some(&in_force));
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: None,
+            in_force: Some(&in_force),
+        });
 
         assert!(stands);
     }
