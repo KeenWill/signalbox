@@ -55,8 +55,7 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
     AcceptedInputTurnFailureIdentities, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
-    AuthorizedModelCall,
+    AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText, AuthorizedModelCall,
     CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
     CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
     CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult,
