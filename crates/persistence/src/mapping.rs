@@ -27,6 +27,32 @@ use sqlx::types::Uuid;
 
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
+/// Closed stored states for one durable runner-loss propagation cursor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunnerLossPropagationStateStorageKind {
+    Pending,
+    Completed,
+}
+
+pub(crate) const fn runner_loss_propagation_state_to_str(
+    value: RunnerLossPropagationStateStorageKind,
+) -> &'static str {
+    match value {
+        RunnerLossPropagationStateStorageKind::Pending => "pending",
+        RunnerLossPropagationStateStorageKind::Completed => "completed",
+    }
+}
+
+pub(crate) fn runner_loss_propagation_state_from_str(
+    value: &str,
+) -> Option<RunnerLossPropagationStateStorageKind> {
+    match value {
+        "pending" => Some(RunnerLossPropagationStateStorageKind::Pending),
+        "completed" => Some(RunnerLossPropagationStateStorageKind::Completed),
+        _ => None,
+    }
+}
+
 /// Closed delegated-session relationship policy discriminators in PostgreSQL.
 ///
 /// Public because the outbox decode tripwire drives these spellings with the
@@ -2046,10 +2072,10 @@ mod tests {
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         PlanEventStorageKind, PositiveOrdinalMappingError,
         PromotePendingRunnerRejectionStorageKind, PromotePendingRunnerResultStorageKind,
-        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, StoredModelSettingsError,
-        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
-        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
+        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
+        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
@@ -2081,6 +2107,7 @@ mod tests {
         repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
         runner_connection_state_from_str, runner_connection_state_to_str,
         runner_enrollment_state_from_str, runner_enrollment_state_to_str,
+        runner_loss_propagation_state_from_str, runner_loss_propagation_state_to_str,
         runner_non_lost_connection_state_from_str, runner_non_lost_connection_state_to_str,
         runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
         runner_sandbox_from_str, runner_sandbox_to_str, session_creation_cause_from_str,
@@ -2093,6 +2120,23 @@ mod tests {
         tool_attempt_disposition_to_str, tool_permission_default_from_str,
         tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
     };
+
+    #[test]
+    fn runner_loss_propagation_state_mapping_is_closed() {
+        assert_eq!(
+            runner_loss_propagation_state_from_str(runner_loss_propagation_state_to_str(
+                RunnerLossPropagationStateStorageKind::Pending,
+            )),
+            Some(RunnerLossPropagationStateStorageKind::Pending)
+        );
+        assert_eq!(
+            runner_loss_propagation_state_from_str(runner_loss_propagation_state_to_str(
+                RunnerLossPropagationStateStorageKind::Completed,
+            )),
+            Some(RunnerLossPropagationStateStorageKind::Completed)
+        );
+        assert_eq!(runner_loss_propagation_state_from_str("unknown"), None);
+    }
 
     #[test]
     fn tool_attempt_dispositions_pin_each_storage_spelling() {
