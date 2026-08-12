@@ -28,12 +28,13 @@ remain owned by [tool loop](tool-loop.md). Invariant tags cite
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
 (`agent/runner-replacement-domain-contract`). The closed abandonment result and
-rejection payloads plus its application transaction boundary are verified
-against this PR (`agent/runner-abandonment-transaction`). **Committed
-unimplemented functionality.** No current persistence or process-protocol
-adapter handles abandonment, and no current application, persistence, or
-process-protocol adapter handles replacement; the closed transactions below
-remain compatibility constraints for those adapters.
+rejection payloads, its application transaction boundary, and its atomic
+PostgreSQL command transaction are verified against this PR
+(`agent/runner-abandonment-transaction`). **Committed unimplemented
+functionality.** No current process-protocol adapter handles abandonment, and no
+current application, persistence, or process-protocol adapter handles
+replacement; the closed transactions below remain compatibility constraints for
+those adapters.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
