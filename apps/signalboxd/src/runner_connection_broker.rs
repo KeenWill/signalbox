@@ -13,7 +13,7 @@ use signalbox_runner_wire::{CanonicalUuid, Message, OperationCorrelation};
 use tokio::sync::mpsc;
 
 // Durable operation state stays in PostgreSQL. The process-local queue only
-// hands one frame to the socket owner and applies backpressure to later work.
+// hands one frame to the connection task and applies backpressure to later work.
 const OUTBOUND_OPERATION_CAPACITY: usize = 1;
 
 /// Exact established physical runner connection selected for outbound work.
