@@ -1117,9 +1117,10 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .modelAliasesEnd(aliasCount: try decoder.decode("alias_count"))
       case "transcript_snapshot_start":
         try tagged.rejectUnadmittedFields(
-          ["type", "session_id", "cursor"],
+          ["type", "session_id", "cursor", "runner"],
           decoder: decoder
         )
+        try tagged.requireFields(["runner"], decoder: decoder)
         self = .transcriptSnapshotStart(try SignalboxTranscriptSnapshotBoundary(from: decoder))
       case "transcript_turn":
         try tagged.rejectUnadmittedFields(
@@ -2251,15 +2252,122 @@ public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxRootPlacementGlobalReadIntent: String, Decodable, Equatable, Sendable {
+  case acknowledged
+}
+
+public enum SignalboxSessionPlacement: Decodable, Equatable, Sendable {
+  case pathless
+  case scoped(path: String)
+  case rootGlobalRead(path: String, intent: SignalboxRootPlacementGlobalReadIntent)
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let kind: String = try decoder.decode("kind")
+    switch kind {
+    case "pathless":
+      try payload.rejectUnadmittedFields(["kind"], decoder: decoder)
+      try payload.requireFields(["kind"], decoder: decoder)
+      self = .pathless
+    case "scoped":
+      try payload.rejectUnadmittedFields(["kind", "path"], decoder: decoder)
+      try payload.requireFields(["kind", "path"], decoder: decoder)
+      let path: String = try decoder.decode("path")
+      try Self.validatePath(path, root: false, decoder: decoder)
+      self = .scoped(path: path)
+    case "root_global_read":
+      try payload.rejectUnadmittedFields(["kind", "path", "intent"], decoder: decoder)
+      try payload.requireFields(["kind", "path", "intent"], decoder: decoder)
+      let path: String = try decoder.decode("path")
+      try Self.validatePath(path, root: true, decoder: decoder)
+      self = .rootGlobalRead(
+        path: path,
+        intent: try decoder.decode("intent")
+      )
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("kind")],
+          debugDescription: "Session placement is outside the closed vocabulary."
+        )
+      )
+    }
+  }
+
+  private static func validatePath(
+    _ path: String,
+    root: Bool,
+    decoder: Decoder
+  ) throws {
+    let segments = path.split(separator: ".", omittingEmptySubsequences: false)
+    let segmentsValid = !segments.isEmpty && segments.count <= 64
+      && segments.allSatisfy { segment in
+        !segment.isEmpty && segment.utf8.count <= 64
+          && segment.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57)
+              || (byte >= 65 && byte <= 90)
+              || (byte >= 97 && byte <= 122)
+              || byte == 45
+              || byte == 95
+          }
+      }
+    guard path.utf8.count <= 4_159, segmentsValid, (segments.count == 1) == root else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("path")],
+          debugDescription: "Session placement path is invalid."
+        )
+      )
+    }
+  }
+}
+
 public struct SignalboxProcessSessionSummary: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let defaultsVersion: SignalboxCanonicalUInt64
   public let modelSelection: SignalboxModelSelection
+  public let placementVersion: SignalboxCanonicalUInt64
+  public let placement: SignalboxSessionPlacement
+  public let runner: SignalboxRunnerProjection?
 
-  private enum CodingKeys: String, CodingKey {
-    case sessionID = "session_id"
-    case defaultsVersion = "defaults_version"
-    case modelSelection = "model_selection"
+  public init(
+    sessionID: SignalboxCanonicalUUID,
+    defaultsVersion: SignalboxCanonicalUInt64,
+    modelSelection: SignalboxModelSelection,
+    placementVersion: SignalboxCanonicalUInt64,
+    placement: SignalboxSessionPlacement,
+    runner: SignalboxRunnerProjection?
+  ) {
+    self.sessionID = sessionID
+    self.defaultsVersion = defaultsVersion
+    self.modelSelection = modelSelection
+    self.placementVersion = placementVersion
+    self.placement = placement
+    self.runner = runner
+  }
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    let fields: Set<String> = [
+      "type", "session_id", "defaults_version", "model_selection", "placement_version",
+      "placement", "runner",
+    ]
+    try tagged.rejectUnadmittedFields(fields, decoder: decoder)
+    try tagged.requireFields(fields, decoder: decoder)
+    sessionID = try decoder.decode("session_id")
+    defaultsVersion = try decoder.decode("defaults_version")
+    modelSelection = try decoder.decode("model_selection")
+    placementVersion = try decoder.decode("placement_version")
+    guard placementVersion.rawValue > 0 else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("placement_version")],
+          debugDescription: "Session placement version must be positive."
+        )
+      )
+    }
+    placement = try decoder.decode("placement")
+    runner = try decoder.decodeIfPresent("runner")
   }
 }
 
@@ -2307,13 +2415,248 @@ public struct SignalboxProcessSessionMetadataRead: Decodable, Equatable, Sendabl
   }
 }
 
+public enum SignalboxRunnerSandboxProfile: String, Decodable, Equatable, Sendable {
+  case ambient
+  case workspaceRestricted = "workspace-restricted"
+}
+
+public enum SignalboxRunnerProjectionValueError: Error, Equatable {
+  case portableName
+  case exactText
+}
+
+private func isRunnerASCIIAlphanumeric(_ byte: UInt8) -> Bool {
+  (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+}
+
+private func validateRunnerPortableName(_ value: String) throws {
+  guard let first = value.utf8.first,
+    value.utf8.count <= 64,
+    isRunnerASCIIAlphanumeric(first),
+    value.utf8.allSatisfy({ byte in
+      isRunnerASCIIAlphanumeric(byte) || byte == 46 || byte == 95 || byte == 45
+    })
+  else {
+    throw SignalboxRunnerProjectionValueError.portableName
+  }
+}
+
+public struct SignalboxRunnerCapabilityClass: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    try validateRunnerPortableName(rawValue)
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
+public struct SignalboxRunnerCredentialProfileName: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    try validateRunnerPortableName(rawValue)
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
+public struct SignalboxRunnerRepositoryKey: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    try validateRunnerPortableName(rawValue)
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
+public struct SignalboxRunnerWorkingDirectory: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    guard !rawValue.isEmpty,
+      rawValue.utf8.count <= 4_096,
+      !rawValue.utf8.contains(0)
+    else {
+      throw SignalboxRunnerProjectionValueError.exactText
+    }
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
+public enum SignalboxRunnerProjectionSelector: Decodable, Equatable, Sendable {
+  case runner(runnerID: SignalboxCanonicalUUID)
+  case capabilityClass(name: SignalboxRunnerCapabilityClass)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "runner":
+      try tagged.rejectUnadmittedFields(["type", "runner_id"], decoder: decoder)
+      self = .runner(runnerID: try decoder.decode("runner_id"))
+    case "capability_class":
+      try tagged.rejectUnadmittedFields(["type", "name"], decoder: decoder)
+      self = .capabilityClass(name: try decoder.decode("name"))
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Runner projection selector is outside the closed vocabulary."
+        )
+      )
+    }
+  }
+}
+
+public enum SignalboxRunnerConnectionHealth: String, Decodable, Equatable, Sendable {
+  case connected
+  case suspect
+  case shutdown
+  case lost
+}
+
+public enum SignalboxRunnerProjectionState: String, Decodable, Equatable, Sendable {
+  case unpinned
+  case pinned
+  case runnerLostBeforePin = "runner_lost_before_pin"
+  case runnerLost = "runner_lost"
+  case runnerAbandoned = "runner_abandoned"
+}
+
+public enum SignalboxRunnerStateTransitionState: String, Decodable, Equatable, Sendable {
+  case pinned
+  case suspect
+  case connected
+  case runnerLostBeforePin = "runner_lost_before_pin"
+  case runnerLost = "runner_lost"
+  case replaced
+  case workingDirectoryChanged = "working_directory_changed"
+  case abandoned
+}
+
+public struct SignalboxRunnerProjection: Decodable, Equatable, Sendable {
+  public let selector: SignalboxRunnerProjectionSelector
+  public let runnerID: SignalboxCanonicalUUID?
+  public let placementRevision: SignalboxCanonicalUInt64
+  public let sandboxProfile: SignalboxRunnerSandboxProfile
+  public let credentialProfile: SignalboxRunnerCredentialProfileName?
+  public let repository: SignalboxRunnerRepositoryKey?
+  public let workingDirectory: SignalboxRunnerWorkingDirectory?
+  public let connectionHealth: SignalboxRunnerConnectionHealth?
+  public let state: SignalboxRunnerProjectionState
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = [
+      "selector", "runner_id", "placement_revision", "sandbox_profile",
+      "credential_profile", "repository", "working_directory", "connection_health", "state",
+    ]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    selector = try decoder.decode("selector")
+    runnerID = try decoder.decodeIfPresent("runner_id")
+    placementRevision = try decoder.decode("placement_revision")
+    sandboxProfile = try decoder.decode("sandbox_profile")
+    credentialProfile = try decoder.decodeIfPresent("credential_profile")
+    repository = try decoder.decodeIfPresent("repository")
+    workingDirectory = try decoder.decodeIfPresent("working_directory")
+    connectionHealth = try decoder.decodeIfPresent("connection_health")
+    state = try decoder.decode("state")
+    try validateShape(codingPath: decoder.codingPath)
+  }
+
+  public init(
+    selector: SignalboxRunnerProjectionSelector,
+    runnerID: SignalboxCanonicalUUID?,
+    placementRevision: SignalboxCanonicalUInt64,
+    sandboxProfile: SignalboxRunnerSandboxProfile,
+    credentialProfile: SignalboxRunnerCredentialProfileName?,
+    repository: SignalboxRunnerRepositoryKey?,
+    workingDirectory: SignalboxRunnerWorkingDirectory?,
+    connectionHealth: SignalboxRunnerConnectionHealth?,
+    state: SignalboxRunnerProjectionState
+  ) throws {
+    self.selector = selector
+    self.runnerID = runnerID
+    self.placementRevision = placementRevision
+    self.sandboxProfile = sandboxProfile
+    self.credentialProfile = credentialProfile
+    self.repository = repository
+    self.workingDirectory = workingDirectory
+    self.connectionHealth = connectionHealth
+    self.state = state
+    try validateShape(codingPath: [])
+  }
+
+  private func validateShape(codingPath: [any CodingKey]) throws {
+    let runnerShapeValid = (state == .unpinned) == (runnerID == nil)
+    let selectorValid: Bool
+    switch (selector, runnerID, state) {
+    case (.runner(runnerID: let selected), .some(let current), _):
+      selectorValid = selected == current
+    case (.runner, .none, .unpinned):
+      selectorValid = true
+    case (.capabilityClass, _, .unpinned),
+      (.capabilityClass, _, .pinned),
+      (.capabilityClass, _, .runnerLost),
+      (.capabilityClass, _, .runnerAbandoned):
+      selectorValid = true
+    case (.runner, .none, _), (.capabilityClass, _, .runnerLostBeforePin):
+      selectorValid = false
+    }
+    let connectionShapeValid = (state == .pinned) == (connectionHealth != nil)
+    guard placementRevision.rawValue > 0,
+      runnerShapeValid,
+      selectorValid,
+      connectionShapeValid
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: codingPath,
+          debugDescription: "Runner projection carries an inconsistent state shape."
+        )
+      )
+    }
+  }
+}
+
 public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let cursor: SignalboxCanonicalUInt64
+  public let runner: SignalboxRunnerProjection?
 
-  private enum CodingKeys: String, CodingKey {
-    case sessionID = "session_id"
-    case cursor
+  public init(
+    sessionID: SignalboxCanonicalUUID,
+    cursor: SignalboxCanonicalUInt64,
+    runner: SignalboxRunnerProjection?
+  ) {
+    self.sessionID = sessionID
+    self.cursor = cursor
+    self.runner = runner
+  }
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    let fields: Set<String> = ["type", "session_id", "cursor", "runner"]
+    try tagged.rejectUnadmittedFields(fields, decoder: decoder)
+    try tagged.requireFields(["runner"], decoder: decoder)
+    sessionID = try decoder.decode("session_id")
+    cursor = try decoder.decode("cursor")
+    runner = try decoder.decodeIfPresent("runner")
   }
 }
 
@@ -3626,6 +3969,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case toolBatchTransition(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     state: SignalboxToolBatchState)
+  case runnerStateTransition(
+    runnerID: SignalboxCanonicalUUID,
+    placementRevision: SignalboxCanonicalUInt64,
+    sandboxProfile: SignalboxRunnerSandboxProfile,
+    workingDirectory: SignalboxRunnerWorkingDirectory?,
+    state: SignalboxRunnerStateTransitionState
+  )
   case toolApprovalDecided(
     turnID: SignalboxCanonicalUUID,
     toolRequestID: SignalboxCanonicalUUID,
@@ -3712,6 +4062,30 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         self = .toolBatchTransition(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
+          state: try decoder.decode("state")
+        )
+      case "runner_state_transition":
+        let fields: Set<String> = [
+          "type", "runner_id", "placement_revision", "sandbox_profile", "working_directory",
+          "state",
+        ]
+        try tagged.rejectUnadmittedFields(fields, decoder: decoder)
+        try tagged.requireFields(["working_directory"], decoder: decoder)
+        let placementRevision: SignalboxCanonicalUInt64 = try decoder.decode(
+          "placement_revision")
+        guard placementRevision.rawValue > 0 else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath,
+              debugDescription: "Runner state transition placement revision must be positive."
+            )
+          )
+        }
+        self = .runnerStateTransition(
+          runnerID: try decoder.decode("runner_id"),
+          placementRevision: placementRevision,
+          sandboxProfile: try decoder.decode("sandbox_profile"),
+          workingDirectory: try decoder.decodeIfPresent("working_directory"),
           state: try decoder.decode("state")
         )
       case "tool_approval_decided":

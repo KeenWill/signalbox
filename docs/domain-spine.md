@@ -4820,6 +4820,7 @@ pub struct ApprovedToolRequestError { /* private */ }
 pub enum ToolExecutionErrorKind {
     UnknownTool,
     InvalidArguments,
+    PreauthorizationRejected,
     ExecutionFailed,
     ResultTooLarge,
     CrashLost,
@@ -6583,6 +6584,10 @@ pub trait ToolArgumentValidator: Send + Sync {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail>;
+    fn preauthorization(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolExecutionErrorDetail>;
 }
 // implemented for matching Fn(&NormalizedToolArguments) -> Result<(), ToolExecutionErrorDetail>
 
@@ -6616,6 +6621,17 @@ pub trait ToolCatalog: Send + Sync {
         name: &ToolName,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolCatalogValidationFailure>;
+    fn preauthorization(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure>;
+}
+
+pub enum ToolPreauthorization {
+    Unmetered,
+    BlobMetadata { digest: BlobDigest },
+    BlobRead { digest: BlobDigest, decoded_bytes: NonZeroU64 },
 }
 
 pub struct NoToolCatalog;
@@ -8321,6 +8337,11 @@ pub enum ToolAttemptAuthorizationStatus {
     InFlight(ToolDispatchAuthority),
 }
 
+pub enum ToolAttemptAuthorizationOutcome {
+    Authorized(ToolDispatchAuthority),
+    PreauthorizationRejected,
+}
+
 pub trait ToolExecutionTransaction {
     type Error: ClassifyOperatorFailure;
     fn load_active_batch(
@@ -8346,7 +8367,8 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
+        preauthorization: ToolPreauthorization,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationOutcome, Self::Error>> + Send;
     fn reread_ambiguous_authorization(
         &mut self,
         session: SessionId,
@@ -8449,6 +8471,9 @@ pub enum RunnerDomainError {
 pub struct RunnerCapabilityClass(/* private */);
 pub struct CredentialProfileName(/* private */);
 pub struct RunnerWorkingDirectory(/* private */);
+impl RunnerWorkingDirectory {
+    pub const MAX_BYTES: usize;
+}
 pub struct WorkspaceRepositoryKey(/* private */);
 pub struct CanonicalCloneUrlDigest(/* private */);
 pub struct WorkspaceRevision(/* private */);
@@ -10474,7 +10499,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
 | application: model_execution                       | 36 (incl. 8 traits)   |
-| application: tool_loop                             | 26 (incl. 5 traits)   |
+| application: tool_loop                             | 27 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
@@ -10488,5 +10513,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
-| application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **254 (+2 free fn)**  |
+| application: tool_loop_ports                       | 9 (incl. 2 traits)    |
+| **signalbox-application total**                    | **256 (+2 free fn)**  |
