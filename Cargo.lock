@@ -3179,6 +3179,7 @@ dependencies = [
  "signalbox-domain",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3650,6 +3651,8 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "signalbox-application",
+ "signalbox-blob-store",
+ "signalbox-blob-store-filesystem",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
