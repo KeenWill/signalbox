@@ -21,7 +21,7 @@ use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use signalbox_persistence::approval_judge_eval::{
     ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRunId, ApprovalJudgeEvalRunRecord,
-    record_eval_run,
+    record_eval_run, verify_recording_schema,
 };
 use signalboxd::{
     FileCredentialAccess, HubModelConfiguration, ModelAdapter,
@@ -99,6 +99,7 @@ enum ParsedArguments {
 struct EvalRecording {
     pool: sqlx::PgPool,
     repeats: u32,
+    usage_input_includes_cache_tokens: bool,
 }
 
 fn parse_arguments() -> Result<ParsedArguments, String> {
@@ -289,9 +290,10 @@ async fn run(options: RunOptions) -> Result<(), String> {
             })
             .ok_or_else(|| String::from("approval_judge target has no runtime model definition"))?;
 
-    // Recording admission and the database connection both resolve before the
-    // first paid call, so neither an oversized --repeats nor an unreachable
-    // database can surface only after quota is already spent.
+    // Recording admission, the database connection, and the schema check all
+    // resolve before the first paid call, so neither an oversized --repeats
+    // nor an unreachable or unmigrated database can surface only after quota
+    // is already spent.
     let recording = match &options.database_url {
         Some(database_url) => {
             let repeats = u32::try_from(options.repeats).map_err(|_| {
@@ -300,7 +302,19 @@ async fn run(options: RunOptions) -> Result<(), String> {
             let pool = signalbox_persistence::connect_production(database_url)
                 .await
                 .map_err(|error| format!("database connection failed: {error}"))?;
-            Some(EvalRecording { pool, repeats })
+            // The eval tables must already exist: schema application belongs
+            // to the daemon, and a measurement tool never migrates a live
+            // database out from under it.
+            verify_recording_schema(&pool)
+                .await
+                .map_err(|error| format!("database recording is unavailable: {error}"))?;
+            Some(EvalRecording {
+                pool,
+                repeats,
+                usage_input_includes_cache_tokens: configuration
+                    .cache_inclusive_input_targets()
+                    .contains(&binding.target),
+            })
         }
         None => None,
     };
@@ -349,6 +363,16 @@ async fn run(options: RunOptions) -> Result<(), String> {
             && !case.category.contains(filter.as_str())
         {
             continue;
+        }
+        // The recording schema stores case names non-empty, so a selected
+        // case recording cannot store must fail here, before any paid call,
+        // rather than after the whole run's quota is spent. Without
+        // --database-url the corpus admission is unchanged.
+        if recording.is_some() && case.name.is_empty() {
+            return Err(format!(
+                "corpus line {} has an empty case name, which --database-url recording cannot store",
+                index + 1
+            ));
         }
         cases.push(case);
     }
@@ -533,20 +557,26 @@ async fn run(options: RunOptions) -> Result<(), String> {
             run: ApprovalJudgeEvalRunId::from_uuid(uuid::Uuid::now_v7()),
             selection,
             provider_model,
+            usage_input_includes_cache_tokens: recording.usage_input_includes_cache_tokens,
             corpus_digest: digest,
             contract_digest,
             rendered_digest,
             repeats: recording.repeats,
             scorecard,
         };
-        record_eval_run(&recording.pool, &run, &recorded_calls)
-            .await
-            .map_err(|error| format!("database recording failed: {error}"))?;
+        let run_identity = run.run.into_uuid();
+        // The identity is announced before the commit is attempted, so an
+        // ambiguous commit outcome still leaves the exact key to query for.
         eprintln!(
-            "recorded eval run {} holding {} calls",
-            run.run.into_uuid(),
+            "recording eval run {run_identity} holding {} calls",
             recorded_calls.len()
         );
+        record_eval_run(&recording.pool, &run, &recorded_calls)
+            .await
+            .map_err(|error| {
+                format!("database recording failed for eval run {run_identity}: {error}")
+            })?;
+        eprintln!("recorded eval run {run_identity}");
     }
     Ok(())
 }

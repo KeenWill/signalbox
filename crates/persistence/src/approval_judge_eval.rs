@@ -47,6 +47,9 @@ pub struct ApprovalJudgeEvalRunRecord {
     pub selection: DirectModelSelection,
     /// Provider model the selection resolved to.
     pub provider_model: String,
+    /// Whether the resolved adapter's reported input total includes the cache
+    /// axes; resolved once because a run holds a single frozen binding.
+    pub usage_input_includes_cache_tokens: bool,
     /// Stable digest of the corpus bytes.
     pub corpus_digest: String,
     /// Stable digest of the operation contract beyond the payloads.
@@ -77,26 +80,53 @@ pub struct ApprovalJudgeEvalCallRecord {
     pub usage: ProviderReportedTokenUsage,
 }
 
+/// Reports whether both eval recording tables exist in the connected
+/// database, so a caller can refuse to start work whose recording would
+/// predictably fail against a database the daemon has not migrated yet.
+/// Schema application stays with the daemon; this only observes it.
+pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let present: bool = sqlx::query_scalar(
+        "SELECT to_regclass('approval_judge_eval_run') IS NOT NULL
+            AND to_regclass('approval_judge_eval_call') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    if present {
+        Ok(())
+    } else {
+        Err(ApprovalJudgeEvalRecordingError::TablesAbsent)
+    }
+}
+
 /// Records one run and its per-call verdicts in one transaction.
 ///
 /// Either the run row and every call row commit together or nothing is
 /// recorded, so a stored run always carries its complete verdict evidence.
+/// Every call ordinal must fall inside the run's configured repeats; a call
+/// outside that range would be durable evidence for an attempt the run
+/// claims was never configured, so it is rejected before anything commits.
 pub async fn record_eval_run(
     pool: &PgPool,
     run: &ApprovalJudgeEvalRunRecord,
     calls: &[ApprovalJudgeEvalCallRecord],
 ) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    for call in calls {
+        if call.repeat_ordinal < 1 || call.repeat_ordinal > run.repeats {
+            return Err(ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats);
+        }
+    }
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO approval_judge_eval_run
             (eval_run_id, direct_model_selection_id, provider_model,
-             corpus_digest, contract_digest, rendered_digest, repeats,
-             scorecard)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             usage_input_includes_cache_tokens, corpus_digest,
+             contract_digest, rendered_digest, repeats, scorecard)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(run.run.into_uuid())
     .bind(run.selection.into_uuid())
     .bind(run.provider_model.as_str())
+    .bind(run.usage_input_includes_cache_tokens)
     .bind(run.corpus_digest.as_str())
     .bind(run.contract_digest.as_str())
     .bind(run.rendered_digest.as_str())
@@ -130,7 +160,7 @@ pub async fn record_eval_run(
         .map_err(ApprovalJudgeEvalRecordingError::commit)
 }
 
-/// PostgreSQL failure while recording an eval run.
+/// Rejection or PostgreSQL failure while recording an eval run.
 #[derive(Debug)]
 pub enum ApprovalJudgeEvalRecordingError {
     /// PostgreSQL failure with explicit commit ambiguity.
@@ -140,6 +170,10 @@ pub enum ApprovalJudgeEvalRecordingError {
         /// Whether a failed commit acknowledgement leaves outcome unknown.
         commit_ambiguous: bool,
     },
+    /// The connected database has no eval recording tables.
+    TablesAbsent,
+    /// A call's repeat ordinal falls outside the run's configured repeats.
+    CallOutsideConfiguredRepeats,
 }
 
 impl ApprovalJudgeEvalRecordingError {
@@ -162,6 +196,11 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
                 commit_ambiguous: false,
                 ..
             } => formatter.write_str("eval recording database operation failed"),
+            Self::TablesAbsent => formatter.write_str(
+                "eval recording tables are absent; the daemon has not applied this migration set",
+            ),
+            Self::CallOutsideConfiguredRepeats => formatter
+                .write_str("eval call repeat ordinal is outside the run's configured repeats"),
         }
     }
 }
@@ -170,6 +209,7 @@ impl Error for ApprovalJudgeEvalRecordingError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database { source, .. } => Some(source),
+            Self::TablesAbsent | Self::CallOutsideConfiguredRepeats => None,
         }
     }
 }
@@ -204,6 +244,18 @@ mod tests {
         assert_eq!(
             ambiguous.to_string(),
             "eval recording database commit outcome is ambiguous"
+        );
+    }
+
+    #[test]
+    fn recording_rejections_render_their_causes() {
+        assert_eq!(
+            ApprovalJudgeEvalRecordingError::TablesAbsent.to_string(),
+            "eval recording tables are absent; the daemon has not applied this migration set"
+        );
+        assert_eq!(
+            ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats.to_string(),
+            "eval call repeat ordinal is outside the run's configured repeats"
         );
     }
 }

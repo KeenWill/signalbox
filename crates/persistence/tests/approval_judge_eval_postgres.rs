@@ -15,7 +15,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     approval_judge_eval::{
         ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRecordingError, ApprovalJudgeEvalRunId,
-        ApprovalJudgeEvalRunRecord, record_eval_run,
+        ApprovalJudgeEvalRunRecord, record_eval_run, verify_recording_schema,
     },
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
@@ -42,6 +42,10 @@ const CORPUS_DIGEST: &str = "fnv1a128:00000000000000000000000000000001";
 const CONTRACT_DIGEST: &str = "fnv1a128:00000000000000000000000000000002";
 const RENDERED_DIGEST: &str = "fnv1a128:00000000000000000000000000000003";
 const REPEATS: u32 = 3;
+// One past the configured repeats: the smallest ordinal the recording
+// repository must reject as evidence for an unconfigured attempt.
+const OVERFLOWING_ORDINAL: u32 = REPEATS + 1;
+const CACHE_INCLUSIVE_INPUT: bool = true;
 const FIRST_CASE: &str = "fixture-push-own-branch";
 // The second call replays another case at ordinal 3: its second attempt
 // failed and recorded nothing, which is exactly the gap the ordinal keeps.
@@ -58,7 +62,7 @@ const APPROVE_SPELLING: &str = "approve";
 const DENY_SPELLING: &str = "deny";
 const FOREIGN_RECOMMENDATION_SPELLING: &str = "maybe";
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
@@ -76,6 +80,11 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .max_connections(4)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
+    Ok((container, pool))
+}
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let (container, pool) = unmigrated_postgres().await?;
     migrate(&pool).await?;
     Ok((container, pool))
 }
@@ -92,6 +101,7 @@ fn run_record() -> ApprovalJudgeEvalRunRecord {
         run: ApprovalJudgeEvalRunId::from_uuid(Uuid::from_u128(RUN_IDENTITY)),
         selection: DirectModelSelection::from_uuid(Uuid::from_u128(SELECTION_IDENTITY)),
         provider_model: String::from(PROVIDER_MODEL),
+        usage_input_includes_cache_tokens: CACHE_INCLUSIVE_INPUT,
         corpus_digest: String::from(CORPUS_DIGEST),
         contract_digest: String::from(CONTRACT_DIGEST),
         rendered_digest: String::from(RENDERED_DIGEST),
@@ -125,11 +135,30 @@ fn second_call() -> ApprovalJudgeEvalCallRecord {
 }
 
 fn constraint_name(error: &ApprovalJudgeEvalRecordingError) -> Option<String> {
-    let ApprovalJudgeEvalRecordingError::Database { source, .. } = error;
-    source
-        .as_database_error()
-        .and_then(|database| database.constraint())
-        .map(ToOwned::to_owned)
+    match error {
+        ApprovalJudgeEvalRecordingError::Database { source, .. } => source
+            .as_database_error()
+            .and_then(|database| database.constraint())
+            .map(ToOwned::to_owned),
+        ApprovalJudgeEvalRecordingError::TablesAbsent
+        | ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats => {
+            panic!("expected a database constraint failure, found {error:?}")
+        }
+    }
+}
+
+fn expect_tables_absent(error: &ApprovalJudgeEvalRecordingError) {
+    match error {
+        ApprovalJudgeEvalRecordingError::TablesAbsent => (),
+        other => panic!("expected absent recording tables, found {other:?}"),
+    }
+}
+
+fn expect_call_outside_configured_repeats(error: &ApprovalJudgeEvalRecordingError) {
+    match error {
+        ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats => (),
+        other => panic!("expected an out-of-range call ordinal rejection, found {other:?}"),
+    }
 }
 
 fn raw_constraint_name(error: &sqlx::Error) -> Option<&str> {
@@ -146,7 +175,8 @@ async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
     record_eval_run(&pool, &run, &[first_call(), second_call()]).await?;
 
     let stored_run = sqlx::query(
-        "SELECT direct_model_selection_id, provider_model, corpus_digest,
+        "SELECT direct_model_selection_id, provider_model,
+                usage_input_includes_cache_tokens, corpus_digest,
                 contract_digest, rendered_digest, repeats, scorecard
            FROM approval_judge_eval_run WHERE eval_run_id = $1",
     )
@@ -160,6 +190,10 @@ async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         stored_run.try_get::<String, _>("provider_model")?,
         run.provider_model
+    );
+    assert_eq!(
+        stored_run.try_get::<bool, _>("usage_input_includes_cache_tokens")?,
+        run.usage_input_includes_cache_tokens
     );
     assert_eq!(
         stored_run.try_get::<String, _>("corpus_digest")?,
@@ -309,6 +343,39 @@ async fn call_rows_require_their_recorded_run() -> Result<(), Box<dyn Error>> {
         raw_constraint_name(&error),
         Some("approval_judge_eval_call_run_fk")
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recording_requires_the_daemon_applied_schema() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    let absent = verify_recording_schema(&pool)
+        .await
+        .expect_err("an unmigrated database has no recording tables");
+    expect_tables_absent(&absent);
+    migrate(&pool).await?;
+    verify_recording_schema(&pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let run = run_record();
+    let mut overflowing = first_call();
+    overflowing.repeat_ordinal = OVERFLOWING_ORDINAL;
+    let error = record_eval_run(&pool, &run, &[overflowing])
+        .await
+        .expect_err("an ordinal past the run's repeats is rejected");
+    expect_call_outside_configured_repeats(&error);
+    let stored_runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_run WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored_runs, 0);
     Ok(())
 }
 

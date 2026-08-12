@@ -11,6 +11,13 @@ CREATE TABLE approval_judge_eval_run (
     eval_run_id uuid PRIMARY KEY,
     direct_model_selection_id uuid NOT NULL,
     provider_model text NOT NULL,
+    -- Whether the resolved adapter's reported input total includes the cache
+    -- axes, resolved once for the run's single frozen binding. Without it the
+    -- stored token columns cannot be aggregated across adapter families, and
+    -- provider_model cannot recover it later because adapter mappings are
+    -- configurable; mirrors the column of the same name on
+    -- tool_approval_judge_model_call.
+    usage_input_includes_cache_tokens boolean NOT NULL,
     corpus_digest text NOT NULL,
     contract_digest text NOT NULL,
     rendered_digest text NOT NULL,
@@ -52,7 +59,9 @@ CREATE TABLE approval_judge_eval_call (
     CONSTRAINT approval_judge_eval_call_case_name_nonempty
         CHECK (char_length(case_name) > 0),
     -- Ordinals count attempts from one; a failed attempt records no row, so
-    -- a case's stored ordinals may hold gaps up to the run's repeats.
+    -- a case's stored ordinals may hold gaps up to the run's repeats. The
+    -- parent-relative upper bound is cross-table and is enforced by
+    -- record_eval_run in the persistence crate, the one writer of these rows.
     CONSTRAINT approval_judge_eval_call_repeat_ordinal_u32
         CHECK (repeat_ordinal BETWEEN 1 AND 4294967295),
     CONSTRAINT approval_judge_eval_call_recommendation_closed

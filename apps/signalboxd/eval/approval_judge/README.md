@@ -31,9 +31,9 @@ PostgreSQL tables after the scorecard prints; without the flag nothing is
 written and the stdout scorecard stays the only artifact either way.
 
 - `approval_judge_eval_run` — one row per run: the minted run identity, the
-  judge selection and resolved provider model, the scorecard's corpus, contract,
-  and rendered digests, the configured repeats, and the full scorecard as
-  `jsonb`.
+  judge selection and resolved provider model, whether that adapter's reported
+  input total includes the cache axes, the scorecard's corpus, contract, and
+  rendered digests, the configured repeats, and the full scorecard as `jsonb`.
 - `approval_judge_eval_call` — one row per successful judge call: the run it
   belongs to, the case name, the one-based attempt ordinal (a failed attempt
   records no row and leaves a gap), the recommendation and rationale, and the
@@ -44,6 +44,12 @@ triggers demand the live-request linkage — an active delegated wait and a
 reserved global call identity — that replayed synthetic cases do not have. The
 connection takes the same URL-only posture as the daemon's, so ambient `PG*`
 variables are refused rather than silently shaping it.
+
+The tables come from the daemon's migration set, and the daemon is what applies
+it; a database missing them — and any corpus case recording cannot store — is
+refused before the first paid call, and the minted run identity is announced
+before the commit is attempted so even an ambiguous commit leaves an exact key
+to query for.
 
 ## Case schema
 
