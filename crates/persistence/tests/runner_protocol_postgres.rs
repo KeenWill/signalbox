@@ -3070,6 +3070,13 @@ async fn append_runner_registration_loss_projection(
         .complete(pin.lease.correlation())
         .expect("the exact claimed fixture lease correlation completes");
     store.store_lease(&completed).await?;
+    append_runner_registration_loss_projection_after_completed_lease(store, pin).await
+}
+
+async fn append_runner_registration_loss_projection_after_completed_lease(
+    store: &RunnerProtocolStore,
+    pin: &SessionRunnerPin,
+) -> Result<(), Box<dyn Error>> {
     let pending = store.load_pending_registration_reconciliations().await?;
     store
         .reconcile_registration_session(pending[0], pin.placement.session())
@@ -18640,13 +18647,28 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     let session = pin.placement.session();
     let (placement_event_ordinal, placement_revision) =
         placement_outbox_facts(&pool, session, "pinned").await?;
-    let connection = store
-        .open_connection(expected_enrollment.enrollment())
-        .await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact fixture lease correlation claims");
+    store.store_lease(&claimed).await?;
+    let completed = claimed
+        .complete(pin.lease.correlation())
+        .expect("the exact claimed fixture lease correlation completes");
+    store.store_lease(&completed).await?;
+    let connection_epoch: i64 = sqlx::query_scalar(
+        "SELECT connection_epoch::bigint
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let connection_epoch = RunnerConnectionEpoch::try_from_u64(u64::try_from(connection_epoch)?)
+        .expect("the fixture current connection epoch is positive");
     store
         .transition_connection(
             expected_enrollment.enrollment(),
-            connection.epoch(),
+            connection_epoch,
             RunnerConnectionTransition::HeartbeatMissed,
         )
         .await?;
@@ -18660,7 +18682,7 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     store
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
-    append_runner_registration_loss_projection(&store, &registration, &pin).await?;
+    append_runner_registration_loss_projection_after_completed_lease(&store, &pin).await?;
     let mut replacement = pool.begin().await?;
     append_same_runner_replacement_projection(&mut replacement, session, None).await?;
     replacement.commit().await?;
