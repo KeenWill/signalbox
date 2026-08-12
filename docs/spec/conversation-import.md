@@ -736,15 +736,12 @@ CHECK constraints seal the derived shape — nonempty single-line text of at mos
 256 scalars without edge ASCII whitespace, present exactly in the `derived`
 state.
 
-Insertion always resolves the title. When relational imported-source rows exist,
-the one-time blob-convergence migration resets that pre-production database
-through the imported aggregate's dependent tables; a database with no imported
-rows retains its unrelated durable records. The migration installs a final
-schema whose closed state discriminator admits only `derived` and `underivable`.
-Runtime reads and writes only that final shape. Checked complete loads re-derive
-and reject a resolved title that disagrees with the records; exact reingestion
-continues to resolve through the digest and conversion-equivalence check
-unchanged, since the deterministic derivation adds no new degree of freedom.
+Insertion always resolves the title. The final schema's closed state
+discriminator admits only `derived` and `underivable`; runtime reads and writes
+only that shape. Checked complete loads re-derive and reject a resolved title
+that disagrees with the records; exact reingestion continues to resolve through
+the digest and conversion-equivalence check unchanged, since the deterministic
+derivation adds no new degree of freedom.
 
 ## Test data and local validation
 

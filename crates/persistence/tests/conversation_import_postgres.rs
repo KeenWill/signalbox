@@ -326,54 +326,53 @@ async fn insert_imported_source_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<ImportedSeedFacts, sqlx::Error> {
     let facts = imported_seed_facts();
-    let raw_bytes_column_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM information_schema.columns
-             WHERE table_schema = 'public'
-               AND table_name = 'imported_raw_source_record'
-               AND column_name = 'raw_bytes')",
+    insert_catalogued_raw_source(transaction, vec![0x11; 32], 1).await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3,
+                 NULL, 'underivable')",
     )
-    .fetch_one(&mut **transaction)
+    .bind(facts.conversation)
+    .bind(vec![0x22_u8; 32])
+    .execute(&mut **transaction)
     .await?;
-    if raw_bytes_column_exists {
-        sqlx::query(
-            "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-             VALUES ($1, $2)",
-        )
-        .bind(vec![0x11_u8; 32])
-        .bind(vec![0x01_u8])
-        .execute(&mut **transaction)
-        .await?;
-    } else {
-        insert_catalogued_raw_source(transaction, vec![0x11; 32], 1).await?;
-    }
-    if raw_bytes_column_exists {
-        sqlx::query(
-            "INSERT INTO imported_conversation
-                (imported_conversation_id, storage_version, source_format,
-                 converter_version, source_digest, declared_raw_record_count,
-                 declared_entry_count)
-             VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3)",
-        )
-        .bind(facts.conversation)
-        .bind(vec![0x22_u8; 32])
-        .execute(&mut **transaction)
-        .await?;
-    } else {
-        sqlx::query(
-            "INSERT INTO imported_conversation
-                (imported_conversation_id, storage_version, source_format,
-                 converter_version, source_digest, declared_raw_record_count,
-                 declared_entry_count, display_title, display_title_state)
-             VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3,
-                     NULL, 'underivable')",
-        )
-        .bind(facts.conversation)
-        .bind(vec![0x22_u8; 32])
-        .execute(&mut **transaction)
-        .await?;
-    }
+    insert_imported_source_members(transaction).await?;
+    Ok(facts)
+}
+
+async fn insert_pre_blob_imported_source_scaffolding(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<ImportedSeedFacts, sqlx::Error> {
+    let facts = imported_seed_facts();
+    sqlx::query(
+        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+         VALUES ($1, $2)",
+    )
+    .bind(vec![0x11_u8; 32])
+    .bind(vec![0x01_u8])
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3)",
+    )
+    .bind(facts.conversation)
+    .bind(vec![0x22_u8; 32])
+    .execute(&mut **transaction)
+    .await?;
+    insert_imported_source_members(transaction).await?;
+    Ok(facts)
+}
+
+async fn insert_imported_source_members(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
         "INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
@@ -401,7 +400,7 @@ async fn insert_imported_source_scaffolding(
     )
     .execute(&mut **transaction)
     .await?;
-    Ok(facts)
+    Ok(())
 }
 
 async fn insert_catalogued_raw_source(
@@ -640,7 +639,8 @@ async fn inv015_frontier_prefix_migration_preserves_existing_complete_snapshots(
     let mut transaction = pool.begin().await?;
     // This database stands before the rename migration, so the fixture must
     // write the spelling that its CHECK constraints still admit.
-    let seed = insert_imported_resume_seed_scaffolding_with_creation_cause(
+    let seed = insert_pre_blob_imported_source_scaffolding(&mut transaction).await?;
+    insert_imported_session_scaffolding_with_creation_cause(
         &mut transaction,
         RETIRED_CREATION_CAUSE,
     )
@@ -753,7 +753,7 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres_before_import_blob_migration().await?;
     let mut transaction = pool.begin().await?;
-    insert_imported_source_scaffolding(&mut transaction).await?;
+    insert_pre_blob_imported_source_scaffolding(&mut transaction).await?;
     transaction.commit().await?;
     let before: (i64, i64) = sqlx::query_as(
         "SELECT
