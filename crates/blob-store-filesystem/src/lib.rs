@@ -142,6 +142,43 @@ pub struct FilesystemNamespaceIdentity {
     inode: u64,
 }
 
+/// Validated filesystem root retained unopened-for-mutation until namespaces are compared.
+pub struct OpenedFilesystemBlobRoot {
+    configured_path: PathBuf,
+    descriptor: fs::File,
+    identity: FilesystemNamespaceIdentity,
+}
+
+impl std::fmt::Debug for OpenedFilesystemBlobRoot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpenedFilesystemBlobRoot { root: <redacted> }")
+    }
+}
+
+impl OpenedFilesystemBlobRoot {
+    /// Opens and authenticates one root without creating, changing, or sweeping children.
+    pub fn open(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::open_with_locality_policy(root, true)
+    }
+
+    fn open_with_locality_policy(
+        root: PathBuf,
+        require_local_backing: bool,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        let (descriptor, identity) = open_validated_root(&root, require_local_backing)?;
+        Ok(Self {
+            configured_path: root,
+            descriptor,
+            identity,
+        })
+    }
+
+    /// Returns the descriptor-authenticated namespace identity.
+    pub const fn identity(&self) -> &FilesystemNamespaceIdentity {
+        &self.identity
+    }
+}
+
 /// Private crash-recovered staging namespace for connection-local uploads.
 pub struct FilesystemBlobStaging {
     uploads_directory: fs::File,
@@ -164,13 +201,25 @@ impl FilesystemBlobStaging {
         root: PathBuf,
         require_local_backing: bool,
     ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        let (root_descriptor, identity) = open_validated_root(&root, require_local_backing)?;
-        let uploads_directory = prepare_staging_directory(&root_descriptor).map_err(|source| {
-            FilesystemBlobStoreConstructionError::PrepareStagingDirectory { root, source }
-        })?;
+        let opened =
+            OpenedFilesystemBlobRoot::open_with_locality_policy(root, require_local_backing)?;
+        Self::from_opened(opened)
+    }
+
+    /// Prepares and sweeps a root only after its identity has been compared.
+    pub fn from_opened(
+        opened: OpenedFilesystemBlobRoot,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        let uploads_directory =
+            prepare_staging_directory(&opened.descriptor).map_err(|source| {
+                FilesystemBlobStoreConstructionError::PrepareStagingDirectory {
+                    root: opened.configured_path,
+                    source,
+                }
+            })?;
         Ok(Self {
             uploads_directory,
-            identity,
+            identity: opened.identity,
         })
     }
 
@@ -223,7 +272,20 @@ impl FilesystemBlobStore {
         namespace_id: Uuid,
         binding_state: NamespaceBindingState,
     ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
-        Self::try_new_bound_with_locality_policy(root, namespace_id, binding_state, true)
+        Self::from_opened_bound(
+            OpenedFilesystemBlobRoot::open(root)?,
+            namespace_id,
+            binding_state,
+        )
+    }
+
+    /// Establishes a namespace marker and publication area after identity comparison.
+    pub fn from_opened_bound(
+        opened: OpenedFilesystemBlobRoot,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        Self::from_opened_bound_inner(opened, namespace_id, binding_state)
     }
 
     /// Constructs a conformance fixture while retaining every check except
@@ -255,23 +317,24 @@ impl FilesystemBlobStore {
         })
     }
 
-    fn try_new_bound_with_locality_policy(
-        root: PathBuf,
+    fn from_opened_bound_inner(
+        opened: OpenedFilesystemBlobRoot,
         namespace_id: Uuid,
         binding_state: NamespaceBindingState,
-        require_local_backing: bool,
     ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
-        let (root_descriptor, identity) = open_validated_root(&root, require_local_backing)?;
-        initialize_namespace_marker(&root_descriptor, namespace_id, binding_state).map_err(
+        initialize_namespace_marker(&opened.descriptor, namespace_id, binding_state).map_err(
             |source| FilesystemBlobStoreConstructionError::PrepareNamespaceMarker {
-                root: root.clone(),
+                root: opened.configured_path.clone(),
                 source,
             },
         )?;
-        let root_descriptor = Arc::new(root_descriptor);
+        let root_descriptor = Arc::new(opened.descriptor);
         let publication_directory = Arc::new(
             prepare_publication_directory(&root_descriptor).map_err(|source| {
-                FilesystemBlobStoreConstructionError::PreparePublicationDirectory { root, source }
+                FilesystemBlobStoreConstructionError::PreparePublicationDirectory {
+                    root: opened.configured_path,
+                    source,
+                }
             })?,
         );
         Ok((
@@ -279,7 +342,7 @@ impl FilesystemBlobStore {
                 root: root_descriptor,
                 publication_directory,
             },
-            identity,
+            opened.identity,
         ))
     }
 
@@ -1490,12 +1553,37 @@ mod tests {
         (FilesystemBlobStore, FilesystemNamespaceIdentity),
         FilesystemBlobStoreConstructionError,
     > {
-        FilesystemBlobStore::try_new_bound_with_locality_policy(
-            root.to_path_buf(),
-            Uuid::from_u128(namespace),
-            state,
-            false,
-        )
+        let opened =
+            OpenedFilesystemBlobRoot::open_with_locality_policy(root.to_path_buf(), false)?;
+        FilesystemBlobStore::from_opened_bound(opened, Uuid::from_u128(namespace), state)
+    }
+
+    /// INV-059: descriptor-authenticated root inspection is mutation-free so
+    /// registry overlap checks always precede marker creation and recovery sweeps.
+    #[test]
+    fn inv059_opened_root_defers_every_namespace_mutation() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let publication = root.path().join(PUBLICATION_DIRECTORY);
+        fs::create_dir(&publication).expect("the fixture publication directory is created");
+        fs::set_permissions(&publication, fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture publication directory is private");
+        let sentinel = publication.join("pre-validation-sentinel");
+        fs::write(&sentinel, b"must remain before validation").expect("the sentinel is written");
+        fs::set_permissions(&sentinel, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the sentinel is private");
+
+        let opened =
+            OpenedFilesystemBlobRoot::open_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the private root can be inspected");
+
+        assert_eq!(opened.identity().canonical_path(), root.path());
+        assert_eq!(
+            fs::read(&sentinel).expect("inspection leaves the sentinel intact"),
+            b"must remain before validation"
+        );
+        assert!(!root.path().join(NAMESPACE_MARKER).exists());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::{
 use signalbox_blob_store::{BlobStore, BlobStoreName};
 use signalbox_blob_store_filesystem::{
     FilesystemBlobStaging, FilesystemBlobStore, FilesystemBlobStoreConstructionError,
-    FilesystemNamespaceIdentity, NamespaceBindingState,
+    FilesystemNamespaceIdentity, NamespaceBindingState, OpenedFilesystemBlobRoot,
 };
 use signalbox_persistence::blob::{
     BlobCatalogRepository, BlobCatalogRepositoryError, BlobStoreBindingRecord,
@@ -61,10 +61,9 @@ impl BlobStoreRegistry {
             return Err(BlobStoreRegistryError::UnsupportedStoreKind);
         }
 
-        let staging =
-            FilesystemBlobStaging::try_new(configuration.staging_directory().to_path_buf())?;
-        let mut identities = Vec::new();
-        let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
+        let staging_root =
+            OpenedFilesystemBlobRoot::open(configuration.staging_directory().to_path_buf())?;
+        let mut opened_stores = Vec::new();
         for (name, configured) in configuration.stores() {
             let root = configured
                 .filesystem_root()
@@ -74,19 +73,22 @@ impl BlobStoreRegistry {
             } else {
                 NamespaceBindingState::New
             };
-            let (store, identity) = FilesystemBlobStore::try_new_bound(
-                root.to_path_buf(),
-                configured.namespace_id(),
-                state,
-            )?;
-            identities.push(OpenedNamespace {
-                canonical_path: identity.canonical_path().to_path_buf(),
-                device_inode: identity.device_inode(),
-            });
-            stores.insert(name.clone(), Arc::new(store));
+            let opened = OpenedFilesystemBlobRoot::open(root.to_path_buf())?;
+            opened_stores.push((name.clone(), configured.namespace_id(), state, opened));
         }
-        let staging_identity = OpenedNamespace::from(staging.identity());
+        let staging_identity = OpenedNamespace::from(staging_root.identity());
+        let identities = opened_stores
+            .iter()
+            .map(|(_, _, _, opened)| OpenedNamespace::from(opened.identity()))
+            .collect::<Vec<_>>();
         validate_physical_namespaces(&staging_identity, &identities)?;
+
+        let staging = FilesystemBlobStaging::from_opened(staging_root)?;
+        let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
+        for (name, namespace_id, state, opened) in opened_stores {
+            let (store, _) = FilesystemBlobStore::from_opened_bound(opened, namespace_id, state)?;
+            stores.insert(name, Arc::new(store));
+        }
 
         for (name, configured) in configuration.stores() {
             repository
