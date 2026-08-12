@@ -1582,12 +1582,12 @@ or
 All byte counts use canonical decimal strings and both digest fields use the
 canonical blob spelling. The range detail also represents checked-add overflow.
 The request type identifies which append, commit, abort, or read operation
-failed, so state details carry no duplicate operation discriminator. Begin
-checks its declared-length range before connection state and routed-store
-lookup. Append checks cumulative size after state; commit checks state, then
-actual length, then digest. Read checks requested length, catalog existence, and
-then checked range. Each request reports only the first applicable failure in
-that order.
+failed, so state details carry no duplicate operation discriminator. With blob
+storage enabled, Begin checks active connection state before its declared-length
+range and routed-store lookup. Append checks cumulative size after state; commit
+checks state, then actual length, then digest. Read checks requested length,
+catalog existence, and then checked range. Each request reports only the first
+applicable failure in that order.
 
 Conversation-import evidence carries no source bytes, text, paths, identifiers
 taken from source, or parser excerpts; blob evidence carries no blob bytes,
