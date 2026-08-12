@@ -55,7 +55,7 @@ use signalbox_domain::{
     GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptPosition, ModelAlias, ModelCallId,
+    ImportedTranscriptEntryInput, ImportedTranscriptPosition, ModelAlias, ModelCallId,
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
@@ -100,7 +100,10 @@ use signalbox_persistence::{
         PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
         PreparedContextCompaction,
     },
-    conversation_import::{ImportedConversationRepository, ImportedConversationRepositoryError},
+    conversation_import::{
+        ImportedConversationRepository, ImportedConversationRepositoryError,
+        ImportedRawBlobStorageError,
+    },
     conversation_listing::{ConversationListingRepository, ConversationListingRepositoryError},
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
     create_session_from_imported_frontier::{
@@ -237,7 +240,7 @@ const GENERAL_BUFFERED_INBOUND_FRAMES: usize =
     MAX_BUFFERED_INBOUND_FRAMES - RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES;
 const MAX_IMPORT_ADMISSION_WAITERS: usize = GENERAL_BUFFERED_INBOUND_FRAMES;
 const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
-const MAX_CONCURRENT_BLOB_READS: usize = 16;
+const MAX_CONCURRENT_BLOB_READS: usize = crate::blob_storage_runtime::MAX_CONCURRENT_BLOB_READS;
 const BULK_INGEST_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
@@ -283,6 +286,7 @@ struct ConnectionServices {
     review_command_budget: Arc<Semaphore>,
     snapshot_reader_budget: Arc<Semaphore>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    imported_conversations: ImportedConversationRepository,
 }
 
 #[derive(Clone, Debug)]
@@ -616,6 +620,23 @@ async fn serve_connections(
     let snapshot_reader_capacity =
         snapshot_reader_capacity(dependencies.pool.options().get_max_connections())
             .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
+    let blob_read_budget = dependencies.blob_store_registry.as_ref().map_or_else(
+        || Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
+        |registry| registry.read_budget(),
+    );
+    let imported_storage = Arc::new(
+        crate::imported_source_blobs::ImportedSourceBlobStorage::new(
+            dependencies.pool.clone(),
+            dependencies.blob_store_registry.clone(),
+            dependencies
+                .model_configuration
+                .conversation_import_max_source_bytes(),
+        ),
+    );
+    let imported_conversations = ImportedConversationRepository::with_blob_storage(
+        dependencies.pool.clone(),
+        imported_storage,
+    );
     let services = ConnectionServices {
         recovery_reporter: dependencies.recovery_reporter,
         pool: dependencies.pool,
@@ -628,10 +649,11 @@ async fn serve_connections(
         inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
-        blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
+        blob_read_budget,
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
         blob_store_registry: dependencies.blob_store_registry,
+        imported_conversations,
     };
     let mut connections = JoinSet::new();
     loop {
@@ -1494,6 +1516,7 @@ where
                 },
                 &services.pool,
                 services.model_configuration.as_ref(),
+                &services.imported_conversations,
             )
             .await
         }
@@ -1927,7 +1950,7 @@ where
                 request_id,
                 format,
                 source,
-                &services.pool,
+                services.imported_conversations.clone(),
                 import_permit,
             )
             .await
@@ -1972,7 +1995,7 @@ where
                 services
                     .model_configuration
                     .conversation_import_max_source_bytes(),
-                &services.pool,
+                services.imported_conversations.clone(),
                 pending_import,
             )
             .await
@@ -5313,7 +5336,7 @@ async fn handle_commit_conversation_import<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     limit: usize,
-    pool: &PgPool,
+    repository: ImportedConversationRepository,
     pending: &mut Option<PendingConversationImport>,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -5366,7 +5389,7 @@ where
         request_id,
         pending.format,
         pending.source,
-        pool,
+        repository,
         pending.import_permit,
     )
     .await
@@ -5817,7 +5840,7 @@ async fn handle_import_conversation<Writer>(
     request_id: RequestId,
     format: ConversationImportFormat,
     source: Vec<u8>,
-    pool: &PgPool,
+    repository: ImportedConversationRepository,
     import_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -5825,10 +5848,10 @@ where
 {
     let outcome = match format {
         ConversationImportFormat::ClaudeCodeSessionJsonlV2 => {
-            execute_import(ClaudeCodeJsonlConverter, source, pool.clone()).await
+            execute_import(ClaudeCodeJsonlConverter, source, repository).await
         }
         ConversationImportFormat::CodexRolloutJsonlV1 => {
-            execute_import(CodexRolloutJsonlConverter, source, pool.clone()).await
+            execute_import(CodexRolloutJsonlConverter, source, repository).await
         }
     };
     drop(import_permit);
@@ -5876,6 +5899,15 @@ where
             )
             .await
         }
+        Err(OperationalImportError::Unavailable) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
         Err(OperationalImportError::Internal(diagnostic)) => {
             write_error(
                 writer,
@@ -5898,6 +5930,7 @@ struct ImportRejectionEvidence {
 enum OperationalImportError {
     InvalidSource(ImportRejectionEvidence),
     Database,
+    Unavailable,
     Internal(InternalDiagnostic),
 }
 
@@ -6096,6 +6129,9 @@ where
         ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
             OperationalImportError::Database
         }
+        ImportConversationError::Store(ImportedConversationRepositoryError::BlobStorage(
+            ImportedRawBlobStorageError::Unavailable,
+        )) => OperationalImportError::Unavailable,
         ImportConversationError::Store(error) => {
             OperationalImportError::Internal(imported_conversation_internal_diagnostic(&error))
         }
@@ -6112,7 +6148,7 @@ where
 async fn execute_import<Converter>(
     converter: Converter,
     source: Vec<u8>,
-    pool: PgPool,
+    repository: ImportedConversationRepository,
 ) -> Result<ImportConversationOutcome, OperationalImportError>
 where
     Converter: ImportedConversationConverter + Send + 'static,
@@ -6124,7 +6160,7 @@ where
             let mut service = ImportConversationService::new(
                 UuidV7ImportedConversationIdGenerator,
                 converter,
-                ImportedConversationRepository::new(pool),
+                repository,
             );
             service
                 .execute(&source)
@@ -6164,6 +6200,7 @@ async fn handle_create_session_from_imported_frontier<Writer>(
     wire_request: WireImportedContinuationRequest,
     pool: &PgPool,
     model_configuration: &HubModelConfiguration,
+    imported_conversations: &ImportedConversationRepository,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -6174,8 +6211,11 @@ where
     let model_selection = domain_model_selection(wire_request.initial_model_selection);
     let caller_model_settings = domain_model_settings_overlay(wire_request.model_settings);
     let through_position = wire_request.through_position;
-    let repository =
-        ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
+    let repository = ImportedSessionRepository::with_imported_conversations(
+        pool.clone(),
+        model_configuration.session_credential_pin(),
+        imported_conversations.clone(),
+    );
 
     match repository.load(command_id).await {
         Ok(Some(recorded)) => {
@@ -6243,6 +6283,20 @@ where
             )
             .await;
         }
+        Err(ImportedSessionRepositoryError::ImportedConversation(
+            ImportedConversationRepositoryError::Database(_)
+            | ImportedConversationRepositoryError::BlobStorage(
+                ImportedRawBlobStorageError::Unavailable,
+            ),
+        )) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
         Err(ImportedSessionRepositoryError::CommitAmbiguous(_)) => {
             return write_error(
                 writer,
@@ -6255,6 +6309,7 @@ where
         Err(
             error @ (ImportedSessionRepositoryError::Preparation(_)
             | ImportedSessionRepositoryError::IdentityCollision(_)
+            | ImportedSessionRepositoryError::ImportedConversation(_)
             | ImportedSessionRepositoryError::Corruption(_)),
         ) => {
             let diagnostic = imported_session_internal_diagnostic(&error);
@@ -6281,10 +6336,7 @@ where
         )
         .await;
     };
-    let conversation = match ImportedConversationRepository::new(pool.clone())
-        .load(conversation_id)
-        .await
-    {
+    let conversation = match imported_conversations.load(conversation_id).await {
         Ok(Some(conversation)) => conversation,
         Ok(None) => {
             return write_error(
@@ -6295,7 +6347,12 @@ where
             )
             .await;
         }
-        Err(ImportedConversationRepositoryError::Database(_)) => {
+        Err(
+            ImportedConversationRepositoryError::Database(_)
+            | ImportedConversationRepositoryError::BlobStorage(
+                ImportedRawBlobStorageError::Unavailable,
+            ),
+        ) => {
             return write_error(
                 writer,
                 version,
@@ -6306,6 +6363,10 @@ where
         }
         Err(
             error @ (ImportedConversationRepositoryError::IdentityCollision(_)
+            | ImportedConversationRepositoryError::BlobStorage(
+                ImportedRawBlobStorageError::Integrity,
+            )
+            | ImportedConversationRepositoryError::BlobCatalog(_)
             | ImportedConversationRepositoryError::Corruption(_)),
         ) => {
             let diagnostic = imported_conversation_internal_diagnostic(&error);
@@ -6452,6 +6513,20 @@ where
             )
             .await
         }
+        Err(ImportedSessionRepositoryError::ImportedConversation(
+            ImportedConversationRepositoryError::Database(_)
+            | ImportedConversationRepositoryError::BlobStorage(
+                ImportedRawBlobStorageError::Unavailable,
+            ),
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
         Err(ImportedSessionRepositoryError::CommitAmbiguous(_)) => {
             write_error(
                 writer,
@@ -6465,6 +6540,7 @@ where
             error @ (ImportedSessionRepositoryError::DifferentCommandKind { .. }
             | ImportedSessionRepositoryError::Preparation(_)
             | ImportedSessionRepositoryError::IdentityCollision(_)
+            | ImportedSessionRepositoryError::ImportedConversation(_)
             | ImportedSessionRepositoryError::Corruption(_)),
         ) => {
             let diagnostic = imported_session_internal_diagnostic(&error);
@@ -7806,11 +7882,11 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let conversation_id = ImportedConversationId::from_uuid(imported_conversation_id.into_uuid());
-    let load = ImportedConversationRepository::new(pool.clone())
-        .load(conversation_id)
-        .await;
-    let conversation = match load {
-        Ok(Some(conversation)) => conversation,
+    let load =
+        signalbox_persistence::conversation_import::load_normalized_entries(pool, conversation_id)
+            .await;
+    let entries = match load {
+        Ok(Some(entries)) => entries,
         Ok(None) => {
             drop(snapshot_permit);
             return write_error(
@@ -7833,6 +7909,8 @@ where
         }
         Err(
             error @ (ImportedConversationRepositoryError::IdentityCollision(_)
+            | ImportedConversationRepositoryError::BlobStorage(_)
+            | ImportedConversationRepositoryError::BlobCatalog(_)
             | ImportedConversationRepositoryError::Corruption(_)),
         ) => {
             let diagnostic = imported_conversation_internal_diagnostic(&error);
@@ -7847,9 +7925,8 @@ where
         }
     };
     let spool_result =
-        spool_imported_conversation(&conversation, imported_conversation_id, version, request_id)
-            .await;
-    drop(conversation);
+        spool_imported_conversation(&entries, imported_conversation_id, version, request_id).await;
+    drop(entries);
     drop(snapshot_permit);
     let mut spool = match spool_result {
         Ok(spool) => spool,
@@ -7859,7 +7936,7 @@ where
 }
 
 async fn spool_imported_conversation(
-    conversation: &ImportedConversation,
+    entries: &[ImportedTranscriptEntryInput],
     imported_conversation_id: CanonicalUuid,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -7876,7 +7953,7 @@ async fn spool_imported_conversation(
     )
     .await?;
     let mut entry_count = 0_u64;
-    for entry in conversation.entries() {
+    for entry in entries {
         write_spool_message(
             &mut file,
             version,
@@ -10738,6 +10815,9 @@ fn imported_session_internal_diagnostic(
         ImportedSessionRepositoryError::IdentityCollision(_) => {
             InternalDiagnostic::ImportedSessionIdentityCollision
         }
+        ImportedSessionRepositoryError::ImportedConversation(_) => {
+            InternalDiagnostic::ImportedSessionCorruption
+        }
         ImportedSessionRepositoryError::Corruption(_) => {
             InternalDiagnostic::ImportedSessionCorruption
         }
@@ -10754,6 +10834,15 @@ fn imported_conversation_internal_diagnostic(
         }
         ImportedConversationRepositoryError::IdentityCollision(_) => {
             InternalDiagnostic::ImportedConversationIdentityCollision
+        }
+        ImportedConversationRepositoryError::BlobStorage(
+            ImportedRawBlobStorageError::Unavailable,
+        ) => InternalDiagnostic::ImportedConversationDatabase,
+        ImportedConversationRepositoryError::BlobStorage(
+            ImportedRawBlobStorageError::Integrity,
+        ) => InternalDiagnostic::ImportedConversationCorruption,
+        ImportedConversationRepositoryError::BlobCatalog(_) => {
+            InternalDiagnostic::ImportedConversationCorruption
         }
         ImportedConversationRepositoryError::Corruption(_) => {
             InternalDiagnostic::ImportedConversationCorruption
@@ -14836,7 +14925,8 @@ mod tests {
     use super::{
         CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
         ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
-        ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
+        ImportedConversationRepository, ImportedConversationRepositoryError,
+        ImportedRawBlobStorageError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
         MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
         MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError, PendingConversationImport,
@@ -16836,6 +16926,7 @@ mod tests {
         });
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let repository = ImportedConversationRepository::new(pool);
         let (mut writer, mut reader) = duplex(1);
         let write = tokio::spawn(async move {
             let result = handle_commit_conversation_import(
@@ -16843,7 +16934,7 @@ mod tests {
                 ProtocolVersion::One,
                 request_id,
                 limit,
-                &pool,
+                repository,
                 &mut pending,
             )
             .await;
@@ -16896,6 +16987,7 @@ mod tests {
         });
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let repository = ImportedConversationRepository::new(pool);
         let (mut writer, mut reader) = duplex(1_024);
 
         handle_commit_conversation_import(
@@ -16903,7 +16995,7 @@ mod tests {
             ProtocolVersion::One,
             request_id,
             limit,
-            &pool,
+            repository,
             &mut pending,
         )
         .await?;
@@ -16991,11 +17083,12 @@ mod tests {
         let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let repository = ImportedConversationRepository::new(pool);
 
         let outcome = execute_import(
             ThreadReportingRejectConverter(thread_sender),
             Vec::new(),
-            pool,
+            repository,
         )
         .await;
         let conversion_worker = thread_receiver.recv_timeout(Duration::from_secs(1))?;
@@ -17018,8 +17111,9 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let repository = ImportedConversationRepository::new(pool);
 
-        let outcome = execute_import(PanickingConverter, Vec::new(), pool).await;
+        let outcome = execute_import(PanickingConverter, Vec::new(), repository).await;
 
         assert_eq!(
             outcome,
@@ -17100,6 +17194,36 @@ mod tests {
         assert_eq!(
             InternalDiagnostic::ImportedConversationCorruption.failure_class(),
             signalbox_application::OperatorFailureClass::FailClosedCorruption,
+        );
+    }
+
+    #[test]
+    fn import_blob_unavailability_is_retryable_without_ambiguity() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
+                ImportedConversationRepositoryError::BlobStorage(
+                    ImportedRawBlobStorageError::Unavailable,
+                ),
+            );
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Unavailable,
+        );
+    }
+
+    #[test]
+    fn import_blob_integrity_failure_is_fail_closed() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
+                ImportedConversationRepositoryError::BlobStorage(
+                    ImportedRawBlobStorageError::Integrity,
+                ),
+            );
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Internal(InternalDiagnostic::ImportedConversationCorruption),
         );
     }
 

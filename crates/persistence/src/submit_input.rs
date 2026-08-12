@@ -5640,7 +5640,8 @@ fn map_imported_scheduling_error(
         | ImportedSessionRepositoryError::CommitAmbiguous(_)
         | ImportedSessionRepositoryError::DifferentCommandKind { .. }
         | ImportedSessionRepositoryError::Preparation(_)
-        | ImportedSessionRepositoryError::IdentityCollision(_) => {
+        | ImportedSessionRepositoryError::IdentityCollision(_)
+        | ImportedSessionRepositoryError::ImportedConversation(_) => {
             SubmitInputCorruption::Inconsistent("complete imported scheduling projection").into()
         }
     }

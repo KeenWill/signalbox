@@ -616,7 +616,7 @@ impl PostgresToolLoopRepository {
             )
             .await?
         {
-            ToolAttemptAuthorizationOutcome::Authorized(authorized) => Ok(authorized),
+            ToolAttemptAuthorizationOutcome::Authorized(authorized) => Ok(*authorized),
             ToolAttemptAuthorizationOutcome::PreauthorizationRejected => {
                 Err(ToolLoopCorruption::Inconsistent("unmetered tool preauthorization").into())
             }
@@ -673,7 +673,9 @@ impl PostgresToolLoopRepository {
             .await?
             .rows_affected();
             require_single(rows, "tool attempt authorization")?;
-            Ok(ToolAttemptAuthorizationOutcome::Authorized(authorized))
+            Ok(ToolAttemptAuthorizationOutcome::Authorized(Box::new(
+                authorized,
+            )))
         }
         .await;
         finish_commit(transaction, result).await
@@ -3675,6 +3677,28 @@ fn require_single(rows: u64, relationship: &'static str) -> Result<(), ToolLoopR
     }
 }
 
+async fn finish_commit<T>(
+    transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    result: Result<T, ToolLoopRepositoryError>,
+) -> Result<T, ToolLoopRepositoryError> {
+    match result {
+        Ok(value) => {
+            transaction.commit().await.map_err(|source| {
+                let commit_ambiguous = commit_failure_is_ambiguous(&source);
+                ToolLoopRepositoryError::Database {
+                    source,
+                    commit_ambiguous,
+                }
+            })?;
+            Ok(value)
+        }
+        Err(error) => {
+            transaction.rollback().await?;
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod blob_read_budget_tests {
     use super::*;
@@ -3704,27 +3728,5 @@ mod blob_read_budget_tests {
             0,
             NonZeroU64::new(1).expect("one is positive"),
         ));
-    }
-}
-
-async fn finish_commit<T>(
-    transaction: sqlx::Transaction<'_, sqlx::Postgres>,
-    result: Result<T, ToolLoopRepositoryError>,
-) -> Result<T, ToolLoopRepositoryError> {
-    match result {
-        Ok(value) => {
-            transaction.commit().await.map_err(|source| {
-                let commit_ambiguous = commit_failure_is_ambiguous(&source);
-                ToolLoopRepositoryError::Database {
-                    source,
-                    commit_ambiguous,
-                }
-            })?;
-            Ok(value)
-        }
-        Err(error) => {
-            transaction.rollback().await?;
-            Err(error)
-        }
     }
 }

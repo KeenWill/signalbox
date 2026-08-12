@@ -532,6 +532,7 @@ mod tests {
         ) -> Result<signalbox_application::ToolAttemptAuthorizationOutcome, Self::Error> {
             self.batch
                 .authorize_dispatch(attempt)
+                .map(Box::new)
                 .map(signalbox_application::ToolAttemptAuthorizationOutcome::Authorized)
                 .map_err(|_| CurrentTimeExecutorError::ArgumentValidationDrift)
         }

@@ -22,7 +22,7 @@ transactional registration behavior are verified against this implementing
 change (`agent/blob-storage-catalog`).
 
 The configuration catalog, route validation, filesystem namespace admission, and
-startup store registry are verified against PR #582
+startup store registry are verified against this implementing change
 (`agent/blob-storage-registry`).
 
 The disk-backed upload lifecycle, routed-store-only live deduplication,
@@ -62,6 +62,11 @@ verified against this implementing change
 The text-only blob-read family, frontier-derived digest authorization, and
 durable per-request and per-turn admission counters are verified against this
 implementing change (`agent/blob-storage-read-tools`).
+
+Imported raw-source publication, aggregate-owned catalog registration,
+blob-backed checked loads, normalized runtime projections, and the one-time
+final-schema migration are verified against this implementing change
+(`agent/blob-storage-import-convergence`).
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store

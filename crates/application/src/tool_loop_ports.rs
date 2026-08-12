@@ -86,7 +86,7 @@ pub enum ToolAttemptAuthorizationStatus {
 #[derive(Debug, Eq, PartialEq)]
 pub enum ToolAttemptAuthorizationOutcome {
     /// The exact dispatch fence was authorized.
-    Authorized(ToolDispatchAuthority),
+    Authorized(Box<ToolDispatchAuthority>),
     /// A request-scoped durable resource budget refused dispatch authority.
     PreauthorizationRejected,
 }

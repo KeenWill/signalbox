@@ -584,6 +584,11 @@ fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositor
                 "imported load reported an impossible identity collision",
             ))
         }
+        ImportedSessionRepositoryError::ImportedConversation(_) => {
+            SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+                "imported conversation load failed",
+            ))
+        }
     }
 }
 

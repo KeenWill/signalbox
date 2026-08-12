@@ -8,7 +8,7 @@
 //! Unified conversation-listing and display-title integration behavior over
 //! real PostgreSQL: both origin classes in one transactionally fresh keyset
 //! page, honest pagination, exact filters, import-time title derivation, and
-//! the one-time startup backfill for rows inserted before the title column.
+//! the immutable resolved title facts stored at import time.
 
 use std::error::Error;
 
@@ -29,12 +29,9 @@ use signalbox_domain::{
 use signalbox_persistence::{
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationRepository,
-        ImportedConversationRepositoryError, backfill_imported_conversation_display_titles,
+        ImportedConversationRepositoryError,
     },
-    conversation_listing::{
-        ConversationListingCorruption, ConversationListingRepository,
-        ConversationListingRepositoryError,
-    },
+    conversation_listing::ConversationListingRepository,
     create_session::CreateSessionRepository,
     disposable_test_container_labels, local_test_connection_options, migrate,
     session_metadata::SessionMetadataRepository,
@@ -559,100 +556,6 @@ async fn s28_import_derives_and_stores_the_display_title() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// S28: the startup backfill resolves exactly the transitional pending rows
-/// by pure re-derivation, and a second run finds nothing left to resolve.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_display_title_backfill_resolves_pending_rows_exactly_once()
--> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
-    let imported_claude =
-        import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
-    force_pending_display_title(&pool, imported_claude).await?;
-
-    let resolved = backfill_imported_conversation_display_titles(&pool).await?;
-    assert_eq!(resolved, 1);
-    let stored: (Option<String>, String) = sqlx::query_as(
-        "SELECT display_title, display_title_state
-           FROM imported_conversation
-          WHERE imported_conversation_id = $1",
-    )
-    .bind(imported_claude.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(
-        stored,
-        (
-            Some(String::from(CLAUDE_SUMMARY_TITLE)),
-            String::from("derived")
-        )
-    );
-
-    let second_run = backfill_imported_conversation_display_titles(&pool).await?;
-    assert_eq!(second_run, 0);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// A serving unified read fails closed on a transitional pending title rather
-/// than presenting a row whose derivation never ran.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn pending_display_title_fails_closed_in_the_serving_listing() -> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
-    let imported_claude =
-        import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
-    force_pending_display_title(&pool, imported_claude).await?;
-
-    let mut page = ConversationListingRepository::new(pool.clone())
-        .open_conversation_page(query(
-            None,
-            ConversationOriginFilter::Imported,
-            false,
-            50,
-            None,
-        ))
-        .await?;
-    let error = ConversationPageReader::next_item(&mut page)
-        .await
-        .expect_err("a pending display title must fail the serving read");
-    assert!(matches!(
-        error,
-        ConversationListingRepositoryError::Corruption(
-            ConversationListingCorruption::UnresolvedDisplayTitle
-        )
-    ));
-    // The failed page still owns its open transaction's pooled connection;
-    // release it before closing the pool, which waits for every connection.
-    drop(page);
-
-    let mut filtered_page = ConversationListingRepository::new(pool.clone())
-        .open_conversation_page(query(
-            Some("unrelated filter"),
-            ConversationOriginFilter::Imported,
-            false,
-            50,
-            None,
-        ))
-        .await?;
-    let filtered_error = ConversationPageReader::next_item(&mut filtered_page)
-        .await
-        .expect_err("a title filter must not silently omit a pending row");
-    assert!(matches!(
-        filtered_error,
-        ConversationListingRepositoryError::Corruption(
-            ConversationListingCorruption::UnresolvedDisplayTitle
-        )
-    ));
-    drop(filtered_page);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
 /// A stored display title that disagrees with pure re-derivation is typed
 /// corruption on the checked complete load.
 #[tokio::test(flavor = "multi_thread")]
@@ -692,11 +595,10 @@ async fn corrupt_display_title_fails_closed_on_load() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// The header stays append-only for everything except the one guarded
-/// pending-to-resolved backfill transition.
+/// The final imported-conversation header is append-only.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn header_admits_only_the_display_title_backfill_update() -> Result<(), Box<dyn Error>> {
+async fn final_imported_conversation_header_is_append_only() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let imported_claude =
         import_claude_fixture(&pool, imported(0x10), 0x300, CLAUDE_SUMMARY_SOURCE).await?;
@@ -733,29 +635,6 @@ async fn header_admits_only_the_display_title_backfill_update() -> Result<(), Bo
 
     pool.close().await;
     drop(container);
-    Ok(())
-}
-
-/// Rewrites one resolved row to the transitional pre-column state through the
-/// same trigger bypass the lineage tests use for pre-column fixtures.
-async fn force_pending_display_title(
-    pool: &PgPool,
-    conversation: ImportedConversationId,
-) -> Result<(), Box<dyn Error>> {
-    sqlx::query("ALTER TABLE imported_conversation DISABLE TRIGGER USER")
-        .execute(pool)
-        .await?;
-    sqlx::query(
-        "UPDATE imported_conversation
-            SET display_title = NULL, display_title_state = 'pending'
-          WHERE imported_conversation_id = $1",
-    )
-    .bind(conversation.into_uuid())
-    .execute(pool)
-    .await?;
-    sqlx::query("ALTER TABLE imported_conversation ENABLE TRIGGER USER")
-        .execute(pool)
-        .await?;
     Ok(())
 }
 

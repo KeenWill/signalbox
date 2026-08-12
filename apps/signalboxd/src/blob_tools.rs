@@ -16,6 +16,7 @@ use signalbox_domain::{
 use signalbox_persistence::blob::BlobCatalogRepository;
 use signalbox_tool_contract::{ToolContract, compile_contract_definition};
 use signalbox_tool_schema_derive::ToolSchema;
+use tokio::sync::Semaphore;
 
 use crate::{
     blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_metadata},
@@ -127,11 +128,16 @@ impl BlobTools {
             CompiledTool::new(read, BlobValidator { read: true, detail }),
         ])
         .map_err(|_| BlobToolConstructionError)?;
+        let read_budget = registry.as_ref().map_or_else(
+            || Arc::new(Semaphore::new(0)),
+            |registry| registry.read_budget(),
+        );
         Ok(Self {
             catalog,
             executor: BlobToolExecutor {
                 repository,
                 registry,
+                read_budget,
             },
         })
     }
@@ -158,6 +164,7 @@ impl Error for BlobToolConstructionError {}
 pub struct BlobToolExecutor {
     repository: BlobCatalogRepository,
     registry: Option<Arc<BlobStoreRegistry>>,
+    read_budget: Arc<Semaphore>,
 }
 
 impl fmt::Debug for BlobToolExecutor {
@@ -212,22 +219,27 @@ impl ToolExecutor for BlobToolExecutor {
                 digest,
                 offset,
                 length,
-            } => match read_blob_chunk(
-                self.registry.as_deref(),
-                &self.repository,
-                digest,
-                offset,
-                length,
-            )
-            .await
-            {
-                Ok(bytes) => completed(&ReadResult {
-                    digest: digest.to_string(),
-                    offset_bytes: offset.to_string(),
-                    bytes_base64: STANDARD.encode(bytes),
-                })?,
-                Err(error) => failed(error)?,
-            },
+            } => {
+                let _permit = Arc::clone(&self.read_budget)
+                    .try_acquire_owned()
+                    .map_err(|_| BlobToolExecutorError)?;
+                match read_blob_chunk(
+                    self.registry.as_deref(),
+                    &self.repository,
+                    digest,
+                    offset,
+                    length,
+                )
+                .await
+                {
+                    Ok(bytes) => completed(&ReadResult {
+                        digest: digest.to_string(),
+                        offset_bytes: offset.to_string(),
+                        bytes_base64: STANDARD.encode(bytes),
+                    })?,
+                    Err(error) => failed(error)?,
+                }
+            }
         };
         Ok(invocation.bind(evidence))
     }

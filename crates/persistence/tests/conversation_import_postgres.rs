@@ -11,6 +11,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use rust_decimal::Decimal;
@@ -21,7 +22,7 @@ use signalbox_application::{
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
-    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    BlobDigest, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedRawRecordHash, ImportedRawRecordPosition,
     ImportedRawSourceRecord, ImportedRecordEntryPosition, ImportedSourceAttestation,
     ImportedSourceMetadata, ImportedSpeaker, ImportedStructuredObjectMember,
@@ -34,6 +35,7 @@ use signalbox_persistence::{
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
+        corrupt_integration_imported_blob,
     },
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
@@ -236,6 +238,39 @@ async fn postgres_before_frontier_prefixes()
     Ok((container, pool))
 }
 
+async fn postgres_before_import_blob_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608110010)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool))
+}
+
 #[derive(Clone, Copy)]
 /// Named behavior facts returned by the plumbing-only resume fixture.
 ///
@@ -266,22 +301,81 @@ fn imported_seed_facts() -> ImportedSeedFacts {
     }
 }
 
+#[track_caller]
+fn assert_attested_source_result_kind(
+    content: &ImportedTranscriptContent,
+    expected_source_type: &str,
+) {
+    let ImportedTranscriptContent::ToolResult {
+        content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)),
+        ..
+    } = content
+    else {
+        panic!("fixture expected an attested block-valued tool result");
+    };
+    let [ImportedToolResultBlock::SourceResultBlock { source_type }] = blocks.as_ref() else {
+        panic!("fixture expected exactly one source-result block");
+    };
+    let ImportedSourceAttestation::Attested(source_type) = source_type else {
+        panic!("fixture expected an attested source-result type");
+    };
+    assert_eq!(source_type.as_str(), expected_source_type);
+}
+
 async fn insert_imported_source_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<ImportedSeedFacts, sqlx::Error> {
     let facts = imported_seed_facts();
+    let raw_bytes_column_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'imported_raw_source_record'
+               AND column_name = 'raw_bytes')",
+    )
+    .fetch_one(&mut **transaction)
+    .await?;
+    if raw_bytes_column_exists {
+        sqlx::query(
+            "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+             VALUES ($1, $2)",
+        )
+        .bind(vec![0x11_u8; 32])
+        .bind(vec![0x01_u8])
+        .execute(&mut **transaction)
+        .await?;
+    } else {
+        insert_catalogued_raw_source(transaction, vec![0x11; 32], 1).await?;
+    }
+    if raw_bytes_column_exists {
+        sqlx::query(
+            "INSERT INTO imported_conversation
+                (imported_conversation_id, storage_version, source_format,
+                 converter_version, source_digest, declared_raw_record_count,
+                 declared_entry_count)
+             VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3)",
+        )
+        .bind(facts.conversation)
+        .bind(vec![0x22_u8; 32])
+        .execute(&mut **transaction)
+        .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO imported_conversation
+                (imported_conversation_id, storage_version, source_format,
+                 converter_version, source_digest, declared_raw_record_count,
+                 declared_entry_count, display_title, display_title_state)
+             VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3,
+                     NULL, 'underivable')",
+        )
+        .bind(facts.conversation)
+        .bind(vec![0x22_u8; 32])
+        .execute(&mut **transaction)
+        .await?;
+    }
     sqlx::raw_sql(
-        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-         VALUES (decode(repeat('11', 32), 'hex'), decode('01', 'hex'));
-         INSERT INTO imported_conversation
-            (imported_conversation_id, storage_version, source_format,
-             converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES
-            ('10000000-0000-4000-8000-000000000039', 1,
-             'claude_code_session_jsonl', 1,
-             decode(repeat('22', 32), 'hex'), 1, 3);
-         INSERT INTO imported_conversation_raw_record
+        "INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
              conversion_digest, normalized_value_encoding,
              declared_entry_count)
@@ -310,6 +404,43 @@ async fn insert_imported_source_scaffolding(
     Ok(facts)
 }
 
+async fn insert_catalogued_raw_source(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+    content_hash: Vec<u8>,
+    byte_length: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('integration', '0000696d-706f-7274-6564-5f736f757263')
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob (digest, byte_length)
+         VALUES ($1, $2)",
+    )
+    .bind(&content_hash)
+    .bind(byte_length)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'integration', 'sha256/fixture/' || encode($1, 'hex'))",
+    )
+    .bind(&content_hash)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_raw_source_record (content_hash)
+         VALUES ($1)",
+    )
+    .bind(content_hash)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Applies every migration at or after `version` to a pool deliberately held
 /// short of it, finishing the upgrade a migration test exercises.
 ///
@@ -324,10 +455,23 @@ async fn apply_migrations_from(pool: &PgPool, version: i64) -> Result<(), Box<dy
         .await?;
     for migration in MIGRATOR
         .iter()
-        .filter(|migration| migration.version >= version)
+        .filter(|migration| migration.version >= version && migration.version < 202608110010)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
+    Ok(())
+}
+
+async fn apply_exact_migration(pool: &PgPool, version: i64) -> Result<(), Box<dyn Error>> {
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == version)
+        .ok_or("fixture migration is absent")?;
+    connection.apply("_sqlx_migrations", migration).await?;
     Ok(())
 }
 
@@ -594,6 +738,84 @@ async fn inv015_frontier_prefix_migration_preserves_existing_complete_snapshots(
             (second_frontier, 2, seed.semantic_prefix[1]),
         ]
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-064: the pre-production import convergence migration resets existing
+/// imported aggregates, removes the byte column, and installs only the final
+/// blob-reference schema.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv064_one_time_import_migration_installs_only_the_final_schema()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres_before_import_blob_migration().await?;
+    let mut transaction = pool.begin().await?;
+    insert_imported_source_scaffolding(&mut transaction).await?;
+    transaction.commit().await?;
+    let before: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_conversation),
+            (SELECT count(*) FROM imported_raw_source_record)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(before, (1, 1));
+
+    apply_exact_migration(&pool, 202608110010).await?;
+
+    let after: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_conversation),
+            (SELECT count(*) FROM imported_raw_source_record)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after, (0, 0));
+    let raw_bytes_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'imported_raw_source_record'
+               AND column_name = 'raw_bytes')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!raw_bytes_exists);
+    let blob_reference_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM pg_constraint
+             WHERE conname = 'imported_raw_source_record_blob_fk')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(blob_reference_exists);
+    let display_title_state_default: Option<String> = sqlx::query_scalar(
+        "SELECT column_default
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'imported_conversation'
+            AND column_name = 'display_title_state'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(display_title_state_default, None);
+    let pending_insert = sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count, display_title, display_title_state)
+         VALUES ('10000000-0000-4000-8000-000000000064', 1,
+                 'claude_code_session_jsonl', 1,
+                 decode(repeat('64', 32), 'hex'), 1, 1, NULL, 'pending')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(pending_insert.is_err());
 
     pool.close().await;
     drop(container);
@@ -1046,12 +1268,14 @@ async fn s28_inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), B
 async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, database_url) = migrated_postgres().await?;
+    let source_result_kind = "future-result-kind";
     let source = concat!(
         "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
-        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}\r\n",
+        "\"content\":[{\"type\":\"<source-result-kind>\",\"payload\":{\"exact\":1}}]}]}}\r\n",
         "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
-        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}"
-    );
+        "\"content\":[{\"type\":\"<source-result-kind>\",\"payload\":{\"exact\":1}}]}]}}"
+    )
+    .replace("<source-result-kind>", source_result_kind);
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut service = ImportConversationService::new(
@@ -1080,18 +1304,7 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     assert_eq!(stored.raw_records().len(), 2);
     assert_eq!(stored.entries().len(), 2);
     assert_eq!(stored.frontiers().count(), 2);
-    assert!(matches!(
-        stored.entries()[0].content(),
-        ImportedTranscriptContent::ToolResult {
-            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)),
-            ..
-        } if matches!(
-            blocks.as_ref(),
-            [ImportedToolResultBlock::SourceResultBlock {
-                source_type: ImportedSourceAttestation::Attested(value)
-            }] if value.as_str() == "future-result-kind"
-        )
-    ));
+    assert_attested_source_result_kind(stored.entries()[0].content(), source_result_kind);
     assert_eq!(
         stored.raw_records()[0].bytes(),
         stored.raw_records()[1].bytes()
@@ -1110,7 +1323,7 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     assert!(
         sqlx::query(
             "UPDATE imported_raw_source_record
-                SET raw_bytes = raw_bytes",
+                SET content_hash = content_hash",
         )
         .execute(&pool)
         .await
@@ -1617,7 +1830,7 @@ async fn s28_inv038_reingestion_rejects_converter_projection_drift() -> Result<(
 async fn s28_inv002_inv038_reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let source = br#"{"type":"summary","value":null}"#;
+    let source = br#"{"type":"summary","summary":"corruption-only"}"#;
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x750));
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut service = ImportConversationService::new(
@@ -1632,31 +1845,20 @@ async fn s28_inv002_inv038_reingestion_does_not_mask_raw_corruption() -> Result<
         }
     );
 
-    sqlx::query("ALTER TABLE imported_raw_source_record DISABLE TRIGGER USER")
-        .execute(&pool)
+    let digest: Vec<u8> = sqlx::query_scalar("SELECT content_hash FROM imported_raw_source_record")
+        .fetch_one(&pool)
         .await?;
-    sqlx::query(
-        "UPDATE imported_raw_source_record
-            SET raw_bytes = raw_bytes || $1",
-    )
-    .bind(vec![b' '])
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE imported_raw_source_record ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
+    let digest = BlobDigest::from_bytes(digest.try_into().map_err(|_| "fixture digest size")?);
+    corrupt_integration_imported_blob(digest, Arc::from(b"corrupt".as_slice()))?;
 
     let error = service
         .execute(source)
         .await
         .expect_err("reingestion must expose existing raw corruption");
+    corrupt_integration_imported_blob(digest, Arc::from(source.as_slice()))?;
     assert!(matches!(
         error,
-        ImportConversationError::Store(ImportedConversationRepositoryError::Corruption(
-            ImportedConversationCorruption::Domain(
-                ImportedConversationReconstitutionFailure::RawRecordHashMismatch { .. }
-            )
-        ))
+        ImportConversationError::Store(ImportedConversationRepositoryError::BlobStorage(_))
     ));
 
     pool.close().await;
@@ -1805,21 +2007,15 @@ async fn inv001_late_entry_identity_constraint_is_typed_collision() -> Result<()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(vec![0x10_u8; 32])
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-         VALUES ($1, $2)",
-    )
-    .bind(vec![0x11_u8; 32])
-    .bind(vec![0x12_u8])
-    .execute(&mut *transaction)
-    .await?;
+    insert_catalogued_raw_source(&mut transaction, vec![0x11_u8; 32], 1).await?;
     sqlx::query(
         "INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
@@ -1879,8 +2075,9 @@ async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn E
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x400))
     .bind(vec![0_u8; 32])
@@ -1907,14 +2104,7 @@ async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn E
 async fn s28_inv038_unowned_raw_source_record_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-         VALUES ($1, $2)",
-    )
-    .bind(vec![0x41_u8; 32])
-    .bind(vec![0x42_u8])
-    .execute(&mut *transaction)
-    .await?;
+    insert_catalogued_raw_source(&mut transaction, vec![0x41_u8; 32], 1).await?;
 
     assert!(
         transaction.commit().await.is_err(),
@@ -1930,17 +2120,17 @@ async fn s28_inv038_unowned_raw_source_record_cannot_commit() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-038: physical raw records are nonempty at the schema boundary.
+/// INV-038: catalogued raw records are nonempty at the schema boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
-        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+        "INSERT INTO blob (digest, byte_length)
          VALUES ($1, $2)",
     )
     .bind(vec![0_u8; 32])
-    .bind(Vec::<u8>::new())
+    .bind(0_i64)
     .execute(&pool)
     .await
     .expect_err("empty raw source records must violate the schema");
@@ -1948,7 +2138,7 @@ async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Erro
         error
             .as_database_error()
             .and_then(sqlx::error::DatabaseError::constraint),
-        Some("imported_raw_source_record_bytes_nonempty")
+        Some("blob_byte_length_positive_u64")
     );
 
     pool.close().await;
@@ -1967,8 +2157,9 @@ async fn inv002_inv038_unsupported_format_version_pair_is_schema_rejected()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4ff))
     .bind(vec![0_u8; 32])
@@ -1985,8 +2176,9 @@ async fn inv002_inv038_unsupported_format_version_pair_is_schema_rejected()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4fe))
     .bind(vec![1_u8; 32])
