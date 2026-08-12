@@ -134,7 +134,7 @@ remains at SQLx defaults until an operational slice selects limits.
 
 Schema change is a forward-only, versioned SQL file set in
 `crates/persistence/migrations/` — seventy-one files, `202607180001` through
-`202608100005` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`202608110006` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -326,7 +326,7 @@ Representation rules, all enforced in the schema:
   unimplemented functionality.** No present adapter installs those transitions;
   their dedicated orchestration transactions will install these same checked
   records, and direct snapshot storage cannot stand in for those transactions.
-- Migration `202608100004` records the connection-loss epoch observed when each
+- Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
   enrollment, and connection/loss authority in the runner total order; callers
@@ -674,7 +674,7 @@ statements live in the schema instead:
 - the lease-claim connection-loss fence in migration `202608100003` takes
   `FOR SHARE` on the selected enrollment and connection authority head before
   admitting the claim event; and
-- the placement-loss baseline trigger in migration `202608100004` takes
+- the placement-loss baseline trigger in migration `202608110005` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
   deriving the immutable baseline and before the placement row becomes visible.
