@@ -3009,6 +3009,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
         pinned_targets: Vec<PinnedProviderTargetReconstitutionInput>,
         model_calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self;
+    pub fn with_runner_placement_frontier(
+        self,
+        frontier: ContextFrontierId,
+    ) -> Self;
     pub fn with_context_compaction_facts(
         self,
         calls: Vec<ContextCompactionModelCallReconstitutionInput>,
@@ -3150,6 +3154,8 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         snapshot: ContextFrontierId,
         entry: SemanticTranscriptEntryRef,
     },
+    RunnerPlacementSnapshotMissing { snapshot: ContextFrontierId },
+    RunnerPlacementSnapshotMismatch { snapshot: ContextFrontierId },
     StartingSnapshotMissing { turn: TurnId },
     TerminalSnapshotMissing { turn: TurnId },
     InvalidLifecycleOrder { turn: TurnId },
