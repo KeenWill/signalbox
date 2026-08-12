@@ -155,6 +155,7 @@ struct CategoryScore {
     cases: usize,
     correct_majorities: usize,
     unstable_cases: usize,
+    stability_unmeasured_cases: usize,
     partial_cases: usize,
     unmeasured_cases: usize,
     failed_calls: usize,
@@ -444,13 +445,21 @@ async fn run(options: RunOptions) -> Result<(), String> {
             .map(|(label, _)| *label);
         let measured = !verdicts.is_empty();
         let complete = verdicts.len() == options.repeats;
-        let stable = complete && counts.len() == 1;
-        let tied = measured && majority.is_none() && counts.len() > 1;
+        // One observation cannot establish stability across repeats, so a
+        // single-repeat run reports stability as unmeasured rather than
+        // perfectly stable.
+        let stable = (options.repeats >= 2 && complete).then(|| counts.len() == 1);
+        // A tie is an equal leading count, not any majority-less spread: two
+        // approvals against one denial with a failed fourth repeat is a
+        // partial 2-1 lead, not a tie.
+        let leading = counts.values().max().copied().unwrap_or(0);
+        let tied = measured && counts.values().filter(|count| **count == leading).count() > 1;
         let correct = measured && majority == Some(case.expected.as_str());
         let score = scores.entry(case.category.clone()).or_default();
         score.cases += 1;
         score.correct_majorities += usize::from(correct);
         score.unstable_cases += usize::from(counts.len() > 1);
+        score.stability_unmeasured_cases += usize::from(measured && stable.is_none());
         score.partial_cases += usize::from(measured && !complete);
         score.unmeasured_cases += usize::from(!measured);
         score.failed_calls += failures;
@@ -483,6 +492,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 "cases": score.cases,
                 "correct_majorities": score.correct_majorities,
                 "unstable_cases": score.unstable_cases,
+                "stability_unmeasured_cases": score.stability_unmeasured_cases,
                 "partial_cases": score.partial_cases,
                 "unmeasured_cases": score.unmeasured_cases,
                 "failed_calls": score.failed_calls,
