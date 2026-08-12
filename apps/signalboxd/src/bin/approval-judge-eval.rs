@@ -19,6 +19,10 @@ use signalbox_model_provider_runtime::{RuntimeApprovalJudgeModel, approval_judge
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
+use signalbox_persistence::approval_judge_eval::{
+    ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRunId, ApprovalJudgeEvalRunRecord,
+    record_eval_run,
+};
 use signalboxd::{
     FileCredentialAccess, HubModelConfiguration, ModelAdapter,
     approval_judge_eval::{
@@ -26,7 +30,7 @@ use signalboxd::{
         judge_system_prompt, render_eval_case,
     },
     model_adapter::ConfiguredModelRuntime,
-    usage_limits,
+    provider_reported_usage, usage_limits,
 };
 
 const HELP: &str =
@@ -43,6 +47,9 @@ Options:
   --repeats <n>     Judge calls per case, n >= 1. Default 3; repeats measure verdict stability.
   --filter <text>   Keep only cases whose name or category contains <text>. Default: all cases.
   --limit <n>       Stop after selecting n cases, n >= 1. Default: no bound.
+  --database-url <url>
+                    Also record the run and each verdict in the named PostgreSQL
+                    database's eval-owned tables. Default: stdout scorecard only.
   --help            Print this reference and exit without spending quota.";
 
 const CATEGORY_INVENTORY: &[&str] = &[
@@ -81,11 +88,17 @@ struct RunOptions {
     repeats: usize,
     filter: Option<String>,
     limit: Option<usize>,
+    database_url: Option<String>,
 }
 
 enum ParsedArguments {
     Run(RunOptions),
     Help,
+}
+
+struct EvalRecording {
+    pool: sqlx::PgPool,
+    repeats: u32,
 }
 
 fn parse_arguments() -> Result<ParsedArguments, String> {
@@ -94,6 +107,7 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
     let mut repeats = 3_usize;
     let mut filter = None;
     let mut limit = None;
+    let mut database_url = None;
     let mut arguments = env::args().skip(1);
     while let Some(flag) = arguments.next() {
         let mut value = |flag: &str| {
@@ -116,6 +130,7 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
                 }
             }
             "--filter" => filter = Some(value("--filter")?),
+            "--database-url" => database_url = Some(value("--database-url")?),
             "--limit" => {
                 let bound: usize = value("--limit")?
                     .parse()
@@ -136,6 +151,7 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
         repeats,
         filter,
         limit,
+        database_url,
     }))
 }
 
@@ -273,6 +289,22 @@ async fn run(options: RunOptions) -> Result<(), String> {
             })
             .ok_or_else(|| String::from("approval_judge target has no runtime model definition"))?;
 
+    // Recording admission and the database connection both resolve before the
+    // first paid call, so neither an oversized --repeats nor an unreachable
+    // database can surface only after quota is already spent.
+    let recording = match &options.database_url {
+        Some(database_url) => {
+            let repeats = u32::try_from(options.repeats).map_err(|_| {
+                String::from("--repeats exceeds the range --database-url recording stores")
+            })?;
+            let pool = signalbox_persistence::connect_production(database_url)
+                .await
+                .map_err(|error| format!("database connection failed: {error}"))?;
+            Some(EvalRecording { pool, repeats })
+        }
+        None => None,
+    };
+
     let corpus = fs::read_to_string(&options.cases)
         .map_err(|error| format!("corpus read failed: {error}"))?;
     let digest = stable_digest(corpus.as_bytes());
@@ -369,10 +401,15 @@ async fn run(options: RunOptions) -> Result<(), String> {
 
     let mut scores: BTreeMap<String, CategoryScore> = BTreeMap::new();
     let mut case_reports = Vec::new();
+    let mut recorded_calls: Vec<ApprovalJudgeEvalCallRecord> = Vec::new();
     for (case, eval_case) in cases.iter().zip(&eval_cases) {
         let mut verdicts: Vec<ApprovalJudgeEvalVerdict> = Vec::new();
         let mut failures = 0_usize;
+        // Counts every attempt, so a failed call leaves a gap in the recorded
+        // ordinals rather than shifting later verdicts onto its position.
+        let mut attempt_ordinal = 0_u32;
         for _ in 0..options.repeats {
+            attempt_ordinal = attempt_ordinal.saturating_add(1);
             match judge_eval_case(&model, &binding, eval_case).await {
                 Ok(verdict) => {
                     // The daemon rejects verdicts whose reported usage exceeds
@@ -390,6 +427,15 @@ async fn run(options: RunOptions) -> Result<(), String> {
                             case.name
                         );
                     } else {
+                        if recording.is_some() {
+                            recorded_calls.push(ApprovalJudgeEvalCallRecord {
+                                case_name: case.name.clone(),
+                                repeat_ordinal: attempt_ordinal,
+                                recommendation: verdict.recommendation,
+                                rationale: verdict.rationale.clone(),
+                                usage: provider_reported_usage(verdict.usage),
+                            });
+                        }
                         verdicts.push(verdict);
                     }
                 }
@@ -464,10 +510,10 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let total_partial: usize = scores.values().map(|score| score.partial_cases).sum();
     let scorecard = serde_json::json!({
         "judge_selection": selection.into_uuid().to_string(),
-        "provider_model": provider_model,
-        "corpus_digest": digest,
-        "contract_digest": contract_digest,
-        "rendered_digest": rendered_digest,
+        "provider_model": provider_model.as_str(),
+        "corpus_digest": digest.as_str(),
+        "contract_digest": contract_digest.as_str(),
+        "rendered_digest": rendered_digest.as_str(),
         "repeats": options.repeats,
         "total_cases": total_cases,
         "correct_majorities": total_correct,
@@ -480,5 +526,27 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let rendered = serde_json::to_string_pretty(&scorecard)
         .map_err(|error| format!("scorecard rendering failed: {error}"))?;
     println!("{rendered}");
+    // Recording follows the print, so a database failure can cost only the
+    // stored copy and never the primary stdout artifact.
+    if let Some(recording) = recording {
+        let run = ApprovalJudgeEvalRunRecord {
+            run: ApprovalJudgeEvalRunId::from_uuid(uuid::Uuid::now_v7()),
+            selection,
+            provider_model,
+            corpus_digest: digest,
+            contract_digest,
+            rendered_digest,
+            repeats: recording.repeats,
+            scorecard,
+        };
+        record_eval_run(&recording.pool, &run, &recorded_calls)
+            .await
+            .map_err(|error| format!("database recording failed: {error}"))?;
+        eprintln!(
+            "recorded eval run {} holding {} calls",
+            run.run.into_uuid(),
+            recorded_calls.len()
+        );
+    }
     Ok(())
 }

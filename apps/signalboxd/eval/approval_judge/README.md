@@ -24,6 +24,27 @@ accuracy against `expected`, verdict stability across repeats (a case is
 unstable when its repeats disagree), and per-case rationales for reading why a
 verdict moved.
 
+## Recording runs (`--database-url`)
+
+Passing `--database-url <url>` additionally records the run in two eval-owned
+PostgreSQL tables after the scorecard prints; without the flag nothing is
+written and the stdout scorecard stays the only artifact either way.
+
+- `approval_judge_eval_run` — one row per run: the minted run identity, the
+  judge selection and resolved provider model, the scorecard's corpus, contract,
+  and rendered digests, the configured repeats, and the full scorecard as
+  `jsonb`.
+- `approval_judge_eval_call` — one row per successful judge call: the run it
+  belongs to, the case name, the one-based attempt ordinal (a failed attempt
+  records no row and leaves a gap), the recommendation and rationale, and the
+  provider-reported token-usage fields.
+
+Eval calls deliberately never enter `tool_approval_judge_model_call`: its
+triggers demand the live-request linkage — an active delegated wait and a
+reserved global call identity — that replayed synthetic cases do not have. The
+connection takes the same URL-only posture as the daemon's, so ambient `PG*`
+variables are refused rather than silently shaping it.
+
 ## Case schema
 
 One JSON object per line:
