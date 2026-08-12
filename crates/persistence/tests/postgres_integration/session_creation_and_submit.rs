@@ -1042,7 +1042,7 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
             ('10000000-0000-4000-8000-000000000134',
              'replace_session_defaults', 99, transaction_timestamp()),
             ('10000000-0000-4000-8000-000000000135',
-             'submit_input', 3, transaction_timestamp()),
+             'submit_input', 4, transaction_timestamp()),
             ('10000000-0000-4000-8000-000000000136',
              'submit_input', 99, transaction_timestamp())",
     )
@@ -2533,7 +2533,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 4, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x3ff))
     .execute(&mut *transaction)
@@ -2697,7 +2697,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 4, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x3fb))
     .execute(&mut *transaction)
@@ -2820,7 +2820,7 @@ async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 4, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x323))
     .execute(&mut *transaction)
