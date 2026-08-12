@@ -138,14 +138,19 @@ current path and device identity are locally unique.
 Each S3 bucket likewise owns the reserved object key
 `.signalbox-blob-namespace-v1`, whose complete body is the configured canonical
 `namespace_id` plus one LF. Startup reads recorded bindings before accessing the
-bucket. For an existing binding, it requires a bounded exact marker read and
-never creates a missing marker. For a new binding, it conditionally creates the
-marker with `If-None-Match: *`, then performs the same bounded exact read;
-precondition loss reads and verifies the winner. Absence, disagreement, a body
-larger than 128 bytes, or an unavailable read or conditional write fails startup
-before socket admission. This backend-resident proof makes two locator strings
-that alias one physical bucket disagree on their distinct configured namespace
-UUIDs instead of being admitted as independent replicas.
+bucket. For a new binding in a currently routed store, it conditionally creates
+the marker with `If-None-Match: *`, then performs a bounded exact read;
+precondition loss reads and verifies the winner. A currently routed existing
+binding requires that exact read and never creates a missing marker. Absence,
+disagreement, a body larger than 128 bytes, or an unavailable read or
+conditional write fails startup before socket admission. An unrouted historical
+S3 binding performs no startup I/O; before its first read operation in an
+incarnation, one shared lazy check reads and verifies the marker, with
+concurrent callers sharing the outcome. Failure makes that store candidate
+unavailable and falls through under ordinary replica selection rather than
+stopping the daemon. This backend-resident proof makes two locator strings that
+alias one physical bucket disagree on their distinct configured namespace UUIDs
+instead of being admitted as independent replicas.
 
 A `filesystem` store entry contains exactly `name`, `namespace_id`,
 `kind = "filesystem"`, and an absolute `root_directory`. An `s3` entry contains
@@ -229,6 +234,17 @@ only the remaining allowance; moving to another candidate never restarts it.
 Expiry cancels the active adapter operation, releases traversal resources, and
 uses the ordinary unavailable outcome rather than delaying a later candidate or
 caller beyond the aggregate bound.
+
+Attachment-preparation store traversal is bounded independently from scheduler
+passes: at most eight such traversals are active process-wide. A model-call pass
+releases its scheduler-pass slot before waiting for this permit or performing
+store I/O, while remaining in flight for per-session deduplication. A waiter
+holds neither scheduler capacity nor a store operation. Successful preparation
+reacquires scheduler capacity before send authorization, whose guarded
+transaction revalidates the call; unavailable preparation releases all capacity
+and leaves the call `Prepared`. The zero-attachment path acquires no blob permit
+and never relinquishes its ordinary pass slot. Thus slow 24-hour traversals
+cannot occupy the scheduler's bounded pass inventory.
 
 An S3 store currently named by at least one route is admitted for publication
 only when its bucket lifecycle configuration contains an enabled rule covering

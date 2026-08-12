@@ -395,7 +395,12 @@ the sweep (INV-007).
   passes, deduplicates hints for a session already in flight (recording one
   rerun), and keeps an in-progress sweep read alive across pass completions. A
   failed or panicked pass is logged and retried by a later hint or sweep;
-  nothing is lost because the rows are the queue.
+  nothing is lost because the rows are the queue. A pass about to perform
+  attachment store I/O relinquishes this 16-pass capacity before waiting for the
+  blob contract's separate attachment-preparation permit. Its task remains in
+  flight for per-session deduplication but does not consume a scheduler-pass
+  slot; after successful verification it reacquires a slot before send
+  authorization and its guarded transaction revalidates authority.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
@@ -463,9 +468,9 @@ end (INV-034):
 - an evidence-free turn (no model call) prepares
   `prepare_active_turn_lost_failure`: the current attempt ends
   `WithoutStop(Lost)` and the turn fails;
-- a turn holding a `Prepared` model call (`recover_after_restart`) closes the
-  call `known_failed` while its abandoned attempt still ends
-  `WithoutStop(Lost)`, and the turn fails; and
+- a turn holding a `Prepared` model call proves that no send authorization
+  existed. Startup validates its exact stored frontier and leaves the call,
+  attempt, and turn unchanged for the ordinary scheduler to retry; and
 - a turn holding an unstopped in-flight call ends the call `ambiguous` and the
   attempt `WithoutStop(Lost)`, but the turn does not terminalize: it stays
   active, parked in the `awaiting_model_call_recovery` phase naming the
