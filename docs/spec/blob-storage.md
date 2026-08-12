@@ -22,7 +22,7 @@ transactional registration behavior are verified against this implementing
 change (`agent/blob-storage-catalog`).
 
 The configuration catalog, route validation, filesystem namespace admission, and
-startup store registry are verified against PR #582
+startup store registry are verified against this implementing change
 (`agent/blob-storage-registry`).
 
 The disk-backed upload lifecycle, routed-store-only live deduplication,
