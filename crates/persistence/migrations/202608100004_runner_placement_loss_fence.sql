@@ -207,7 +207,8 @@ BEGIN
      WHERE enrollment_id = NEW.registration_enrollment_id
      FOR SHARE;
     IF NOT FOUND THEN
-        RETURN NEW;
+        RAISE EXCEPTION 'runner lease offer lacks connection authority'
+            USING ERRCODE = '23514';
     END IF;
     SELECT *
       INTO placement
