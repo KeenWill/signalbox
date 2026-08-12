@@ -7,13 +7,17 @@
 
 use std::{error::Error, fmt};
 
+#[cfg(feature = "postgres-integration")]
+use std::num::NonZeroU64;
+
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_domain::{
     AcceptedInputId, BoundChildAction, ContextCompactionId, ContextFrontierId, DelegationMessageId,
     DelegationOutcomeKind, DelegationOutcomeReason, DelegationWaitMode, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallId, ModelSelectionRequest,
+    ModelAlias, ModelCallDisposition, ModelCallId, ModelSelectionRequest, RunnerEnrollmentId,
+    RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerWorkingDirectory,
     SemanticTranscriptEntryId, SessionId, SessionInputPosition, SessionModelSettingsChanged,
     ToolApprovalResolution, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
     TurnModelSettingsResolved,
@@ -28,12 +32,16 @@ use crate::{
         defaults_version_to_numeric, delegation_outcome_kind_from_str,
         delegation_outcome_reason_from_str, delegation_policy_kind_from_str,
         delegation_update_kind_from_str, delegation_wait_mode_from_str,
-        delegation_wake_subject_from_str, durable_command_id_from_uuid,
-        input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
-        model_settings_from_json, model_settings_overlay_from_json, session_id_from_uuid,
-        session_id_to_uuid, turn_id_to_uuid,
+        delegation_wake_subject_from_str, dispatched_runner_state_from_str,
+        dispatched_runner_state_to_str, durable_command_id_from_uuid, input_position_from_numeric,
+        input_position_to_numeric, model_change_adjustments_from_json, model_settings_from_json,
+        model_settings_overlay_from_json, runner_sandbox_from_str, runner_sandbox_to_str,
+        session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
     },
 };
+
+#[cfg(feature = "postgres-integration")]
+use crate::runner_protocol::RunnerConnectionEpoch;
 
 const SESSION_CREATED: &str = "session_created";
 const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
@@ -50,6 +58,7 @@ const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const TURN_CANCELLED: &str = "turn_cancelled";
 const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
+const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
 const DELEGATION_UPDATE: &str = "delegation_update";
 const DELEGATION_WAKE: &str = "delegation_wake";
 const STORAGE_VERSION: i16 = 1;
@@ -217,6 +226,19 @@ pub enum DispatchedOutboxEventKind {
         operation: DispatchedReconciliationOperation,
         /// Exact terminal frontier.
         terminal_frontier: ContextFrontierId,
+    },
+    /// A session-visible runner placement or connection state changed.
+    RunnerStateTransition {
+        /// Exact runner named by the transition.
+        runner: RunnerId,
+        /// Positive placement revision whose immutable facts are projected.
+        placement_revision: RunnerGeneration,
+        /// Placement-selected sandbox profile.
+        sandbox: RunnerSandboxProfile,
+        /// Caller-selected directory, absent when the runner default was selected.
+        working_directory: Option<RunnerWorkingDirectory>,
+        /// Closed state projected to followers.
+        state: DispatchedRunnerState,
     },
     /// One typed relationship update committed for a parent or message recipient.
     DelegationUpdate(DispatchedDelegationUpdate),
@@ -433,6 +455,27 @@ pub enum DispatchedToolBatchState {
     },
 }
 
+/// Closed runner state carried by one dispatched session transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedRunnerState {
+    /// Initial dispatch pinned the selected runner.
+    Pinned,
+    /// The runner's current connection missed its first heartbeat.
+    Suspect,
+    /// A heartbeat acknowledgement recovered that same suspect connection.
+    Connected,
+    /// An exact runner selection was lost before initial pinning.
+    RunnerLostBeforePin,
+    /// A pinned runner became unavailable.
+    RunnerLost,
+    /// A checked successor runner replaced the prior placement.
+    Replaced,
+    /// Checked recovery retained the runner but changed the selected directory.
+    WorkingDirectoryChanged,
+    /// The user abandoned a lost runner placement.
+    Abandoned,
+}
+
 /// Exact operation that made a turn require reconciliation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DispatchedReconciliationOperation {
@@ -531,6 +574,8 @@ pub enum OutboxCorruption {
     InvalidDelegationEvent,
     /// A settings event disagreed with its immutable referenced records.
     InvalidModelSettingsEvent,
+    /// A runner event had an inconsistent or unknown typed shape.
+    InvalidRunnerEvent,
 }
 
 impl fmt::Display for OutboxCorruption {
@@ -560,6 +605,7 @@ impl fmt::Display for OutboxCorruption {
             Self::InvalidModelCallState => "outbox model-call state is invalid",
             Self::InvalidDelegationEvent => "outbox delegation event is invalid",
             Self::InvalidModelSettingsEvent => "outbox model-settings event is invalid",
+            Self::InvalidRunnerEvent => "outbox runner event is invalid",
         })
     }
 }
@@ -1917,6 +1963,9 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
+        RUNNER_STATE_TRANSITION => {
+            load_runner_state_transition(transaction, expected_sequence, stored_session).await?
+        }
         DELEGATION_UPDATE => DispatchedOutboxEventKind::DelegationUpdate(
             load_delegation_update(transaction, expected_sequence, stored_session).await?,
         ),
@@ -1935,6 +1984,222 @@ async fn load_event(
             kind,
         }),
     ))
+}
+
+async fn load_runner_state_transition(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
+    let row = sqlx::query(
+        "SELECT event.runner_id, event.placement_revision,
+                event.sandbox_profile, event.working_directory,
+                event.state_kind, event.connection_enrollment_id,
+                event.connection_epoch, event.connection_event_ordinal,
+                placement.event_kind AS source_event_kind,
+                placement.state_kind AS source_state_kind,
+                placement.requested_sandbox_profile AS source_sandbox_profile,
+                placement.requested_working_directory AS source_working_directory,
+                placement.selector_runner_id AS source_selector_runner_id,
+                placement.pinned_runner_id AS source_pinned_runner_id,
+                placement.lost_runner_id AS source_lost_runner_id,
+                placement.registration_enrollment_id AS source_registration_enrollment_id,
+                connection.state_kind AS source_connection_state_kind,
+                connection.cause_kind AS source_connection_cause_kind,
+                CASE
+                    WHEN connection.cause_kind = 'established' THEN
+                        connection.event_ordinal = 1
+                        AND connection_prior.connection_epoch + 1 =
+                            connection.connection_epoch
+                        AND connection_prior.state_kind = 'suspect'
+                    WHEN connection.cause_kind = 'heartbeat_recovered' THEN
+                        connection_prior.connection_epoch =
+                            connection.connection_epoch
+                        AND connection_prior.event_ordinal + 1 =
+                            connection.event_ordinal
+                        AND connection_prior.state_kind = 'suspect'
+                    ELSE false
+                END AS source_connection_predecessor_matches,
+                prior.lost_runner_id AS prior_lost_runner_id,
+                prior.requested_working_directory AS prior_working_directory
+           FROM runner_state_transition_outbox_event AS event
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = event.session_id
+            AND placement.event_ordinal = event.placement_event_ordinal
+            AND placement.placement_revision = event.placement_revision
+           LEFT JOIN runner_connection_event AS connection
+             ON connection.enrollment_id = event.connection_enrollment_id
+            AND connection.connection_epoch = event.connection_epoch
+            AND connection.event_ordinal = event.connection_event_ordinal
+           LEFT JOIN LATERAL (
+                SELECT earlier.connection_epoch, earlier.event_ordinal,
+                       earlier.state_kind
+                  FROM runner_connection_event AS earlier
+                 WHERE earlier.enrollment_id = connection.enrollment_id
+                   AND (
+                        earlier.connection_epoch < connection.connection_epoch
+                        OR (
+                            earlier.connection_epoch = connection.connection_epoch
+                            AND earlier.event_ordinal < connection.event_ordinal
+                        )
+                   )
+                 ORDER BY earlier.connection_epoch DESC,
+                          earlier.event_ordinal DESC
+                 LIMIT 1
+           ) AS connection_prior ON true
+           LEFT JOIN runner_session_placement_record AS prior
+             ON prior.session_id = placement.session_id
+            AND prior.event_ordinal + 1 = placement.event_ordinal
+          WHERE event.event_sequence = $1
+            AND event.event_kind = $2
+            AND event.storage_version = $3
+            AND event.session_id = $4",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(RUNNER_STATE_TRANSITION)
+    .bind(STORAGE_VERSION)
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let placement_revision = RunnerGeneration::try_from_u64(decode_positive_sequence(
+        row.try_get("placement_revision")?,
+    )?)
+    .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
+    let sandbox_text = row.try_get::<String, _>("sandbox_profile")?;
+    let sandbox =
+        runner_sandbox_from_str(&sandbox_text).ok_or(OutboxCorruption::InvalidRunnerEvent)?;
+    let working_directory = row
+        .try_get::<Option<String>, _>("working_directory")?
+        .map(RunnerWorkingDirectory::try_new)
+        .transpose()
+        .map_err(|_| OutboxCorruption::InvalidRunnerEvent)?;
+    let state_kind = row.try_get::<String, _>("state_kind")?;
+    let state = dispatched_runner_state_from_str(&state_kind)
+        .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
+    let connection_source_shape_matches = match state {
+        DispatchedRunnerState::Suspect | DispatchedRunnerState::Connected => {
+            row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
+                .is_some()
+                && row
+                    .try_get::<Option<Decimal>, _>("connection_epoch")?
+                    .is_some()
+                && row
+                    .try_get::<Option<Decimal>, _>("connection_event_ordinal")?
+                    .is_some()
+        }
+        DispatchedRunnerState::Pinned
+        | DispatchedRunnerState::RunnerLostBeforePin
+        | DispatchedRunnerState::RunnerLost
+        | DispatchedRunnerState::Replaced
+        | DispatchedRunnerState::WorkingDirectoryChanged
+        | DispatchedRunnerState::Abandoned => {
+            row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
+                .is_none()
+                && row
+                    .try_get::<Option<Decimal>, _>("connection_epoch")?
+                    .is_none()
+                && row
+                    .try_get::<Option<Decimal>, _>("connection_event_ordinal")?
+                    .is_none()
+        }
+    };
+    let runner_uuid = row.try_get::<Uuid, _>("runner_id")?;
+    let source_sandbox = row.try_get::<String, _>("source_sandbox_profile")?;
+    let source_working_directory = row.try_get::<Option<String>, _>("source_working_directory")?;
+    if source_sandbox != row.try_get::<String, _>("sandbox_profile")?
+        || source_working_directory != row.try_get::<Option<String>, _>("working_directory")?
+    {
+        return Err(OutboxCorruption::InvalidRunnerEvent.into());
+    }
+    let source_event = row.try_get::<String, _>("source_event_kind")?;
+    let source_state = row.try_get::<String, _>("source_state_kind")?;
+    let source_selector = row.try_get::<Option<Uuid>, _>("source_selector_runner_id")?;
+    let source_pinned = row.try_get::<Option<Uuid>, _>("source_pinned_runner_id")?;
+    let source_lost = row.try_get::<Option<Uuid>, _>("source_lost_runner_id")?;
+    let source_matches = match state {
+        DispatchedRunnerState::Pinned => {
+            source_event == "pinned"
+                && source_state == "pinned"
+                && source_pinned == Some(runner_uuid)
+        }
+        DispatchedRunnerState::Suspect => {
+            source_state == "pinned"
+                && source_pinned == Some(runner_uuid)
+                && row.try_get::<Option<Uuid>, _>("source_registration_enrollment_id")?
+                    == row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
+                && row
+                    .try_get::<Option<String>, _>("source_connection_state_kind")?
+                    .as_deref()
+                    == Some("suspect")
+                && row
+                    .try_get::<Option<String>, _>("source_connection_cause_kind")?
+                    .as_deref()
+                    == Some("heartbeat_missed")
+        }
+        DispatchedRunnerState::Connected => {
+            source_state == "pinned"
+                && source_pinned == Some(runner_uuid)
+                && row.try_get::<Option<Uuid>, _>("source_registration_enrollment_id")?
+                    == row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
+                && row
+                    .try_get::<Option<String>, _>("source_connection_state_kind")?
+                    .as_deref()
+                    == Some("connected")
+                && matches!(
+                    row.try_get::<Option<String>, _>("source_connection_cause_kind")?
+                        .as_deref(),
+                    Some("established" | "heartbeat_recovered")
+                )
+                && row.try_get::<Option<bool>, _>("source_connection_predecessor_matches")?
+                    == Some(true)
+        }
+        DispatchedRunnerState::RunnerLostBeforePin => {
+            source_event == "runner_lost_before_pin"
+                && source_state == "runner_lost_before_pin"
+                && source_lost == Some(runner_uuid)
+        }
+        DispatchedRunnerState::RunnerLost => {
+            source_event == "runner_lost"
+                && source_state == "runner_lost"
+                && source_lost == Some(runner_uuid)
+        }
+        DispatchedRunnerState::Replaced => {
+            (source_event == "pre_pin_replaced"
+                && source_state == "unpinned"
+                && source_selector == Some(runner_uuid))
+                || (source_event == "runner_replaced"
+                    && source_state == "pinned"
+                    && source_pinned == Some(runner_uuid)
+                    && !(row.try_get::<Option<Uuid>, _>("prior_lost_runner_id")?
+                        == Some(runner_uuid)
+                        && row.try_get::<Option<String>, _>("prior_working_directory")?
+                            != source_working_directory))
+        }
+        DispatchedRunnerState::WorkingDirectoryChanged => {
+            source_event == "runner_replaced"
+                && source_state == "pinned"
+                && source_pinned == Some(runner_uuid)
+                && row.try_get::<Option<Uuid>, _>("prior_lost_runner_id")? == Some(runner_uuid)
+                && row.try_get::<Option<String>, _>("prior_working_directory")?
+                    != source_working_directory
+        }
+        DispatchedRunnerState::Abandoned => {
+            source_event == "abandoned"
+                && source_state == "runner_abandoned"
+                && source_lost == Some(runner_uuid)
+        }
+    };
+    if !connection_source_shape_matches || !source_matches {
+        return Err(OutboxCorruption::InvalidRunnerEvent.into());
+    }
+    Ok(DispatchedOutboxEventKind::RunnerStateTransition {
+        runner: RunnerId::from_uuid(runner_uuid),
+        placement_revision,
+        sandbox,
+        working_directory,
+        state,
+    })
 }
 
 async fn load_delegation_update(
@@ -2374,6 +2639,123 @@ fn requested_from_frozen(selection: &FrozenModelSelection) -> ModelSelectionRequ
     }
 }
 
+pub(crate) struct RunnerConnectionOutboxSource {
+    pub(crate) enrollment: RunnerEnrollmentId,
+    pub(crate) epoch: u64,
+    pub(crate) event_ordinal: u64,
+}
+
+pub(crate) struct RunnerStateOutboxSource {
+    pub(crate) placement_event_ordinal: u64,
+    pub(crate) connection: Option<RunnerConnectionOutboxSource>,
+}
+
+pub(crate) struct RunnerStateOutboxEvent {
+    pub(crate) session: SessionId,
+    pub(crate) runner: RunnerId,
+    pub(crate) placement_revision: RunnerGeneration,
+    pub(crate) sandbox: RunnerSandboxProfile,
+    pub(crate) working_directory: Option<RunnerWorkingDirectory>,
+    pub(crate) state: DispatchedRunnerState,
+    pub(crate) source: RunnerStateOutboxSource,
+}
+
+/// Exact relational source used only by runner PostgreSQL integration tests.
+#[cfg(feature = "postgres-integration")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct RunnerStateTransitionOutboxTestSource {
+    placement_event_ordinal: u64,
+    connection: Option<(RunnerEnrollmentId, RunnerConnectionEpoch, NonZeroU64)>,
+}
+
+#[cfg(feature = "postgres-integration")]
+impl RunnerStateTransitionOutboxTestSource {
+    /// Names one placement-record source.
+    pub const fn placement(placement_event_ordinal: u64) -> Self {
+        Self {
+            placement_event_ordinal,
+            connection: None,
+        }
+    }
+
+    /// Names one placement record plus exact connection event.
+    pub const fn connection(
+        placement_event_ordinal: u64,
+        enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        event_ordinal: NonZeroU64,
+    ) -> Self {
+        Self {
+            placement_event_ordinal,
+            connection: Some((enrollment, epoch, event_ordinal)),
+        }
+    }
+
+    fn into_source(self) -> RunnerStateOutboxSource {
+        RunnerStateOutboxSource {
+            placement_event_ordinal: self.placement_event_ordinal,
+            connection: self.connection.map(|(enrollment, epoch, event_ordinal)| {
+                RunnerConnectionOutboxSource {
+                    enrollment,
+                    epoch: epoch.get(),
+                    event_ordinal: event_ordinal.get(),
+                }
+            }),
+        }
+    }
+}
+
+/// Complete runner transition event used only by PostgreSQL integration tests.
+#[cfg(feature = "postgres-integration")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct RunnerStateTransitionOutboxTestEvent {
+    session: SessionId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    sandbox: RunnerSandboxProfile,
+    working_directory: Option<RunnerWorkingDirectory>,
+    state: DispatchedRunnerState,
+    source: RunnerStateTransitionOutboxTestSource,
+}
+
+#[cfg(feature = "postgres-integration")]
+impl RunnerStateTransitionOutboxTestEvent {
+    /// Constructs one complete test-only runner transition event.
+    pub const fn new(
+        session: SessionId,
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+        working_directory: Option<RunnerWorkingDirectory>,
+        state: DispatchedRunnerState,
+        source: RunnerStateTransitionOutboxTestSource,
+    ) -> Self {
+        Self {
+            session,
+            runner,
+            placement_revision,
+            sandbox,
+            working_directory,
+            state,
+            source,
+        }
+    }
+
+    fn into_event(self) -> RunnerStateOutboxEvent {
+        RunnerStateOutboxEvent {
+            session: self.session,
+            runner: self.runner,
+            placement_revision: self.placement_revision,
+            sandbox: self.sandbox,
+            working_directory: self.working_directory,
+            state: self.state,
+            source: self.source.into_source(),
+        }
+    }
+}
+
 pub(crate) enum OutboxEvent {
     SessionCreated {
         session: SessionId,
@@ -2463,6 +2845,11 @@ pub(crate) enum OutboxEvent {
         attempt: ToolAttemptId,
         terminal_frontier: ContextFrontierId,
     },
+    #[allow(
+        dead_code,
+        reason = "runner transition producers land in the child orchestration transactions"
+    )]
+    RunnerStateTransition(RunnerStateOutboxEvent),
 }
 
 pub(crate) enum ModelCallOutboxState {
@@ -2624,7 +3011,87 @@ pub(crate) async fn append(
             )
             .await
         }
+        OutboxEvent::RunnerStateTransition(event) => {
+            append_runner_state_transition(connection, event).await
+        }
     }
+}
+
+#[cfg(feature = "postgres-integration")]
+#[doc(hidden)]
+pub async fn append_runner_state_transition_for_test(
+    pool: &PgPool,
+    event: RunnerStateTransitionOutboxTestEvent,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    append(
+        transaction.as_mut(),
+        OutboxEvent::RunnerStateTransition(event.into_event()),
+    )
+    .await?;
+    transaction.commit().await
+}
+
+async fn append_runner_state_transition(
+    connection: &mut PgConnection,
+    event: RunnerStateOutboxEvent,
+) -> Result<(), sqlx::Error> {
+    let RunnerStateOutboxEvent {
+        session,
+        runner,
+        placement_revision,
+        sandbox,
+        working_directory,
+        state,
+        source,
+    } = event;
+    let sandbox = runner_sandbox_to_str(sandbox);
+    let state = dispatched_runner_state_to_str(state);
+    let (connection_enrollment, connection_epoch, connection_event_ordinal) =
+        match source.connection {
+            Some(connection) => (
+                Some(connection.enrollment.into_uuid()),
+                Some(Decimal::from(connection.epoch)),
+                Some(Decimal::from(connection.event_ordinal)),
+            ),
+            None => (None, None, None),
+        };
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO runner_state_transition_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             runner_id, placement_revision, sandbox_profile,
+             working_directory, state_kind, placement_event_ordinal,
+             connection_enrollment_id, connection_epoch,
+             connection_event_ordinal)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7, $8, $9, $10, $11, $12
+           FROM header",
+    )
+    .bind(RUNNER_STATE_TRANSITION)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement_revision.get()))
+    .bind(sandbox)
+    .bind(
+        working_directory
+            .as_ref()
+            .map(RunnerWorkingDirectory::as_str),
+    )
+    .bind(state)
+    .bind(Decimal::from(source.placement_event_ordinal))
+    .bind(connection_enrollment)
+    .bind(connection_epoch)
+    .bind(connection_event_ordinal)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn append_tool_approval_decided(

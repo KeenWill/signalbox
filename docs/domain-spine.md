@@ -104,6 +104,28 @@ pub enum Actor {
 }
 ```
 
+## domain: blob
+
+```rust
+pub struct BlobDigest(/* private [u8; 32] */);
+impl BlobDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+    pub fn digest(bytes: &[u8]) -> Self;
+}
+
+pub enum BlobDigestParseFailure {
+    MissingSha256Prefix,
+    InvalidLength,
+    InvalidHex,
+}
+
+pub struct BlobDigestParseError { /* private */ }
+impl BlobDigestParseError {
+    // accessors: rejected, failure
+}
+```
+
 ## domain: imported_conversation
 
 ```rust
@@ -8291,6 +8313,9 @@ pub enum RunnerDomainError {
 pub struct RunnerCapabilityClass(/* private */);
 pub struct CredentialProfileName(/* private */);
 pub struct RunnerWorkingDirectory(/* private */);
+impl RunnerWorkingDirectory {
+    pub const MAX_BYTES: usize;
+}
 pub struct WorkspaceRepositoryKey(/* private */);
 pub struct CanonicalCloneUrlDigest(/* private */);
 pub struct WorkspaceRevision(/* private */);
@@ -10270,6 +10295,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | -------------------------------------------------- | --------------------- |
 | domain: lib.rs identities                          | 27                    |
 | domain: actor                                      | 1                     |
+| domain: blob                                       | 3                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
@@ -10306,7 +10332,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **771 (+12 free fn)** |
+| **signalbox-domain total**                         | **774 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
