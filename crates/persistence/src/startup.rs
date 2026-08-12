@@ -438,7 +438,9 @@ where
                     turn: delegated_turn,
                 }
             }
-            "awaiting_tool_approval" | "awaiting_child" => StartupScanSessionOutcome::NoActiveTurn,
+            "awaiting_tool_approval" | "awaiting_child" | "awaiting_runner_recovery" => {
+                StartupScanSessionOutcome::NoActiveTurn
+            }
             _ => {
                 return Err(StartupScanCorruption::Inconsistent("delegated active phase").into());
             }
@@ -487,7 +489,8 @@ where
         }
         Some(signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. })
         | Some(signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. })
-        | Some(signalbox_domain::ActiveTurnPhase::AwaitingChild { .. }) => {
+        | Some(signalbox_domain::ActiveTurnPhase::AwaitingChild { .. })
+        | Some(signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }) => {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::NoActiveTurn,
             ));

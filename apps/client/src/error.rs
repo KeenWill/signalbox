@@ -47,6 +47,7 @@ pub(crate) enum ClientError {
     AmbiguousMutation,
     Input(&'static str),
     TurnRecoveryRequired,
+    RunnerRecoveryRequired,
     TurnFailed(Option<FailedModelCallCause>),
     TurnRefused,
     TurnCancelled,
@@ -128,6 +129,7 @@ impl ClientError {
             | Self::AmbiguousMutation
             | Self::Input(_)
             | Self::TurnRecoveryRequired
+            | Self::RunnerRecoveryRequired
             | Self::TurnFailed(_)
             | Self::TurnRefused
             | Self::TurnCancelled
@@ -209,6 +211,10 @@ impl fmt::Display for ClientError {
             Self::TurnRecoveryRequired => formatter.write_str(
                 "the submitted turn requires model-call recovery that the terminal cannot perform",
             ),
+            Self::RunnerRecoveryRequired => formatter.write_str(
+                "the submitted turn awaits lost-runner replacement or stop_turn before \
+                     abandonment",
+            ),
             Self::TurnFailed(None) => formatter.write_str("the submitted turn failed"),
             Self::TurnFailed(Some(cause)) => write!(
                 formatter,
@@ -246,6 +252,7 @@ impl Error for ClientError {
             | Self::SourceExceedsFrame
             | Self::ScanIncomplete { .. }
             | Self::TurnRecoveryRequired
+            | Self::RunnerRecoveryRequired
             | Self::TurnFailed(_)
             | Self::TurnRefused
             | Self::TurnCancelled

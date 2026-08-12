@@ -648,6 +648,15 @@ pub struct EndedTurnAttempt {
 }
 
 impl EndedTurnAttempt {
+    pub(crate) const fn reconstitute_yielded(id: crate::TurnAttemptId) -> Self {
+        Self {
+            id,
+            end: AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+            },
+        }
+    }
+
     /// Returns the identity preserved from the current attempt.
     pub const fn id(&self) -> crate::TurnAttemptId {
         self.id

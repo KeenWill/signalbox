@@ -1,5 +1,9 @@
 # Turn lifecycle and scheduling
 
+The runner-recovery active-phase algebra, checked persistence reconstitution,
+and preserved interrupt/stop authority were verified against this PR
+(`agent/runner-awaiting-recovery-persistence`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 

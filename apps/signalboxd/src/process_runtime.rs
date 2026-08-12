@@ -163,7 +163,7 @@ use signalbox_process_protocol::{
     ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
     ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
-    ModelSettingsSnapshot as WireModelSettingsSnapshot, ProtocolVersion,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot, PositiveCanonicalU64, ProtocolVersion,
     ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
@@ -12067,6 +12067,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
         } => TurnState::ActiveAwaitingToolRecovery {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_tool_attempt_id: wire_uuid(recovery_attempt.into_uuid()),
+        },
+        ProcessTurnState::ActiveAwaitingRunnerRecovery {
+            runner,
+            placement_revision,
+            interrupted_tool_attempt,
+        } => TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: wire_uuid(runner.into_uuid()),
+            placement_revision: PositiveCanonicalU64::from(*placement_revision),
+            tool_attempt_id: interrupted_tool_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
         },
         ProcessTurnState::Failed {
             terminal_frontier,

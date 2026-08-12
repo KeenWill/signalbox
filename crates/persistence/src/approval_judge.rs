@@ -693,7 +693,8 @@ async fn persist_successor_phase(
             require_single(rows, "delegated tool execution phase")?;
         }
         ActiveTurnPhase::AwaitingChild { .. }
-        | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+        | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
             return Err(ApprovalJudgeCorruption::Inconsistent("delegate entered recovery").into());
         }
     }
