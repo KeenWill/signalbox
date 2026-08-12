@@ -87,7 +87,7 @@ mod tests {
     use super::PromotePendingRunnerRequest;
     use crate::InvalidDurableCommandId;
 
-    /// S32 / INV-001: reserved durable-command identities fail before the
+    /// INV-001: reserved durable-command identities fail before the
     /// pending-runner promotion transaction can observe a request.
     #[test]
     fn inv001_promotion_request_rejects_reserved_command_identifiers() {
