@@ -376,8 +376,24 @@ async fn ensure_store_binding(
     transaction: &mut Transaction<'_, Postgres>,
     supplied: &BlobStoreBindingRecord,
 ) -> Result<(), BlobCatalogRepositoryError> {
+    let namespace_for_name: Option<Uuid> = sqlx::query_scalar(
+        "SELECT namespace_id
+           FROM blob_store_binding
+          WHERE store_name = $1",
+    )
+    .bind(supplied.store().as_str())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(namespace_id) = namespace_for_name {
+        if namespace_id == supplied.namespace_id() {
+            return Ok(());
+        }
+        return Err(BlobCatalogCorruption::StoreNamespaceMismatch.into());
+    }
+
     // Store bindings are deployment-time facts. Serialize their admission so
     // concurrent new names cannot both observe the final free catalog slot.
+    // The ordinary established-binding path above remains lock-free.
     sqlx::query("LOCK TABLE blob_store_binding IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut **transaction)
         .await?;
