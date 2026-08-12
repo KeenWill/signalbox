@@ -338,7 +338,7 @@ Representation rules, all enforced in the schema:
   connections until a checked replacement installs a fresh baseline. This is the
   implemented not-yet-projected placement fence; bounded session propagation
   remains the committed unimplemented transaction described below.
-- Migration `202608100005` gives every new durable connection-loss epoch a
+- Migration `202608110006` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction. Migration backfill marks a
   loss completed only when no affected current placement remains: losses already
   absorbed into `202608100004`'s compatibility baseline complete, while a loss
