@@ -4201,7 +4201,7 @@ pub enum ErrorCode {
     Internal,
 }
 
-/// Closed connection-local owner of the process-wide bulk-ingest permit.
+/// Closed connection-local holder of the process-wide bulk-ingest permit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BulkIngestKind {
