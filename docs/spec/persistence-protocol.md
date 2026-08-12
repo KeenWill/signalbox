@@ -2,7 +2,9 @@
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
-(`agent/runner-event-outbox-persistence`).
+(`agent/runner-event-outbox-persistence`). The established-successor outbox
+source check was re-verified against this PR
+(`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
@@ -126,8 +128,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-nine files, `202607180001` through
-`202608110004` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — seventy files, `202607180001` through
+`202608110015` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -235,7 +237,7 @@ Implemented table families (across the forward-only migrations):
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly
   one ordered lifecycle effect and outbox event atomically;
-- migration `202608110004` adds `tool_approval_user_override` — one armed,
+- migration `202608110015` adds `tool_approval_user_override` — one armed,
   append-only user override per delegate-denied request, linking the denied
   request, its denying judge call, and the applied
   `override_denied_tool_request_command` — and the UNIQUE
