@@ -27,7 +27,9 @@ use crate::{
         runner_enrollment_state_to_str, runner_non_lost_connection_state_from_str,
         runner_non_lost_connection_state_to_str,
     },
-    runner_protocol::RunnerConnectionState,
+    runner_protocol::{
+        RunnerConnectionState, RunnerEnrollmentAuthority, encode_enrollment_authority,
+    },
 };
 
 const STORAGE_VERSION: i16 = 1;
@@ -623,7 +625,7 @@ async fn load_record(
                 result_registration_revision, active_runner_id,
                 active_connection_state,
                 CASE
-                    WHEN command.result_kind <> 'applied' THEN TRUE
+                    WHEN command.result_kind <> $2 THEN TRUE
                     ELSE EXISTS (
                         SELECT 1
                           FROM runner_enrollment_request_receipt AS receipt
@@ -653,30 +655,46 @@ async fn load_record(
                             ON pending_audit.enrollment_id =
                                    command.result_enrollment_id
                            AND pending_audit.revision = 1
-                           AND pending_audit.state_kind = 'pending'
+                           AND pending_audit.state_kind = $3
                           JOIN runner_enrollment_audit AS active_audit
                             ON active_audit.enrollment_id =
                                    command.result_enrollment_id
                            AND active_audit.revision = 2
-                           AND active_audit.state_kind = 'active'
+                           AND active_audit.state_kind = $4
                          WHERE receipt.request_id = command.pending_request_id
                            AND receipt.enrollment_id =
                                    command.result_enrollment_id
                            AND receipt.registration_revision =
                                    command.result_registration_revision
-                           AND receipt.authority_kind = 'replacement_pending'
+                           AND receipt.authority_kind = $5
                            AND pending.predecessor_enrollment_id =
                                    command.predecessor_enrollment_id
                            AND pending.predecessor_loss_epoch =
                                    command.predecessor_loss_epoch
-                           AND candidate_connection.state_kind = 'connected'
-                           AND predecessor_connection.state_kind = 'lost'
+                           AND candidate_connection.state_kind = $6
+                           AND predecessor_connection.state_kind = $7
                     )
                 END AS applied_evidence_valid
            FROM promote_pending_runner_command AS command
           WHERE command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
+    .bind(promote_pending_runner_result_to_str(
+        PromotePendingRunnerResultStorageKind::Applied,
+    ))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Pending,
+    ))
+    .bind(runner_enrollment_state_to_str(
+        RunnerEnrollmentState::Active,
+    ))
+    .bind(encode_enrollment_authority(
+        RunnerEnrollmentAuthority::ReplacementPending,
+    ))
+    .bind(runner_connection_state_to_str(
+        RunnerConnectionState::Connected,
+    ))
+    .bind(runner_connection_state_to_str(RunnerConnectionState::Lost))
     .fetch_optional(&mut *connection)
     .await?;
     row.map(|row| decode_record(command_id, row)).transpose()

@@ -8,7 +8,9 @@ transition into runner recovery was verified against this PR
 resumption of that transition were verified against this PR
 (`agent/runner-loss-daemon-propagation`). Registration-triggered loss uses the
 same runner-recovery turn boundary and is verified against this PR
-(`agent/runner-registration-reconciliation`).
+(`agent/runner-registration-reconciliation`). Queued activation across the
+latest runner-placement frontier is verified against this PR
+(`agent/runner-placement-semantic-persistence`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).

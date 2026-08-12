@@ -8513,7 +8513,9 @@ fn decode_enrollment_authority(
     }
 }
 
-const fn encode_enrollment_authority(authority: RunnerEnrollmentAuthority) -> &'static str {
+pub(crate) const fn encode_enrollment_authority(
+    authority: RunnerEnrollmentAuthority,
+) -> &'static str {
     match authority {
         RunnerEnrollmentAuthority::Active => "active",
         RunnerEnrollmentAuthority::ReplacementPending => "replacement_pending",

@@ -184,6 +184,295 @@ CREATE TRIGGER session_runner_placement_frontier_rejects_truncate
 BEFORE TRUNCATE ON session_runner_placement_frontier
 FOR EACH STATEMENT EXECUTE FUNCTION reject_immutable_record_change();
 
+-- Turn activation treats the latest relocation boundary as part of the
+-- authoritative predecessor prefix. The helper keeps the existing imported
+-- seed and predecessor rules while admitting that one exact intervening
+-- boundary before the fresh origin entry.
+CREATE FUNCTION turn_starting_frontier_extends_current_base(
+    checked_session_id uuid,
+    checked_starting_frontier_id uuid,
+    ordinary_base_frontier_id uuid
+)
+RETURNS boolean LANGUAGE plpgsql STABLE AS $function$
+DECLARE
+    placement_base_frontier_id uuid;
+    effective_base_frontier_id uuid;
+    starting_member_count numeric(20, 0);
+    ordinary_member_count numeric(20, 0);
+    placement_member_count numeric(20, 0);
+    effective_member_count numeric(20, 0);
+    missing_member_count bigint;
+BEGIN
+    SELECT frontier.member_count
+      INTO starting_member_count
+      FROM context_frontier AS frontier
+     WHERE frontier.owning_session_id = checked_session_id
+       AND frontier.context_frontier_id = checked_starting_frontier_id;
+    IF starting_member_count IS NULL THEN
+        RETURN false;
+    END IF;
+
+    SELECT pointer.context_frontier_id
+      INTO placement_base_frontier_id
+      FROM runner_current_session_placement AS head
+      JOIN runner_session_placement_record AS placement
+        ON placement.session_id = head.session_id
+       AND placement.event_ordinal = head.event_ordinal
+      JOIN session_runner_placement_frontier AS pointer
+        ON pointer.session_id = placement.session_id
+       AND pointer.placement_revision = placement.placement_revision
+     WHERE head.session_id = checked_session_id;
+
+    IF ordinary_base_frontier_id IS NULL
+       AND placement_base_frontier_id IS NULL
+    THEN
+        RETURN starting_member_count = 1;
+    END IF;
+    IF ordinary_base_frontier_id IS NULL THEN
+        effective_base_frontier_id := placement_base_frontier_id;
+    ELSIF placement_base_frontier_id IS NULL THEN
+        effective_base_frontier_id := ordinary_base_frontier_id;
+    ELSE
+        SELECT member_count
+          INTO ordinary_member_count
+          FROM context_frontier
+         WHERE owning_session_id = checked_session_id
+           AND context_frontier_id = ordinary_base_frontier_id;
+        SELECT member_count
+          INTO placement_member_count
+          FROM context_frontier
+         WHERE owning_session_id = checked_session_id
+           AND context_frontier_id = placement_base_frontier_id;
+        IF ordinary_member_count IS NULL OR placement_member_count IS NULL THEN
+            RETURN false;
+        END IF;
+        IF ordinary_member_count <= placement_member_count
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS ordinary_member
+                  LEFT JOIN context_frontier_member AS placement_member
+                    ON placement_member.owning_session_id = checked_session_id
+                   AND placement_member.context_frontier_id =
+                           placement_base_frontier_id
+                   AND placement_member.member_position =
+                           ordinary_member.member_position
+                   AND placement_member.source_session_id =
+                           ordinary_member.source_session_id
+                   AND placement_member.semantic_entry_id =
+                           ordinary_member.semantic_entry_id
+                 WHERE ordinary_member.owning_session_id = checked_session_id
+                   AND ordinary_member.context_frontier_id =
+                           ordinary_base_frontier_id
+                   AND placement_member.member_position IS NULL
+           )
+        THEN
+            effective_base_frontier_id := placement_base_frontier_id;
+        ELSIF placement_member_count <= ordinary_member_count
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS placement_member
+                  LEFT JOIN context_frontier_member AS ordinary_member
+                    ON ordinary_member.owning_session_id = checked_session_id
+                   AND ordinary_member.context_frontier_id =
+                           ordinary_base_frontier_id
+                   AND ordinary_member.member_position =
+                           placement_member.member_position
+                   AND ordinary_member.source_session_id =
+                           placement_member.source_session_id
+                   AND ordinary_member.semantic_entry_id =
+                           placement_member.semantic_entry_id
+                 WHERE placement_member.owning_session_id = checked_session_id
+                   AND placement_member.context_frontier_id =
+                           placement_base_frontier_id
+                   AND ordinary_member.member_position IS NULL
+           )
+        THEN
+            effective_base_frontier_id := ordinary_base_frontier_id;
+        ELSE
+            RETURN false;
+        END IF;
+    END IF;
+
+    SELECT member_count
+      INTO effective_member_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session_id
+       AND context_frontier_id = effective_base_frontier_id;
+    SELECT count(*)
+      INTO missing_member_count
+      FROM context_frontier_member AS base_member
+      LEFT JOIN context_frontier_member AS starting_member
+        ON starting_member.owning_session_id = checked_session_id
+       AND starting_member.context_frontier_id = checked_starting_frontier_id
+       AND starting_member.member_position = base_member.member_position
+       AND starting_member.source_session_id = base_member.source_session_id
+       AND starting_member.semantic_entry_id = base_member.semantic_entry_id
+     WHERE base_member.owning_session_id = checked_session_id
+       AND base_member.context_frontier_id = effective_base_frontier_id
+       AND starting_member.member_position IS NULL;
+
+    RETURN effective_member_count IS NOT NULL
+       AND starting_member_count = effective_member_count + 1
+       AND missing_member_count = 0;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION first_native_starting_frontier_matches_seed(
+    checked_session uuid,
+    checked_starting_frontier uuid
+)
+RETURNS boolean LANGUAGE plpgsql STABLE AS $function$
+DECLARE
+    checked_ancestry text;
+    seed_frontier uuid;
+BEGIN
+    SELECT ancestry_kind
+      INTO checked_ancestry
+      FROM session
+     WHERE session_id = checked_session;
+    IF checked_ancestry = 'none' THEN
+        RETURN turn_starting_frontier_extends_current_base(
+            checked_session,
+            checked_starting_frontier,
+            NULL
+        );
+    END IF;
+    IF checked_ancestry <> 'imported_conversation' THEN
+        RETURN false;
+    END IF;
+    SELECT seed_context_frontier_id
+      INTO seed_frontier
+      FROM imported_session_seed
+     WHERE session_id = checked_session;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    RETURN turn_starting_frontier_extends_current_base(
+        checked_session,
+        checked_starting_frontier,
+        seed_frontier
+    );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION turn_start_effective_predecessor_frontier(
+    checked_session uuid,
+    checked_predecessor_frontier uuid
+)
+RETURNS TABLE (
+    context_frontier_id uuid,
+    member_count numeric(20, 0)
+)
+LANGUAGE sql STABLE AS $function$
+    WITH applicable_leaf AS (
+        SELECT candidate.result_frontier_id
+          FROM context_compaction AS candidate
+         WHERE candidate.session_id = checked_session
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_compaction AS successor
+                 WHERE successor.session_id = candidate.session_id
+                   AND successor.predecessor_compaction_id =
+                           candidate.context_compaction_id
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS predecessor_member
+                  LEFT JOIN context_frontier_member AS result_member
+                    ON result_member.owning_session_id = checked_session
+                   AND result_member.context_frontier_id =
+                           candidate.result_frontier_id
+                   AND result_member.member_position =
+                           predecessor_member.member_position
+                   AND result_member.source_session_id =
+                           predecessor_member.source_session_id
+                   AND result_member.semantic_entry_id =
+                           predecessor_member.semantic_entry_id
+                 WHERE predecessor_member.owning_session_id = checked_session
+                   AND predecessor_member.context_frontier_id =
+                           checked_predecessor_frontier
+                   AND result_member.member_position IS NULL
+           )
+    ),
+    ordinary_base AS (
+        SELECT frontier.context_frontier_id, frontier.member_count
+          FROM context_frontier AS frontier
+         WHERE frontier.owning_session_id = checked_session
+           AND frontier.context_frontier_id = COALESCE(
+                (SELECT result_frontier_id FROM applicable_leaf),
+                checked_predecessor_frontier
+           )
+    ),
+    placement_base AS (
+        SELECT frontier.context_frontier_id, frontier.member_count
+          FROM runner_current_session_placement AS head
+          JOIN runner_session_placement_record AS placement
+            ON placement.session_id = head.session_id
+           AND placement.event_ordinal = head.event_ordinal
+          JOIN session_runner_placement_frontier AS pointer
+            ON pointer.session_id = placement.session_id
+           AND pointer.placement_revision = placement.placement_revision
+          JOIN context_frontier AS frontier
+            ON frontier.owning_session_id = pointer.session_id
+           AND frontier.context_frontier_id = pointer.context_frontier_id
+         WHERE head.session_id = checked_session
+    ),
+    candidate AS (
+        SELECT placement.context_frontier_id, placement.member_count
+          FROM ordinary_base AS ordinary
+          JOIN placement_base AS placement ON true
+         WHERE ordinary.member_count <= placement.member_count
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS ordinary_member
+                  LEFT JOIN context_frontier_member AS placement_member
+                    ON placement_member.owning_session_id = checked_session
+                   AND placement_member.context_frontier_id =
+                           placement.context_frontier_id
+                   AND placement_member.member_position =
+                           ordinary_member.member_position
+                   AND placement_member.source_session_id =
+                           ordinary_member.source_session_id
+                   AND placement_member.semantic_entry_id =
+                           ordinary_member.semantic_entry_id
+                 WHERE ordinary_member.owning_session_id = checked_session
+                   AND ordinary_member.context_frontier_id =
+                           ordinary.context_frontier_id
+                   AND placement_member.member_position IS NULL
+           )
+        UNION ALL
+        SELECT ordinary.context_frontier_id, ordinary.member_count
+          FROM ordinary_base AS ordinary
+          LEFT JOIN placement_base AS placement ON true
+         WHERE placement.context_frontier_id IS NULL
+            OR (
+                placement.member_count <= ordinary.member_count
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM context_frontier_member AS placement_member
+                      LEFT JOIN context_frontier_member AS ordinary_member
+                        ON ordinary_member.owning_session_id = checked_session
+                       AND ordinary_member.context_frontier_id =
+                               ordinary.context_frontier_id
+                       AND ordinary_member.member_position =
+                               placement_member.member_position
+                       AND ordinary_member.source_session_id =
+                               placement_member.source_session_id
+                       AND ordinary_member.semantic_entry_id =
+                               placement_member.semantic_entry_id
+                     WHERE placement_member.owning_session_id = checked_session
+                       AND placement_member.context_frontier_id =
+                               placement.context_frontier_id
+                       AND ordinary_member.member_position IS NULL
+                )
+            )
+    )
+    SELECT candidate.context_frontier_id, candidate.member_count
+      FROM candidate
+     ORDER BY candidate.member_count DESC
+     LIMIT 1
+$function$;
+
 CREATE FUNCTION require_runner_placement_frontier_boundary(
     checked_session_id uuid,
     checked_placement_revision numeric(20, 0)
@@ -206,6 +495,9 @@ BEGIN
        AND placement.placement_revision = entry.runner_placement_revision
        AND placement.event_kind IN ('runner_replaced', 'profile_replaced')
        AND placement.state_kind = 'pinned'
+      JOIN runner_current_session_placement AS current_placement
+        ON current_placement.session_id = placement.session_id
+       AND current_placement.event_ordinal = placement.event_ordinal
       JOIN context_frontier AS frontier
         ON frontier.owning_session_id = pointer.session_id
        AND frontier.context_frontier_id = pointer.context_frontier_id
