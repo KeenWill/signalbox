@@ -71,6 +71,52 @@ pub struct S3BlobStore {
     namespace_marker: Option<NamespaceMarker>,
 }
 
+#[derive(Default)]
+struct PutReconciliation {
+    credentials: Option<Credentials>,
+    replacing: Option<bool>,
+}
+
+struct MultipartAbortGuard {
+    client: Client,
+    signed_abort: Option<Url>,
+}
+
+impl MultipartAbortGuard {
+    const fn new(client: Client, signed_abort: Url) -> Self {
+        Self {
+            client,
+            signed_abort: Some(signed_abort),
+        }
+    }
+
+    async fn abort(&mut self) {
+        let Some(signed_abort) = self.signed_abort.as_ref().cloned() else {
+            return;
+        };
+        let _ = self.client.delete(signed_abort).send().await;
+        self.signed_abort = None;
+    }
+
+    fn disarm(&mut self) {
+        self.signed_abort = None;
+    }
+}
+
+impl Drop for MultipartAbortGuard {
+    fn drop(&mut self) {
+        let Some(signed_abort) = self.signed_abort.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = client.delete(signed_abort).send().await;
+            });
+        }
+    }
+}
+
 impl fmt::Debug for S3BlobStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("S3BlobStore { endpoint: <redacted>, bucket: <redacted> }")
@@ -276,12 +322,17 @@ impl S3BlobStore {
         &self,
         expected: ExpectedBlob,
         source: BlobReader,
+        reconciliation: &StdMutex<PutReconciliation>,
     ) -> Result<BlobPutOutcome, BlobStoreError> {
         self.ensure_namespace_ready().await?;
         let key = BlobObjectKey::for_digest(expected.digest());
         let stripe = usize::from(expected.digest().as_bytes()[0]) % PUBLICATION_LOCK_STRIPES;
         let _publication = self.publication_locks[stripe].lock().await;
         let credentials = self.credentials().await?;
+        reconciliation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .credentials = Some(credentials.clone());
         let replacing = match self.verify_object(&credentials, &key, expected).await {
             Ok(()) => return Ok(BlobPutOutcome::AlreadyPresent { key }),
             Err(error)
@@ -295,6 +346,10 @@ impl S3BlobStore {
             }
             Err(error) => return Err(error),
         };
+        reconciliation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replacing = Some(replacing);
 
         self.multipart_publish(&credentials, &key, expected, source)
             .await?;
@@ -334,12 +389,19 @@ impl S3BlobStore {
         if upload_id.is_empty() || upload_id.len() > MAX_UPLOAD_ID_BYTES {
             return Err(BlobStoreError::unavailable("bound S3 upload id"));
         }
+        let abort_action =
+            self.bucket
+                .abort_multipart_upload(Some(credentials), key.as_str(), upload_id);
+        let mut abort_guard =
+            MultipartAbortGuard::new(self.client.clone(), abort_action.sign(SIGNED_URL_LIFETIME));
 
         let result = self
             .upload_parts(credentials, key, upload_id, expected, source)
             .await;
         if result.is_err() {
-            self.abort_multipart(credentials, key, upload_id).await;
+            abort_guard.abort().await;
+        } else {
+            abort_guard.disarm();
         }
         result
     }
@@ -453,22 +515,6 @@ impl S3BlobStore {
                 Err(_) => Err(completion_error),
             },
         }
-    }
-
-    async fn abort_multipart(
-        &self,
-        credentials: &Credentials,
-        key: &BlobObjectKey,
-        upload_id: &str,
-    ) {
-        let action = self
-            .bucket
-            .abort_multipart_upload(Some(credentials), key.as_str(), upload_id);
-        let _ = self
-            .client
-            .delete(action.sign(SIGNED_URL_LIFETIME))
-            .send()
-            .await;
     }
 
     async fn open_response(
@@ -645,9 +691,35 @@ impl BlobStore for S3BlobStore {
         source: BlobReader,
     ) -> BlobStoreFuture<'a, BlobPutOutcome> {
         Box::pin(async move {
-            tokio::time::timeout(OPERATION_DEADLINE, self.put_inner(expected, source))
-                .await
-                .map_err(|_| BlobStoreError::unavailable("bound S3 put deadline"))?
+            let reconciliation = StdMutex::new(PutReconciliation::default());
+            match tokio::time::timeout(
+                OPERATION_DEADLINE,
+                self.put_inner(expected, source, &reconciliation),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    let state = reconciliation
+                        .into_inner()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some((credentials, replacing)) = state.credentials.zip(state.replacing)
+                    else {
+                        return Err(BlobStoreError::unavailable("bound S3 put deadline"));
+                    };
+                    let key = BlobObjectKey::for_digest(expected.digest());
+                    match tokio::time::timeout(
+                        OPERATION_DEADLINE,
+                        self.verify_object(&credentials, &key, expected),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) if replacing => Ok(BlobPutOutcome::Repaired { key }),
+                        Ok(Ok(())) => Ok(BlobPutOutcome::Published { key }),
+                        _ => Err(BlobStoreError::unavailable("bound S3 put deadline")),
+                    }
+                }
+            }
         })
     }
 
