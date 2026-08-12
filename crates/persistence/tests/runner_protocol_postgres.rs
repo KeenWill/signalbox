@@ -125,6 +125,12 @@ const SAME_RUNNER_REPLACEMENT_COMMAND: u128 = 0x9375;
 const NONCURRENT_REPLACEMENT_COMMAND: u128 = 0x9376;
 const DISCONNECTED_REPLACEMENT_COMMAND: u128 = 0x9377;
 const UNADVERTISED_REPLACEMENT_COMMAND: u128 = 0x9378;
+const PENDING_REPLACEMENT_COMMAND: u128 = 0x9379;
+const PENDING_MISMATCH_REPLACEMENT_COMMAND: u128 = 0x937a;
+const PENDING_DISCONNECTED_REPLACEMENT_COMMAND: u128 = 0x937b;
+const FOREIGN_PREDECESSOR_REPLACEMENT_COMMAND: u128 = 0x937c;
+const ACTIVATED_PENDING_REPLACEMENT_COMMAND: u128 = 0x937d;
+const UNADVERTISED_PENDING_REPLACEMENT_COMMAND: u128 = 0x937e;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -181,6 +187,18 @@ struct PendingPromotionFixture {
     candidate_registration: RunnerGeneration,
 }
 
+struct PendingPrePinReplacementFixture {
+    store: RunnerProtocolStore,
+    placement: SessionRunnerPlacement,
+    predecessor_enrollment: RunnerEnrollmentId,
+    predecessor_runner: RunnerId,
+    candidate_enrollment: RunnerEnrollmentId,
+    candidate_runner: RunnerId,
+    candidate_request: RunnerEnrollmentRequestId,
+    candidate_registration: RunnerGeneration,
+    successor_placement_revision: RunnerGeneration,
+}
+
 async fn pending_promotion_fixture(
     pool: PgPool,
 ) -> Result<PendingPromotionFixture, Box<dyn Error>> {
@@ -222,6 +240,74 @@ async fn pending_promotion_fixture(
         candidate_runner: pending.receipt().enrollment().runner(),
         candidate_request: pending.receipt().request(),
         candidate_registration,
+    })
+}
+
+async fn pending_pre_pin_replacement_fixture(
+    pool: PgPool,
+) -> Result<PendingPrePinReplacementFixture, Box<dyn Error>> {
+    pending_pre_pin_replacement_fixture_with(pool, None, advertisement()).await
+}
+
+async fn pending_pre_pin_replacement_fixture_with(
+    pool: PgPool,
+    credential_profile: Option<CredentialProfileName>,
+    candidate_advertisement: RunnerAdvertisement,
+) -> Result<PendingPrePinReplacementFixture, Box<dyn Error>> {
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let active = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?;
+    let placement_request = SessionRunnerPlacementRequest {
+        credential_profile,
+        ..exact_runner_request(active.receipt().enrollment().runner())
+    };
+    let placement =
+        SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), placement_request);
+    store.store_placement(&placement, None, None).await?;
+    let active_connection = store
+        .open_connection(active.receipt().enrollment().enrollment())
+        .await?;
+    store
+        .transition_connection(
+            active.receipt().enrollment().enrollment(),
+            active_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    let pending = store
+        .enroll_pristine(PristineRunnerEnrollmentRequest::new(
+            RunnerEnrollmentRequestId::from_uuid(uuid(PENDING_ENROLLMENT_REQUEST)),
+            IssuedRunnerEnrollmentIdentities::new(
+                RunnerEnrollmentId::from_uuid(uuid(REPLACEMENT_ENROLLMENT)),
+                RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)),
+                RunnerAuthenticationId::from_uuid(uuid(REPLACEMENT_AUTHENTICATION)),
+            ),
+            [class()],
+            candidate_advertisement,
+        ))
+        .await?;
+    let candidate_registration =
+        RunnerGeneration::try_from_u64(pending.receipt().registration().revision().get())
+            .expect("the fixture registration revision is positive");
+    Ok(PendingPrePinReplacementFixture {
+        store,
+        placement,
+        predecessor_enrollment: active.receipt().enrollment().enrollment(),
+        predecessor_runner: active.receipt().enrollment().runner(),
+        candidate_enrollment: pending.receipt().enrollment().enrollment(),
+        candidate_runner: pending.receipt().enrollment().runner(),
+        candidate_request: pending.receipt().request(),
+        candidate_registration,
+        successor_placement_revision: RunnerGeneration::try_from_u64(2)
+            .expect("the fixture successor placement revision is positive"),
     })
 }
 
@@ -15186,6 +15272,394 @@ async fn s32_inv001_inv044_pre_pin_replacement_round_trips_unadvertised_target()
 
     assert_eq!(recorded, expected);
     assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-002 / INV-042 / INV-044: a pending-target command activates
+/// its candidate, revokes its predecessor, and installs one unpinned successor
+/// in the same replayable terminal transaction.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv002_inv042_inv044_pending_pre_pin_replacement_applies_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_pre_pin_replacement_fixture(pool.clone()).await?;
+    let candidate_connection = fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(PENDING_REPLACEMENT_COMMAND)),
+        fixture.placement.session(),
+        fixture.placement.revision(),
+        RunnerReplacementTarget::PendingEnrollment(fixture.candidate_request),
+    );
+    let expected = ReplaceLostRunnerBeforePinOutcome::Recorded(
+        ReplaceLostRunnerBeforePinResult::Applied(ReplacedLostRunnerBeforePin::new(
+            fixture.placement.session(),
+            fixture.predecessor_runner,
+            fixture.candidate_runner,
+            fixture.successor_placement_revision,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        )),
+    );
+
+    let applied = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let replayed = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let loaded = fixture
+        .store
+        .load_placement(fixture.placement.session())
+        .await?
+        .expect("the pending successor placement reads back");
+    let predecessor = fixture
+        .store
+        .load_enrollment(fixture.predecessor_enrollment)
+        .await?
+        .expect("the revoked predecessor reads back");
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the activated candidate reads back");
+    let result_authority: (Uuid, Decimal, Decimal, Decimal) = sqlx::query_as(
+        "SELECT target_enrollment_id, target_registration_revision,
+                target_connection_epoch, target_connection_event_ordinal
+           FROM replace_lost_runner_result
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(applied, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        loaded.placement().revision(),
+        fixture.successor_placement_revision
+    );
+    assert_eq!(
+        loaded.placement().state(),
+        &SessionRunnerPlacementState::Unpinned
+    );
+    assert_eq!(
+        loaded.placement().request().selector,
+        RunnerSelector::Identity(fixture.candidate_runner)
+    );
+    assert_eq!(
+        predecessor.state(),
+        signalbox_domain::RunnerEnrollmentState::Revoked
+    );
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    assert_eq!(result_authority.0, fixture.candidate_enrollment.into_uuid());
+    assert_eq!(
+        result_authority.1,
+        Decimal::from(fixture.candidate_registration.get())
+    );
+    assert_eq!(
+        result_authority.2,
+        Decimal::from(candidate_connection.epoch().get())
+    );
+    assert_eq!(
+        result_authority.3,
+        Decimal::from(candidate_connection.event_ordinal())
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-042 / INV-044: a command naming a different pending request
+/// records mismatch without activating the deployment's actual candidate.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv042_inv044_pending_pre_pin_replacement_round_trips_request_mismatch()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_pre_pin_replacement_fixture(pool.clone()).await?;
+    let observed = RunnerEnrollmentRequestId::from_uuid(uuid(SECOND_PENDING_ENROLLMENT_REQUEST));
+    let target = RunnerReplacementTarget::PendingEnrollment(observed);
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(PENDING_MISMATCH_REPLACEMENT_COMMAND)),
+        fixture.placement.session(),
+        fixture.placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session: fixture.placement.session(),
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            },
+        ));
+
+    let rejected = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let replayed = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the unmatched candidate reads back pending");
+    let retained_runner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT new_runner_id
+           FROM replace_lost_runner_result
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Pending
+    );
+    assert_eq!(retained_runner, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-042 / INV-044: an exact pending request with no connected
+/// candidate records a terminal rejection and leaves both enrollments intact.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv042_inv044_pending_pre_pin_replacement_round_trips_disconnected()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_pre_pin_replacement_fixture(pool.clone()).await?;
+    let target = RunnerReplacementTarget::PendingEnrollment(fixture.candidate_request);
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(PENDING_DISCONNECTED_REPLACEMENT_COMMAND)),
+        fixture.placement.session(),
+        fixture.placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session: fixture.placement.session(),
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestDisconnected,
+            },
+        ));
+
+    let rejected = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let replayed = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let predecessor = fixture
+        .store
+        .load_enrollment(fixture.predecessor_enrollment)
+        .await?
+        .expect("the active predecessor reads back");
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the disconnected candidate reads back pending");
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        predecessor.state(),
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Pending
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-042 / INV-044: a pending request admitted for another
+/// predecessor is a mismatch even while its candidate is disconnected.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv042_inv044_pending_pre_pin_replacement_rejects_foreign_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_pre_pin_replacement_fixture(pool.clone()).await?;
+    let session = SessionId::from_uuid(uuid(SECOND_SESSION));
+    insert_session_for(&pool, session.into_uuid()).await?;
+    let foreign_runner = RunnerId::from_uuid(uuid(FOREIGN_RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(foreign_runner));
+    fixture
+        .store
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let target = RunnerReplacementTarget::PendingEnrollment(fixture.candidate_request);
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(FOREIGN_PREDECESSOR_REPLACEMENT_COMMAND)),
+        session,
+        placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session,
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            },
+        ));
+
+    let rejected = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let replayed = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the foreign candidate reads back pending");
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Pending
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-042 / INV-044: a request consumed by deployment promotion is
+/// no longer a pending replacement target, even though its relation persists.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv042_inv044_pending_pre_pin_replacement_rejects_activated_request()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_pre_pin_replacement_fixture(pool.clone()).await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    PromotePendingRunnerRepository::new(pool.clone())
+        .handle(PromotePendingRunner::new(
+            DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND)),
+            fixture.candidate_request,
+        ))
+        .await?;
+    let target = RunnerReplacementTarget::PendingEnrollment(fixture.candidate_request);
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(ACTIVATED_PENDING_REPLACEMENT_COMMAND)),
+        fixture.placement.session(),
+        fixture.placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session: fixture.placement.session(),
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            },
+        ));
+
+    let rejected = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let replayed = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the promoted candidate reads back active");
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-042 / INV-044: a connected pending candidate that omits a
+/// retained placement capability records not-advertised and stays pending.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv042_inv044_pending_pre_pin_replacement_round_trips_unadvertised()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_pre_pin_replacement_fixture_with(
+        pool.clone(),
+        Some(profile()),
+        profileless_advertisement(),
+    )
+    .await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let target = RunnerReplacementTarget::PendingEnrollment(fixture.candidate_request);
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(UNADVERTISED_PENDING_REPLACEMENT_COMMAND)),
+        fixture.placement.session(),
+        fixture.placement.revision(),
+        target,
+    );
+    let expected =
+        ReplaceLostRunnerBeforePinOutcome::Recorded(ReplaceLostRunnerBeforePinResult::Rejected(
+            ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+                session: fixture.placement.session(),
+                target,
+                reason: RunnerReplacementTargetUnavailableReason::NotAdvertised,
+            },
+        ));
+
+    let rejected = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let replayed = fixture
+        .store
+        .replace_lost_runner_before_pin(command)
+        .await?;
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the unadvertised candidate reads back pending");
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Pending
+    );
     drop(pool);
     Ok(())
 }
