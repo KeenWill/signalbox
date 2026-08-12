@@ -4189,6 +4189,17 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
 #[ignore = "requires Docker"]
 async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
 -> Result<(), Box<dyn Error>> {
+    struct SerializationOutcome {
+        replacement_result: Result<
+            Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError>,
+            tokio::time::error::Elapsed,
+        >,
+        replacement_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        blocker_commit: Result<Result<(), sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
+    }
+
     let (_container, pool) = migrated_postgres().await?;
     let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
         let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
@@ -4240,33 +4251,33 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
             replacement_result,
             (replacement_observation, lease_observation, blocker_commit, lease_result),
         ) = tokio::join!(replacement, lease_admission);
-        Ok::<_, Box<dyn Error>>((
+        Ok::<_, Box<dyn Error>>(SerializationOutcome {
             replacement_result,
             replacement_observation,
             lease_observation,
             blocker_commit,
             lease_result,
-        ))
+        })
     })
     .await;
     let pool_close = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, pool.close()).await;
-    let (
-        replacement_result,
-        replacement_observation,
-        lease_observation,
-        blocker_commit,
-        lease_result,
-    ) = serialization
+    let outcome = serialization
         .expect("registration replacement serialization must finish within its test deadline")?;
     pool_close.expect("registration replacement pool cleanup must remain bounded");
-    let replacement_blocked = replacement_observation
+    let replacement_blocked = outcome
+        .replacement_observation
         .expect("registration replacement lock observation must remain bounded")?;
-    let lease_blocked =
-        lease_observation.expect("lease admission lock observation must remain bounded")?;
-    blocker_commit.expect("registration-head blocker commit must remain bounded")?;
-    replacement_result
+    let lease_blocked = outcome
+        .lease_observation
+        .expect("lease admission lock observation must remain bounded")?;
+    outcome
+        .blocker_commit
+        .expect("registration-head blocker commit must remain bounded")?;
+    outcome
+        .replacement_result
         .expect("registration replacement must finish within its operation timeout")?;
-    let rejected = lease_result
+    let rejected = outcome
+        .lease_result
         .expect("lease admission must finish within its operation timeout")
         .expect_err("withdrawn current availability cannot authorize the later lease");
 
