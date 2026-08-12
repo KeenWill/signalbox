@@ -416,7 +416,7 @@ impl PostgresApprovalJudgeRepository {
         continuation_attempt: TurnAttemptId,
     ) -> Result<CompleteApprovalJudgeOutcome, ApprovalJudgeRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        // Completion rechecks the goal authority in force, and goal
+        // Completion rechecks the goal authority in force, and goal system
         // transitions serialize on the session row without ever taking the
         // scheduler row (`goal::handle_system_transition`), so excluding a
         // concurrent `declare_achieved` requires holding the session row

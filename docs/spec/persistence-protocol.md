@@ -817,12 +817,14 @@ Locks per transaction, in acquisition order:
   checking for an existing decision and validating the prepared call. Completion
   first locks the session row `FOR NO KEY UPDATE` and only then the scheduler
   row: it resolves the goal authority in force before committing a decision, and
-  goal transitions serialize on the session row without taking the scheduler
-  row, so holding the session row from before that read until commit is what
-  makes a goal-closing transition and the completion recheck mutually exclusive.
-  The session row precedes the scheduler row because every transaction that
-  locks both acquires them in that order. Completion performs its guarded
-  lifecycle transition under the scheduler lock; at commit, the deferred
+  a goal system transition — a model declaration or scheduler-failure blocking —
+  serializes on the session row without taking the scheduler row, so holding the
+  session row from before that read until commit is what makes a goal-closing
+  transition and the completion recheck mutually exclusive. Applied goal
+  commands take the scheduler row too, after that same session row. The session
+  row precedes the scheduler row because every transaction that locks both
+  acquires them in that order. Completion performs its guarded lifecycle
+  transition under the scheduler lock; at commit, the deferred
   decision-authority trigger then takes the `tool_request` row `FOR UPDATE`.
   Authorization and failure need no additional explicit lock. The shared
   scheduler-lock position prevents approval-judge, tool-loop, and
