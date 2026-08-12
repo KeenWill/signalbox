@@ -54,12 +54,12 @@ implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
 automatic machinery. Session-delegation semantic rendering and its
 provider-neutral bridge were verified against this PR (`agent/delegation`). The
-runner-placement rendering and executable session-tool snapshot paragraphs are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Availability successor calls are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with its child pull requests. Invariant tags cite
-[docs/invariants.md](../invariants.md).
+runner-placement rendering is verified against this PR; the executable
+session-tool snapshot paragraph remains the foundation proposal at the bottom of
+its implementing stack and becomes verified only with its child pull requests.
+Availability successor calls are the foundation proposal at the bottom of their
+implementing stack and become verified only with its child pull requests.
+Invariant tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 

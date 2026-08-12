@@ -42,11 +42,11 @@ use signalbox_domain::{
     ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
     ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    ResolvedProviderTarget, RunnerGeneration, RunnerSandboxProfile, SemanticTranscriptEntry,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
-    StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
-    ToolRequest, ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId, UserContent,
+    ResolvedProviderTarget, RunnerGeneration, SemanticTranscriptEntry, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
+    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
+    ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
+    ToolRoundModelCallTurn, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -59,8 +59,8 @@ use crate::{
         delegation_outcome_kind_to_str, delegation_outcome_reason_to_str,
         delegation_update_kind_to_str, delegation_wake_subject_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
-        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_decision_source_to_str, tool_approval_posture_to_str,
+        positive_u64_from_numeric, runner_sandbox_from_str, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_to_str, tool_approval_posture_to_str,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
@@ -4806,15 +4806,11 @@ async fn load_runner_placement_conversation_entries(
             .ok_or(ModelCallCorruption::Inconsistent(
                 "runner placement semantic revision",
             ))?;
-        let sandbox = match required::<String>(&row, "requested_sandbox_profile")?.as_str() {
-            "ambient" => RunnerSandboxProfile::Ambient,
-            "workspace_restricted" => RunnerSandboxProfile::WorkspaceRestricted,
-            _ => {
-                return Err(
-                    ModelCallCorruption::Inconsistent("runner placement semantic sandbox").into(),
-                );
-            }
-        };
+        let sandbox =
+            runner_sandbox_from_str(&required::<String>(&row, "requested_sandbox_profile")?)
+                .ok_or(ModelCallCorruption::Inconsistent(
+                    "runner placement semantic sandbox",
+                ))?;
         if loaded
             .insert(
                 source,

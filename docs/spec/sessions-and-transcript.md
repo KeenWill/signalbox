@@ -706,10 +706,11 @@ entry/turn-state trigger so an origin entry additionally requires its input's
 `origin_of` disposition (constraint
 `semantic_transcript_entry_origin_disposition`); pending steering can never
 appear as a semantic origin. Migration
-`202608080109_runner_placement_semantic_frontier.sql` adds the unique
+`202608110011_runner_placement_semantic_frontier.sql` adds the unique
 reference-only placement-change payload, binds it to one exact same-session
-successor placement record, and requires its exact semantic entry to be the
-final member of the installing frontier.
+successor placement record, and requires its exact semantic entry to be the only
+suffix member after the prior frontier, or the sole root member when no semantic
+history exists.
 
 ### Context compaction
 
