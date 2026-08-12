@@ -3,6 +3,7 @@
 //! The normative specification is `docs/spec/blob-storage.md`.
 
 use std::{
+    collections::BTreeSet,
     ffi::{CString, OsStr, OsString},
     fmt::Write as _,
     fs, io,
@@ -37,6 +38,7 @@ const PERMISSION_MASK: u32 = 0o7777;
 const PUBLICATION_DIRECTORY: &str = ".publish-v1";
 const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
 const TEMPORARY_NAME_ATTEMPTS: usize = 16;
+const MAX_BACKING_DEVICE_NODES: usize = 64;
 
 struct TemporaryBlobFile {
     directory: Arc<fs::File>,
@@ -91,7 +93,17 @@ impl TemporaryBlobFile {
 
 impl Drop for TemporaryBlobFile {
     fn drop(&mut self) {
-        if self.linked {
+        if !self.linked {
+            return;
+        }
+        self.linked = false;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let directory = self.directory.clone();
+            let name = std::mem::take(&mut self.name);
+            drop(runtime.spawn_blocking(move || {
+                let _ = unlinkat(&directory, &name, AtFlags::empty());
+            }));
+        } else {
             let _ = unlinkat(&self.directory, &self.name, AtFlags::empty());
         }
     }
@@ -911,10 +923,68 @@ fn positively_classified_local_filesystem(root: &fs::File) -> io::Result<bool> {
     const ZFS_SUPER_MAGIC: u32 = 0x2fc1_2fc1;
     const F2FS_SUPER_MAGIC: u32 = 0xf2f5_2010;
     let filesystem = rustix::fs::fstatfs(root).map_err(io::Error::from)?.f_type as u32;
-    Ok(matches!(
+    if !matches!(
         filesystem,
         EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | ZFS_SUPER_MAGIC | F2FS_SUPER_MAGIC
-    ))
+    ) {
+        return Ok(false);
+    }
+    positively_classified_local_backing_devices(root.metadata()?.dev())
+}
+
+#[cfg(target_os = "linux")]
+fn positively_classified_local_backing_devices(device: u64) -> io::Result<bool> {
+    let major = rustix::fs::major(device);
+    let minor = rustix::fs::minor(device);
+    let mut pending = vec![PathBuf::from(format!("/sys/dev/block/{major}:{minor}"))];
+    let mut visited = BTreeSet::new();
+    while let Some(device_path) = pending.pop() {
+        let canonical = fs::canonicalize(device_path)?;
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_BACKING_DEVICE_NODES {
+            return Ok(false);
+        }
+        let slaves_path = canonical.join("slaves");
+        let slaves = match fs::read_dir(slaves_path) {
+            Ok(slaves) => Some(slaves),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+            Err(source) => return Err(source),
+        };
+        let mut has_slave = false;
+        if let Some(slaves) = slaves {
+            for slave in slaves {
+                has_slave = true;
+                pending.push(slave?.path());
+                if pending.len() + visited.len() > MAX_BACKING_DEVICE_NODES {
+                    return Ok(false);
+                }
+            }
+        }
+        if !has_slave && !local_block_transport_leaf(&canonical) {
+            return Ok(false);
+        }
+    }
+    Ok(!visited.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn local_block_transport_leaf(path: &Path) -> bool {
+    if !path.starts_with("/sys/devices") || path.starts_with("/sys/devices/virtual") {
+        return false;
+    }
+    path.components().any(|component| {
+        let std::path::Component::Normal(component) = component else {
+            return false;
+        };
+        let component = component.as_encoded_bytes();
+        component.starts_with(b"ata")
+            || component.starts_with(b"mmc")
+            || component.starts_with(b"nvme")
+            || component.starts_with(b"usb")
+            || component.starts_with(b"virtio")
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1070,5 +1140,16 @@ mod tests {
         assert!(outcome.is_none());
         assert!(moved_destination.join("object").is_file());
         assert!(!destination_path.join("object").exists());
+    }
+
+    #[test]
+    fn inv059_filesystem_accepts_only_explicitly_local_block_transport_leaves() {
+        let local = Path::new("/sys/devices/pci0000:00/0000:00:01.0/virtio1/block/vda/vda1");
+        let network_block = Path::new("/sys/devices/virtual/block/nbd0");
+        let iscsi = Path::new("/sys/devices/platform/host2/session1/target2:0:0/2:0:0:0/block/sdb");
+
+        assert!(local_block_transport_leaf(local));
+        assert!(!local_block_transport_leaf(network_block));
+        assert!(!local_block_transport_leaf(iscsi));
     }
 }
