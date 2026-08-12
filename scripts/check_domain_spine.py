@@ -65,7 +65,7 @@ ROOT_DECLARATION = re.compile(
 )
 IMPL_HEADER = re.compile(r"^impl\b|^impl<")
 IMPL_METHOD = re.compile(
-    rf"^\s*pub\s+{MODIFIERS}fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+    rf"^\s*pub\s+{MODIFIERS}fn\s+(?:r#)?([A-Za-z_][A-Za-z0-9_]*)"
 )
 ACCESSOR_COMMENT = re.compile(r"^\s*// accessors?:")
 ACCESSOR_NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\(\)")
@@ -79,10 +79,14 @@ MACRO_INVOCATION = re.compile(
 METHOD_MINTING_MACROS = frozenset(
     {"define_identity", "goal_text", "bounded_text", "positive_position"}
 )
-DOC_COMMENT_LINE = re.compile(r"///[^\n]*")
 CAPITALIZED_NAME = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
 ANGLE_TOKEN = re.compile(r"->|<|>|\bfor\b")
-CFG_TEST_ATTRIBUTE = re.compile(r"^#\[cfg\(test\)\]")
+# A cfg predicate that names `test` outside not(...) removes the item from
+# library builds (string contents are already blanked, so a feature name
+# containing "test" cannot match). `#[cfg(not(test))]` stays public surface,
+# and `#[cfg_attr(...)]` never gates compilation, so neither matches here.
+CFG_TEST_ATTRIBUTE = re.compile(r"^#\[cfg\(.*\btest\b")
+CFG_NOT_TEST = re.compile(r"\bnot\s*\(\s*test\b")
 ATTRIBUTE_LINE = re.compile(r"^#\[")
 
 
@@ -245,22 +249,33 @@ def body_brace_offset(header: str) -> int | None:
     A brace inside the header's angle brackets — a const-generic argument
     such as `Foo<{ 1 + 1 }>` — is part of the self type, not the body, so
     the opener is the first brace at angle depth zero (`->` skipped).
+    Angle tracking suspends inside those const braces, where `<` is a
+    comparison operator (`Foo<{ 1 < 2 }>`), not a delimiter.
     """
     angle_depth = 0
+    const_brace_depth = 0
     index = 0
     length = len(header)
     while index < length:
-        pair = header[index : index + 2]
-        if pair == "->":
+        char = header[index]
+        if const_brace_depth:
+            if char == "{":
+                const_brace_depth += 1
+            elif char == "}":
+                const_brace_depth -= 1
+            index += 1
+            continue
+        if header[index : index + 2] == "->":
             index += 2
             continue
-        char = header[index]
         if char == "<":
             angle_depth += 1
         elif char == ">":
             angle_depth -= 1
-        elif char == "{" and angle_depth == 0:
-            return index
+        elif char == "{":
+            if angle_depth == 0:
+                return index
+            const_brace_depth = 1
         index += 1
     return None
 
@@ -319,7 +334,7 @@ def parse_source_methods(
                     if method:
                         methods.setdefault(target, set()).add(method.group(1))
                 depth += body_line.count("{") - body_line.count("}")
-        elif CFG_TEST_ATTRIBUTE.match(line):
+        elif CFG_TEST_ATTRIBUTE.match(line) and not CFG_NOT_TEST.search(line):
             test_configured = True
         elif not ATTRIBUTE_LINE.match(line) and line.strip():
             test_configured = False
@@ -333,31 +348,51 @@ def parse_macro_surface_types(text: str) -> set[str]:
     These types keep their declared spine methods without a textual source
     counterpart (the stale direction skips them). Only the macros in
     METHOD_MINTING_MACROS qualify — an assertion or derive helper naming a
-    listed type mints nothing, so it earns no exemption. Doc-comment lines
-    inside the invocation are dropped first so their prose contributes no
-    names. Only parenthesized invocations are read; a brace or bracket form
-    that mints public surface would need this parser extended.
+    listed type mints nothing, so it earns no exemption. Comments and
+    string contents are blanked before matching, so a commented-out
+    invocation grants nothing and doc comments inside the invocation
+    contribute no names. Only parenthesized invocations are read; a brace
+    or bracket form that mints public surface would need this parser
+    extended.
     """
     names: set[str] = set()
-    for invocation, arguments in MACRO_INVOCATION.findall(text):
+    for invocation, arguments in MACRO_INVOCATION.findall(
+        blank_comments_and_strings(text)
+    ):
         if invocation.split("::")[-1] not in METHOD_MINTING_MACROS:
             continue
-        names.update(CAPITALIZED_NAME.findall(DOC_COMMENT_LINE.sub("", arguments)))
+        names.update(CAPITALIZED_NAME.findall(arguments))
     return names
 
 
 def parse_spine_method_declarations(
     spine_text: str,
-) -> dict[tuple[str, str], dict[str, set[str]]]:
+) -> tuple[dict[tuple[str, str], dict[str, set[str]]], list[str]]:
     """Map (crate, section label) -> type name -> declared method names.
 
     A method is declared by a `pub fn` line inside a section's column-0
     impl block, or by an `// accessors:` comment list — inside an impl
     block, or at column 0 attached to the nearest preceding `pub
     struct`/`pub enum` line. An accessor list continues onto following
-    comment lines for as long as each line ends with a comma.
+    comment lines for as long as each line ends with a comma. Declaring
+    the same method twice for one type is reported, matching how the
+    name-level parser rejects duplicate type declarations.
     """
     sections: dict[tuple[str, str], dict[str, set[str]]] = {}
+    duplicates: list[str] = []
+
+    def declare(
+        section: tuple[str, str], target: str, names: list[str]
+    ) -> None:
+        declared = sections[section].setdefault(target, set())
+        for name in names:
+            if name in declared:
+                duplicates.append(
+                    f"'{section[0]}: {section[1]}' section declares"
+                    f" {target}::{name}() more than once"
+                )
+            declared.add(name)
+
     current: tuple[str, str] | None = None
     current_type: str | None = None
     in_impl = False
@@ -398,15 +433,13 @@ def parse_spine_method_declarations(
                 accessor_continues and line.lstrip().startswith("//")
             ):
                 if impl_type:
-                    sections[current].setdefault(impl_type, set()).update(
-                        ACCESSOR_NAME.findall(line)
-                    )
+                    declare(current, impl_type, ACCESSOR_NAME.findall(line))
                 accessor_continues = line.rstrip().endswith(",")
                 continue
             accessor_continues = False
             method = IMPL_METHOD.match(line)
             if method and impl_type:
-                sections[current].setdefault(impl_type, set()).add(method.group(1))
+                declare(current, impl_type, [method.group(1)])
             if line.startswith("}"):
                 in_impl = False
                 impl_type = None
@@ -415,16 +448,14 @@ def parse_spine_method_declarations(
             accessor_continues and line.startswith("//")
         ):
             if current_type:
-                sections[current].setdefault(current_type, set()).update(
-                    ACCESSOR_NAME.findall(line)
-                )
+                declare(current, current_type, ACCESSOR_NAME.findall(line))
             accessor_continues = line.rstrip().endswith(",")
             continue
         accessor_continues = False
         declared_type = SECTION_TYPE.match(line)
         if declared_type:
             current_type = declared_type.group(1)
-    return sections
+    return sections, duplicates
 
 
 def validate_lib_forms(crate: str, lib_rs: Path) -> list[str]:
@@ -599,7 +630,10 @@ def main() -> int:
             )
 
     # Method-surface comparison per listed type, both directions.
-    spine_methods = parse_spine_method_declarations(spine_text)
+    spine_methods, method_duplicates = parse_spine_method_declarations(
+        spine_text
+    )
+    failures.extend(method_duplicates)
     for crate, lib_path in CRATES.items():
         home_section: dict[str, str] = {}
         for module, names in all_exports[crate].items():

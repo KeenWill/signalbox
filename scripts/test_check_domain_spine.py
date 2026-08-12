@@ -53,6 +53,11 @@ impl Widget {
         self.value
     }
 
+    /// Returns the fixture kind.
+    pub const fn r#type(&self) -> u64 {
+        0
+    }
+
     fn double(&self) -> u64 {
         self.value * 2
     }
@@ -84,6 +89,13 @@ impl Widget {
 #[cfg(test)]
 impl Widget {
     pub fn test_only_helper(&self) -> u64 {
+        self.value
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Widget {
+    pub fn composite_test_helper(&self) -> u64 {
         self.value
     }
 }
@@ -138,6 +150,7 @@ pub struct SessionId(/* private */);
 pub struct Widget { /* private */ }
 impl Widget {
     pub fn new(value: u64) -> Self;
+    pub const fn r#type(&self) -> u64;
     // accessor: value()
 }
 
@@ -290,6 +303,84 @@ def main() -> int:
             " no longer defines as a public method",
         )
 
+        # A commented-out minting invocation grants nothing: the macro scan
+        # runs over comment-blanked text.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "bounded_text!(\n"
+                "    /// One fixture bounded text.\n"
+                "    Tag\n"
+                ");\n",
+                "/*\nbounded_text!(\n"
+                "    Tag\n"
+                ");\n*/\n",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "commented-out invocation earns no exemption",
+            "'domain: widget' section declares Tag::try_new(), which source"
+            " no longer defines as a public method",
+        )
+
+        # `#[cfg(not(test))]` is library surface, not a test fixture.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "#[cfg(test)]\nimpl Widget {",
+                "#[cfg(not(test))]\nimpl Widget {\n"
+                "    pub fn prod_only(&self) -> u64 {\n"
+                "        self.value\n"
+                "    }\n"
+                "}\n\n"
+                "#[cfg(test)]\nimpl Widget {",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "cfg(not(test)) impl stays public surface",
+            "domain::widget::Widget has public method prod_only() with no"
+            " declaration in the 'domain: widget' section",
+        )
+
+        # A raw-identifier method compares by its unprefixed name, so a
+        # source rename under `r#` is still drift.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "    pub const fn r#type(&self) -> u64 {",
+                "    pub const fn r#match(&self) -> u64 {",
+            ),
+        )
+        renamed = run_checker(root)
+        expect_failure(
+            renamed,
+            "raw-identifier rename is drift",
+            "domain::widget::Widget has public method match() with no"
+            " declaration in the 'domain: widget' section",
+        )
+        assert (
+            "'domain: widget' section declares Widget::type(), which source"
+            " no longer defines as a public method" in renamed.stdout
+        ), f"raw-identifier rename lacks the stale side:\n{renamed.stdout}"
+
+        # Declaring the same method twice is rejected, matching the
+        # duplicate-type rule.
+        write_fixture(
+            root,
+            spine=SPINE_BASELINE.replace(
+                "    pub fn new(value: u64) -> Self;\n",
+                "    pub fn new(value: u64) -> Self;\n"
+                "    pub fn new(value: u64) -> Self;\n",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "duplicate method declaration",
+            "'domain: widget' section declares Widget::new() more than once",
+        )
+
         # Only the method-minting macros exempt: an assertion naming the
         # type mints nothing and rescues nothing.
         write_fixture(
@@ -331,12 +422,13 @@ def main() -> int:
             " declaration in the 'domain: widget' section",
         )
 
-        # A const-generic brace in the impl header is not the body opener;
-        # the body behind it is still scanned.
+        # A const-generic brace in the impl header is not the body opener,
+        # and a comparison inside it is not an angle delimiter; the body
+        # behind it is still scanned.
         write_fixture(
             root,
             widget=WIDGET_BASELINE
-            + "\nimpl Widget<{ 1 + 1 }> {\n"
+            + "\nimpl Widget<{ 1 < 2 }> {\n"
             "    pub fn shadow(&self) -> u64 {\n"
             "        2\n"
             "    }\n"
