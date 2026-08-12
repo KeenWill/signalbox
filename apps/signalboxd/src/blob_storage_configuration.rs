@@ -511,14 +511,19 @@ generated_artifact = "archive"
     }
 
     #[test]
-    fn catalog_rejects_unknown_and_kind_inapplicable_fields() {
+    fn catalog_rejects_an_unknown_top_level_field() {
         let unknown = VALID.replace("version = 1", "version = 1\nextra = true");
+
+        assert!(parse(&unknown).is_err());
+    }
+
+    #[test]
+    fn catalog_rejects_a_field_inapplicable_to_the_store_kind() {
         let inapplicable = VALID.replace(
             "root_directory = \"/var/lib/signalbox/blobs\"",
             "root_directory = \"/var/lib/signalbox/blobs\"\nbucket = \"wrong-kind\"",
         );
 
-        assert!(parse(&unknown).is_err());
         assert!(parse(&inapplicable).is_err());
     }
 
