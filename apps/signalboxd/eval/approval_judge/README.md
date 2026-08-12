@@ -28,7 +28,10 @@ verdict moved.
 
 Passing `--database-url <url>` additionally records the run in two eval-owned
 PostgreSQL tables after the scorecard prints; without the flag nothing is
-written and the stdout scorecard stays the only artifact either way.
+written and the stdout scorecard stays the only artifact either way. When the
+URL carries a password, pass `--database-url-env <variable>` instead to read it
+from the named environment variable, keeping the credential out of the process
+argument vector and shell history.
 
 - `approval_judge_eval_run` — one row per run: the minted run identity, the
   judge selection, the resolved provider target identity and model, the frozen
@@ -47,14 +50,15 @@ connection takes the same URL-only posture as the daemon's, so ambient `PG*`
 variables are refused rather than silently shaping it.
 
 The tables come from the daemon's migration set, and the daemon is what applies
-it; a database missing them, a role that cannot insert into them, and any corpus
-case recording cannot store (an empty name, or U+0000 in a name or notes) are
-all refused before the first paid call, and the minted run identity is announced
-before the commit is attempted so even an ambiguous commit leaves an exact key
-to query for. Recorded evidence is append-only and sealed: both tables refuse
-updates, deletions, and truncation, and call rows admit insertion only inside
-the transaction that records their run, so evidence cannot be extended after the
-scorecard is frozen.
+it; a database missing them, a role lacking the privileges recording exercises
+(insert on both tables, and select on the run table, which the sealing trigger
+reads), and any corpus case recording cannot store (an empty name, or U+0000 in
+a name or notes) are all refused before the first paid call, and the minted run
+identity is announced before the commit is attempted so even an ambiguous commit
+leaves an exact key to query for. Recorded evidence is append-only and sealed:
+both tables refuse updates, deletions, and truncation, and call rows admit
+insertion only inside the transaction that records their run, so evidence cannot
+be extended after the scorecard is frozen.
 
 ## Case schema
 

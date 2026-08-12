@@ -53,6 +53,10 @@ Options:
   --database-url <url>
                     Also record the run and each verdict in the named PostgreSQL
                     database's eval-owned tables. Default: stdout scorecard only.
+  --database-url-env <variable>
+                    Like --database-url, but read the URL from the named
+                    environment variable, keeping a password-bearing URL out of
+                    the process argument vector and shell history.
   --help            Print this reference and exit without spending quota.";
 
 const CATEGORY_INVENTORY: &[&str] = &[
@@ -112,6 +116,7 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
     let mut filter = None;
     let mut limit = None;
     let mut database_url = None;
+    let mut database_url_from_environment = None;
     let mut arguments = env::args().skip(1);
     while let Some(flag) = arguments.next() {
         let mut value = |flag: &str| {
@@ -135,6 +140,18 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
             }
             "--filter" => filter = Some(value("--filter")?),
             "--database-url" => database_url = Some(value("--database-url")?),
+            "--database-url-env" => {
+                let variable = value("--database-url-env")?;
+                let url = env::var(&variable).map_err(|_| {
+                    format!("--database-url-env names {variable}, which is unset or not text")
+                })?;
+                if url.is_empty() {
+                    return Err(format!(
+                        "--database-url-env names {variable}, which is empty"
+                    ));
+                }
+                database_url_from_environment = Some(url);
+            }
             "--limit" => {
                 let bound: usize = value("--limit")?
                     .parse()
@@ -149,13 +166,18 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
             other => return Err(format!("unknown flag: {other}")),
         }
     }
+    if database_url.is_some() && database_url_from_environment.is_some() {
+        return Err(String::from(
+            "--database-url and --database-url-env both name a recording database; pass one",
+        ));
+    }
     Ok(ParsedArguments::Run(RunOptions {
         configuration: configuration.ok_or_else(|| String::from("--config is required"))?,
         cases: cases.ok_or_else(|| String::from("--cases is required"))?,
         repeats,
         filter,
         limit,
-        database_url,
+        database_url: database_url.or(database_url_from_environment),
     }))
 }
 

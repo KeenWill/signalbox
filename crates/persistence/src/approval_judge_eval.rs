@@ -93,8 +93,11 @@ pub struct ApprovalJudgeEvalCallRecord {
 /// Reports whether both eval recording tables exist in the connected database
 /// and admit inserts for the connected role, so a caller can refuse to start
 /// work whose recording would predictably fail against a database the daemon
-/// has not migrated yet or a role that can only read. Schema application
-/// stays with the daemon; this only observes it.
+/// has not migrated yet or an underprivileged role. Schema application stays
+/// with the daemon; this only observes it. The checked privileges are exactly
+/// what recording exercises: INSERT on both tables, plus SELECT on the run
+/// table because the sealing trigger reads the run's recording transaction
+/// while admitting each call row.
 pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeEvalRecordingError> {
     let present: bool = sqlx::query_scalar(
         "SELECT to_regclass('approval_judge_eval_run') IS NOT NULL
@@ -105,13 +108,14 @@ pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeE
     if !present {
         return Err(ApprovalJudgeEvalRecordingError::TablesAbsent);
     }
-    let insertable: bool = sqlx::query_scalar(
+    let privileged: bool = sqlx::query_scalar(
         "SELECT has_table_privilege('approval_judge_eval_run', 'INSERT')
+            AND has_table_privilege('approval_judge_eval_run', 'SELECT')
             AND has_table_privilege('approval_judge_eval_call', 'INSERT')",
     )
     .fetch_one(pool)
     .await?;
-    if insertable {
+    if privileged {
         Ok(())
     } else {
         Err(ApprovalJudgeEvalRecordingError::TablesUnwritable)
@@ -217,6 +221,18 @@ fn require_scorecard_verdict_agreement(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| verdict_mismatch(name))?;
             verdicts.push((recommendation, rationale));
+        }
+        // Every configured attempt is accounted for: the case's successful
+        // verdicts plus its stated failed calls must cover the run's repeats
+        // exactly, so a scorecard cannot quietly drop an attempt the call
+        // rows would otherwise be missing.
+        let failed_calls = case
+            .get("failed_calls")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| verdict_mismatch(name))?;
+        let successful = u64::try_from(verdicts.len()).map_err(|_| verdict_mismatch(name))?;
+        if successful.saturating_add(failed_calls) != u64::from(run.repeats) {
+            return Err(verdict_mismatch(name));
         }
         if stated.insert(name, verdicts).is_some() {
             return Err(verdict_mismatch(name));
@@ -333,7 +349,7 @@ pub enum ApprovalJudgeEvalRecordingError {
     },
     /// The connected database has no eval recording tables.
     TablesAbsent,
-    /// The connected role cannot insert into the eval recording tables.
+    /// The connected role lacks a table privilege eval recording exercises.
     TablesUnwritable,
     /// A call's repeat ordinal falls outside the run's configured repeats.
     CallOutsideConfiguredRepeats,
@@ -372,9 +388,9 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
             Self::TablesAbsent => formatter.write_str(
                 "eval recording tables are absent; the daemon has not applied this migration set",
             ),
-            Self::TablesUnwritable => {
-                formatter.write_str("eval recording tables refuse inserts for the connected role")
-            }
+            Self::TablesUnwritable => formatter.write_str(
+                "eval recording tables refuse the connected role a required table privilege",
+            ),
             Self::CallOutsideConfiguredRepeats => formatter
                 .write_str("eval call repeat ordinal is outside the run's configured repeats"),
             Self::ScorecardHeaderMismatch { field } => write!(
@@ -436,7 +452,7 @@ mod tests {
     fn recording_rejections_render_their_causes() {
         expect!["eval recording tables are absent; the daemon has not applied this migration set"]
             .assert_eq(&ApprovalJudgeEvalRecordingError::TablesAbsent.to_string());
-        expect!["eval recording tables refuse inserts for the connected role"]
+        expect!["eval recording tables refuse the connected role a required table privilege"]
             .assert_eq(&ApprovalJudgeEvalRecordingError::TablesUnwritable.to_string());
         expect!["eval call repeat ordinal is outside the run's configured repeats"]
             .assert_eq(&ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats.to_string());

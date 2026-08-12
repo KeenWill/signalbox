@@ -49,6 +49,11 @@ const LATE_CALL_ORDINAL: u32 = 2;
 const FOREIGN_PROVIDER_MODEL: &str = "some-other-model";
 // The login role granted SELECT but not INSERT on the eval tables.
 const RESTRICTED_ROLE: &str = "eval_reader";
+// The login role granted INSERT but not the SELECT the sealing trigger reads.
+const INSERT_ONLY_ROLE: &str = "eval_writer";
+// A transaction identity no fixture transaction ever holds, for forgery
+// fixtures; the stamping trigger must overwrite it.
+const FOREIGN_TRANSACTION_ID: &str = "42";
 // The ERRCODE reject_immutable_record_change raises for every refused change.
 const CHECK_VIOLATION_CODE: &str = "23514";
 const CORPUS_DIGEST: &str = "fnv1a128:00000000000000000000000000000001";
@@ -107,7 +112,12 @@ fn verdict_entry(recommendation: &str, rationale: &str) -> serde_json::Value {
 }
 
 fn scorecard_case(name: &str, repeats: &[serde_json::Value]) -> serde_json::Value {
-    serde_json::json!({"name": name, "repeats": repeats})
+    // Recording requires every configured attempt accounted for, so the
+    // fixture states the failures as exactly the attempts its verdicts do
+    // not cover.
+    let failed_calls =
+        usize::try_from(REPEATS).expect("the fixture repeat count is small") - repeats.len();
+    serde_json::json!({"name": name, "repeats": repeats, "failed_calls": failed_calls})
 }
 
 // The scorecard restates the run headers and per-case verdicts exactly as
@@ -514,6 +524,28 @@ async fn recording_requires_insert_privileges() -> Result<(), Box<dyn Error>> {
         .await
         .expect_err("a role without INSERT cannot claim a recordable schema");
     expect_tables_unwritable(&unwritable);
+    // INSERT alone is not enough either: the sealing trigger reads the run
+    // row while admitting each call, so recording also needs SELECT there.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {INSERT_ONLY_ROLE} LOGIN PASSWORD '{DATABASE_PASSWORD}'"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT INSERT ON approval_judge_eval_run, approval_judge_eval_call TO {INSERT_ONLY_ROLE}"
+    )))
+    .execute(&pool)
+    .await?;
+    let insert_only_url =
+        format!("postgres://{INSERT_ONLY_ROLE}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let insert_only = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(local_test_connection_options(&insert_only_url)?)
+        .await?;
+    let unreadable = verify_recording_schema(&insert_only)
+        .await
+        .expect_err("a role without SELECT on the run table cannot record sealed calls");
+    expect_tables_unwritable(&unreadable);
     verify_recording_schema(&pool).await?;
     Ok(())
 }
@@ -667,6 +699,78 @@ async fn foreign_recommendation_spellings_are_rejected() -> Result<(), Box<dyn E
         Some("approval_judge_eval_call_recommendation_closed")
     );
     transaction.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn run_rows_pin_their_recording_transaction() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let run = run_record_with(RUN_IDENTITY, &[]);
+    let mut transaction = pool.begin().await?;
+    // The insert names a foreign transaction identity outright; the stamping
+    // trigger must replace it with the inserting transaction's own.
+    sqlx::query(
+        "INSERT INTO approval_judge_eval_run
+            (eval_run_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, provider_model,
+             credential_reference, usage_input_includes_cache_tokens,
+             corpus_digest, contract_digest, rendered_digest, repeats,
+             scorecard, recording_transaction_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::xid8)",
+    )
+    .bind(run.run.into_uuid())
+    .bind(run.selection.into_uuid())
+    .bind(run.target.identity().into_uuid())
+    .bind(run.provider_model.as_str())
+    .bind(run.credential_reference.as_str())
+    .bind(run.usage_input_includes_cache_tokens)
+    .bind(run.corpus_digest.as_str())
+    .bind(run.contract_digest.as_str())
+    .bind(run.rendered_digest.as_str())
+    .bind(Decimal::from(run.repeats))
+    .bind(Json(&run.scorecard))
+    .bind(FOREIGN_TRANSACTION_ID)
+    .execute(&mut *transaction)
+    .await?;
+    let stamped: bool = sqlx::query_scalar(
+        "SELECT recording_transaction_id = pg_current_xact_id()
+            AND recording_transaction_id::text <> $2
+           FROM approval_judge_eval_run WHERE eval_run_id = $1",
+    )
+    .bind(run.run.into_uuid())
+    .bind(FOREIGN_TRANSACTION_ID)
+    .fetch_one(&mut *transaction)
+    .await?;
+    assert!(stamped);
+    transaction.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unaccounted_attempts_are_rejected() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut run = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+        )],
+    );
+    // One verdict plus zero failures leaves two configured attempts
+    // unaccounted for.
+    run.scorecard["cases"][0]["failed_calls"] = serde_json::json!(0);
+    let error = record_eval_run(&pool, &run, &[first_call()])
+        .await
+        .expect_err("a scorecard dropping attempts is rejected");
+    expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
+    let stored_runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_run WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored_runs, 0);
     Ok(())
 }
 

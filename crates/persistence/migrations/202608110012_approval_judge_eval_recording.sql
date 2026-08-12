@@ -126,6 +126,25 @@ CREATE TABLE approval_judge_eval_call (
         )
 );
 
+-- The recording transaction is stamped, never caller-supplied: an insert
+-- that named another live transaction's identity here would let that
+-- transaction append call rows after this run commits, so the default alone
+-- is not enough — the trigger overwrites whatever the insert carried.
+CREATE FUNCTION stamp_eval_run_recording_transaction()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.recording_transaction_id := pg_current_xact_id();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER approval_judge_eval_run_stamps_its_recording_transaction
+BEFORE INSERT ON approval_judge_eval_run
+FOR EACH ROW
+EXECUTE FUNCTION stamp_eval_run_recording_transaction();
+
 -- A run's call rows are sealed with the run: the recording role necessarily
 -- keeps INSERT after the commit, so without this gate it could append another
 -- valid-looking call row later and make the normalized evidence disagree
