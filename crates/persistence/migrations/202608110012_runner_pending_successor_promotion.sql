@@ -398,9 +398,9 @@ BEGIN
         WHEN 'compact_session' THEN SELECT count(*) INTO matching_records FROM compact_session_command WHERE command_id = NEW.command_id;
         WHEN 'goal' THEN SELECT count(*) INTO matching_records FROM goal_command WHERE command_id = NEW.command_id;
         WHEN 'update_session_placement' THEN SELECT count(*) INTO matching_records FROM update_session_placement_command WHERE command_id = NEW.command_id;
-        WHEN 'register_workspace' THEN SELECT count(*) INTO matching_records FROM register_workspace_command WHERE command_id = NEW.command_id;
-        WHEN 'mint_git_remote' THEN SELECT count(*) INTO matching_records FROM mint_git_remote_command WHERE command_id = NEW.command_id;
-        WHEN 'withdraw_git_remote' THEN SELECT count(*) INTO matching_records FROM withdraw_git_remote_command WHERE command_id = NEW.command_id;
+        WHEN 'register_workspace' THEN SELECT count(*) INTO matching_records FROM workspace WHERE command_id = NEW.command_id;
+        WHEN 'mint_git_remote' THEN SELECT count(*) INTO matching_records FROM configured_git_remote_mint WHERE command_id = NEW.command_id;
+        WHEN 'withdraw_git_remote' THEN SELECT count(*) INTO matching_records FROM configured_git_remote_withdrawal WHERE command_id = NEW.command_id;
         WHEN 'promote_pending_runner' THEN SELECT count(*) INTO matching_records FROM promote_pending_runner_command WHERE command_id = NEW.command_id;
         ELSE RAISE EXCEPTION 'unsupported durable command kind %', NEW.command_kind USING ERRCODE = '23514';
     END CASE;

@@ -103,6 +103,12 @@ const PENDING_ENROLLMENT_REQUEST: u128 = 0x9351;
 const SECOND_PENDING_ENROLLMENT_REQUEST: u128 = 0x9352;
 const PROMOTE_PENDING_RUNNER_COMMAND: u128 = 0x9360;
 const SECOND_PROMOTE_PENDING_RUNNER_COMMAND: u128 = 0x9361;
+const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
+const REGISTERED_WORKSPACE: u128 = 0x9363;
+const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
+const GIT_REMOTE_MINT: u128 = 0x9365;
+const WITHDRAW_GIT_REMOTE_COMMAND: u128 = 0x9366;
+const GIT_REMOTE_WITHDRAWAL: u128 = 0x9367;
 const SESSION: u128 = 0x9400;
 const FOREIGN_SESSION: u128 = 0x9401;
 const SECOND_SESSION: u128 = 0x9402;
@@ -4377,6 +4383,91 @@ async fn s32_inv042_inv044_pending_successor_promotion_upgrades_existing_candida
         candidate.state(),
         signalbox_domain::RunnerEnrollmentState::Active
     );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001: the pending-promotion migration preserves the exact typed-record
+/// relations for every durable workspace and Git-remote command family.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_pending_promotion_preserves_workspace_command_typed_records()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'register_workspace', 1, transaction_timestamp())",
+    )
+    .bind(uuid(REGISTER_WORKSPACE_COMMAND))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO workspace
+            (workspace_id, root_path, origin, command_id, command_kind, storage_version)
+         VALUES ($1, '/srv/signalbox/promotion-migration', 'operator_registered',
+                 $2, 'register_workspace', 1)",
+    )
+    .bind(uuid(REGISTERED_WORKSPACE))
+    .bind(uuid(REGISTER_WORKSPACE_COMMAND))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'mint_git_remote', 1, transaction_timestamp())",
+    )
+    .bind(uuid(MINT_GIT_REMOTE_COMMAND))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO configured_git_remote_mint
+            (mint_id, command_id, command_kind, storage_version,
+             workspace_id, remote_name, remote_url)
+         VALUES ($1, $2, 'mint_git_remote', 1, $3, 'origin',
+                 'https://example.test/namespace/project.git')",
+    )
+    .bind(uuid(GIT_REMOTE_MINT))
+    .bind(uuid(MINT_GIT_REMOTE_COMMAND))
+    .bind(uuid(REGISTERED_WORKSPACE))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'withdraw_git_remote', 1, transaction_timestamp())",
+    )
+    .bind(uuid(WITHDRAW_GIT_REMOTE_COMMAND))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO configured_git_remote_withdrawal
+            (withdrawal_id, mint_id, command_id, command_kind, storage_version)
+         VALUES ($1, $2, $3, 'withdraw_git_remote', 1)",
+    )
+    .bind(uuid(GIT_REMOTE_WITHDRAWAL))
+    .bind(uuid(GIT_REMOTE_MINT))
+    .bind(uuid(WITHDRAW_GIT_REMOTE_COMMAND))
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    let recorded_commands: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM durable_command
+          WHERE command_id = ANY($1)",
+    )
+    .bind(vec![
+        uuid(REGISTER_WORKSPACE_COMMAND),
+        uuid(MINT_GIT_REMOTE_COMMAND),
+        uuid(WITHDRAW_GIT_REMOTE_COMMAND),
+    ])
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(recorded_commands, 3);
     drop(pool);
     Ok(())
 }
