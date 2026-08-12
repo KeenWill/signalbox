@@ -9,8 +9,12 @@ functionality and carries only its stated compatibility constraint.
 The blob digest and external spelling, deterministic object-key producer,
 streaming whole-object and ranged store contract, filesystem publication,
 verification, and corrupt-object repair behavior, and shared store conformance
-suite are verified against PR #555 (`agent/blob-storage-substrate`; via PR #593
-`agent/blob-storage-attachment-frontier-admission`).
+suite are verified against PR #555 (`agent/blob-storage-substrate`).
+
+The path-style S3 adapter, explicit rotating credential-file reads, streaming
+multipart publication, namespace and lifecycle authentication, bounded
+transport, and opt-in live conformance suite are verified against this
+implementing change (`agent/blob-storage-s3`).
 
 The disk-backed upload lifecycle, routed-store-only live deduplication,
 publication-before-registration ordering, process-protocol messages, and shared
