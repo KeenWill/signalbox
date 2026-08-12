@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    fmt,
+    fmt, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -124,7 +124,6 @@ impl BlobStoreRegistry {
             .collect::<Vec<_>>();
         validate_physical_namespaces(&staging_identity, &identities)?;
 
-        let staging = FilesystemBlobStaging::from_opened(staging_root)?;
         let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
         let mut namespace_ids = BTreeMap::new();
         for (name, namespace_id, state, opened) in opened_stores {
@@ -168,6 +167,11 @@ impl BlobStoreRegistry {
                 .await?;
         }
 
+        // No fallible asynchronous work follows staging preparation. If the
+        // caller cancels initialization after losing the singleton guard,
+        // there is therefore no armed staging value hidden in this future.
+        let staging = FilesystemBlobStaging::from_opened(staging_root)?;
+
         let routes = [
             BlobStorageClass::UserAttachment,
             BlobStorageClass::ToolArtifact,
@@ -210,6 +214,15 @@ impl BlobStoreRegistry {
     /// Returns the private upload staging namespace.
     pub const fn staging(&self) -> &FilesystemBlobStaging {
         &self.staging
+    }
+
+    /// Removes proven upload spools and makes a successful sweep final.
+    pub fn sweep_staging(&self) -> io::Result<()> {
+        let result = self.staging.sweep();
+        if result.is_ok() {
+            self.staging.disarm_sweep_on_drop();
+        }
+        result
     }
 
     /// Prevents staging cleanup after the database singleton guard is lost.
