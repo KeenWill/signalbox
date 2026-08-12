@@ -102,6 +102,8 @@ const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
     "runner placement loss source cannot be inferred from legacy rows";
+const LEGACY_PLACEMENT_LOSS_FENCE_REFUSAL: &str =
+    "runner placement loss fence requires empty placement history";
 
 #[derive(Clone, Copy)]
 struct PhysicalAttemptFacts {
@@ -3455,17 +3457,17 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     Ok(())
 }
 
-/// INV-043 / INV-044: upgrading a pinned placement preserves its durable lease
-/// and records the latest migrated loss as the compatibility baseline.
+/// INV-043 / INV-044: the placement loss fence refuses history whose exact
+/// authorization baseline was not recorded when the placement was appended.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_inv043_inv044_placement_loss_fence_migration_backfills_pinned_state()
+async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
-    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
@@ -3476,30 +3478,15 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_backfills_pinned_state
             RunnerConnectionTransition::TransportClosed,
         )
         .await?;
-    let loss = store
-        .load_current_connection_loss(expected_enrollment.enrollment())
-        .await?
-        .expect("the pre-upgrade terminal connection owns a loss epoch");
-    migrate(&pool).await?;
-    let baseline: (Uuid, Decimal) = sqlx::query_as(
-        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
-           FROM runner_session_placement_record
-          WHERE session_id = $1 AND event_kind = 'pinned'",
-    )
-    .bind(pin.placement.session().into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    let loaded = store
-        .load_lease(
-            pin.lease.correlation().lease,
-            pin.lease.correlation().generation,
-        )
-        .await?
-        .expect("the pre-upgrade lease remains durable");
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("legacy placement history has no exact loss baseline");
 
-    assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
-    assert_eq!(baseline.1, Decimal::from(loss.loss_epoch().get()));
-    assert_eq!(loaded, pin.lease);
+    assert!(
+        refusal
+            .to_string()
+            .contains(LEGACY_PLACEMENT_LOSS_FENCE_REFUSAL)
+    );
     drop(pool);
     Ok(())
 }
