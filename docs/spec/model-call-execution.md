@@ -492,10 +492,12 @@ command. This proposal is accepted with the implementing stack's merge.
    remains temporarily unavailable, `AttachmentPreparationFailure::Unavailable`
    is a sanitized operator failure: it releases all store and preparation
    resources, leaves the call `Prepared`, commits no turn outcome, and permits a
-   later execution pass to retry the same unsent call. Authoritative
-   cancellation aborts store I/O, returns `NoWork`, and never substitutes an
-   attachment failure for the cancellation closure. A successful check seeds
-   only the bounded turn-scoped verification inventory owned by
+   later execution pass to retry the same unsent call. It is an expected
+   nonfatal deferred execution result and is never routed to
+   `FatalExecutionSupervisor`. Authoritative cancellation aborts store I/O,
+   returns `NoWork`, and never substitutes an attachment failure for the
+   cancellation closure. A successful check seeds only the bounded turn-scoped
+   verification inventory owned by
    [blob storage](blob-storage.md#wire-vocabulary).
 4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
@@ -982,19 +984,21 @@ signal through its recovery handle for an explicit compaction command reporting
 that class, and still answers the client `commit_ambiguous`: a connection
 handler holds no prepared record to terminalize, replay of the command finds it
 pending, and a fresh command finds the nonterminal call, so the restart is the
-only remedy and nothing else would ask for it.
+only remedy and nothing else would ask for it. Attachment unavailability is not
+a stage failure under this paragraph: it carries no ambiguous durable effect,
+returns the nonfatal deferred result above, and leaves the scheduler running.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):
 
 - an evidence-free turn ends its abandoned attempt `Lost`, fails the turn, and
   reclassifies all pending steering instead of deferring startup;
-- a durable `Prepared` call proves no send authorization existed; the call ends
-  `KnownFailed`, the abandoned attempt ends `Lost`, and the turn fails,
-  reclassifying pending steering. Before closure, reconstitution validates the
-  call's exact stored frontier; when preparation consumed steering, that is the
-  complete extended snapshot and checked steering suffix described above, not
-  the turn's unextended starting snapshot;
+- a durable `Prepared` call proves no send authorization existed. Reconstitution
+  validates the call's exact stored frontier; when preparation consumed
+  steering, that is the complete extended snapshot and checked steering suffix
+  described above, not the turn's unextended starting snapshot. Startup leaves
+  the call, attempt, and turn unchanged, and the ordinary scheduler later
+  retries preparation of that same unsent call;
 - a durable unstopped `InFlight` call with no surviving evidence ends
   `Ambiguous`, the abandoned attempt ends `Lost`, and the turn parks in
   `awaiting_model_call_recovery`;
@@ -1005,8 +1009,11 @@ per-session locked transaction as the general scan (INV-034):
 Recovery is configuration-independent: `require_live_execution_for_restart`
 passes no configured catalog and rebuilds target authority from the stored
 call's own selection and target facts, so a deployment-configuration change can
-never block or alter classification of an issued call. Recovery never resumes an
-attempt, redispatches a call, or assumes a request was or was not sent.
+never block or alter classification of an issued call. Recovery never itself
+resumes an attempt, redispatches a call, or assumes a request was or was not
+sent. A retained `Prepared` call is driven only by a later ordinary scheduler
+pass, while issued calls still follow the terminal recovery classifications
+above.
 
 ## Composition and harness
 

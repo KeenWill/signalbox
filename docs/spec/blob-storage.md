@@ -116,11 +116,12 @@ S3, the namespace locator is the parsed endpoint's canonical URL serialization
 with default-port and empty-path variance removed, paired with the exact bucket;
 startup rejects a duplicate locator even when store names, namespace UUIDs,
 regions, or credentials differ. One physical namespace is represented by one
-store binding. The canonical staging-directory path must be disjoint from every
-filesystem-store root: neither path may equal, contain, or be contained by the
-other. This also excludes every store's reserved `.publish-v1` subtree from
-staging ownership and prevents either startup sweep from encountering the
-other's files.
+store binding. The bucket marker below additionally detects physical aliases
+whose canonical locators differ. The canonical staging-directory path must be
+disjoint from every filesystem-store root: neither path may equal, contain, or
+be contained by the other. This also excludes every store's reserved
+`.publish-v1` subtree from staging ownership and prevents either startup sweep
+from encountering the other's files.
 
 Each filesystem root also owns a private exact-mode-0600
 `.signalbox-blob-namespace-v1` marker whose complete bytes are the configured
@@ -133,6 +134,18 @@ without clobbering, syncs the file and root directory, or validates an existing
 exact marker. Why: if a configured mount is absent at restart, the underlying
 directory must not be admitted as the recorded namespace merely because its
 current path and device identity are locally unique.
+
+Each S3 bucket likewise owns the reserved object key
+`.signalbox-blob-namespace-v1`, whose complete body is the configured canonical
+`namespace_id` plus one LF. Startup reads recorded bindings before accessing the
+bucket. For an existing binding, it requires a bounded exact marker read and
+never creates a missing marker. For a new binding, it conditionally creates the
+marker with `If-None-Match: *`, then performs the same bounded exact read;
+precondition loss reads and verifies the winner. Absence, disagreement, a body
+larger than 128 bytes, or an unavailable read or conditional write fails startup
+before socket admission. This backend-resident proof makes two locator strings
+that alias one physical bucket disagree on their distinct configured namespace
+UUIDs instead of being admitted as independent replicas.
 
 A `filesystem` store entry contains exactly `name`, `namespace_id`,
 `kind = "filesystem"`, and an absolute `root_directory`. An `s3` entry contains
