@@ -9,7 +9,8 @@ functionality and carries only its stated compatibility constraint.
 The blob digest and external spelling, deterministic object-key producer,
 streaming whole-object and ranged store contract, filesystem publication,
 verification, and corrupt-object repair behavior, and shared store conformance
-suite are verified against PR #555 (`agent/blob-storage-substrate`).
+suite are verified against this implementing change
+(`agent/blob-storage-substrate`).
 
 The disk-backed upload lifecycle, routed-store-only live deduplication,
 publication-before-registration ordering, process-protocol messages, and shared
@@ -26,6 +27,10 @@ against this implementing change (`agent/blob-storage-read-wire`).
 The canonical multipart domain algebra and ordered process-protocol vocabulary
 are verified against this implementing change
 (`agent/blob-storage-multipart-algebra`).
+
+Registry-first attachment catalog admission, distinct-digest byte accounting,
+and durable typed rejection replay are verified against this implementing change
+(`agent/blob-storage-attachment-admission`).
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
@@ -411,7 +416,9 @@ protocol; an unknown digest or oversized aggregate then commits the typed
 payload and terminal rejection with no accepted-input effect. Equal replay
 returns that rejection and corrected content uses a new command identity.
 Command and accepted-input rows carry mirrored ordered content-part satellites
-under the existing command/effect correlation discipline, and the wire
+under the existing command/effect correlation discipline. The command-side
+satellite retains a pre-admission unknown digest for exact rejection replay;
+only an accepted-side attachment has a catalog foreign key. The wire
 `submit_input`, `reconcile_turn`, and `stop_turn` content fields all become the
 same ordered parts array. The process protocol's version-one in-place editing
 window is why this lands as the canonical shape rather than a compatibility
@@ -422,12 +429,12 @@ both attachment sums equal to zero and bypass blob configuration, catalog, and
 store access. Text-only submission therefore remains available when
 `[blob_storage]` is omitted under the empty-catalog startup rule.
 
-The one-time satellite migration inserts exactly one ordinal-zero text part for
-every pre-migration command and accepted-input row, verifies one complete
-ordered sequence per parent row, updates every `SubmitInput` record to storage
-version 3, and removes the `content_text` columns. Its inserts are idempotent on
-parent row plus ordinal, disagreement aborts the migration, and runtime code
-accepts only version 3 and reconstructs only the satellites. Command-side and
+The one-time storage migrations insert exactly one ordinal-zero text part for
+every pre-migration command and accepted-input row, verify one complete ordered
+sequence per parent row, update every `SubmitInput` record to final storage
+version 4, and remove the `content_text` columns. Their inserts are idempotent
+on parent row plus ordinal, disagreement aborts the migration, and runtime code
+accepts only version 4 and reconstructs only the satellites. Command-side and
 accepted-side parts remain separate mirrored records rather than shared mutable
 authority.
 

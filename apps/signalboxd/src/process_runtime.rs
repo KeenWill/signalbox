@@ -1680,6 +1680,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -1705,6 +1706,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -2345,6 +2347,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -10128,6 +10131,24 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     }
 }
 
+fn configured_submit_input_repository(
+    pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
+) -> SubmitInputRepository {
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
+    match blob_store_registry {
+        Some(registry) => match NonZeroU64::new(registry.max_blob_bytes()) {
+            Some(maximum) => repository.with_maximum_attachment_bytes(maximum),
+            None => repository,
+        },
+        None => repository,
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the closed submit request is kept explicit at this wire-to-application adapter"
@@ -10146,6 +10167,7 @@ async fn handle_submit_input<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -10161,10 +10183,8 @@ where
     };
     let session = SessionId::from_uuid(session_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::with_model_capabilities(
-        pool.clone(),
-        model_configuration.model_capability_catalog(),
-    );
+    let repository =
+        configured_submit_input_repository(pool, model_configuration, blob_store_registry);
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let model_settings = domain_model_settings_overlay(model_settings);
@@ -10256,6 +10276,7 @@ async fn handle_reconcile_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -10263,10 +10284,8 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::with_model_capabilities(
-        pool.clone(),
-        model_configuration.model_capability_catalog(),
-    );
+    let repository =
+        configured_submit_input_repository(pool, model_configuration, blob_store_registry);
     // A command identity that already names durable intent must reach the
     // replay boundary unconditionally (INV-012): the first handling already
     // released the wait, so re-applying the current-state precondition would
@@ -10434,6 +10453,7 @@ async fn handle_stop_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -10441,10 +10461,8 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::with_model_capabilities(
-        pool.clone(),
-        model_configuration.model_capability_catalog(),
-    );
+    let repository =
+        configured_submit_input_repository(pool, model_configuration, blob_store_registry);
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -12048,6 +12066,17 @@ fn map_rejection(
     rejected: SubmitInputRejectedResult,
 ) -> Result<RejectionDetail, ProcessConnectionError> {
     Ok(match rejected {
+        SubmitInputRejectedResult::BlobNotFound { session: _, digest } => {
+            RejectionDetail::AttachmentBlobNotFound {
+                digest: CanonicalBlobDigest::from_digest(digest),
+            }
+        }
+        SubmitInputRejectedResult::AttachmentBytesTooLarge {
+            session: _,
+            maximum_bytes,
+        } => RejectionDetail::AttachmentByteBudgetExceeded {
+            maximum_bytes: CanonicalU64::new(maximum_bytes.get()),
+        },
         SubmitInputRejectedResult::SessionNotFound { session } => {
             RejectionDetail::SessionNotFound {
                 session_id: wire_uuid(session.into_uuid()),

@@ -3,6 +3,9 @@
 The ordered user-content part-array vocabulary is verified against this PR
 (`agent/blob-storage-multipart-algebra`).
 
+The typed attachment catalog and aggregate-byte rejection details are verified
+against this PR (`agent/blob-storage-attachment-admission`).
+
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 
