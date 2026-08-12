@@ -75,9 +75,10 @@ use signalbox_domain::{
     ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunId, ReviewRunRef,
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
-    ReviewWorkflowKind, SemanticTranscriptEntryId, ServiceTier as DomainServiceTier,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataSnapshot,
+    ReviewWorkflowKind, RunnerSandboxProfile as DomainRunnerSandboxProfile, RunnerSelector,
+    SemanticTranscriptEntryId, ServiceTier as DomainServiceTier, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
+    SessionMetadataLastWriter, SessionMetadataSnapshot,
     SessionModelSettingsChanged as DomainSessionModelSettingsChanged,
     SessionPlacement as DomainSessionPlacement, SessionPlacementPath, SessionPlacementVersion,
     SessionTemplateName, SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay,
@@ -113,15 +114,16 @@ use signalbox_persistence::{
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
         DispatchedDelegationWaitMode, DispatchedModelCallDisposition, DispatchedModelCallState,
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
-        DispatchedToolBatchState, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedRunnerState, DispatchedToolBatchState, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
         ProcessModelCallRecoveryPrecondition, ProcessModelCallUsageProvenance,
         ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadError,
-        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessRunnerConnectionHealth,
+        ProcessRunnerProjection, ProcessRunnerProjectionState, ProcessSessionDefaultsRead,
         ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
         ProcessTranscriptTurn, ProcessTurnState,
     },
@@ -174,10 +176,20 @@ use signalbox_process_protocol::{
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
-    ServerFrame, ServerMessage, ServiceTier as WireServiceTier, SessionEvent,
-    SessionMetadata as WireSessionMetadata, SessionPlacement as WireSessionPlacement,
-    SettingOverlay as WireSettingOverlay, SystemPromptMember, SystemPromptText,
-    ToolApprovalEventDecider as WireToolApprovalEventDecider,
+    RunnerCapabilityClass as WireRunnerCapabilityClass,
+    RunnerConnectionHealth as WireRunnerConnectionHealth,
+    RunnerCredentialProfileName as WireRunnerCredentialProfileName,
+    RunnerPlacementRevision as WireRunnerPlacementRevision,
+    RunnerProjection as WireRunnerProjection,
+    RunnerProjectionSelector as WireRunnerProjectionSelector,
+    RunnerProjectionState as WireRunnerProjectionState,
+    RunnerRepositoryKey as WireRunnerRepositoryKey,
+    RunnerSandboxProfile as WireRunnerSandboxProfile,
+    RunnerStateTransitionState as WireRunnerStateTransitionState,
+    RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
+    ServiceTier as WireServiceTier, SessionEvent, SessionMetadata as WireSessionMetadata,
+    SessionPlacement as WireSessionPlacement, SettingOverlay as WireSettingOverlay,
+    SystemPromptMember, SystemPromptText, ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
     TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
@@ -559,6 +571,7 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::RunnerStateTransition { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. }
         | DispatchedOutboxEventKind::DelegationUpdate(_)
         | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
@@ -2728,6 +2741,7 @@ fn update_signals_child_result(update: &ProcessUpdate, wait: DelegationWait) -> 
             | ProcessUpdateEvent::ModelCallTransition { .. }
             | ProcessUpdateEvent::ToolBatchTransition { .. }
             | ProcessUpdateEvent::ToolApprovalDecided { .. }
+            | ProcessUpdateEvent::RunnerStateTransition { .. }
             | ProcessUpdateEvent::ContextCompacted { .. }
             | ProcessUpdateEvent::TurnCompleted { .. }
             | ProcessUpdateEvent::TurnFailed { .. }
@@ -8867,6 +8881,11 @@ async fn spool_session_summaries(
                 model_selection: wire_model_selection(summary.model_selection()),
                 placement_version: CanonicalU64::new(summary.placement().version().as_u64()),
                 placement: wire_session_placement(summary.placement().placement()),
+                runner: summary
+                    .runner()
+                    .map(wire_runner_projection)
+                    .transpose()
+                    .map_err(SessionListSpoolError::Spool)?,
             },
         )
         .await
@@ -11308,7 +11327,15 @@ async fn spool_transcript(
         &mut file,
         version,
         request_id,
-        ServerMessage::TranscriptSnapshotStart { session_id, cursor },
+        ServerMessage::TranscriptSnapshotStart {
+            session_id,
+            cursor,
+            runner: reader
+                .runner()
+                .map(wire_runner_projection)
+                .transpose()
+                .map_err(TranscriptSpoolError::Spool)?,
+        },
     )
     .await
     .map_err(TranscriptSpoolError::Spool)?;
@@ -11393,6 +11420,70 @@ async fn spool_transcript(
         file,
         cursor: summary.cursor(),
     }))
+}
+
+fn wire_runner_projection(
+    projection: &ProcessRunnerProjection,
+) -> Result<WireRunnerProjection, SnapshotSpoolError> {
+    let selector = match projection.selector() {
+        RunnerSelector::Identity(runner) => WireRunnerProjectionSelector::Runner {
+            runner_id: wire_uuid(runner.into_uuid()),
+        },
+        RunnerSelector::CapabilityClass(capability) => {
+            WireRunnerProjectionSelector::CapabilityClass {
+                name: WireRunnerCapabilityClass::try_new(capability.as_str().to_owned())
+                    .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+            }
+        }
+    };
+    let sandbox_profile = match projection.sandbox() {
+        DomainRunnerSandboxProfile::Ambient => WireRunnerSandboxProfile::Ambient,
+        DomainRunnerSandboxProfile::WorkspaceRestricted => {
+            WireRunnerSandboxProfile::WorkspaceRestricted
+        }
+    };
+    let state = match projection.state() {
+        ProcessRunnerProjectionState::Unpinned => WireRunnerProjectionState::Unpinned,
+        ProcessRunnerProjectionState::Pinned => WireRunnerProjectionState::Pinned,
+        ProcessRunnerProjectionState::RunnerLostBeforePin => {
+            WireRunnerProjectionState::RunnerLostBeforePin
+        }
+        ProcessRunnerProjectionState::RunnerLost => WireRunnerProjectionState::RunnerLost,
+        ProcessRunnerProjectionState::RunnerAbandoned => WireRunnerProjectionState::RunnerAbandoned,
+    };
+    let connection_health = projection.connection_health().map(|health| match health {
+        ProcessRunnerConnectionHealth::Connected => WireRunnerConnectionHealth::Connected,
+        ProcessRunnerConnectionHealth::Suspect => WireRunnerConnectionHealth::Suspect,
+        ProcessRunnerConnectionHealth::Shutdown => WireRunnerConnectionHealth::Shutdown,
+        ProcessRunnerConnectionHealth::Lost => WireRunnerConnectionHealth::Lost,
+    });
+    WireRunnerProjection::try_new(
+        selector,
+        projection
+            .runner()
+            .map(|runner| wire_uuid(runner.into_uuid())),
+        WireRunnerPlacementRevision::try_new(projection.placement_revision().get())
+            .ok_or(SnapshotSpoolError::EncodeInvariant)?,
+        sandbox_profile,
+        projection
+            .credential_profile()
+            .map(|profile| WireRunnerCredentialProfileName::try_new(profile.as_str().to_owned()))
+            .transpose()
+            .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+        projection
+            .repository()
+            .map(|repository| WireRunnerRepositoryKey::try_new(repository.as_str().to_owned()))
+            .transpose()
+            .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+        projection
+            .working_directory()
+            .map(|directory| WireRunnerWorkingDirectory::try_new(directory.as_str().to_owned()))
+            .transpose()
+            .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+        connection_health,
+        state,
+    )
+    .map_err(|_| SnapshotSpoolError::EncodeInvariant)
 }
 
 async fn write_spooled_transcript<Writer>(
@@ -13916,6 +14007,13 @@ enum ProcessUpdateEvent {
         approval: signalbox_domain::ToolApprovalResolution,
         decider: signalbox_domain::ToolApprovalDecider,
     },
+    RunnerStateTransition {
+        runner: signalbox_domain::RunnerId,
+        placement_revision: signalbox_domain::RunnerGeneration,
+        sandbox: signalbox_domain::RunnerSandboxProfile,
+        working_directory: Option<signalbox_domain::RunnerWorkingDirectory>,
+        state: DispatchedRunnerState,
+    },
     ContextCompacted {
         compaction: signalbox_domain::ContextCompactionId,
         call: signalbox_domain::ModelCallId,
@@ -14016,6 +14114,19 @@ impl ProcessUpdateEvent {
                 turn: *turn,
                 approval: approval.clone(),
                 decider: *decider,
+            },
+            DispatchedOutboxEventKind::RunnerStateTransition {
+                runner,
+                placement_revision,
+                sandbox,
+                working_directory,
+                state,
+            } => Self::RunnerStateTransition {
+                runner: *runner,
+                placement_revision: *placement_revision,
+                sandbox: *sandbox,
+                working_directory: working_directory.clone(),
+                state: *state,
             },
             DispatchedOutboxEventKind::ContextCompacted {
                 compaction,
@@ -14198,6 +14309,46 @@ impl ProcessUpdateEvent {
                     rationale: approval.rationale().map(|value| value.as_str().to_owned()),
                 }
             }
+            Self::RunnerStateTransition {
+                runner,
+                placement_revision,
+                sandbox,
+                working_directory,
+                state,
+            } => SessionEvent::RunnerStateTransition {
+                runner_id: wire_uuid(runner.into_uuid()),
+                placement_revision: WireRunnerPlacementRevision::try_new(placement_revision.get())
+                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
+                sandbox_profile: match sandbox {
+                    signalbox_domain::RunnerSandboxProfile::Ambient => {
+                        WireRunnerSandboxProfile::Ambient
+                    }
+                    signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted => {
+                        WireRunnerSandboxProfile::WorkspaceRestricted
+                    }
+                },
+                working_directory: working_directory
+                    .as_ref()
+                    .map(|directory| {
+                        WireRunnerWorkingDirectory::try_new(directory.as_str().to_owned())
+                            .map_err(|_| ProcessConnectionError::EncodeInvariant)
+                    })
+                    .transpose()?,
+                state: match state {
+                    DispatchedRunnerState::Pinned => WireRunnerStateTransitionState::Pinned,
+                    DispatchedRunnerState::Suspect => WireRunnerStateTransitionState::Suspect,
+                    DispatchedRunnerState::Connected => WireRunnerStateTransitionState::Connected,
+                    DispatchedRunnerState::RunnerLostBeforePin => {
+                        WireRunnerStateTransitionState::RunnerLostBeforePin
+                    }
+                    DispatchedRunnerState::RunnerLost => WireRunnerStateTransitionState::RunnerLost,
+                    DispatchedRunnerState::Replaced => WireRunnerStateTransitionState::Replaced,
+                    DispatchedRunnerState::WorkingDirectoryChanged => {
+                        WireRunnerStateTransitionState::WorkingDirectoryChanged
+                    }
+                    DispatchedRunnerState::Abandoned => WireRunnerStateTransitionState::Abandoned,
+                },
+            },
             Self::ContextCompacted {
                 compaction,
                 call,
@@ -14625,8 +14776,9 @@ mod tests {
         ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
         ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
         ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
-        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
-        SessionId, SessionInputPosition, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
+        ReviewWorkflowKind, RunnerGeneration, RunnerId, RunnerWorkingDirectory,
+        SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
+        SessionInputPosition, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
         SessionModelSettingsChanged, SettingOverlay, SubmitInputRejectedResult,
         ToolApprovalDecision, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
         TurnModelSettingsResolved, ValidatedModelSettings,
@@ -14635,8 +14787,12 @@ mod tests {
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
-        RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
+        RejectionDetail, ReviewFindingInput, ReviewSeverity,
+        RunnerPlacementRevision as WireRunnerPlacementRevision,
+        RunnerSandboxProfile as WireRunnerSandboxProfile,
+        RunnerStateTransitionState as WireRunnerStateTransitionState,
+        RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
         SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
         TurnState, UserInputContent, decode_server_line, encode_server_line,
     };
@@ -14732,7 +14888,7 @@ mod tests {
         },
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
-            DispatchedReconciliationOperation, DispatchedToolBatchState,
+            DispatchedReconciliationOperation, DispatchedRunnerState, DispatchedToolBatchState,
         },
         process_read::{
             ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
@@ -18121,6 +18277,42 @@ mod tests {
                 state: ToolBatchState::RecoveryRequired {
                     tool_attempt_id: CanonicalUuid::from_uuid(tool_attempt.into_uuid()),
                 },
+            }
+        );
+    }
+
+    /// INV-032 / INV-044: the daemon preserves every bounded runner-placement
+    /// fact while projecting one dispatched outbox transition to the wire.
+    #[test]
+    fn inv032_inv044_runner_state_transition_projects_to_the_closed_wire_shape() {
+        let runner = RunnerId::from_uuid(Uuid::from_u128(7));
+        let placement_revision =
+            RunnerGeneration::try_from_u64(9).expect("the fixture revision is positive");
+        let working_directory = RunnerWorkingDirectory::try_new("workspace/project".to_owned())
+            .expect("the fixture directory is bounded exact text");
+        let expected_working_directory = working_directory.as_str().to_owned();
+        let update =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::RunnerStateTransition {
+                runner,
+                placement_revision,
+                sandbox: signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted,
+                working_directory: Some(working_directory),
+                state: DispatchedRunnerState::WorkingDirectoryChanged,
+            })
+            .expect("a client-visible runner event projects to one update");
+
+        assert_eq!(
+            update.wire().expect("the fixture event is representable"),
+            SessionEvent::RunnerStateTransition {
+                runner_id: CanonicalUuid::from_uuid(runner.into_uuid()),
+                placement_revision: WireRunnerPlacementRevision::try_new(placement_revision.get(),)
+                    .expect("the fixture placement revision is positive"),
+                sandbox_profile: WireRunnerSandboxProfile::WorkspaceRestricted,
+                working_directory: Some(
+                    WireRunnerWorkingDirectory::try_new(expected_working_directory)
+                        .expect("the fixture wire directory is valid"),
+                ),
+                state: WireRunnerStateTransitionState::WorkingDirectoryChanged,
             }
         );
     }

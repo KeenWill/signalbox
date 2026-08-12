@@ -128,8 +128,6 @@ pub enum BlobCatalogCorruption {
     PartialReplica,
     /// Registration returned without the replica it was required to record.
     MissingRegisteredReplica,
-    /// Registration returned without the namespace binding it required.
-    MissingRegisteredBinding,
     /// Durable rows exceeded the version-one deployment store bound.
     StoreLimitExceeded,
 }
@@ -150,7 +148,6 @@ impl fmt::Display for BlobCatalogCorruption {
             Self::BlobWithoutReplica => "blob identity has no verified replica",
             Self::PartialReplica => "blob replica row is incomplete",
             Self::MissingRegisteredReplica => "registered blob replica could not be reloaded",
-            Self::MissingRegisteredBinding => "registered blob store binding could not be reloaded",
             Self::StoreLimitExceeded => "blob store identities exceed the deployment bound",
         };
         formatter.write_str(message)
@@ -379,15 +376,27 @@ async fn ensure_store_binding(
     transaction: &mut Transaction<'_, Postgres>,
     supplied: &BlobStoreBindingRecord,
 ) -> Result<(), BlobCatalogRepositoryError> {
-    sqlx::query(
-        "INSERT INTO blob_store_binding (store_name, namespace_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING",
+    let namespace_for_name: Option<Uuid> = sqlx::query_scalar(
+        "SELECT namespace_id
+           FROM blob_store_binding
+          WHERE store_name = $1",
     )
     .bind(supplied.store().as_str())
-    .bind(supplied.namespace_id())
-    .execute(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await?;
+    if let Some(namespace_id) = namespace_for_name {
+        if namespace_id == supplied.namespace_id() {
+            return Ok(());
+        }
+        return Err(BlobCatalogCorruption::StoreNamespaceMismatch.into());
+    }
+
+    // Store bindings are deployment-time facts. Serialize their admission so
+    // concurrent new names cannot both observe the final free catalog slot.
+    // The ordinary established-binding path above remains lock-free.
+    sqlx::query("LOCK TABLE blob_store_binding IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut **transaction)
+        .await?;
 
     let namespace_for_name: Option<Uuid> = sqlx::query_scalar(
         "SELECT namespace_id
@@ -415,7 +424,25 @@ async fn ensure_store_binding(
     if store_for_namespace.is_some() {
         return Err(BlobCatalogCorruption::NamespaceStoreMismatch.into());
     }
-    Err(BlobCatalogCorruption::MissingRegisteredBinding.into())
+
+    let store_count: i64 = sqlx::query_scalar("SELECT count(*) FROM blob_store_binding")
+        .fetch_one(&mut **transaction)
+        .await?;
+    let maximum_store_count =
+        i64::try_from(MAX_BLOB_STORES).map_err(|_| BlobCatalogCorruption::StoreLimitExceeded)?;
+    if store_count >= maximum_store_count {
+        return Err(BlobCatalogCorruption::StoreLimitExceeded.into());
+    }
+
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ($1, $2)",
+    )
+    .bind(supplied.store().as_str())
+    .bind(supplied.namespace_id())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn load_in_transaction(
