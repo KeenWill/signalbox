@@ -10,8 +10,9 @@ instead. The mirror covers the public type and function surface of
 comments, no tests, no bodies. Any pull request that adds, removes, or changes a
 public item in either crate must update this file in the same change;
 `AGENTS.md` carries that rule, and CI (`scripts/check_domain_spine.py`) fails
-when an exported name is missing here or an inventory count disagrees with
-source.
+when an exported name or a listed type's public method is missing here, when a
+declaration outlives its source counterpart, or when an inventory count
+disagrees with source.
 
 Conventions used below:
 
@@ -121,7 +122,7 @@ pub enum BlobDigestParseFailure {
 
 pub struct BlobDigestParseError { /* private */ }
 impl BlobDigestParseError {
-    // accessors: rejected, failure
+    // accessors: rejected(), failure()
 }
 ```
 
@@ -6976,16 +6977,6 @@ pub enum RepoWatchSingletonKey {
     Repository { repository: RepositorySlug },
 }
 
-pub struct RepoWatchDispatchGoal { /* private */ }
-impl RepoWatchDispatchGoal {
-    pub const fn new(
-        command: GoalUserCommand,
-        accepted_input: AcceptedInputId,
-        turn: TurnId,
-    ) -> Self;
-    // accessors: command(), accepted_input(), turn()
-}
-
 pub struct RepoWatchPreparedDispatchAction { /* private */ }
 impl RepoWatchPreparedDispatchAction {
     // accessors: action(), prepared_session(), goal()
@@ -6999,7 +6990,7 @@ impl RepoWatchPreparedDispatchAction {
         TurnId,
         SemanticTranscriptEntryId,
         ContextFrontierId,
-        RepoWatchDispatchGoal,
+        GoalUserCommand,
     );
 }
 
@@ -10397,7 +10388,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 34 (incl. 4 traits)   |
+| application: repo_watch                            | 33 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10408,4 +10399,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **250 (+1 free fn)**  |
+| **signalbox-application total**                    | **249 (+1 free fn)**  |
