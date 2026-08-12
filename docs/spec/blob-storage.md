@@ -237,12 +237,12 @@ Expiry cancels the active adapter operation, releases traversal resources, and
 uses the ordinary unavailable outcome rather than delaying a later candidate or
 caller beyond the aggregate bound.
 
-Direct blob reads have a separate non-waiting process-wide admission bound of 16
-active traversals. A request that cannot acquire one of those permits
-immediately returns the ordinary unavailable outcome; it never occupies a
-connection task while queued. Thus even 16 reads that retain their complete
-24-hour allowance leave 112 of the process protocol's 128 connection tasks
-available to control traffic.
+Direct blob reads and checked imported-aggregate loads share a separate
+non-waiting process-wide admission bound of 16 active traversals. A request that
+cannot acquire one of those permits immediately returns the ordinary unavailable
+outcome; it never occupies a connection task while queued. Thus even 16 reads
+that retain their complete 24-hour allowance leave 112 of the process protocol's
+128 connection tasks available to control traffic.
 
 Attachment-preparation store traversal is bounded independently from scheduler
 passes: at most eight such traversals are active process-wide. A model-call pass
@@ -268,6 +268,12 @@ An unrouted historical S3 binding remains configured but is not
 lifecycle-queried at startup; its read failures use the ordinary runtime
 `unavailable` candidate outcome. The external bucket rule is the crash and
 credential-loss bound for uploaded parts that never became a final object.
+
+All namespace-marker and lifecycle operations for every currently routed S3
+store share one non-resetting five-minute monotonic startup deadline. Each
+operation receives only the remaining allowance while retaining the 10-second
+connect and 60-second no-progress bounds. Exhaustion fails startup before socket
+admission; changing stores or probe kinds never restarts the aggregate deadline.
 
 ## Ingest and the transaction boundary
 

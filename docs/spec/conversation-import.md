@@ -639,7 +639,10 @@ the committed unimplemented seam above. Each checked aggregate load — includin
 ordinary read, replay comparison, and imported-frontier reconstitution — has one
 non-resetting 24-hour monotonic deadline shared across every referenced digest
 and replica candidate. It performs at most one referenced-blob store operation
-at a time; digest or candidate changes never restart the deadline.
+at a time; digest or candidate changes never restart the deadline. Every checked
+load acquires the blob contract's shared 16-slot read-traversal admission
+without waiting; when no slot is immediately available, it returns the ordinary
+unavailable outcome and retains no queued connection task.
 
 One transaction resolves or inserts a complete aggregate:
 

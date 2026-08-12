@@ -400,11 +400,14 @@ the sweep (INV-007).
   rerun), and keeps an in-progress sweep read alive across pass completions. A
   failed or panicked pass is logged and retried by a later hint or sweep;
   nothing is lost because the rows are the queue. A pass about to perform
-  attachment store I/O relinquishes this 16-pass capacity before waiting for the
-  blob contract's separate attachment-preparation permit. Its task remains in
-  flight for per-session deduplication but does not consume a scheduler-pass
-  slot; after successful verification it reacquires a slot before send
-  authorization and its guarded transaction revalidates authority.
+  attachment store I/O first tries the blob contract's separate
+  attachment-preparation permit without waiting. If none is immediately
+  available, the pass relinquishes its 16-pass capacity, ends, and leaves only
+  the durable `Prepared` row for a later sweep. After acquiring a permit, its
+  task remains in flight for per-session deduplication but relinquishes the
+  scheduler-pass slot during store I/O; after successful verification it
+  reacquires a slot before send authorization and its guarded transaction
+  revalidates authority.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
@@ -877,12 +880,16 @@ fences the prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes the generic recovery scan, marks every prior-process nonterminal
-runner connection lost, and — once the credential-pool child is composed —
-establishes each `codex_home` profile's credential-home identity, resolves every
-prior-process capacity reservation, resolves every retained OAuth
-refresh-in-progress marker to a replacement token or a quarantine, scavenges
-every crash-left OAuth scratch home, and runs the legacy family-to-policy
-backfill
+runner connection lost, initializes every configured blob store against its
+recorded namespace binding, and verifies every currently routed S3 namespace
+marker and multipart lifecycle rule under the blob contract's aggregate startup
+deadline. Blob initialization failure stops startup before either socket binds
+or scheduling begins; unrouted historical S3 bindings retain their lazy runtime
+check. It then — once the credential-pool child is composed — establishes each
+`codex_home` profile's credential-home identity, resolves every prior-process
+capacity reservation, resolves every retained OAuth refresh-in-progress marker
+to a replacement token or a quarantine, scavenges every crash-left OAuth scratch
+home, and runs the legacy family-to-policy backfill
 ([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
 Those five gates sit after the recovery scan so a failure cannot block recovery
 of acknowledged work, and before any socket binding or scheduling so no request
