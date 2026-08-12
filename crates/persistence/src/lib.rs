@@ -10,6 +10,7 @@ mod model_settings_resolution;
 
 pub mod approval_judge;
 pub mod approval_judge_eval;
+pub mod blob;
 pub mod context_compaction;
 pub mod conversation_import;
 pub mod conversation_listing;

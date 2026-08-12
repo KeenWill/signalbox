@@ -317,6 +317,7 @@ Documentation bar:
 ```bash
 python3 scripts/generate_invariants.py --check
 python3 scripts/check_domain_spine.py
+python3 scripts/test_check_domain_spine.py
 python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py

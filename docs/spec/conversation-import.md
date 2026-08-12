@@ -3,6 +3,10 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The raw-source blob convergence below is the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and becomes verified with its implementing
+child stack.
+
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
@@ -97,18 +101,26 @@ names.
 ## Raw source records
 
 Every nonempty physical JSONL record is preserved before normalization. A raw
-record blob stores the exact bytes between line delimiters and their SHA-256
-content hash; a conversation occurrence stores the blob hash and a positive
+record blob stores the exact bytes between line delimiters under their SHA-256
+identity; a conversation occurrence stores the blob digest and a positive
 contiguous physical-record position. Line delimiters and source paths are not
 part of a record. Duplicate content in one or many conversations creates
 distinct ordered occurrences referencing one content-addressed blob.
 
-The Postgres representation uses `bytea`, not `jsonb`, as raw authority. JSON
-key order, whitespace, escapes, number spelling, empty strings, and U+0000
-therefore remain recoverable even when normalization has a different typed
-representation. A hash collision whose stored bytes differ is typed corruption
-and fails closed; equality is never inferred from the hash alone at a checked
-boundary.
+One source admits at most 65,536 physical records. Conversion counts records in
+physical order before any per-record blob publication and rejects record 65,537
+with the typed `raw_record_count_exceeded` conversion class and that one-based
+ordinal. The fixed count bounds per-object publication, catalog work, relational
+members, and the time one import can retain the process-wide bulk-ingest permit
+independently of its source-byte ceiling.
+
+The verified blob is the raw-byte authority; PostgreSQL stores only its ordinary
+blob digest and occurrence relationships, never a second `bytea` copy.
+Exact-byte loading through that reference preserves JSON key order, whitespace,
+escapes, number spelling, empty strings, and U+0000 even when normalization has
+a different typed representation. A referenced blob whose bytes disagree with
+its digest is typed corruption and fails closed; equality is never inferred from
+an unverified hash at a checked boundary.
 
 Each occurrence also carries the complete source JSON object normalized into the
 source-neutral structured-value algebra. Non-message records produce a typed
@@ -284,6 +296,14 @@ existing version is never reinterpreted.
 The converter does not read files or choose paths. Its caller supplies bytes, so
 later formats implement the same seam without adding filesystem types to the
 domain or application crates.
+
+Blob-bearing import conversion is committed unimplemented functionality: no
+present surface supplies a blob-backed source directly to a converter. The
+compatibility constraint is that such a path streams from the blob substrate
+through conversion without materializing the whole blob. The existing text-file
+and chunked socket paths remain the bounded whole-source conversion described
+below; this future streaming seam does not reinterpret an existing converter
+version.
 
 ## Operational surface
 
@@ -589,20 +609,44 @@ produced it.
 
 ## Persistence and reconstitution
 
-The Postgres representation uses append-only `imported_raw_source_record` blobs,
-`imported_conversation` headers, `imported_conversation_raw_record` occurrences,
-and `imported_transcript_entry` members. Imported text and opaque media data use
-UTF-8 `bytea`; complete structured records and nested values use a checked
-adapter encoding of the domain algebra, never provider JSON as a domain type.
-Every encoded top-level value carries a fixed format version and payload-kind
-discriminator; a decoder rejects a value from another column kind rather than
-reinterpreting it. Encoded collection counts bound parsing but never directly
-drive capacity allocation: collections grow fallibly after each decoded element.
-Structured-value and source-metadata encodings remain at version `1`. Content
-using the existing closed vocabulary, including `SourceMessageBlock`, also
-remains at version `1`. A content value containing the new `SourceResultBlock`
-uses version `2`; content decoding retains the version-1 message-block tag and
-rejects the new result-block tag beneath a version-1 header.
+The Postgres representation uses append-only `imported_raw_source_record` blob
+references, `imported_conversation` headers, `imported_conversation_raw_record`
+occurrences, and `imported_transcript_entry` members. Imported text and opaque
+media data use UTF-8 `bytea`; complete structured records and nested values use
+a checked adapter encoding of the domain algebra, never provider JSON as a
+domain type. Every encoded top-level value carries a fixed format version and
+payload-kind discriminator; a decoder rejects a value from another column kind
+rather than reinterpreting it. Encoded collection counts bound parsing but never
+directly drive capacity allocation: collections grow fallibly after each decoded
+element. Structured-value and source-metadata encodings remain at version `1`.
+Content using the existing closed vocabulary, including `SourceMessageBlock`,
+also remains at version `1`. A content value containing the new
+`SourceResultBlock` uses version `2`; content decoding retains the version-1
+message-block tag and rejects the new result-block tag beneath a version-1
+header.
+
+Raw source bytes live in the blob store under their existing SHA-256 content
+hash; the relational record stores that ordinary blob digest and never a second
+copy. New ingestion publishes and verifies every raw blob before the aggregate
+transaction, then registers all blob and replica rows in the same transaction
+that first references them. One admitted import starts and awaits at most one
+raw blob publication or verification operation at a time; the process-wide
+bulk-ingest permit remains held across that sequential traversal, so one import
+cannot fan out a record inventory into concurrent store operations. A failed
+import can therefore leave deterministic unregistered store orphans but no
+unreachable catalog rows. Loading first reads the complete append-only
+relational projection and releases its transaction, then reads and verifies the
+referenced blobs, so no database transaction spans store I/O. The current
+converter and reconstitution surfaces retain their configured bounded
+whole-source behavior; future streaming conversion remains the committed
+unimplemented seam above. Each checked aggregate load — including ordinary read,
+replay comparison, and imported-frontier reconstitution — has one non-resetting
+24-hour monotonic deadline shared across every referenced digest and replica
+candidate. It performs at most one referenced-blob store operation at a time;
+digest or candidate changes never restart the deadline. Every checked load
+acquires the blob contract's shared 16-slot read-traversal admission without
+waiting; when no slot is immediately available, it returns the ordinary
+unavailable outcome and retains no queued connection task.
 
 One transaction resolves or inserts a complete aggregate:
 
@@ -613,14 +657,15 @@ One transaction resolves or inserts a complete aggregate:
   content, and source metadata; only the candidate conversation and entry
   identities are excluded. A semantic mismatch is typed
   `ExistingSnapshotMismatch`, never accepted as replay;
-- a new digest inserts or verifies every content-addressed raw blob, then
-  atomically inserts one header, every raw occurrence, and every normalized
-  entry; a concurrent header-insert loser re-inspects and completely
-  reconstitutes the winner, returning `AlreadyImported` only after the same
-  conversion-equivalence check, and raw-blob insert conflicts likewise reload
-  and verify the winning bytes before reuse; writers acquire both shared raw
-  hashes and globally unique imported-entry identities in their respective
-  sorted key order while storing physical positions explicitly; and
+- a new digest enters this transaction only after every content-addressed raw
+  blob has been published and verified without an open database transaction,
+  then atomically registers their blob and replica rows and inserts one header,
+  every raw occurrence, and every normalized entry; a concurrent header-insert
+  loser re-inspects and completely reconstitutes the winner, returning
+  `AlreadyImported` only after the same conversion-equivalence check; writers
+  acquire both shared raw hashes and globally unique imported-entry identities
+  in their respective sorted key order while storing physical positions
+  explicitly; and
 - every raw occurrence stores and rechecks its conversion digest before its
   normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
@@ -644,6 +689,12 @@ every expected entry using that version's fixed interpretation and requires
 exact agreement in entry count, order, content, speaker, and source metadata. It
 also reapplies the 128-container bound to complete records and entry-carried
 structured values (INV-002).
+
+The one-time storage-layer SQL migration produces the final blob-reference-only
+raw-source schema. The runtime repository accepts only that shape, and new
+imports write only blob references. The owning
+[blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration)
+defines when omitted configuration is valid.
 
 ## Derived display titles
 
@@ -688,17 +739,18 @@ state.
 
 Insertion always resolves the title, so the transitional `pending` state names
 only rows inserted before the column existed. The daemon resolves every pending
-row once at startup — after migration and before serving — by loading each
-complete aggregate through the checked reconstitution seam, re-deriving, and
-applying the one guarded update the header's append-only trigger admits: a
-`pending` row resolving to `derived` or `underivable` with every other column
-unchanged. The backfill is a pure derivation from durably stored raw bytes; it
-fails closed rather than guessing, and a serving unified-listing read that
-observes a pending row fails closed as corruption because startup owns that
-transition. Checked complete loads re-derive and reject a resolved title that
-disagrees with the records; exact reingestion continues to resolve through the
-digest and conversion-equivalence check unchanged, since the deterministic
-derivation adds no new degree of freedom.
+row once at startup — after migration, generic recovery, and blob namespace
+initialization, and before serving — by loading each complete aggregate through
+the checked reconstitution seam, re-deriving, and applying the one guarded
+update the header's append-only trigger admits: a `pending` row resolving to
+`derived` or `underivable` with every other column unchanged. The backfill is a
+pure derivation from durably stored raw bytes; it fails closed rather than
+guessing, and a serving unified-listing read that observes a pending row fails
+closed as corruption because startup owns that transition. Checked complete
+loads re-derive and reject a resolved title that disagrees with the records;
+exact reingestion continues to resolve through the digest and
+conversion-equivalence check unchanged, since the deterministic derivation adds
+no new degree of freedom.
 
 ## Test data and local validation
 

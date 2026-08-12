@@ -16,6 +16,7 @@ rust_decimal = { version = "1.42.1", default-features = false, features = ["std"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 signalbox-application = { path = "../application" }
+signalbox-blob-store = { path = "../blob-store" }
 signalbox-domain = { path = "../domain" }
 signalbox-tools-plan = { path = "../tools-plan" }
 sqlx = { version = "0.9.0", default-features = false, features = [
@@ -35,6 +36,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "time",
 ] }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
+uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 testcontainers-modules = { version = "0.15.0", optional = true, default-features = false, features = [
     "postgres",
     "ring",
@@ -53,6 +55,11 @@ signalbox-expect-table = { path = "../expect-table" }
 [[test]]
 name = "approval_judge_eval_postgres"
 path = "tests/approval_judge_eval_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "blob_postgres"
+path = "tests/blob_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
