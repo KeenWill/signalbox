@@ -2579,21 +2579,21 @@ fn validate_tool_approval_event_shape(
             } => rationale.is_none() && ToolDenialReason::try_new(reason.clone()).is_ok(),
         },
         ToolApprovalEventDecider::Delegate { .. } => match decision {
-            ToolApprovalEventDecision::Approve {}
-            | ToolApprovalEventDecision::Deny { reason: None } => rationale
+            ToolApprovalEventDecision::Approve {} => rationale
                 .as_ref()
                 .is_some_and(|rationale| ToolDecisionRationale::try_new(rationale.clone()).is_ok()),
             // A delegate denial's reason is exactly the derivation from its
-            // rationale; a reason-free denial is the legacy pre-derivation
-            // shape and stays admitted above.
-            ToolApprovalEventDecision::Deny {
-                reason: Some(reason),
-            } => rationale.as_ref().is_some_and(|rationale| {
-                ToolDecisionRationale::try_new(rationale.clone()).is_ok_and(|rationale| {
-                    ToolDenialReason::from_rationale(&rationale)
-                        .is_some_and(|derived| derived.as_str() == reason)
+            // rationale: absent only when the rationale derives nothing.
+            ToolApprovalEventDecision::Deny { reason } => {
+                rationale.as_ref().is_some_and(|rationale| {
+                    ToolDecisionRationale::try_new(rationale.clone()).is_ok_and(|rationale| {
+                        ToolDenialReason::from_rationale(&rationale)
+                            .as_ref()
+                            .map(ToolDenialReason::as_str)
+                            == reason.as_deref()
+                    })
                 })
-            }),
+            }
         },
     };
     if !shape_matches {
@@ -12382,7 +12382,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_deny_event_round_trips_with_rationale()
+    fn inv033_tool_approval_delegate_deny_event_round_trips_null_reason_for_empty_derivation()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -12397,10 +12397,10 @@ mod tests {
                         model_selection_id: uuid(10),
                         model_call_id: uuid(11),
                     },
-                    rationale: Some(String::from("request exceeds the stated scope")),
+                    rationale: Some(String::from("   ")),
                 },
             },
-            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"   "}}"#,
         )
     }
 
@@ -12425,11 +12425,11 @@ mod tests {
                             model_selection_id: uuid(11),
                             model_call_id: uuid(12),
                         },
-                        rationale: Some(String::from("request exceeds the stated scope")),
+                        rationale: Some(String::from("   ")),
                     }),
                 },
             },
-            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"request exceeds the stated scope"}}}"#,
+            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"   "}}}"#,
         )
     }
 

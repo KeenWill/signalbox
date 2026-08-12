@@ -1,10 +1,70 @@
 -- A delegate denial now surfaces its judge rationale as the denial reason the
 -- denied session reads, derived under the reason's tighter bounds (control
--- characters become spaces, surrounding whitespace is trimmed, text is cut to
--- 1024 bytes). The previous shape forced delegate denials to carry no reason,
--- which rendered every judge denial as an unexplained `detail: null`. Rows
--- written before this migration keep their absent reason; readers treat that
--- shape as legacy rather than corruption.
+-- characters become spaces, edge spaces are trimmed, text is cut to 1024
+-- bytes). The previous shape forced delegate denials to carry no reason,
+-- which rendered every judge denial as an unexplained `detail: null`.
+-- Existing delegate denials are backfilled with the same derivation, so a
+-- null reason afterwards means exactly one thing everywhere: the rationale
+-- sanitizes to nothing. Readers reject every other null as corruption rather
+-- than tolerating a shape no deployment produces.
+
+-- The backfill mirrors ToolDenialReason::from_rationale. It refuses rather
+-- than truncates: a stored rationale whose sanitized form exceeds the reason
+-- bound would need the derivation's character-boundary cut, which SQL cannot
+-- replicate byte-for-byte, so such a row fails the migration loudly for a
+-- hand-written rewrite. No such row exists in any current database.
+DO $$
+DECLARE
+    oversized bigint;
+BEGIN
+    SELECT count(*) INTO oversized
+      FROM tool_approval_decision
+     WHERE decision_source = 'delegate'
+       AND decision_kind = 'deny'
+       AND denial_reason IS NULL
+       AND octet_length(
+               btrim(
+                   regexp_replace(
+                       rationale,
+                       e'[\\x01-\\x1f\\x7f\\u0080-\\u009f]',
+                       ' ',
+                       'g'
+                   ),
+                   ' '
+               )
+           ) > 1024;
+    IF oversized <> 0 THEN
+        RAISE EXCEPTION
+            'delegate denial rationale sanitizes past the reason bound; '
+            'backfill these rows by hand before applying this migration';
+    END IF;
+END $$;
+
+-- The decision table is append-only behind a BEFORE UPDATE trigger that
+-- raises unconditionally, so the backfill runs with user triggers disabled,
+-- following 202608110001's rewrite discipline: DISABLE TRIGGER USER needs
+-- only table ownership and leaves foreign-key enforcement intact. A fresh
+-- database has no rows here and every statement is a no-op.
+ALTER TABLE tool_approval_decision DISABLE TRIGGER USER;
+
+UPDATE tool_approval_decision
+   SET denial_reason = NULLIF(
+           btrim(
+               regexp_replace(
+                   rationale,
+                   e'[\\x01-\\x1f\\x7f\\u0080-\\u009f]',
+                   ' ',
+                   'g'
+               ),
+               ' '
+           ),
+           ''
+       )
+ WHERE decision_source = 'delegate'
+   AND decision_kind = 'deny'
+   AND denial_reason IS NULL;
+
+ALTER TABLE tool_approval_decision ENABLE TRIGGER USER;
 
 -- The deny branch no longer enumerates decision sources: the source-shape
 -- constraint already restricts automatic sources to approvals, so every

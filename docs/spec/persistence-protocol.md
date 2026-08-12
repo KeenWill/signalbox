@@ -236,8 +236,9 @@ Implemented table families (across the forward-only migrations):
   correlates delegate decisions to their completed call, selection,
   recommendation, and rationale; migration `202608110003` supersedes its
   decision-shape constraint so a delegate denial stores the checked reason
-  derived from its rationale (rows written earlier keep their absent reason,
-  which readers accept as the legacy shape);
+  derived from its rationale, and backfills earlier delegate denials with the
+  same derivation, so a null reason means exactly one thing everywhere: the
+  rationale sanitizes to nothing;
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly

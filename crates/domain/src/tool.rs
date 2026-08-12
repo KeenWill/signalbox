@@ -1036,10 +1036,10 @@ impl ToolApprovalResolutionReconstitutionInput {
     /// Supplies one authority-checked delegate decision, its recorded call,
     /// and the denial reason exactly as stored beside the decision.
     ///
-    /// The stored reason is authoritative for reconstitution: rows written
-    /// before reason derivation existed carry none and keep rendering none,
-    /// while a present stored reason must equal the derivation from the
-    /// recorded rationale.
+    /// Reconstitution requires the stored reason to equal the derivation
+    /// from the recorded rationale — null exactly when the rationale
+    /// derives nothing — so a row missing its current evidence fails closed
+    /// instead of restoring as an unexplained denial.
     pub fn delegate(
         approval: DelegateToolApproval,
         stored_denial_reason: Option<ToolDenialReason>,
@@ -1105,22 +1105,18 @@ impl ToolApprovalResolutionReconstitutionInput {
             StoredToolApprovalEvidence::Delegate {
                 approval,
                 stored_denial_reason,
-            } => ToolApprovalResolution::delegate(approval).and_then(|mut resolution| {
-                match &mut resolution.decision {
+            } => ToolApprovalResolution::delegate(approval).and_then(|resolution| {
+                // The stored reason must equal the derivation exactly — a
+                // null admitted only when the rationale derives nothing — so
+                // a row missing its current evidence is corruption, never an
+                // unexplained denial.
+                match &resolution.decision {
                     ToolApprovalDecision::Approve => {
                         stored_denial_reason.is_none().then_some(resolution)
                     }
-                    ToolApprovalDecision::Deny { reason } => match stored_denial_reason {
-                        // The stored reason is authoritative: legacy rows
-                        // written before derivation existed keep their absent
-                        // reason on every read path.
-                        None => {
-                            *reason = None;
-                            Some(resolution)
-                        }
-                        Some(stored) if reason.as_ref() == Some(stored) => Some(resolution),
-                        Some(_) => None,
-                    },
+                    ToolApprovalDecision::Deny { reason } => {
+                        (reason == stored_denial_reason).then_some(resolution)
+                    }
                 }
             }),
             StoredToolApprovalEvidence::PolicyAuto(request) => {
@@ -1843,19 +1839,16 @@ mod tests {
         .expect("delegated authority may deny")
     }
 
-    /// A pre-derivation delegate denial stored no reason; reconstitution must
-    /// keep rendering none rather than deriving one the durable decision
-    /// never carried.
+    /// A stored null reason is admitted exactly when the rationale derives
+    /// nothing; a null beside a deriving rationale is missing evidence and
+    /// fails closed.
     #[test]
-    fn delegate_reconstitution_preserves_the_stored_denial_reason() {
-        let legacy =
-            ToolApprovalResolutionReconstitutionInput::delegate(denied_delegate_fixture(), None)
-                .reconstitute()
-                .expect("a legacy reason-free denial reconstitutes");
-        assert_eq!(
-            legacy.decision(),
-            &ToolApprovalDecision::Deny { reason: None }
-        );
+    fn delegate_reconstitution_admits_null_only_for_empty_derivation() {
+        let denial = denied_delegate_fixture();
+        let missing_evidence = ToolApprovalResolutionReconstitutionInput::delegate(denial, None)
+            .reconstitute()
+            .expect_err("a null reason beside a deriving rationale is rejected");
+        drop(missing_evidence);
     }
 
     /// A stored delegate denial reason the recorded rationale cannot derive
@@ -1874,46 +1867,66 @@ mod tests {
         drop(mismatched);
     }
 
+    fn admitted_rationale(value: &str) -> ToolDecisionRationale {
+        ToolDecisionRationale::try_new(String::from(value)).expect("fixture rationale is admitted")
+    }
+
+    /// A rationale already inside the reason bounds derives verbatim.
     #[test]
-    fn delegate_denial_reason_derivation_is_lossy_only_where_bounds_disagree() {
-        let verbatim = ToolDecisionRationale::try_new(String::from("scope exceeded"))
-            .expect("fixture rationale is admitted");
+    fn denial_reason_derivation_preserves_admissible_text_verbatim() {
         assert_eq!(
-            ToolDenialReason::from_rationale(&verbatim).map(ToolDenialReason::into_string),
+            ToolDenialReason::from_rationale(&admitted_rationale("scope exceeded"))
+                .map(ToolDenialReason::into_string),
             Some(String::from("scope exceeded"))
         );
+    }
 
-        let control_and_padding =
-            ToolDecisionRationale::try_new(String::from("  first\nsecond\tthird  "))
-                .expect("fixture rationale is admitted");
+    /// Control characters become spaces and forbidden edge spaces trim.
+    #[test]
+    fn denial_reason_derivation_maps_control_characters_and_trims_edges() {
         assert_eq!(
-            ToolDenialReason::from_rationale(&control_and_padding)
+            ToolDenialReason::from_rationale(&admitted_rationale("  first\nsecond\tthird  "))
                 .map(ToolDenialReason::into_string),
             Some(String::from("first second third"))
         );
+    }
 
-        let whitespace_only = ToolDecisionRationale::try_new(String::from(" \n \t "))
-            .expect("fixture rationale is admitted");
-        assert_eq!(ToolDenialReason::from_rationale(&whitespace_only), None);
-
-        let admitted_edge_nbsp =
-            ToolDecisionRationale::try_new(String::from("\u{00a0}denied\u{00a0}"))
-                .expect("fixture rationale is admitted");
+    /// A rationale of only control characters and spaces derives nothing.
+    #[test]
+    fn denial_reason_derivation_of_whitespace_only_text_is_empty() {
         assert_eq!(
-            ToolDenialReason::from_rationale(&admitted_edge_nbsp)
+            ToolDenialReason::from_rationale(&admitted_rationale(" \n \t ")),
+            None
+        );
+    }
+
+    /// Admitted non-POSIX edge whitespace such as NBSP is preserved.
+    #[test]
+    fn denial_reason_derivation_preserves_admitted_edge_whitespace() {
+        assert_eq!(
+            ToolDenialReason::from_rationale(&admitted_rationale("\u{00a0}denied\u{00a0}"))
                 .map(ToolDenialReason::into_string),
             Some(String::from("\u{00a0}denied\u{00a0}"))
         );
+    }
 
+    /// Oversized text cuts to the reason bound on a character boundary.
+    #[test]
+    fn denial_reason_derivation_truncates_on_a_character_boundary() {
         let truncation_prefix = "a".repeat(1023);
         let oversized = ToolDecisionRationale::try_new(format!("{truncation_prefix}é"))
             .expect("fixture rationale is admitted");
         let truncated =
             ToolDenialReason::from_rationale(&oversized).expect("nonempty text derives a reason");
         assert_eq!(truncated.as_str(), truncation_prefix);
+    }
 
-        let derived = ToolDenialReason::from_rationale(&control_and_padding)
-            .expect("nonempty text derives a reason");
+    /// Every derived reason re-admits through the reason validator.
+    #[test]
+    fn denial_reason_derivation_output_is_always_admissible() {
+        let derived =
+            ToolDenialReason::from_rationale(&admitted_rationale("  first\nsecond\tthird  "))
+                .expect("nonempty text derives a reason");
         assert!(ToolDenialReason::try_new(derived.into_string()).is_ok());
     }
 

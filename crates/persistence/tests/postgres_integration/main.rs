@@ -3485,14 +3485,14 @@ async fn persist_delegated_denial_fixture(
     .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
-            (request_id, decision_kind, decision_source,
+            (request_id, decision_kind, decision_source, denial_reason,
              delegate_model_selection_id, delegate_model_call_id, rationale)
-         VALUES ($1, 'deny', 'delegate', $2, $3, $4)",
+         VALUES ($1, 'deny', 'delegate', $2, $3, $4, $2)",
     )
     .bind(request.into_uuid())
+    .bind(APPROVAL_JUDGE_RATIONALE)
     .bind(selection)
     .bind(judge_call)
-    .bind(APPROVAL_JUDGE_RATIONALE)
     .execute(&mut *connection)
     .await?;
     sqlx::query(

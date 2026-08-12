@@ -2014,17 +2014,16 @@ and ignore the replacement activation.
 
 The `tool_approval_decided` decision is exactly `approve {}` or
 `deny { reason }`, where `reason` is required-nullable: a user denial may
-decline to give one, and delegate denials recorded before reason derivation
-existed carry none. Its decider is exactly `user { command_id }` or
+decline to give one. Its decider is exactly `user { command_id }` or
 `delegate { model_selection_id, model_call_id }`; `rationale` is
 required-nullable and present only for a delegate decision. A delegate rationale
 is 1 through 4,096 UTF-8 bytes and contains no U+0000; a delegate denial's
 `reason` is derived deterministically from that rationale (control characters
 become spaces, forbidden edge spaces are trimmed, the text is cut to 1,024 bytes
-on a character boundary) and is null exactly when the row predates the
-derivation or the rationale sanitizes to empty. Every present denial reason —
-user-authored or derived — is nonempty, at most 1,024 UTF-8 bytes, contains no
-Unicode control scalar, and has no surrounding POSIX whitespace.
+on a character boundary) and is null exactly when the rationale sanitizes to
+nothing. Every present denial reason — user-authored or derived — is nonempty,
+at most 1,024 UTF-8 bytes, contains no Unicode control scalar, and has no
+surrounding POSIX whitespace.
 
 The protocol additionally admits
 `context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.
