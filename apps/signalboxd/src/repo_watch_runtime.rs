@@ -3776,7 +3776,11 @@ mod tests {
     }
 
     fn settled_responses_with_pending_mergeability() -> Vec<ScriptedResponse> {
-        settled_typed_observation_responses()
+        with_pending_mergeability(settled_typed_observation_responses())
+    }
+
+    fn with_pending_mergeability(responses: Vec<ScriptedResponse>) -> Vec<ScriptedResponse> {
+        responses
             .into_iter()
             .map(|response| {
                 if response.target == PULL_DETAIL_TARGET {
@@ -3789,6 +3793,46 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn with_pending_mergeability_rewrites_the_pull_detail_response() {
+        let responses = with_pending_mergeability(vec![ScriptedResponse::conditional_ok(
+            RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+            ResponseBody(pull_detail()),
+        )]);
+
+        let [response] = responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "GET");
+        assert_eq!(response.target, PULL_DETAIL_TARGET);
+        assert_eq!(response.validator, None);
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, Some(ENTITY_TAG));
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, pull_detail_with_pending_mergeability());
+        assert_eq!(response.delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn with_pending_mergeability_leaves_another_target_unchanged() {
+        let responses = with_pending_mergeability(vec![ScriptedResponse::conditional_ok(
+            RequestTarget(REVIEWS_TARGET.to_owned()),
+            ResponseBody(reviews()),
+        )]);
+
+        let [response] = responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "GET");
+        assert_eq!(response.target, REVIEWS_TARGET);
+        assert_eq!(response.validator, Some(ENTITY_TAG));
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, Some(ENTITY_TAG));
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, reviews());
+        assert_eq!(response.delay, Duration::ZERO);
     }
 
     fn revalidated(responses: Vec<ScriptedResponse>) -> Vec<ScriptedResponse> {
