@@ -4773,7 +4773,7 @@ fn decode_process_tool_approval(
             if let ToolApprovalDecision::Deny { ref reason } = decision {
                 if reason.is_some() && *reason != ToolDenialReason::from_rationale(&rationale) {
                     return Err(
-                        ProcessReadCorruption::Inconsistent("delegate denial payload").into()
+                        ProcessReadCorruption::Inconsistent("delegate denial payload").into(),
                     );
                 }
             }

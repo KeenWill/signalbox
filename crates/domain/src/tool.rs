@@ -824,7 +824,13 @@ impl ToolDenialReason {
         let sanitized = rationale
             .as_str()
             .chars()
-            .map(|character| if character.is_control() { ' ' } else { character })
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
             .collect::<String>();
         let mut trimmed = sanitized.trim_matches(' ');
         while trimmed.len() > Self::MAX_UTF8_BYTES {
@@ -1800,8 +1806,8 @@ mod tests {
         let truncation_prefix = "a".repeat(1023);
         let oversized = ToolDecisionRationale::try_new(format!("{truncation_prefix}é"))
             .expect("fixture rationale is admitted");
-        let truncated = ToolDenialReason::from_rationale(&oversized)
-            .expect("nonempty text derives a reason");
+        let truncated =
+            ToolDenialReason::from_rationale(&oversized).expect("nonempty text derives a reason");
         assert_eq!(truncated.as_str(), truncation_prefix);
 
         let derived = ToolDenialReason::from_rationale(&control_and_padding)

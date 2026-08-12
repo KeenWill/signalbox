@@ -82,10 +82,10 @@ use signalbox_domain::{
     ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
     ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDenialReason,
     ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
-    ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
