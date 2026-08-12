@@ -5,10 +5,14 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::{
+    os::fd::AsRawFd,
+    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
+};
 
 use rustix::fs::{Mode, OFlags, open};
 #[cfg(target_os = "linux")]
@@ -33,7 +37,8 @@ const PUBLICATION_DIRECTORY: &str = ".publish-v1";
 /// Filesystem store rooted at one deployment-owned storage namespace.
 #[derive(Clone)]
 pub struct FilesystemBlobStore {
-    root: PathBuf,
+    root: Arc<fs::File>,
+    root_directory: PathBuf,
     publication_directory: PathBuf,
 }
 
@@ -49,7 +54,18 @@ impl FilesystemBlobStore {
         if !root.is_absolute() {
             return Err(FilesystemBlobStoreConstructionError::NotAbsolute { root });
         }
-        let metadata = fs::symlink_metadata(&root).map_err(|source| {
+        let root_descriptor = open(
+            &root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(fs::File::from)
+        .map_err(io::Error::from)
+        .map_err(|source| FilesystemBlobStoreConstructionError::Inspect {
+            root: root.clone(),
+            source,
+        })?;
+        let metadata = root_descriptor.metadata().map_err(|source| {
             FilesystemBlobStoreConstructionError::Inspect {
                 root: root.clone(),
                 source,
@@ -61,7 +77,7 @@ impl FilesystemBlobStore {
         if !private_directory_metadata(&metadata) {
             return Err(FilesystemBlobStoreConstructionError::NotPrivate { root });
         }
-        if !positively_classified_local_filesystem(&root).map_err(|source| {
+        if !positively_classified_local_filesystem(&root_descriptor).map_err(|source| {
             FilesystemBlobStoreConstructionError::Inspect {
                 root: root.clone(),
                 source,
@@ -69,21 +85,25 @@ impl FilesystemBlobStore {
         })? {
             return Err(FilesystemBlobStoreConstructionError::UnclassifiedFilesystem { root });
         }
-        let publication_directory = root.join(PUBLICATION_DIRECTORY);
-        prepare_publication_directory(&root, &publication_directory).map_err(|source| {
-            FilesystemBlobStoreConstructionError::PreparePublicationDirectory {
-                root: root.clone(),
-                source,
-            }
-        })?;
+        let root_descriptor = Arc::new(root_descriptor);
+        let root_directory = pinned_directory_path(&root_descriptor);
+        let publication_directory = root_directory.join(PUBLICATION_DIRECTORY);
+        prepare_publication_directory(&root_descriptor, &root_directory, &publication_directory)
+            .map_err(|source| {
+                FilesystemBlobStoreConstructionError::PreparePublicationDirectory {
+                    root: root.clone(),
+                    source,
+                }
+            })?;
         Ok(Self {
-            root,
+            root: root_descriptor,
+            root_directory,
             publication_directory,
         })
     }
 
     fn path(&self, key: &BlobObjectKey) -> Option<PathBuf> {
-        filesystem_key_is_admitted(key).then(|| self.root.join(key.as_str()))
+        filesystem_key_is_admitted(key).then(|| self.root_directory.join(key.as_str()))
     }
 
     async fn put_inner(
@@ -95,7 +115,7 @@ impl FilesystemBlobStore {
         let destination = self
             .path(&key)
             .ok_or_else(|| BlobStoreError::unavailable("reject reserved object key"))?;
-        let repair_destination = if private_regular_file_exists(&self.root, &key).await? {
+        let repair_destination = if private_regular_file_exists(self.root.clone(), &key).await? {
             match verify_file(&self.root, &key, expected).await {
                 Ok(()) => {
                     let parent = destination
@@ -281,7 +301,8 @@ impl FilesystemBlobStore {
         let relative_parent = std::path::Path::new(key.as_str())
             .parent()
             .ok_or_else(|| BlobStoreError::unavailable("derive destination parent"))?;
-        let mut current = self.root.clone();
+        let mut current = self.root_directory.clone();
+        let mut current_is_root = true;
         for component in relative_parent.components() {
             let std::path::Component::Normal(segment) = component else {
                 return Err(BlobStoreError::unavailable("resolve destination parent"));
@@ -294,8 +315,13 @@ impl FilesystemBlobStore {
             .await
             .map_err(|source| BlobStoreError::io("join destination directory creation", source))?
             .map_err(|source| BlobStoreError::io("create destination directory", source))?;
-            sync_directory(current.clone()).await?;
+            if current_is_root {
+                sync_open_directory(self.root.clone()).await?;
+            } else {
+                sync_directory(current.clone()).await?;
+            }
             current = next;
+            current_is_root = false;
         }
         Ok(current)
     }
@@ -330,7 +356,7 @@ async fn replace_corrupt_destination(
     destination: PathBuf,
     parent: PathBuf,
     publication_directory: PathBuf,
-    root: PathBuf,
+    root: Arc<fs::File>,
     key: BlobObjectKey,
     expected: ExpectedBlob,
 ) -> Result<BlobPutOutcome, BlobStoreError> {
@@ -347,12 +373,12 @@ async fn replace_corrupt_destination(
 }
 
 async fn verify_file(
-    root: &Path,
+    root: &Arc<fs::File>,
     key: &BlobObjectKey,
     expected: ExpectedBlob,
 ) -> Result<(), BlobStoreError> {
     let (mut file, _) =
-        open_private_regular_file(root.to_path_buf(), key.clone(), "verify object").await?;
+        open_private_regular_file(root.clone(), key.clone(), "verify object").await?;
     let mut digest = Sha256::new();
     let mut observed_length = 0_u64;
     let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
@@ -392,7 +418,7 @@ async fn verify_file(
 }
 
 async fn verify_and_retain_range(
-    root: PathBuf,
+    root: Arc<fs::File>,
     key: BlobObjectKey,
     expected: ExpectedBlob,
     offset: u64,
@@ -479,17 +505,18 @@ async fn sync_directory(path: PathBuf) -> Result<(), BlobStoreError> {
     .map_err(|source| BlobStoreError::io("sync destination directory", source))
 }
 
+async fn sync_open_directory(directory: Arc<fs::File>) -> Result<(), BlobStoreError> {
+    tokio::task::spawn_blocking(move || directory.sync_all())
+        .await
+        .map_err(|source| BlobStoreError::io("join directory sync", source))?
+        .map_err(|source| BlobStoreError::io("sync destination directory", source))
+}
+
 async fn private_regular_file_exists(
-    root: &Path,
+    root: Arc<fs::File>,
     key: &BlobObjectKey,
 ) -> Result<bool, BlobStoreError> {
-    match open_private_regular_file(
-        root.to_path_buf(),
-        key.clone(),
-        "inspect destination object",
-    )
-    .await
-    {
+    match open_private_regular_file(root, key.clone(), "inspect destination object").await {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == signalbox_blob_store::BlobStoreFailureKind::NotFound => {
             Ok(false)
@@ -499,7 +526,7 @@ async fn private_regular_file_exists(
 }
 
 async fn open_private_regular_file(
-    root: PathBuf,
+    root: Arc<fs::File>,
     key: BlobObjectKey,
     operation: &'static str,
 ) -> Result<(tokio::fs::File, u64), BlobStoreError> {
@@ -535,15 +562,9 @@ fn filesystem_key_is_admitted(key: &BlobObjectKey) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn open_relative_regular_candidate(root: &Path, key: &BlobObjectKey) -> io::Result<fs::File> {
-    let root = open(
-        root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
+fn open_relative_regular_candidate(root: &fs::File, key: &BlobObjectKey) -> io::Result<fs::File> {
     let object = openat2(
-        &root,
+        root,
         key.as_str(),
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
@@ -554,10 +575,10 @@ fn open_relative_regular_candidate(root: &Path, key: &BlobObjectKey) -> io::Resu
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_relative_regular_candidate(root: &Path, key: &BlobObjectKey) -> io::Result<fs::File> {
+fn open_relative_regular_candidate(root: &fs::File, key: &BlobObjectKey) -> io::Result<fs::File> {
     Ok(fs::File::from(
         open(
-            root.join(key.as_str()),
+            pinned_directory_path(root).join(key.as_str()),
             OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
@@ -565,10 +586,14 @@ fn open_relative_regular_candidate(root: &Path, key: &BlobObjectKey) -> io::Resu
     ))
 }
 
-fn prepare_publication_directory(root: &Path, publication_directory: &Path) -> io::Result<()> {
+fn prepare_publication_directory(
+    root: &fs::File,
+    root_directory: &Path,
+    publication_directory: &Path,
+) -> io::Result<()> {
     create_or_validate_private_directory(publication_directory)?;
-    sync_directory_blocking(root)?;
-    validate_publication_directory_mount(root)?;
+    root.sync_all()?;
+    validate_publication_directory_mount(root, root_directory)?;
     for entry in fs::read_dir(publication_directory)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -607,15 +632,9 @@ fn create_or_validate_private_directory(path: &Path) -> io::Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-fn validate_publication_directory_mount(root: &Path) -> io::Result<()> {
-    let root = open(
-        root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
+fn validate_publication_directory_mount(root: &fs::File, _root_path: &Path) -> io::Result<()> {
     let publication = openat2(
-        &root,
+        root,
         PUBLICATION_DIRECTORY,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
@@ -627,9 +646,9 @@ fn validate_publication_directory_mount(root: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn validate_publication_directory_mount(root: &Path) -> io::Result<()> {
-    let publication_directory = root.join(PUBLICATION_DIRECTORY);
-    if fs::symlink_metadata(root)?.dev() == fs::symlink_metadata(publication_directory)?.dev() {
+fn validate_publication_directory_mount(root: &fs::File, root_path: &Path) -> io::Result<()> {
+    let publication_directory = root_path.join(PUBLICATION_DIRECTORY);
+    if root.metadata()?.dev() == fs::symlink_metadata(publication_directory)?.dev() {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -640,7 +659,7 @@ fn validate_publication_directory_mount(root: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn validate_publication_directory_mount(_root: &Path) -> io::Result<()> {
+fn validate_publication_directory_mount(_root: &fs::File, _root_path: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "filesystem blob storage requires Unix mount identity",
@@ -684,13 +703,13 @@ fn private_regular_file_metadata(_metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn positively_classified_local_filesystem(path: &Path) -> io::Result<bool> {
+fn positively_classified_local_filesystem(root: &fs::File) -> io::Result<bool> {
     const EXT_SUPER_MAGIC: u32 = 0x0000_ef53;
     const XFS_SUPER_MAGIC: u32 = 0x5846_5342;
     const BTRFS_SUPER_MAGIC: u32 = 0x9123_683e;
     const ZFS_SUPER_MAGIC: u32 = 0x2fc1_2fc1;
     const F2FS_SUPER_MAGIC: u32 = 0xf2f5_2010;
-    let filesystem = rustix::fs::statfs(path).map_err(io::Error::from)?.f_type as u32;
+    let filesystem = rustix::fs::fstatfs(root).map_err(io::Error::from)?.f_type as u32;
     Ok(matches!(
         filesystem,
         EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | ZFS_SUPER_MAGIC | F2FS_SUPER_MAGIC
@@ -698,8 +717,18 @@ fn positively_classified_local_filesystem(path: &Path) -> io::Result<bool> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn positively_classified_local_filesystem(_path: &Path) -> io::Result<bool> {
+fn positively_classified_local_filesystem(_root: &fs::File) -> io::Result<bool> {
     Ok(false)
+}
+
+#[cfg(unix)]
+fn pinned_directory_path(directory: &fs::File) -> PathBuf {
+    PathBuf::from("/proc/self/fd").join(directory.as_raw_fd().to_string())
+}
+
+#[cfg(not(unix))]
+fn pinned_directory_path(_directory: &fs::File) -> PathBuf {
+    PathBuf::new()
 }
 
 /// Why a filesystem store root was rejected.

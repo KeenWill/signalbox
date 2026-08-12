@@ -221,3 +221,36 @@ async fn filesystem_range_reverifies_the_generation_it_reads() {
 
     assert_eq!(error.kind(), BlobStoreFailureKind::VerificationFailed);
 }
+
+#[tokio::test]
+async fn inv059_filesystem_pins_the_validated_root_namespace() {
+    let (root, store) = fixture();
+    let configured_root = root.path().to_path_buf();
+    let moved_root = configured_root.with_extension("moved");
+    std::fs::rename(&configured_root, &moved_root)
+        .expect("the validated root is renamed after construction");
+    std::fs::create_dir(&configured_root).expect("a replacement root is created");
+    std::fs::set_permissions(&configured_root, std::fs::Permissions::from_mode(0o700))
+        .expect("the replacement root is private");
+    let replacement_store = FilesystemBlobStore::try_new(configured_root.clone())
+        .expect("the replacement root is independently usable");
+    let expected = signalbox_blob_store::conformance::expected_fixture();
+    let key = BlobObjectKey::for_digest(expected.digest());
+
+    store
+        .put(
+            expected,
+            Box::new(std::io::Cursor::new(
+                signalbox_blob_store::conformance::fixture_content().to_vec(),
+            )),
+        )
+        .await
+        .expect("publication stays in the validated namespace");
+
+    assert!(moved_root.join(key.as_str()).is_file());
+    assert!(!configured_root.join(key.as_str()).exists());
+    drop(replacement_store);
+    std::fs::remove_dir_all(&configured_root).expect("the replacement root is removed");
+    std::fs::rename(&moved_root, &configured_root)
+        .expect("the fixture root is restored for automatic cleanup");
+}
