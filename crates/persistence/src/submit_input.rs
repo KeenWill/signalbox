@@ -5986,9 +5986,8 @@ struct EncodedActor {
 
 fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
-        // Applied migrations freeze this legacy storage discriminator.
         Actor::User => EncodedActor {
-            kind: "owner",
+            kind: "user",
             turn: None,
             tool_request: None,
         },
@@ -8326,7 +8325,7 @@ fn decode_actor(
     tool_request: Option<Uuid>,
 ) -> Result<Actor, SubmitInputRepositoryError> {
     match (kind.as_str(), turn, tool_request) {
-        ("owner", None, None) => Ok(Actor::User),
+        ("user", None, None) => Ok(Actor::User),
         ("model", Some(turn), None) => Ok(Actor::Model {
             turn: TurnId::from_uuid(turn),
         }),
@@ -8334,7 +8333,7 @@ fn decode_actor(
         ("tool", None, Some(request)) => Ok(Actor::Tool {
             request: ToolRequestId::from_uuid(request),
         }),
-        ("owner" | "model" | "recovery" | "tool", _, _) => {
+        ("user" | "model" | "recovery" | "tool", _, _) => {
             Err(SubmitInputCorruption::Inconsistent("actor fields").into())
         }
         _ => Err(SubmitInputCorruption::Unsupported {
