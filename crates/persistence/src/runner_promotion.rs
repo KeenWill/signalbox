@@ -499,7 +499,8 @@ async fn insert_record(
                 "SELECT candidate_authority.connection_epoch,
                         candidate_authority.connection_event_ordinal,
                         pending.predecessor_enrollment_id,
-                        pending.predecessor_loss_epoch
+                        predecessor_authority.latest_loss_epoch
+                            AS predecessor_loss_epoch
                    FROM runner_pending_enrollment AS pending
                    JOIN runner_connection_authority_head AS candidate_authority
                      ON candidate_authority.enrollment_id = pending.enrollment_id
@@ -513,8 +514,6 @@ async fn insert_record(
                    JOIN runner_connection_authority_head AS predecessor_authority
                      ON predecessor_authority.enrollment_id =
                             pending.predecessor_enrollment_id
-                    AND predecessor_authority.latest_loss_epoch =
-                            pending.predecessor_loss_epoch
                    JOIN runner_connection_event AS predecessor_connection
                      ON predecessor_connection.enrollment_id =
                             predecessor_authority.enrollment_id
@@ -669,8 +668,6 @@ async fn load_record(
                            AND receipt.authority_kind = $5
                            AND pending.predecessor_enrollment_id =
                                    command.predecessor_enrollment_id
-                           AND pending.predecessor_loss_epoch =
-                                   command.predecessor_loss_epoch
                            AND candidate_connection.state_kind = $6
                            AND predecessor_connection.state_kind = $7
                     )

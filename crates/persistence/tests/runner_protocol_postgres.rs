@@ -4289,6 +4289,70 @@ async fn inv042_inv044_pending_successor_promotion_installs_atomic_state()
     Ok(())
 }
 
+/// INV-042 / INV-044: promotion authenticates the predecessor's current loss
+/// even when it is later than the immutable loss that admitted the candidate.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv042_inv044_pending_successor_promotes_after_predecessor_reconnect_and_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    let reconnected = fixture
+        .store
+        .open_connection(fixture.predecessor_enrollment)
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.predecessor_enrollment,
+            reconnected.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let current_loss = fixture
+        .store
+        .load_current_connection_loss(fixture.predecessor_enrollment)
+        .await?
+        .expect("the reconnected predecessor records its later loss");
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let repository = PromotePendingRunnerRepository::new(pool.clone());
+    let command = PromotePendingRunner::new(
+        DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND)),
+        fixture.candidate_request,
+    );
+    let expected = PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Applied(
+        PromotedRunnerEnrollment::new(
+            fixture.candidate_request,
+            fixture.candidate_enrollment,
+            fixture.candidate_runner,
+            fixture.candidate_registration,
+        ),
+    ));
+
+    let applied = repository.handle(command).await?;
+    let replayed = repository.handle(command).await?;
+    let recorded_loss: Decimal = sqlx::query_scalar(
+        "SELECT predecessor_loss_epoch
+           FROM promote_pending_runner_command
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(applied, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        recorded_loss,
+        Decimal::from(current_loss.loss_epoch().get())
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// INV-001 / INV-042: equal promotion replay and both registration-resume
 /// paths retain the promoted enrollment's active authority.
 #[tokio::test]
