@@ -5941,7 +5941,8 @@ private enum ProcessDriverFixture {
       {
         "type":"transcript_snapshot_start",
         "session_id":"\(session)",
-        "cursor":"\(cursor)"
+        "cursor":"\(cursor)",
+        "runner":null
       }
       """
     )
@@ -6743,7 +6744,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -6835,7 +6837,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -6954,7 +6957,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7027,7 +7031,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7082,7 +7087,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7141,7 +7147,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7174,7 +7181,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7218,7 +7226,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7267,7 +7276,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7308,7 +7318,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -7467,7 +7478,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7507,7 +7519,8 @@ private enum ProcessProjectionFixture {
           {
             "type":"transcript_snapshot_start",
             "session_id":"\(ProcessDriverFixture.session)",
-            "cursor":"1"
+            "cursor":"1",
+            "runner":null
           }
           """
         )
@@ -7632,7 +7645,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7678,7 +7692,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7795,7 +7810,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"2"
+          "cursor":"2",
+          "runner":null
         }
         """,
         """
@@ -7872,7 +7888,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
       ] + turnEvidence + usageEvidence + [
@@ -7957,7 +7974,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8025,7 +8043,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8081,7 +8100,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"2"
+          "cursor":"2",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8140,7 +8160,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8232,7 +8253,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8288,7 +8310,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8527,7 +8550,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8605,7 +8629,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8694,7 +8719,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8881,7 +8907,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8940,7 +8967,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9047,7 +9075,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9094,7 +9123,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9184,7 +9214,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9246,7 +9277,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9280,7 +9312,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"2"
+          "cursor":"2",
+          "runner":null
         }
         """,
         """
@@ -10112,7 +10145,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10383,7 +10417,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -10492,7 +10527,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -10568,7 +10604,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10650,7 +10687,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10738,7 +10776,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10776,7 +10815,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10836,7 +10876,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10936,7 +10977,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -11582,6 +11624,63 @@ private enum ProcessDriverUpdateRecorderError: Error {
 
 extension ProcessServiceIntegrationTests {
   @MainActor
+  func testAuthoritativeSnapshotPublishesRunnerStatus() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithRunner())
+    )
+
+    XCTAssertEqual(viewModel.runner, try ProcessProjectionFixture.runnerProjection())
+    XCTAssertNil(viewModel.runnerTransition)
+    XCTAssertEqual(
+      viewModel.runnerStatusLabel,
+      ProcessProjectionFixture.runnerSnapshotStatusLabel
+    )
+  }
+
+  @MainActor
+  func testLiveRunnerTransitionReplacesPresentedRunnerStatus() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithRunner())
+    )
+
+    viewModel.apply(.event(try ProcessProjectionFixture.runnerLossEvent()))
+
+    XCTAssertEqual(
+      viewModel.runnerTransition,
+      try ProcessProjectionFixture.runnerLossTransition()
+    )
+    XCTAssertEqual(
+      viewModel.runnerStatusLabel,
+      ProcessProjectionFixture.runnerLossStatusLabel
+    )
+  }
+
+  func testRunnerTransitionStatusPresentsRelocationTarget() throws {
+    let transition = try ProcessProjectionFixture.runnerRelocationTransition()
+
+    XCTAssertEqual(
+      transition.statusLabel,
+      ProcessProjectionFixture.runnerRelocationStatusLabel
+    )
+  }
+
+  func testRunnerTransitionStatusPresentsRunnerDefaultDirectory() throws {
+    let transition = try ProcessProjectionFixture.runnerDefaultDirectoryTransition()
+
+    XCTAssertEqual(
+      transition.statusLabel,
+      ProcessProjectionFixture.runnerDefaultDirectoryStatusLabel
+    )
+  }
+
+  @MainActor
   func testToolApprovalDecisionPresentsDelegateProvenanceAndRationale() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -12025,7 +12124,91 @@ extension ProcessProjectionFixture {
   static let delegateRationale = "The requested effect exceeds the delegated scope."
   static let delegateDenialLabel =
     "Denied by delegate; model selection \(delegateModelSelection); call \(delegateModelCall)"
+  static let runnerID = "44444444-4444-4444-8444-444444444444"
+  static let runnerSnapshotStatusLabel =
+    "Runner \(runnerID) · pinned · health suspect · revision 3"
+    + " · sandbox workspace-restricted · selected directory \"workspace/project\""
+  static let runnerLossStatusLabel =
+    "Runner \(runnerID) · runner_lost · revision 4 · sandbox workspace-restricted"
+    + " · selected directory \"workspace/project\""
+  static let runnerRelocationStatusLabel =
+    "Runner \(runnerID) · working_directory_changed · revision 5"
+    + " · sandbox workspace-restricted · selected directory \"workspace/new\\nproject\""
+  static let runnerDefaultDirectoryStatusLabel =
+    "Runner \(runnerID) · replaced · revision 6 · sandbox ambient · runner-default directory"
   static let futureSessionEventKind = "fixture_future_session_event"
+
+  static func runnerProjection() throws -> SignalboxRunnerProjection {
+    try SignalboxRunnerProjection(
+      selector: .capabilityClass(
+        name: SignalboxRunnerCapabilityClass(validating: "linux.workspace")
+      ),
+      runnerID: SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 3),
+      sandboxProfile: .workspaceRestricted,
+      credentialProfile: SignalboxRunnerCredentialProfileName(validating: "readonly"),
+      repository: SignalboxRunnerRepositoryKey(validating: "primary"),
+      workingDirectory: SignalboxRunnerWorkingDirectory(validating: "workspace/project"),
+      connectionHealth: .suspect,
+      state: .pinned
+    )
+  }
+
+  static func snapshotWithRunner() throws -> SignalboxSynchronizationSnapshot {
+    SignalboxSynchronizationSnapshot(
+      sessionID: try ProcessDriverFixture.sessionID(),
+      cursor: SignalboxCanonicalUInt64(rawValue: 8),
+      runner: try runnerProjection(),
+      records: []
+    )
+  }
+
+  static func runnerLossTransition() throws -> ProcessRunnerTransition {
+    ProcessRunnerTransition(
+      runnerID: try SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 4),
+      sandboxProfile: .workspaceRestricted,
+      workingDirectory: try SignalboxRunnerWorkingDirectory(validating: "workspace/project"),
+      state: .runnerLost
+    )
+  }
+
+  static func runnerLossEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"runner_state_transition",
+        "runner_id":"\(runnerID)",
+        "placement_revision":"4",
+        "sandbox_profile":"workspace-restricted",
+        "working_directory":"workspace/project",
+        "state":"runner_lost"
+      }
+      """
+    )
+  }
+
+  static func runnerRelocationTransition() throws -> ProcessRunnerTransition {
+    ProcessRunnerTransition(
+      runnerID: try SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 5),
+      sandboxProfile: .workspaceRestricted,
+      workingDirectory: try SignalboxRunnerWorkingDirectory(
+        validating: "workspace/new\nproject"
+      ),
+      state: .workingDirectoryChanged
+    )
+  }
+
+  static func runnerDefaultDirectoryTransition() throws -> ProcessRunnerTransition {
+    ProcessRunnerTransition(
+      runnerID: try SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 6),
+      sandboxProfile: .ambient,
+      workingDirectory: nil,
+      state: .replaced
+    )
+  }
   static let formerUsageCollisionEntryIndex = UInt64(7)
   static let disjointUsageAndSemanticPresentationIDs = [Int.min + 1, Int.min / 4]
   static let disjointUsageAndSemanticEventKinds = [
