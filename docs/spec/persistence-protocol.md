@@ -348,8 +348,11 @@ Representation rules, all enforced in the schema:
   A repeatable-read page authenticates the exact loss source and returns at most
   64 current pinned or exact-identity unpinned placements whose baselines
   precede that loss, ordered strictly after the durable session-identity cursor.
-  Cursor advancement is monotonic, cannot pass an affected current placement,
-  and cannot complete while one remains. The cursor and ordered page are
+  An exact-identity selection stored before enrollment remains affected by a
+  later loss for its selected runner despite having no enrollment baseline; the
+  page and both cursor guards associate it through the runner identity. Cursor
+  advancement is monotonic, cannot pass an affected current placement, and
+  cannot complete while one remains. The cursor and ordered page are
   implemented; the per-session transaction that changes placement, lease, turn,
   release, and runner-event state remains the committed unimplemented
   propagation step below.

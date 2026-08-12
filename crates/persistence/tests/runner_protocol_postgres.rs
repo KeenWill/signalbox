@@ -3715,8 +3715,8 @@ async fn s32_inv044_runner_loss_cursor_migration_backfills_completed_state()
     Ok(())
 }
 
-/// INV-044: a loss committed after placement baselines exist but before the
-/// cursor migration backfills as pending when that loss still affects a session.
+/// INV-044: a pre-enrollment exact selection remains in the affected set when
+/// its runner enrolls and is lost before the cursor migration.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
@@ -3728,15 +3728,15 @@ async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
-    store.insert_enrollment(&expected_enrollment).await?;
-    let connection = store
-        .open_connection(expected_enrollment.enrollment())
-        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         exact_runner_request(expected_enrollment.runner()),
     );
     store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     insert_terminal_connection_loss_before_cursor_migration(
         &pool,
         expected_enrollment.enrollment(),
@@ -3815,11 +3815,11 @@ async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(),
     Ok(())
 }
 
-/// INV-044: bounded propagation pages have an enrollment-first placement
-/// index instead of scanning global placement history before applying LIMIT.
+/// INV-044: bounded propagation pages have indexes for both enrollment-fenced
+/// and pre-enrollment exact-runner placement branches.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv044_runner_loss_page_has_enrollment_order_index() -> Result<(), Box<dyn Error>> {
+async fn s32_inv044_runner_loss_page_has_affected_set_indexes() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
 
     let definition: String = sqlx::query_scalar(
@@ -3830,10 +3830,22 @@ async fn s32_inv044_runner_loss_page_has_enrollment_order_index() -> Result<(), 
     )
     .fetch_one(&pool)
     .await?;
+    let exact_definition: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'runner_session_placement_exact_loss_propagation_page'",
+    )
+    .fetch_one(&pool)
+    .await?;
 
     assert!(
         definition.contains("(loss_fence_enrollment_id, session_id, event_ordinal)"),
         "the loss page index must lead with enrollment and preserve session order"
+    );
+    assert!(
+        exact_definition.contains("(selector_runner_id, session_id, event_ordinal)"),
+        "the exact-selection page index must lead with runner and preserve session order"
     );
     drop(pool);
     Ok(())
@@ -3942,13 +3954,18 @@ async fn s32_inv044_runner_loss_cursor_rejects_rewind() -> Result<(), Box<dyn Er
 async fn s32_inv044_runner_loss_cursor_rejects_premature_completion() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
     store.insert_enrollment(&expected_enrollment).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
-    insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
     store
         .transition_connection(
             expected_enrollment.enrollment(),

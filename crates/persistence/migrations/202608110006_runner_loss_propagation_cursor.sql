@@ -33,6 +33,16 @@ CREATE INDEX runner_session_placement_loss_propagation_page
         event_ordinal
     );
 
+CREATE INDEX runner_session_placement_exact_loss_propagation_page
+    ON runner_session_placement_record (
+        selector_runner_id,
+        session_id,
+        event_ordinal
+    )
+    WHERE loss_fence_enrollment_id IS NULL
+      AND state_kind = 'unpinned'
+      AND selector_kind = 'identity';
+
 INSERT INTO runner_connection_loss_propagation (
     enrollment_id,
     loss_epoch,
@@ -49,7 +59,18 @@ SELECT loss.enrollment_id,
                  JOIN runner_session_placement_record AS placement
                    ON placement.session_id = current_placement.session_id
                   AND placement.event_ordinal = current_placement.event_ordinal
-                WHERE placement.loss_fence_enrollment_id = loss.enrollment_id
+                 JOIN runner_enrollment AS lost_enrollment
+                   ON lost_enrollment.enrollment_id = loss.enrollment_id
+                WHERE (
+                       placement.loss_fence_enrollment_id = loss.enrollment_id
+                       OR (
+                           placement.loss_fence_enrollment_id IS NULL
+                           AND placement.state_kind = 'unpinned'
+                           AND placement.selector_kind = 'identity'
+                           AND placement.selector_runner_id =
+                               lost_enrollment.runner_id
+                       )
+                  )
                   AND (
                        placement.observed_runner_loss_epoch IS NULL
                        OR placement.observed_runner_loss_epoch < loss.loss_epoch
@@ -114,7 +135,18 @@ BEGIN
               JOIN runner_session_placement_record AS placement
                 ON placement.session_id = current_placement.session_id
                AND placement.event_ordinal = current_placement.event_ordinal
-             WHERE placement.loss_fence_enrollment_id = NEW.enrollment_id
+              JOIN runner_enrollment AS lost_enrollment
+                ON lost_enrollment.enrollment_id = NEW.enrollment_id
+             WHERE (
+                    placement.loss_fence_enrollment_id = NEW.enrollment_id
+                    OR (
+                        placement.loss_fence_enrollment_id IS NULL
+                        AND placement.state_kind = 'unpinned'
+                        AND placement.selector_kind = 'identity'
+                        AND placement.selector_runner_id =
+                            lost_enrollment.runner_id
+                    )
+               )
                AND (
                     placement.observed_runner_loss_epoch IS NULL
                     OR placement.observed_runner_loss_epoch < NEW.loss_epoch
@@ -140,7 +172,18 @@ BEGIN
               JOIN runner_session_placement_record AS placement
                 ON placement.session_id = current_placement.session_id
                AND placement.event_ordinal = current_placement.event_ordinal
-             WHERE placement.loss_fence_enrollment_id = NEW.enrollment_id
+              JOIN runner_enrollment AS lost_enrollment
+                ON lost_enrollment.enrollment_id = NEW.enrollment_id
+             WHERE (
+                    placement.loss_fence_enrollment_id = NEW.enrollment_id
+                    OR (
+                        placement.loss_fence_enrollment_id IS NULL
+                        AND placement.state_kind = 'unpinned'
+                        AND placement.selector_kind = 'identity'
+                        AND placement.selector_runner_id =
+                            lost_enrollment.runner_id
+                    )
+               )
                AND (
                     placement.observed_runner_loss_epoch IS NULL
                     OR placement.observed_runner_loss_epoch < NEW.loss_epoch

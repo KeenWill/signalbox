@@ -1043,7 +1043,18 @@ impl RunnerProtocolStore {
                    JOIN runner_session_placement_record AS placement
                      ON placement.session_id = current_placement.session_id
                     AND placement.event_ordinal = current_placement.event_ordinal
-                  WHERE placement.loss_fence_enrollment_id = $1
+                   JOIN runner_enrollment AS lost_enrollment
+                     ON lost_enrollment.enrollment_id = $1
+                  WHERE (
+                        placement.loss_fence_enrollment_id = $1
+                        OR (
+                            placement.loss_fence_enrollment_id IS NULL
+                            AND placement.state_kind = 'unpinned'
+                            AND placement.selector_kind = 'identity'
+                            AND placement.selector_runner_id =
+                                lost_enrollment.runner_id
+                        )
+                    )
                     AND (
                         placement.observed_runner_loss_epoch IS NULL
                         OR placement.observed_runner_loss_epoch < $2
