@@ -2569,7 +2569,7 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
     ));
     sqlx::query(
         "UPDATE submit_input_command
-            SET actor_kind = 'owner'
+            SET actor_kind = 'user'
           WHERE command_id = $1",
     )
     .bind(Uuid::from_u128(0x332))

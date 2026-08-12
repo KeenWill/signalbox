@@ -203,6 +203,30 @@ change. Do not silently change a foundational contract or close a recorded open
 question. Keep domain types distinct from storage records, protocol messages,
 and framework types. Keep pull requests narrow and reviewable.
 
+**Pre-alpha compatibility.** Signalbox is pre-alpha: no production instance
+exists, and every daemon and client is rebuilt at will from this tree. Wire
+formats, schema types, and stored values change freely to their correct current
+shape. Machinery protecting an old deployed version — compatibility shims,
+dual-read or dual-write paths, version-tolerant decoding, legacy-value aliases,
+data-upgrade scaffolding — protects deployments that do not exist and is a
+defect, not prudence: neither add it nor request it in review (owner ruling
+2026-08-11). The only compatibility work owed is a one-time migration carrying a
+live database across a change that invalidates its stored data. Compatibility an
+owning implemented contract already retains — the durable-command
+`storage_version` decoding in
+[persistence-protocol](docs/spec/persistence-protocol.md), the credential
+`migration_backfill` fallback in
+[configuration-and-credentials](docs/spec/configuration-and-credentials.md) —
+stands until a migration or the contract's own sunset retires it. That surface
+only narrows: a change retires tolerated shapes rather than adding them,
+migrating stored data where its owning contract permits — append-only command
+records, which [identity-and-commands](docs/spec/identity-and-commands.md)
+forbids rewriting, keep their readers until an authorized change to that
+contract retires them. This rule is rescinded at the first durable deployment
+identified by the freeze condition in
+[process-protocol](docs/spec/process-protocol.md); compatibility policy is then
+decided explicitly.
+
 Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or
 a doc comment naming the invariant). When a test becomes the enforcement of an
