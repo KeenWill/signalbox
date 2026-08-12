@@ -389,7 +389,7 @@ Representation rules, all enforced in the schema:
   candidate. The daemon drains the cursor before acknowledging a changed
   registration and drains any crash-retained cursor before startup classifies
   old physical connections lost.
-- Migration `202608100007` distinguishes active and replacement-pending
+- Migration `202608110008` distinguishes active and replacement-pending
   enrollment receipts and stores each pending candidate's exact active
   predecessor and durable connection-loss epoch. The version-one adapter
   serializes pristine admission, returns an equal request's original receipt
@@ -728,7 +728,7 @@ statements live in the schema instead:
   enrollment, connection authority head, and optional current loss head before
   deriving the immutable baseline and before the placement row becomes visible.
 - the pending-successor registration and connection guards in migration
-  `202608100007` take `FOR SHARE` or `FOR UPDATE`, respectively, on the
+  `202608110008` take `FOR SHARE` or `FOR UPDATE`, respectively, on the
   candidate enrollment before admitting its first registration or a physical
   connection.
 
