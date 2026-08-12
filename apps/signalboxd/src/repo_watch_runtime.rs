@@ -3788,6 +3788,46 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn revalidated_rewrites_a_tagged_response_into_a_conditional_expectation() {
+        let revalidated_responses = revalidated(vec![ScriptedResponse::ok(
+            RequestTarget(PULLS_TARGET.to_owned()),
+            ResponseBody(EMPTY_LIST.to_owned()),
+        )]);
+
+        let [response] = revalidated_responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "GET");
+        assert_eq!(response.target, PULLS_TARGET);
+        assert_eq!(response.validator, Some(ENTITY_TAG));
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, Some(ENTITY_TAG));
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, EMPTY_LIST);
+        assert_eq!(response.delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn revalidated_leaves_an_untagged_response_unchanged() {
+        let revalidated_responses = revalidated(vec![ScriptedResponse::post(
+            RequestTarget(THREADS_TARGET.to_owned()),
+            ResponseBody(empty_threads()),
+        )]);
+
+        let [response] = revalidated_responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "POST");
+        assert_eq!(response.target, THREADS_TARGET);
+        assert_eq!(response.validator, None);
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, None);
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, empty_threads());
+        assert_eq!(response.delay, Duration::ZERO);
+    }
+
     async fn complete_typed_observation() -> RepoWatchObservation {
         let server = ScriptedServer::start(complete_typed_observation_responses()).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
