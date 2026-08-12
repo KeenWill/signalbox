@@ -17,6 +17,10 @@ against this PR (`agent/runner-awaiting-recovery-persistence`).
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The multipart accepted-input persistence paragraph below is the foundation
+proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
+with its implementing child stack.
+
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
@@ -529,9 +533,11 @@ Representation rules, all enforced in the schema:
   rejection directly against its named turn's recorded `awaiting_tool_approval`
   wait, so a receipt naming a running or terminal turn cannot commit and
   therefore never replays as authoritative.
-- Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
-  `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
-  application admission bound.
+- Accepted user content is stored only in the mirrored ordered command and
+  `accepted_input` part satellites. Their parent completeness, ordinal,
+  structural, text-byte, attachment-metadata, and blob-correlation constraints
+  are owned by [blob storage](blob-storage.md#multipart-user-content); neither
+  parent retains a `content_text` column.
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
@@ -562,7 +568,7 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `update_session_placement`) and a kind-scoped `storage_version`. The gates above
 fix the current numbers: create-session records write version 7, imported-create
 records write version 5, replace-defaults records write version 4, and
-submit-input records write version 2; every other closed kind writes version 1.
+submit-input records write version 3; every other closed kind writes version 1.
 The four settings-bearing families require the migration's provider-default full
 settings or inherit-all overlay on every earlier supported version.
 Create-session records reconstitute version 1 with the disabled dangerous-tool
@@ -1123,21 +1129,22 @@ identifiers.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
-holding a `Prepared` call follows the same logical closure after ending the call
-known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
-wait. A persisted `stop_requested` attempt and `cancellation_requested` call
-reconstruct through their exact applied interrupt, end the abandoned attempt
-`after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
-ambiguous call without erasing stop intent. The schema guard
-(`turn_lifecycle_pending_steering_closed`) independently requires every pending
-row to be consumed or reclassified before terminalization. The same finite
-startup inventory includes every nonterminal dedicated compaction call. Under
-the session scheduler lock it requires exactly one matching pending command,
-terminalizes Prepared as `known_failed` or InFlight as `ambiguous`, and marks
-the command failed in the same transaction; disagreement fails closed and no
-summary or result frontier is synthesized. Why: a pending steering row is an
-accepted delivery obligation, so every recovery branch must account for it
-rather than block startup or strand it.
+holding a `Prepared` call proves that no send authorization existed, so startup
+validates its exact stored frontier and leaves the call, attempt, and turn
+unchanged for scheduler retry; an in-flight call recovers into the
+`awaiting_model_call_recovery` wait. A persisted `stop_requested` attempt and
+`cancellation_requested` call reconstruct through their exact applied interrupt,
+end the abandoned attempt `after_cancellation/lost`, and terminalize
+proof-bearing reconciliation for the ambiguous call without erasing stop intent.
+The schema guard (`turn_lifecycle_pending_steering_closed`) independently
+requires every pending row to be consumed or reclassified before
+terminalization. The same finite startup inventory includes every nonterminal
+dedicated compaction call. Under the session scheduler lock it requires exactly
+one matching pending command, terminalizes Prepared as `known_failed` or
+InFlight as `ambiguous`, and marks the command failed in the same transaction;
+disagreement fails closed and no summary or result frontier is synthesized. Why:
+a pending steering row is an accepted delivery obligation, so every recovery
+branch must account for it rather than block startup or strand it.
 
 An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
 does not rewrite its terminal ambiguous call. In the accepting transaction, the

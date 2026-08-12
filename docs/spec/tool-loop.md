@@ -22,6 +22,10 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture â
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The daemon blob-read declarations below are the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and become verified with its implementing
+child stack.
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -286,6 +290,8 @@ The workstation-facing registry is daemon-local and process-lifetime immutable.
 The daemon composes it from these implemented families:
 
 - basic tools (`current_time`, `echo`, and `session_status_update`);
+- blob-read tools (`blob_metadata` and `blob_read`) when blob storage is
+  configured;
 - web fetch and search;
 - code-host and mapped GitHub pull-request tools;
 - mapped workspace read and mutation tools;
@@ -817,6 +823,25 @@ tools:
 - `echo` requires exactly one `text` string and returns the same canonical
   compact `{"text": ...}` object. Its permission default is `Auto` and its
   effect class is `EffectFree`: execution observes no external state.
+- `blob_metadata`, as owned by the
+  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+  requires exactly one canonical blob `digest`. It returns text containing
+  compact JSON with that `digest`, canonical-decimal-string `byte_length`, and
+  canonical-decimal-string `replica_count`. Its permission default is `Auto` and
+  its effect class is `EffectFree`.
+- `blob_read`, as owned by the
+  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+  requires exactly one canonical blob `digest` plus `offset_bytes` and
+  `length_bytes` as canonical decimal-u64 strings. Length is 1 through 524,288
+  bytes; checked offset plus length must lie within the blob. It returns text
+  containing compact JSON with the `digest`, `offset_bytes`, and canonical
+  padded `bytes_base64`. Its permission default is `Auto` and its effect class
+  is conservatively `ExternalEffect`: recorded failover can issue an
+  authenticated S3 GET observable to the object-store operator even when the
+  selected replica for another execution is local. After its non-waiting
+  direct-read admission, the scheduler releases pass capacity during store
+  traversal and reacquires it before correlated result commit or crash-loss
+  classification, as owned by the blob contract.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
   invalid. Before dispatch, its canonical origin must satisfy the
@@ -865,6 +890,34 @@ tools:
   acknowledgement returns `Ambiguous` evidence. Metadata value and replacement
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
+
+Both blob tools authorize only digests present in attachment stubs in the
+rendered frontier for the issuing turn, under the owning
+[blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads).
+The read declaration's requested decoded length and one logical-read unit are
+charged once by tool-request identity to durable per-turn counters before
+authorization; replay never charges twice. Before authorization, a digest absent
+from the rendered frontier closes the `Prepared` attempt as
+`KnownFailed(InvalidArguments)` with exact fixed detail `blob_not_visible`; a
+reservation that would exceed 2,097,152 bytes closes it the same way with exact
+fixed detail `blob_turn_byte_budget_exceeded`, and a reservation that would
+exceed 64 logical reads closes it with exact fixed detail
+`blob_turn_read_count_exceeded`. Any closure resolves the logical request,
+crosses no executor or store boundary, leaves previously charged bytes charged,
+and permits the next model round. A successful reservation is not refunded by a
+later denial or failure. Store I/O occurs only after durable authorization. An
+individual missing, corrupt, or unavailable replica falls through to the next
+recorded candidate. Only after no candidate verifies does the read become
+trustworthy content-silent `ExecutionFailed` evidence with the respective exact
+fixed detail `blob_missing`, `blob_corrupt`, or `blob_unavailable`. Any
+unavailable candidate takes precedence; otherwise any readable candidate that
+fails verification selects `blob_corrupt`, and `blob_missing` applies only when
+every candidate is absent. It resolves the logical request and permits the next
+model round rather than entering the effect-free crash-loss path or failing the
+turn; a later request may retry `blob_unavailable` within the remaining per-turn
+budget. The compact result must also fit the ordinary 1 MiB text-result bound;
+admission accounts for JSON and base64 overhead rather than producing a result
+that the ordinary result boundary would reject.
 
 For both web tools, an explicit shipped `Human` posture supersedes the
 declaration's `Confirm` default and the session blanket, so a request parks for
