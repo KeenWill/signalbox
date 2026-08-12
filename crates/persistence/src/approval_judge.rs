@@ -127,7 +127,10 @@ impl PreparedApprovalJudge {
     ///
     /// The context is read fresh on every preparation and is deliberately
     /// absent from the durable judge binding, so it never participates in the
-    /// exact-call recheck that guards authorization and completion.
+    /// exact-call recheck that guards authorization and completion. Completion
+    /// does compare the goal it carries against the statement in force at that
+    /// moment, but by resolving that statement again rather than by binding
+    /// this value durably.
     pub const fn session_context(&self) -> &SessionAuthorityContext {
         &self.session_context
     }
@@ -435,6 +438,21 @@ impl PostgresApprovalJudgeRepository {
         if state != ApprovalJudgeStateStorageKind::InFlight {
             return Err(ApprovalJudgeCorruption::Inconsistent("judge completion state").into());
         }
+        // Resolved again under the completion lock rather than trusted from the
+        // prepared binding: the session was unlocked for the whole provider
+        // round-trip, which is exactly when a user stopping the goal lands.
+        let in_force = load_judged_turn_goal(
+            &mut transaction,
+            prepared.request.session(),
+            prepared.request.turn(),
+        )
+        .await?;
+        let recommendation =
+            if read_authority_still_stands(prepared.session_context.goal(), in_force.as_ref()) {
+                recommendation
+            } else {
+                DelegateApprovalRecommendation::EscalateToHuman
+            };
         let batch = load_active_batch_from_connection(
             &mut transaction,
             prepared.request.session(),
@@ -792,11 +810,11 @@ async fn load_session_authority_context(
 /// generation is the structural answer and is committed unimplemented
 /// functionality.
 ///
-/// This runs while the judge is prepared, and the statement it yields is
-/// carried on the prepared binding rather than re-read at completion. A
-/// generation closed after preparation is therefore not seen by the decision
-/// that preparation feeds; rechecking under the completion lock is committed
-/// unimplemented functionality.
+/// This runs twice for one decision: once while the judge is prepared, to
+/// compose the context the model reads, and again under the completion lock, to
+/// establish that the authority it read still stands. A generation closed
+/// between the two escalates rather than committing the recommendation it
+/// produced.
 async fn load_judged_turn_goal(
     connection: &mut PgConnection,
     session: SessionId,
@@ -830,6 +848,30 @@ async fn load_judged_turn_goal(
         }
         None => Ok(None),
         Some(goal) => Ok(judged_turn_goal_statement(goal.generations(), recorded)?),
+    }
+}
+
+/// Whether the authority the judge read is still the authority in force.
+///
+/// The judge reads a statement while it is prepared, spends a provider
+/// round-trip deciding under it, and commits afterwards. A user can stop or
+/// supersede the goal in that window, so the statement resolved again under the
+/// completion lock is compared against the one the decision was made under.
+///
+/// Equal statements stand. A statement that resolved before and resolves to
+/// nothing now belongs to a generation that closed, and one that resolves to
+/// different bytes belongs to a generation that was replaced; neither is the
+/// authority the recommendation was formed under. A judge that read no
+/// statement decided without one, so a goal appearing since revokes nothing and
+/// leaves that decision alone — this pins withdrawal, not novelty.
+fn read_authority_still_stands(
+    read: Option<&GoalStatement>,
+    in_force: Option<&GoalStatement>,
+) -> bool {
+    match (read, in_force) {
+        (Some(read), Some(in_force)) => read == in_force,
+        (Some(_), None) => false,
+        (None, _) => true,
     }
 }
 
@@ -1288,6 +1330,7 @@ mod tests {
 
     use super::{
         ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, judged_turn_goal_statement,
+        read_authority_still_stands,
     };
 
     /// A goal commissioned with the given statement, as dispatch commissions it.
@@ -1404,6 +1447,54 @@ mod tests {
         let resolved = judged_turn_goal_statement(achieved.generations(), None);
 
         assert_eq!(resolved, Ok(None));
+    }
+
+    /// The ordinary case: nothing moved while the judge was deciding, so the
+    /// recommendation it formed is the one that commits.
+    #[test]
+    fn an_unchanged_statement_still_stands_at_completion() {
+        let statement = goal_statement("land the reviewer fixes");
+
+        let stands = read_authority_still_stands(Some(&statement), Some(&statement));
+
+        assert!(stands);
+    }
+
+    /// The hazard this recheck exists for: the goal was stopped while the
+    /// request sat awaiting a decision, so the statement resolves to nothing
+    /// and the authority the recommendation was formed under is gone.
+    #[test]
+    fn a_statement_that_stopped_no_longer_stands() {
+        let read = goal_statement("land the reviewer fixes");
+
+        let stands = read_authority_still_stands(Some(&read), None);
+
+        assert!(!stands);
+    }
+
+    /// A supersession is a replacement, not a continuation: the judge decided
+    /// under the statement it read, and the one now in force may authorize
+    /// something wider than that decision covered.
+    #[test]
+    fn a_replaced_statement_no_longer_stands() {
+        let read = goal_statement("land the reviewer fixes");
+        let in_force = goal_statement("land anything at all");
+
+        let stands = read_authority_still_stands(Some(&read), Some(&in_force));
+
+        assert!(!stands);
+    }
+
+    /// A judge that read no statement decided without one. A goal attached
+    /// since withdraws nothing, so this pins withdrawal rather than novelty and
+    /// leaves such a decision alone.
+    #[test]
+    fn a_goal_appearing_after_an_absent_read_still_stands() {
+        let in_force = goal_statement("land the reviewer fixes");
+
+        let stands = read_authority_still_stands(None, Some(&in_force));
+
+        assert!(stands);
     }
 
     #[test]

@@ -702,6 +702,83 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     Ok(())
 }
 
+/// A judge decides under the goal statement it read while being prepared, and
+/// the session is unlocked for the whole provider round-trip that follows, so a
+/// user stop lands between the read and the commit. Completion resolves the
+/// statement again under its own lock and finds nothing, which withdraws the
+/// authority the recommendation was formed under: the approval the judge
+/// returned never becomes a decision, and the request stays parked for the
+/// human who now owns it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7f60;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let request = requests[0];
+    let statement = commission_fixture_session_goal(&pool, fixture.session, seed + 0xf0).await?;
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+
+    repository.authorize(&prepared).await?;
+    stop_fixture_session_goal(&pool, fixture.session, seed + 0xf4).await?;
+    let outcome = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
+            ProviderReportedTokenUsage::unreported(),
+            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
+    let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
+        "SELECT judge.state_kind AS judge_state,
+                judge.recommendation_kind AS recommendation,
+                EXISTS (
+                    SELECT 1 FROM tool_approval_decision
+                     WHERE request_id = judge.request_id
+                ) AS decision_exists,
+                lifecycle.active_phase_kind AS active_phase,
+                lifecycle.approval_tool_request_id
+           FROM tool_approval_judge_model_call AS judge
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = judge.turn_id
+            AND lifecycle.session_id = judge.session_id
+          WHERE judge.model_call_id = $1",
+    )
+    .bind(prepared.call().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(prepared.session_context().goal(), Some(&statement));
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(parked.judge_state, "terminal");
+    assert_eq!(parked.recommendation, "escalate_to_human");
+    assert!(!parked.decision_exists);
+    assert_eq!(parked.active_phase, "awaiting_tool_approval");
+    assert_eq!(parked.approval_tool_request_id, request.into_uuid());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_prepared_insert_rejects_estimated_usage_provenance()

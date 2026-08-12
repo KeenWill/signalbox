@@ -94,10 +94,16 @@ still open, so a goal already stopped or achieved supplies no statement. Any
 other shape resolves to no statement, leaving the consumer to treat the
 authority as unsettled.
 
-**Implemented behavior.** That resolution decides what a consumer reads, not
-what it commits. A consumer that reads the authority, performs work, and commits
-a decision afterwards holds the statement as it stood at the read: a generation
-closed in between is not seen by the commit.
+**Implemented behavior.** A consumer that reads the authority, performs work,
+and commits a decision afterwards resolves the statement again when it commits,
+under the same lock the commit takes, and compares it against the one it read.
+Equal statements commit the decision. A statement that resolved before and
+resolves to nothing now belongs to a generation that closed, and one resolving
+to different bytes belongs to a generation that was replaced; either escalates
+to a human rather than committing a decision formed under authority no longer in
+force. A consumer that read no statement decided without one, so a generation
+attached since withdraws nothing and leaves that decision alone: the comparison
+pins withdrawal, not novelty.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no
@@ -245,14 +251,6 @@ goal priority or more than one concurrent goal per session. Future extension
 must preserve immutable statements, full lineage, and the version-one rule that
 at most one generation is pursuing or blocked.
 
-**Committed unimplemented functionality.** No present goal-mode surface rechecks
-a generation's state when a consumer commits a decision it read that generation
-for. A consumer holding a statement across a long operation can commit after the
-generation closed. Future work binding the read to the commit must do so without
-making goal state part of a durable judge binding that deliberately excludes it.
-What such a consumer should then do is an
-[open question](../open-questions.md#goal-mode).
-
 **Committed unimplemented functionality.** No present surface binds a turn the
 goal machinery did not schedule to the generation it runs under. A generation
 attached after such a turn already existed is therefore still readable by it,
@@ -268,8 +266,7 @@ context feeding an escalation instruction rather than a commit gate.
 
 ## Open edges
 
-**Deferred or undecided work.** One goal-mode open question is recorded by this
-version-one contract: what a consumer does when the generation it read closes
-before it commits the decision it read that generation for. Binding the read to
-the commit is committed unimplemented functionality above; the behaviour that
-binding should then take is [undecided](../open-questions.md#goal-mode).
+**Deferred or undecided work.** No goal-mode open question is recorded by this
+version-one contract. The one it carried — what a consumer does when the
+generation it read closes before it commits — is
+[decided](../open-questions.md#goal-mode) and implemented above: it escalates.

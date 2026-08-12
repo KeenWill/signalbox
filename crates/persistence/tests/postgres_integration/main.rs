@@ -63,26 +63,27 @@ use signalbox_domain::{
     DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
     DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport, FrozenModelSelection,
-    InitialToolApproval, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelCapabilities,
-    ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
-    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
-    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
-    PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
-    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
-    ReasoningLevel, RefusedModelCallTurnIdentities, ReplaceSessionDefaults,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionInputPosition, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
-    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDispatchAuthority,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
+    GoalCommandResult, GoalStatement, GoalUserAction, GoalUserCommand, InitialToolApproval,
+    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
+    ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
+    PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
+    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel,
+    RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SettingOverlay, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure,
+    ToolCallProposal, ToolDecisionRationale, ToolDispatchAuthority, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
     ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
     TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
@@ -99,7 +100,10 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
-    disposable_test_container_labels, local_test_connection_options, migrate,
+    disposable_test_container_labels,
+    goal::{GoalCommandHandlingOutcome, GoalRepository},
+    goal_turn::GoalTurnCandidates,
+    local_test_connection_options, migrate,
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
         PostgresModelCallRepository, PrepareInitialModelCallOutcome,
@@ -179,6 +183,7 @@ const APPROVAL_JUDGE_CREDENTIAL: &str = "fixture-credential";
 const APPROVAL_JUDGE_RATIONALE: &str = "fixture rationale";
 const APPROVAL_JUDGE_ESTIMATED_PROVENANCE: &str = "estimated";
 const APPROVAL_DELEGATE_SOURCE: &str = "delegate";
+const APPROVAL_GOAL_STATEMENT: &str = "finish the commissioned approval task";
 
 fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprovalJudge {
     match outcome {
@@ -3401,6 +3406,66 @@ async fn checkpoint_tool_batch_with_approval(
     }
     Ok((fixture, model_repository, observation, requests))
 }
+
+/// Commissions `APPROVAL_GOAL_STATEMENT` on an existing fixture session and
+/// returns the exact statement it commissioned.
+///
+/// The commission schedules its own queued goal turn from the seed, which
+/// leaves whatever turn the fixture already activated alone.
+async fn commission_fixture_session_goal(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+) -> Result<GoalStatement, Box<dyn Error>> {
+    let statement = GoalStatement::try_new(String::from(APPROVAL_GOAL_STATEMENT))
+        .expect("the fixture goal statement is admitted");
+    let outcome = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed)),
+                session,
+                GoalUserAction::Attach(statement.clone()),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 1)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 2)),
+            )),
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
+    ));
+    Ok(statement)
+}
+
+/// Stops a fixture session's goal as a user stop scoped to that session alone.
+async fn stop_fixture_session_goal(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+) -> Result<(), Box<dyn Error>> {
+    let outcome = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
+    ));
+    Ok(())
+}
+
 async fn insert_completed_judge(
     connection: &mut PgConnection,
     fixture: &RestartModelCallFixture,
