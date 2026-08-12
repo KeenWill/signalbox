@@ -227,9 +227,11 @@ BEGIN
                 AND frontier.member_count = 1
                 AND NOT EXISTS (
                     SELECT 1
-                      FROM semantic_transcript_entry AS prior_entry
-                     WHERE prior_entry.source_session_id = pointer.session_id
-                       AND prior_entry.semantic_entry_id <> entry.semantic_entry_id
+                      FROM context_frontier AS prior_frontier
+                     WHERE prior_frontier.owning_session_id = pointer.session_id
+                       AND prior_frontier.context_frontier_id <>
+                               frontier.context_frontier_id
+                       AND prior_frontier.member_count > 0
                 )
             )
             OR (
