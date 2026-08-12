@@ -1313,6 +1313,7 @@ impl GitHubCodeHostTransport {
         arguments: super::ThreadReplyArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let started = tokio::time::Instant::now();
         self.confirm_thread_in_change_request(
             arguments.repository(),
             arguments.number(),
@@ -1320,6 +1321,17 @@ impl GitHubCodeHostTransport {
             credential,
         )
         .await?;
+        let remaining = remaining_mutation_budget(started.elapsed())?;
+        tokio::time::timeout(remaining, self.dispatch_thread_reply(arguments, credential))
+            .await
+            .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+    }
+
+    async fn dispatch_thread_reply(
+        &self,
+        arguments: super::ThreadReplyArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         let body = serde_json::to_vec(&serde_json::json!({
             "query": THREAD_REPLY_MUTATION,
             "variables": {
@@ -1361,6 +1373,7 @@ impl GitHubCodeHostTransport {
         arguments: super::ThreadResolveArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let started = tokio::time::Instant::now();
         self.confirm_thread_in_change_request(
             arguments.repository(),
             arguments.number(),
@@ -1368,6 +1381,20 @@ impl GitHubCodeHostTransport {
             credential,
         )
         .await?;
+        let remaining = remaining_mutation_budget(started.elapsed())?;
+        tokio::time::timeout(
+            remaining,
+            self.dispatch_thread_resolve(arguments, credential),
+        )
+        .await
+        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+    }
+
+    async fn dispatch_thread_resolve(
+        &self,
+        arguments: super::ThreadResolveArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         let body = serde_json::to_vec(&serde_json::json!({
             "query": THREAD_RESOLVE_MUTATION,
             "variables": {"thread": arguments.thread_id().as_str()}
@@ -2602,6 +2629,19 @@ fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTra
         .checked_sub(elapsed)
         .filter(|remaining| !remaining.is_zero())
         .ok_or(CodeHostTransportFailure::DispatchUnknown)
+}
+
+/// Bounds a mutation phase to the whole-exchange budget its ownership
+/// confirmation has not consumed, so confirmation and mutation together
+/// respect the transport's single 30-second exchange timeout. Exhaustion
+/// here proves the mutation was never dispatched; a timeout after dispatch
+/// is transport loss with dispatch unknown, which the executor classifies as
+/// commit-ambiguous for a mutating declaration.
+fn remaining_mutation_budget(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
+    DEFAULT_TIMEOUT
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(CodeHostTransportFailure::MutationNotDispatched)
 }
 
 fn reject_graphql_errors(value: &serde_json::Value) -> Result<(), CodeHostTransportFailure> {
@@ -5456,6 +5496,27 @@ mod tests {
             &repository(),
             change_request_number(),
         ));
+    }
+
+    /// The mutation phase receives only the exchange budget the ownership
+    /// confirmation left unconsumed, so both requests together respect the
+    /// transport's single 30-second exchange timeout.
+    #[test]
+    fn thread_mutation_uses_the_remaining_exchange_budget() {
+        const ELAPSED: Duration = Duration::from_secs(7);
+        const EXPECTED_REMAINING: Duration = Duration::from_secs(23);
+
+        assert_eq!(remaining_mutation_budget(ELAPSED), Ok(EXPECTED_REMAINING));
+    }
+
+    /// A confirmation that exhausts the whole exchange budget proves the
+    /// mutation was never dispatched rather than claiming ambiguity.
+    #[test]
+    fn an_exhausted_exchange_budget_proves_no_dispatch() {
+        assert_eq!(
+            remaining_mutation_budget(DEFAULT_TIMEOUT),
+            Err(CodeHostTransportFailure::MutationNotDispatched)
+        );
     }
 
     /// Ownership-check failures keep read classification: definitive answers

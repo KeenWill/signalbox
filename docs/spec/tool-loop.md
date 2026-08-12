@@ -1037,7 +1037,10 @@ The declarations and compact result objects are:
   an infrastructure failure during the confirmation reports that the mutation
   was never dispatched and is never commit-ambiguous. A review thread never
   moves between change requests, so the confirmation cannot be invalidated
-  between the two requests.
+  between the two requests. The confirmation and the mutation share the
+  transport's single 30-second exchange budget: the mutation receives only the
+  time the confirmation left, and exhaustion before dispatch reports the
+  undispatched mutation.
 - `change_request_thread_resolve` accepts `repository`, `number`, and one opaque
   `thread_id` under the same pre-dispatch ownership confirmation as
   `change_request_thread_reply`; it returns that thread identity and the
