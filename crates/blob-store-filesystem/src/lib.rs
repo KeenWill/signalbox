@@ -123,15 +123,7 @@ impl Drop for TemporaryBlobFile {
             return;
         }
         self.linked = false;
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let directory = self.directory.clone();
-            let name = std::mem::take(&mut self.name);
-            drop(runtime.spawn_blocking(move || {
-                let _ = unlinkat(&directory, &name, AtFlags::empty());
-            }));
-        } else {
-            let _ = unlinkat(&self.directory, &self.name, AtFlags::empty());
-        }
+        let _ = unlinkat(&self.directory, &self.name, AtFlags::empty());
     }
 }
 
@@ -2237,6 +2229,30 @@ mod tests {
 
         sweep_publication_directory(&directory)
             .expect("the interrupted private temporary file is recoverable");
+
+        assert!(!temporary_path.exists());
+    }
+
+    /// INV-059: cancelling a publication unlinks its temporary file before the
+    /// publication lock can leave scope.
+    #[test]
+    fn inv059_temporary_publication_drop_unlinks_before_returning() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        let directory = Arc::new(fs::File::from(
+            open(
+                root.path(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("the temporary directory opens"),
+        ));
+        let (temporary, output) = create_temporary_blob_file(directory)
+            .expect("the fixture creates a publication temporary file");
+        let temporary_path = root.path().join(&temporary.name);
+        assert!(temporary_path.exists());
+
+        drop(output);
+        drop(temporary);
 
         assert!(!temporary_path.exists());
     }
