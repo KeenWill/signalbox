@@ -33,12 +33,13 @@ const OUTPUT_SCHEMA: &str = r#"{
   "additionalProperties":false
 }"#;
 
-/// Returns the exact structured-output schema every approval-judge call
-/// carries, so measurement harnesses can fingerprint the complete operation
-/// contract they replay.
+/// Returns a canonical rendering of the complete structured-output contract
+/// every approval-judge call carries — name, description, and schema — so
+/// measurement harnesses can fingerprint the exact acceptance criteria they
+/// replay. U+0000 separators cannot occur inside any component.
 #[must_use]
-pub const fn approval_judge_output_schema() -> &'static str {
-    OUTPUT_SCHEMA
+pub fn approval_judge_output_contract_text() -> String {
+    format!("{OUTPUT_NAME}\u{0}{OUTPUT_DESCRIPTION}\u{0}{OUTPUT_SCHEMA}")
 }
 
 /// Exact inputs to one dedicated approval-judge model call.
