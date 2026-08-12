@@ -1779,7 +1779,7 @@ async fn load_window_result_denials(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id,
+                approval.user_command_id,
                 approval.delegate_model_selection_id,
                 approval.delegate_model_call_id, approval.rationale
            FROM resolve_context_frontier_members($1, $2) AS member
@@ -1929,7 +1929,7 @@ async fn load_approvals(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id,
+                approval.user_command_id,
                 approval.delegate_model_selection_id,
                 approval.delegate_model_call_id, approval.rationale
            FROM tool_approval_decision AS approval
@@ -1950,7 +1950,7 @@ pub(crate) async fn decode_approvals(
 ) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
     let user_commands = rows
         .iter()
-        .map(|row| row.try_get::<Option<Uuid>, _>("owner_command_id"))
+        .map(|row| row.try_get::<Option<Uuid>, _>("user_command_id"))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -2009,7 +2009,7 @@ async fn decode_approval(
             .into());
         }
     };
-    let user_command: Option<Uuid> = row.try_get("owner_command_id")?;
+    let user_command: Option<Uuid> = row.try_get("user_command_id")?;
     let source = required::<String>(&row, "decision_source")?;
     let source_kind = tool_approval_decision_source_from_str(&source).ok_or_else(|| {
         ToolLoopRepositoryError::from(ToolLoopCorruption::Unsupported {
@@ -2338,7 +2338,7 @@ pub(crate) async fn load_approvals_by_request(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, decision_kind, decision_source, denial_reason,
-                owner_command_id, delegate_model_selection_id, delegate_model_call_id, rationale
+                user_command_id, delegate_model_selection_id, delegate_model_call_id, rationale
            FROM tool_approval_decision
           WHERE request_id = ANY($1)",
     )
@@ -2748,8 +2748,8 @@ async fn persist_batch_decision(
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
-             owner_command_id)
-         VALUES ($1, $2, 'owner_command', $3, $4)",
+             user_command_id)
+         VALUES ($1, $2, 'user_command', $3, $4)",
     )
     .bind(tool_request_id_to_uuid(applied.resolution().request()))
     .bind(decision_kind)
