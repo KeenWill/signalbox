@@ -1,10 +1,15 @@
 # Blob storage
 
-This page is the foundation proposal verified through PR #553
+This page is the foundation proposal introduced by PR #553
 (`agent/blob-storage-foundation`). Its implemented-behavior statements become
 verified with its implementing child stack and take effect with the full stack.
 A paragraph that names itself unimplemented is committed unimplemented
 functionality and carries only its stated compatibility constraint.
+
+The blob digest and external spelling, deterministic object-key producer,
+streaming whole-object and ranged store contract, filesystem publication,
+verification, and corrupt-object repair behavior, and shared store conformance
+suite are verified against PR #555 (`agent/blob-storage-substrate`).
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
