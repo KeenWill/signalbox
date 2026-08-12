@@ -1,80 +1,23 @@
 -- A delegate denial now surfaces its judge rationale as the denial reason the
 -- denied session reads, derived under the reason's tighter bounds (control
 -- characters become spaces, edge spaces are trimmed, text is cut to 1024
--- bytes). The previous shape forced delegate denials to carry no reason,
--- which rendered every judge denial as an unexplained `detail: null`.
--- Existing delegate denials are backfilled with the same derivation, so a
--- null reason afterwards means exactly one thing everywhere: the rationale
--- sanitizes to nothing. Readers reject every other null as corruption rather
--- than tolerating a shape no deployment produces.
+-- bytes on a character boundary). The previous shape forced delegate denials
+-- to carry no reason, which rendered every judge denial as an unexplained
+-- `detail: null`. Existing delegate denials are backfilled with the same
+-- derivation, so a null reason afterwards means exactly one thing
+-- everywhere: the rationale sanitizes to nothing. Readers reject every other
+-- null as corruption rather than tolerating a shape no deployment produces.
 
--- The backfill mirrors ToolDenialReason::from_rationale. It refuses rather
--- than truncates: a stored rationale whose sanitized form exceeds the reason
--- bound would need the derivation's character-boundary cut, which SQL cannot
--- replicate byte-for-byte, so such a row fails the migration loudly for a
--- hand-written rewrite. No such row exists in any current database.
-DO $$
-DECLARE
-    oversized bigint;
-BEGIN
-    SELECT count(*) INTO oversized
-      FROM tool_approval_decision
-     WHERE decision_source = 'delegate'
-       AND decision_kind = 'deny'
-       AND denial_reason IS NULL
-       AND octet_length(
-               btrim(
-                   regexp_replace(
-                       rationale,
-                       e'[\\x01-\\x1f\\x7f\\u0080-\\u009f]',
-                       ' ',
-                       'g'
-                   ),
-                   ' '
-               )
-           ) > 1024;
-    IF oversized <> 0 THEN
-        RAISE EXCEPTION
-            'delegate denial rationale sanitizes past the reason bound; '
-            'backfill these rows by hand before applying this migration';
-    END IF;
-END $$;
-
--- The decision table is append-only behind a BEFORE UPDATE trigger that
--- raises unconditionally, so the backfill runs with user triggers disabled,
--- following 202608110001's rewrite discipline: DISABLE TRIGGER USER needs
--- only table ownership and leaves foreign-key enforcement intact. A fresh
--- database has no rows here and every statement is a no-op.
-ALTER TABLE tool_approval_decision DISABLE TRIGGER USER;
-
-UPDATE tool_approval_decision
-   SET denial_reason = NULLIF(
-           btrim(
-               regexp_replace(
-                   rationale,
-                   e'[\\x01-\\x1f\\x7f\\u0080-\\u009f]',
-                   ' ',
-                   'g'
-               ),
-               ' '
-           ),
-           ''
-       )
- WHERE decision_source = 'delegate'
-   AND decision_kind = 'deny'
-   AND denial_reason IS NULL;
-
-ALTER TABLE tool_approval_decision ENABLE TRIGGER USER;
-
--- The deny branch no longer enumerates decision sources: the source-shape
--- constraint already restricts automatic sources to approvals, so every
--- admitted denial simply carries an absent or checked reason. The character
--- checks name exact scalar sets rather than POSIX classes because the domain
--- validator's sets are byte-precise while `[[:cntrl:]]`/`[[:space:]]` follow
--- the database collation: a reason with an admitted Unicode separator at an
--- edge (for example EM SPACE) must insert, not roll back the completing
--- judge call. Control means C0, DEL, and C1; edge whitespace means exactly
--- the six POSIX ASCII bytes.
+-- The old shape constraint requires delegate denials to keep a null reason,
+-- and DISABLE TRIGGER USER does not touch CHECK constraints, so the swap
+-- must precede the backfill or the backfill aborts on the first populated
+-- database. The character checks in the replacement name exact scalar sets
+-- rather than POSIX classes because the domain validator's sets are
+-- byte-precise while `[[:cntrl:]]`/`[[:space:]]` follow the database
+-- collation: a reason with an admitted Unicode separator at an edge (for
+-- example EM SPACE) must insert, not roll back the completing judge call.
+-- Control means C0, DEL, and C1; edge whitespace means exactly the six
+-- POSIX ASCII bytes.
 
 ALTER TABLE tool_approval_decision
     -- Supersedes tool_approval_decision_shape as recreated by
@@ -98,3 +41,49 @@ ALTER TABLE tool_approval_decision
                 )
             )
         );
+
+-- The backfill mirrors ToolDenialReason::from_rationale exactly: control
+-- scalars become spaces, edge spaces trim, and oversized text drops one
+-- character at a time until it fits the 1024-byte bound — the same
+-- largest-character-prefix cut the domain derivation takes — then trims
+-- trailing spaces again. The decision table is append-only behind a BEFORE
+-- UPDATE trigger that raises unconditionally, so the rewrite runs with user
+-- triggers disabled, following 202608110001's rewrite discipline: DISABLE
+-- TRIGGER USER needs only table ownership and leaves foreign-key
+-- enforcement intact. A fresh database has no rows here and every statement
+-- is a no-op.
+ALTER TABLE tool_approval_decision DISABLE TRIGGER USER;
+
+DO $$
+DECLARE
+    denial RECORD;
+    derived text;
+BEGIN
+    FOR denial IN
+        SELECT request_id, rationale
+          FROM tool_approval_decision
+         WHERE decision_source = 'delegate'
+           AND decision_kind = 'deny'
+           AND denial_reason IS NULL
+    LOOP
+        derived := btrim(
+            regexp_replace(
+                denial.rationale,
+                e'[\\x01-\\x1f\\x7f\\u0080-\\u009f]',
+                ' ',
+                'g'
+            ),
+            ' '
+        );
+        WHILE octet_length(derived) > 1024 LOOP
+            derived := rtrim(left(derived, char_length(derived) - 1), ' ');
+        END LOOP;
+        IF derived <> '' THEN
+            UPDATE tool_approval_decision
+               SET denial_reason = derived
+             WHERE request_id = denial.request_id;
+        END IF;
+    END LOOP;
+END $$;
+
+ALTER TABLE tool_approval_decision ENABLE TRIGGER USER;

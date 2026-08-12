@@ -5128,14 +5128,13 @@ fn decode_process_tool_approval(
         ) => {
             let rationale = ToolDecisionRationale::try_new(rationale)
                 .map_err(|_| ProcessReadCorruption::Inconsistent("tool decision rationale"))?;
-            // A delegate denial's stored reason is derived from its rationale;
-            // rows written before that derivation existed carry none.
-            if let ToolApprovalDecision::Deny { ref reason } = decision {
-                if reason.is_some() && *reason != ToolDenialReason::from_rationale(&rationale) {
-                    return Err(
-                        ProcessReadCorruption::Inconsistent("delegate denial payload").into(),
-                    );
-                }
+            // A delegate denial's stored reason equals the derivation from
+            // its rationale — null exactly when the rationale derives
+            // nothing — so missing current evidence reads as corruption.
+            if let ToolApprovalDecision::Deny { ref reason } = decision
+                && *reason != ToolDenialReason::from_rationale(&rationale)
+            {
+                return Err(ProcessReadCorruption::Inconsistent("delegate denial payload").into());
             }
             Ok(Some(ProcessToolApproval {
                 decision,
