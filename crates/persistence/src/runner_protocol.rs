@@ -7527,6 +7527,10 @@ async fn decode_placement(
                 .ok_or(RunnerProtocolCorruption::InvalidEncoding)
         })
         .transpose()?;
+    let loss_registration_revision = row
+        .decode_column::<Option<Decimal>>("loss_registration_revision")?
+        .map(decode_generation)
+        .transpose()?;
     let state = if state_kind == "unpinned" {
         if placement_row_has_invalid_unpinned_facts(row)? {
             return Err(RunnerProtocolCorruption::InvalidEncoding.into());
@@ -7564,12 +7568,18 @@ async fn decode_placement(
             ("pinned", None, None) => SessionRunnerPlacementState::Pinned(pinned),
             ("runner_lost", Some(lost), Some(source)) if lost == runner => {
                 SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
-                    pinned, source,
+                    pinned,
+                    source,
+                    loss_registration_revision,
                 ))
             }
             ("runner_abandoned", Some(lost), Some(source)) if lost == runner => {
                 SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
-                    Box::new(LostPinnedRunnerPlacement::from_stored(pinned, source)),
+                    Box::new(LostPinnedRunnerPlacement::from_stored(
+                        pinned,
+                        source,
+                        loss_registration_revision,
+                    )),
                 ))
             }
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
@@ -7904,6 +7914,10 @@ async fn authenticate_pinned_predecessor(
                     })
                     .transpose()?
                     .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+                let loss_registration_revision = predecessor
+                    .decode_column::<Option<Decimal>>("loss_registration_revision")?
+                    .map(decode_generation)
+                    .transpose()?;
                 let lost_runner = predecessor
                     .decode_column::<Option<Uuid>>("lost_runner_id")?
                     .map(runner_id)
@@ -7925,7 +7939,11 @@ async fn authenticate_pinned_predecessor(
                     return Err(RunnerProtocolCorruption::CrossWiredReference.into());
                 }
                 let lost = SessionRunnerPlacementState::RunnerLost(
-                    LostPinnedRunnerPlacement::from_stored(prior_pinned, source),
+                    LostPinnedRunnerPlacement::from_stored(
+                        prior_pinned,
+                        source,
+                        loss_registration_revision,
+                    ),
                 );
                 let (prior_row, prior_request, prior_pinned) =
                     load_authenticated_pinned_loss_predecessor(

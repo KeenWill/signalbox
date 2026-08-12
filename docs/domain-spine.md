@@ -9030,8 +9030,9 @@ impl LostPinnedRunnerPlacement {
     pub const fn from_stored(
         pinned: PinnedRunnerPlacement,
         source: RunnerPlacementLossSource,
+        loss_registration_revision: Option<RunnerGeneration>,
     ) -> Self;
-    // accessors: pinned(), source()
+    // accessors: pinned(), source(), loss_registration_revision()
 }
 pub enum AbandonedRunnerPlacement {
     BeforePin(RunnerLostBeforePin),
@@ -9107,6 +9108,15 @@ impl SessionRunnerPlacement {
         self,
         request: SessionRunnerPlacementRequest,
         registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+        prior_grant: Option<CredentialProfileGrant>,
+    ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn replace_lost_runner_after_same_runner_registration_recovery(
+        self,
+        request: SessionRunnerPlacementRequest,
+        loss_registration: &ValidatedRunnerRegistration,
+        current_registration: &ValidatedRunnerRegistration,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,

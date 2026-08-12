@@ -6460,6 +6460,11 @@ async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_ru
     let registration = store
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
+    let expected_loss = pin
+        .placement
+        .clone()
+        .reconcile_registration(registration.registration())
+        .expect("the narrowed registration produces the expected loss state");
     let pending = store.load_pending_registration_reconciliations().await?;
     let reconciliation = pending[0];
     let page = store
@@ -6506,10 +6511,7 @@ async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_ru
         disposition,
         RunnerRegistrationReconciliationDisposition::RunnerLost
     );
-    assert!(matches!(
-        loaded.placement().state(),
-        SessionRunnerPlacementState::RunnerLost(_)
-    ));
+    assert_eq!(loaded.placement(), &expected_loss);
     assert_eq!(
         stored_loss,
         (

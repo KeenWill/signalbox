@@ -2697,8 +2697,9 @@ pub struct PinnedRunnerPlacement {
 /// Durable source of a session placement's runner-loss transition.
 ///
 /// The source is retained so a later replacement transaction can decide
-/// whether same-runner recovery is admissible. The current domain replacement
-/// transitions refuse a same-runner successor for every source.
+/// whether same-runner recovery is admissible. Ordinary replacement refuses a
+/// same-runner successor; the registration-recovery transition additionally
+/// requires the exact loss-causing registration.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerPlacementLossSource {
     /// The runner connection became durably lost.
@@ -2730,6 +2731,7 @@ impl RunnerLostBeforePin {
 pub struct LostPinnedRunnerPlacement {
     pinned: PinnedRunnerPlacement,
     source: RunnerPlacementLossSource,
+    loss_registration_revision: Option<RunnerGeneration>,
 }
 
 impl LostPinnedRunnerPlacement {
@@ -2737,8 +2739,13 @@ impl LostPinnedRunnerPlacement {
     pub const fn from_stored(
         pinned: PinnedRunnerPlacement,
         source: RunnerPlacementLossSource,
+        loss_registration_revision: Option<RunnerGeneration>,
     ) -> Self {
-        Self { pinned, source }
+        Self {
+            pinned,
+            source,
+            loss_registration_revision,
+        }
     }
 
     /// Borrows the complete pinned facts retained by the loss.
@@ -2749,6 +2756,20 @@ impl LostPinnedRunnerPlacement {
     /// Returns the durable source of the loss.
     pub const fn source(&self) -> RunnerPlacementLossSource {
         self.source
+    }
+
+    /// Returns the registration revision that caused this loss, when its
+    /// source is registration reconciliation.
+    pub const fn loss_registration_revision(&self) -> Option<RunnerGeneration> {
+        self.loss_registration_revision
+    }
+
+    const fn has_valid_source_evidence(&self) -> bool {
+        matches!(
+            (self.source, self.loss_registration_revision),
+            (RunnerPlacementLossSource::Connection, None)
+                | (RunnerPlacementLossSource::Registration, Some(_))
+        )
     }
 }
 
@@ -2961,6 +2982,7 @@ impl SessionRunnerPlacement {
         self.state = SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement {
             pinned,
             source: RunnerPlacementLossSource::Connection,
+            loss_registration_revision: None,
         });
         Ok(self)
     }
@@ -3013,6 +3035,7 @@ impl SessionRunnerPlacement {
         self.state = SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement {
             pinned,
             source: RunnerPlacementLossSource::Registration,
+            loss_registration_revision: Some(registration.revision),
         });
         Ok(self)
     }
@@ -3068,6 +3091,46 @@ impl SessionRunnerPlacement {
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
+        self.replace_lost_runner_checked(
+            request,
+            registration,
+            directory,
+            workspace,
+            prior_grant,
+            SameRunnerReplacement::Refuse,
+        )
+    }
+
+    /// Replaces a registration-lost pin on the same runner after checking the
+    /// exact loss-causing and current registration lineage.
+    pub fn replace_lost_runner_after_same_runner_registration_recovery(
+        self,
+        request: SessionRunnerPlacementRequest,
+        loss_registration: &ValidatedRunnerRegistration,
+        current_registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+        prior_grant: Option<CredentialProfileGrant>,
+    ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
+        self.replace_lost_runner_checked(
+            request,
+            current_registration,
+            directory,
+            workspace,
+            prior_grant,
+            SameRunnerReplacement::RegistrationLoss(loss_registration),
+        )
+    }
+
+    fn replace_lost_runner_checked(
+        self,
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+        prior_grant: Option<CredentialProfileGrant>,
+        same_runner: SameRunnerReplacement<'_>,
+    ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
         let lost = match self.state {
             SessionRunnerPlacementState::RunnerLost(lost) => lost,
             SessionRunnerPlacementState::Unpinned
@@ -3082,6 +3145,21 @@ impl SessionRunnerPlacement {
             return Err(RunnerDomainError::RegistrationChanged);
         }
         if registration.runner == before.runner {
+            let SameRunnerReplacement::RegistrationLoss(loss_registration) = same_runner else {
+                return Err(RunnerDomainError::CorrelationMismatch);
+            };
+            if lost.source != RunnerPlacementLossSource::Registration
+                || loss_registration.enrollment != registration.enrollment
+                || loss_registration.runner != before.runner
+                || loss_registration.runner != registration.runner
+                || loss_registration.authentication != registration.authentication
+                || lost.loss_registration_revision != Some(loss_registration.revision)
+                || loss_registration.revision > registration.revision
+                || registration_preserves_snapshot(&self.request, &before, loss_registration)
+            {
+                return Err(RunnerDomainError::CorrelationMismatch);
+            }
+        } else if matches!(same_runner, SameRunnerReplacement::RegistrationLoss(_)) {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         let revision = self
@@ -3267,15 +3345,17 @@ impl SessionRunnerPlacement {
                 registration,
                 profileless_tombstone,
             ),
-            SessionRunnerPlacementState::RunnerLost(lost) => reconstitute_pinned_placement(
-                placement,
-                lost.pinned,
-                registration,
-                profileless_tombstone,
-            ),
+            SessionRunnerPlacementState::RunnerLost(lost) if lost.has_valid_source_evidence() => {
+                reconstitute_pinned_placement(
+                    placement,
+                    lost.pinned,
+                    registration,
+                    profileless_tombstone,
+                )
+            }
             SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
                 lost,
-            )) => reconstitute_pinned_placement(
+            )) if lost.has_valid_source_evidence() => reconstitute_pinned_placement(
                 placement,
                 lost.pinned,
                 registration,
@@ -3285,7 +3365,11 @@ impl SessionRunnerPlacement {
             | SessionRunnerPlacementState::RunnerLostBeforePin(_)
             | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
                 _,
-            )) => Err(RunnerDomainError::CorruptStoredFacts),
+            ))
+            | SessionRunnerPlacementState::RunnerLost(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_)) => {
+                Err(RunnerDomainError::CorruptStoredFacts)
+            }
         }
     }
 }
@@ -3549,6 +3633,12 @@ fn registration_preserves_snapshot(
 enum WorkspaceRevisionMatch {
     Exact,
     Retained,
+}
+
+#[derive(Clone, Copy)]
+enum SameRunnerReplacement<'a> {
+    Refuse,
+    RegistrationLoss(&'a ValidatedRunnerRegistration),
 }
 
 fn validate_placement(
@@ -4368,6 +4458,17 @@ mod tests {
             [WorkspaceCapability::WorktreePerSession],
             sandbox_profiles(),
             [RunnerRepositoryEntry::new(repository_key(), None)],
+        )
+    }
+
+    fn registration_loss_advertisement() -> RunnerAdvertisement {
+        RunnerAdvertisement::new(
+            [class()],
+            [tool("inspect"), tool("sync")],
+            [profile("readonly")],
+            [WorkspaceCapability::WorktreePerSession],
+            sandbox_profiles(),
+            [],
         )
     }
 
@@ -7072,6 +7173,7 @@ mod tests {
                     LostPinnedRunnerPlacement::from_stored(
                         pinned,
                         RunnerPlacementLossSource::Registration,
+                        Some(registration.revision()),
                     ),
                 ),
                 history: RunnerPlacementReconstitutionHistory::Initial,
@@ -7091,6 +7193,246 @@ mod tests {
                 Some(prior_grant),
             ),
             Err(RunnerDomainError::CorrelationMismatch),
+        );
+    }
+
+    #[test]
+    fn s32_inv042_inv044_checked_registration_loss_admits_same_runner_replacement() {
+        let enrollment = enrollment();
+        let pinned_registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the complete advertisement registers");
+        let mut pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment,
+            &pinned_registration,
+            directory("/workspace/session"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the complete registration pins the runner");
+        let prior_grant = pin.grant.take().expect("the pin carries its grant");
+        let loss_registration = enrollment
+            .register(registration_loss_advertisement(), &catalog())
+            .expect("the narrowed advertisement remains valid");
+        let request = pin.placement.request().clone();
+        let prior_revision = pin.placement.revision();
+        let lost = pin
+            .placement
+            .reconcile_registration(&loss_registration)
+            .expect("the narrowed registration records runner loss");
+        let current_registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the recovered advertisement registers");
+        assert_ne!(
+            current_registration.revision(),
+            loss_registration.revision()
+        );
+        let replacement = lost
+            .replace_lost_runner_after_same_runner_registration_recovery(
+                request.clone(),
+                &loss_registration,
+                &current_registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            )
+            .expect("the exact registration loss admits same-runner recovery");
+
+        assert_eq!(
+            replacement.change.before.runner,
+            current_registration.runner()
+        );
+        assert_eq!(
+            replacement.change.after.runner,
+            current_registration.runner()
+        );
+        assert_eq!(replacement.change.before_request, request);
+        assert_eq!(replacement.change.prior_revision, prior_revision);
+        assert_eq!(
+            replacement.placement.revision(),
+            replacement.change.replacement_revision
+        );
+    }
+
+    #[test]
+    fn s32_inv044_registration_loss_label_rejects_snapshot_preserving_evidence() {
+        let (registration, mut pin) = pinned("readonly");
+        let prior_grant = pin.grant.take().expect("the pin carries its grant");
+        let request = pin.placement.request().clone();
+        let mut pinned = validate_placement(
+            pin.placement.session(),
+            pin.placement.revision(),
+            &request,
+            &registration,
+            directory("/workspace/session"),
+            None,
+            WorkspaceRevisionMatch::Exact,
+        )
+        .expect("the fixture registration validates the pinned facts");
+        pinned.grant_lineage = Some(prior_grant.lineage());
+        let lost = SessionRunnerPlacement::reconstitute(
+            SessionRunnerPlacementReconstitutionInput {
+                session: pin.placement.session(),
+                revision: pin.placement.revision(),
+                request: request.clone(),
+                state: SessionRunnerPlacementState::RunnerLost(
+                    LostPinnedRunnerPlacement::from_stored(
+                        pinned,
+                        RunnerPlacementLossSource::Registration,
+                        Some(registration.revision()),
+                    ),
+                ),
+                history: RunnerPlacementReconstitutionHistory::Initial,
+            },
+            pin.placement.session(),
+            Some(&registration),
+            None,
+        )
+        .expect("complete stored loss facts reconstitute");
+
+        assert_eq!(
+            lost.replace_lost_runner_after_same_runner_registration_recovery(
+                request,
+                &registration,
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_connection_loss_rejects_checked_same_runner_replacement() {
+        let enrollment = enrollment();
+        let pinned_registration = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the complete advertisement registers");
+        let mut pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment,
+            &pinned_registration,
+            directory("/workspace/session"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the complete registration pins the runner");
+        let prior_grant = pin.grant.take().expect("the pin carries its grant");
+        let request = pin.placement.request().clone();
+        let lost = pin
+            .placement
+            .mark_runner_lost()
+            .expect("the connection loss retires the pin");
+        let loss_registration = enrollment
+            .register(registration_loss_advertisement(), &catalog())
+            .expect("the narrowed advertisement remains valid");
+
+        assert_eq!(
+            lost.replace_lost_runner_after_same_runner_registration_recovery(
+                request,
+                &loss_registration,
+                &loss_registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_registration_loss_reconstitution_requires_its_revision() {
+        let (registration, mut pin) = pinned("readonly");
+        let prior_grant = pin.grant.take().expect("the pin carries its grant");
+        let request = pin.placement.request().clone();
+        let mut stored = validate_placement(
+            pin.placement.session(),
+            pin.placement.revision(),
+            &request,
+            &registration,
+            directory("/workspace/session"),
+            None,
+            WorkspaceRevisionMatch::Exact,
+        )
+        .expect("the fixture registration validates the pinned facts");
+        stored.grant_lineage = Some(prior_grant.lineage());
+        let input = SessionRunnerPlacementReconstitutionInput {
+            session: pin.placement.session(),
+            revision: pin.placement.revision(),
+            request,
+            state: SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
+                stored,
+                RunnerPlacementLossSource::Registration,
+                None,
+            )),
+            history: RunnerPlacementReconstitutionHistory::Initial,
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(
+                input,
+                pin.placement.session(),
+                Some(&registration),
+                None,
+            ),
+            Err(RunnerDomainError::CorruptStoredFacts),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_connection_loss_reconstitution_rejects_a_registration_revision() {
+        let (registration, mut pin) = pinned("readonly");
+        let prior_grant = pin.grant.take().expect("the pin carries its grant");
+        let request = pin.placement.request().clone();
+        let mut stored = validate_placement(
+            pin.placement.session(),
+            pin.placement.revision(),
+            &request,
+            &registration,
+            directory("/workspace/session"),
+            None,
+            WorkspaceRevisionMatch::Exact,
+        )
+        .expect("the fixture registration validates the pinned facts");
+        stored.grant_lineage = Some(prior_grant.lineage());
+        let input = SessionRunnerPlacementReconstitutionInput {
+            session: pin.placement.session(),
+            revision: pin.placement.revision(),
+            request,
+            state: SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
+                stored,
+                RunnerPlacementLossSource::Connection,
+                Some(registration.revision()),
+            )),
+            history: RunnerPlacementReconstitutionHistory::Initial,
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(
+                input,
+                pin.placement.session(),
+                Some(&registration),
+                None,
+            ),
+            Err(RunnerDomainError::CorruptStoredFacts),
         );
     }
 
