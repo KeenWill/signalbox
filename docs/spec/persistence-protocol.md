@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The delegate denial-reason storage — the superseded decision-shape constraint
+and its byte-precise checks — was verified against this PR
+(`agent/judge-denial-reason`).
+
 The runner connection authority head, durable loss epoch, and lease offer/claim
 fences were verified against the parent slice (`agent/runner-loss-epoch`).
 Placement-relative lease-offer fencing was verified against this PR
@@ -48,9 +52,11 @@ was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
 extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
-posture storage were verified through PR #420 (`agent/approval-judge-storage`);
-the approval-judge lifecycle transactions were verified through this PR
+PR #384 (`agent/goal-mode-runtime`), with the appends owed when a generation
+binds an already-accepted turn verified against this PR
+(`agent/commission-binding`); and the approval-judge call, decision, and posture
+storage were verified through PR #420 (`agent/approval-judge-storage`); the
+approval-judge lifecycle transactions were verified through this PR
 (`agent/approval-judge-execution-support`); the approval-decision outbox is
 verified against this implementing change; the session-placement event, current
 head, and creation transaction were verified through PR #415
@@ -137,7 +143,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-two files, `202607180001` through
+`crates/persistence/migrations/` — seventy-three files, `202607180001` through
 `202608110015` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -241,7 +247,11 @@ Implemented table families (across the forward-only migrations):
   records dedicated approval-judge calls in the global model-call identity
   namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale;
+  recommendation, and rationale; migration `202608110014` supersedes its
+  decision-shape constraint so a delegate denial stores the checked reason
+  derived from its rationale, and backfills earlier delegate denials with the
+  same derivation, so a null reason means exactly one thing everywhere: the
+  rationale sanitizes to nothing;
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly
@@ -1512,16 +1522,20 @@ successor turn and appends that correlated `input_accepted`; an applied
 stopped issued work becomes ambiguous; terminal reclassification of pending
 steering appends its correlated `input_accepted`. Goal-owned turn creation
 appends the same correlated `input_accepted`; dispatch authenticates its exact
-`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command. A
-stop or supersede that makes a queued goal turn ineligible appends
-`goal_turn_retired` in the same transaction; supersede appends retirement before
-the replacement `input_accepted`. The typed record names the exact queued,
-now-ineligible `goal_turn`, and dispatch rechecks that durable correlation.
-Model-call state transitions append `model_call_transition`, tool-round creation
-appends `tool_batch_transition { proposed }`, all-resolved result projection
-appends `tool_batch_transition { results_projected }`, and an external-effect
-ambiguity appends `tool_batch_transition { recovery_required }`. Completion
-closure appends `turn_completed`, refusal closure appends `turn_refused`, and
+`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command.
+Binding an already-accepted turn to a generation appends nothing, because the
+command that accepted that turn appended its correlated `input_accepted`
+already; dispatch authenticates that command, and the `goal_turn` row recording
+which generation the turn runs under does not disqualify it. A stop or supersede
+that makes a queued goal turn ineligible appends `goal_turn_retired` in the same
+transaction; supersede appends retirement before the replacement
+`input_accepted`. The typed record names the exact queued, now-ineligible
+`goal_turn`, and dispatch rechecks that durable correlation. Model-call state
+transitions append `model_call_transition`, tool-round creation appends
+`tool_batch_transition { proposed }`, all-resolved result projection appends
+`tool_batch_transition { results_projected }`, and an external-effect ambiguity
+appends `tool_batch_transition { recovery_required }`. Completion closure
+appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
 appends `turn_cancelled`, and live stopped ambiguity appends
 `turn_reconciliation_required`; completion of a context compaction appends
