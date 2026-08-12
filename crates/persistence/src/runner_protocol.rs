@@ -7527,10 +7527,6 @@ async fn decode_placement(
                 .ok_or(RunnerProtocolCorruption::InvalidEncoding)
         })
         .transpose()?;
-    let loss_registration_revision = row
-        .decode_column::<Option<Decimal>>("loss_registration_revision")?
-        .map(decode_generation)
-        .transpose()?;
     let state = if state_kind == "unpinned" {
         if placement_row_has_invalid_unpinned_facts(row)? {
             return Err(RunnerProtocolCorruption::InvalidEncoding.into());
@@ -7555,6 +7551,14 @@ async fn decode_placement(
             RunnerLostBeforePin::from_stored(runner),
         ))
     } else {
+        let loss_registration_revision =
+            if matches!(state_kind.as_str(), "runner_lost" | "runner_abandoned") {
+                row.decode_column::<Option<Decimal>>("loss_registration_revision")?
+                    .map(decode_generation)
+                    .transpose()?
+            } else {
+                None
+            };
         let pinned = decode_pinned_placement(
             connection,
             row,
