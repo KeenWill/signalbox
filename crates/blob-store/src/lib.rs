@@ -13,6 +13,9 @@ pub mod conformance;
 /// Maximum ASCII bytes in one durable deployment store name.
 pub const MAX_BLOB_STORE_NAME_BYTES: usize = 64;
 
+/// Maximum bytes one adapter range operation may retain in memory.
+pub const MAX_BLOB_RANGE_BYTES: u64 = 4_194_304;
+
 /// A validated durable deployment identity for one blob store.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BlobStoreName(Arc<str>);
@@ -265,9 +268,10 @@ pub trait BlobStore: Send + Sync {
     /// Opens one recorded object as a stream without materializing it.
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob>;
 
-    /// Opens one exact nonempty range after a caller-scoped full verification.
+    /// Re-verifies one exact object generation while retaining one bounded range.
     fn open_range<'a>(
         &'a self,
+        expected: ExpectedBlob,
         key: &'a BlobObjectKey,
         offset: u64,
         byte_length: NonZeroU64,

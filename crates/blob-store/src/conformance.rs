@@ -12,6 +12,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::{
     BlobObjectKey, BlobPutOutcome, BlobReader, BlobStore, BlobStoreFailureKind, ExpectedBlob,
+    MAX_BLOB_RANGE_BYTES,
 };
 
 const FIRST_CONTENT: &[u8] = b"shared blob-store conformance fixture";
@@ -86,7 +87,7 @@ pub async fn assert_exact_range_read_back(store: &dyn BlobStore) {
         NonZeroU64::new(u64::try_from(RANGE_LENGTH).expect("the fixture range length fits u64"))
             .expect("the fixture range is nonempty");
     let opened = store
-        .open_range(outcome.key(), offset, byte_length)
+        .open_range(expected, outcome.key(), offset, byte_length)
         .await
         .expect("the published conformance range opens");
     assert_eq!(opened.byte_length(), byte_length.get());
@@ -100,6 +101,24 @@ pub async fn assert_exact_range_read_back(store: &dyn BlobStore) {
         actual,
         FIRST_CONTENT[RANGE_OFFSET..RANGE_OFFSET + RANGE_LENGTH]
     );
+}
+
+/// Proves an adapter rejects a range larger than its named memory bound.
+pub async fn assert_oversized_range_is_rejected(store: &dyn BlobStore) {
+    let expected = expected();
+    let outcome = store
+        .put(expected, reader(FIRST_CONTENT))
+        .await
+        .expect("the conformance store publishes valid fixture bytes");
+    let oversized = NonZeroU64::new(MAX_BLOB_RANGE_BYTES + 1)
+        .expect("one beyond the positive range bound remains nonzero");
+
+    let error = store
+        .open_range(expected, outcome.key(), 0, oversized)
+        .await
+        .expect_err("an oversized adapter range must be rejected before allocation");
+
+    assert_eq!(error.kind(), BlobStoreFailureKind::Unavailable);
 }
 
 /// Proves repeated publication verifies and deduplicates the final destination.
