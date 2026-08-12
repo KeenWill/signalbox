@@ -53,9 +53,18 @@ struct TemporaryBlobFile {
     directory: Arc<fs::File>,
     name: OsString,
     linked: bool,
+    #[cfg(test)]
+    cleanup_completion: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl TemporaryBlobFile {
+    #[cfg(test)]
+    fn cleanup_completion(&mut self) -> tokio::sync::oneshot::Receiver<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.cleanup_completion = Some(sender);
+        receiver
+    }
+
     fn publish_noclobber(
         mut self,
         destination_directory: &fs::File,
@@ -109,11 +118,21 @@ impl Drop for TemporaryBlobFile {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let directory = self.directory.clone();
             let name = std::mem::take(&mut self.name);
+            #[cfg(test)]
+            let cleanup_completion = self.cleanup_completion.take();
             drop(runtime.spawn_blocking(move || {
                 let _ = unlinkat(&directory, &name, AtFlags::empty());
+                #[cfg(test)]
+                if let Some(completion) = cleanup_completion {
+                    let _ = completion.send(());
+                }
             }));
         } else {
             let _ = unlinkat(&self.directory, &self.name, AtFlags::empty());
+            #[cfg(test)]
+            if let Some(completion) = self.cleanup_completion.take() {
+                let _ = completion.send(());
+            }
         }
     }
 }
@@ -227,6 +246,11 @@ impl std::fmt::Debug for FilesystemBlobUpload {
 }
 
 impl FilesystemBlobUpload {
+    #[cfg(test)]
+    fn cleanup_completion(&mut self) -> tokio::sync::oneshot::Receiver<()> {
+        self.temporary.cleanup_completion()
+    }
+
     /// Appends one already-bounded chunk in exact physical order.
     pub async fn append(&mut self, chunk: &[u8]) -> io::Result<()> {
         self.file.write_all(chunk).await
@@ -1025,6 +1049,8 @@ fn create_temporary_blob_file(
             directory,
             name,
             linked: true,
+            #[cfg(test)]
+            cleanup_completion: None,
         };
         fchmod(&file, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
         if !private_regular_file_metadata(&file.metadata()?) {
@@ -1705,7 +1731,11 @@ mod tests {
         let linked_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
             .expect("the uploads directory is readable")
             .count();
+        let cleanup_completion = upload.cleanup_completion();
         drop(upload);
+        cleanup_completion
+            .await
+            .expect("the blocking-pool unlink task completes");
         let dropped_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
             .expect("the uploads directory remains readable")
             .count();
