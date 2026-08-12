@@ -46,10 +46,11 @@ use sqlx::{
 };
 
 use crate::lock_inventory::{
-    RUNNER_CONNECTION_LOSS_HEAD, RUNNER_CONNECTION_LOSS_PROPAGATION, RUNNER_ENROLLMENT,
-    RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY,
-    RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_CONNECTION_AUTHORITY,
-    RUNNER_PLACEMENT_CURRENT_LOSS, RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
+    ABANDON_LOST_RUNNER_SCHEDULER, RUNNER_CONNECTION_LOSS_HEAD, RUNNER_CONNECTION_LOSS_PROPAGATION,
+    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
+    RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT,
+    RUNNER_PLACEMENT_CONNECTION_AUTHORITY, RUNNER_PLACEMENT_CURRENT_LOSS,
+    RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
     RUNNER_PRISTINE_ACTIVE_ENROLLMENTS, RUNNER_PRISTINE_PENDING_ENROLLMENTS,
     RUNNER_REGISTRATION_HEAD, RUNNER_REGISTRATION_RECONCILIATION,
     RUNNER_REGISTRATION_RECONCILIATION_STATE, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
@@ -2438,20 +2439,10 @@ impl RunnerProtocolStore {
             return Ok(outcome);
         }
 
-        let scheduler = sqlx::query(
-            "SELECT EXISTS (
-                    SELECT 1 FROM session WHERE session_id = $1
-                ) AS session_exists,
-                (
-                    SELECT session_id
-                      FROM session_scheduler
-                     WHERE session_id = $1
-                     FOR UPDATE
-                ) AS scheduler_session_id",
-        )
-        .bind(command.session().into_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
+        let scheduler = sqlx::query(ABANDON_LOST_RUNNER_SCHEDULER)
+            .bind(command.session().into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
         let session_exists: bool = scheduler.decode_column("session_exists")?;
         let scheduler_session: Option<Uuid> = scheduler.decode_column("scheduler_session_id")?;
         let mut evidence = AbandonmentRecordEvidence::default();

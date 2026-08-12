@@ -26,6 +26,19 @@ pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
                  FOR UPDATE
             )";
 
+pub(crate) const ABANDON_LOST_RUNNER_SCHEDULER: &str = "SELECT
+            EXISTS (
+                SELECT 1
+                  FROM session
+                 WHERE session_id = $1
+            ) AS session_exists,
+            (
+                SELECT session_id
+                  FROM session_scheduler
+                 WHERE session_id = $1
+                 FOR UPDATE
+            ) AS scheduler_session_id";
+
 pub(crate) const STARTUP_RECOVERY: &str = "SELECT
             EXISTS (
                 SELECT 1
