@@ -6746,7 +6746,11 @@ fn decode_stored_turn_origin_provenance(
     let command: Option<Uuid> = row.try_get("origin_command_id")?;
     let generation: Option<Decimal> = row.try_get("origin_goal_generation")?;
     match (command, generation) {
-        (Some(command), None) => {
+        // A bound dispatch turn carries both: the command accepted its tagged
+        // context and the generation records the authority it runs under. The
+        // command is what reconstitutes the origin, so it decides the shape and
+        // the generation rides alongside it.
+        (Some(command), _) => {
             let command_id = durable_command_id_from_uuid(command)
                 .map_err(|_| SubmitInputCorruption::Inconsistent("turn origin command identity"))?;
             Ok((
@@ -6799,9 +6803,8 @@ fn decode_stored_turn_origin_provenance(
                 None,
             ))
         }
-        (Some(_), Some(_)) | (None, None) => {
-            Err(SubmitInputCorruption::Inconsistent("turn origin provenance").into())
-        }
+        // Neither a command nor a generation names no origin at all.
+        (None, None) => Err(SubmitInputCorruption::Inconsistent("turn origin provenance").into()),
     }
 }
 
