@@ -195,6 +195,9 @@ impl CredentialProfileName {
 pub struct RunnerWorkingDirectory(String);
 
 impl RunnerWorkingDirectory {
+    /// Maximum UTF-8 bytes admitted by an exact runner working directory.
+    pub const MAX_BYTES: usize = EXACT_VALUE_MAX_BYTES;
+
     /// Validates and constructs exact runner working-directory text.
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
         validate_exact(value).map(Self)
@@ -2197,15 +2200,86 @@ pub struct PinnedRunnerPlacement {
     pub permission_overrides: RunnerToolPermissionOverrides,
 }
 
+/// Durable source of a session placement's runner-loss transition.
+///
+/// The source is retained so a later replacement transaction can decide
+/// whether same-runner recovery is admissible. The current domain replacement
+/// transitions refuse a same-runner successor for every source.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerPlacementLossSource {
+    /// The runner connection became durably lost.
+    Connection,
+    /// A current re-registration removed availability required by the pin.
+    Registration,
+}
+
+/// Exact unpinned identity selection retained after its runner is lost.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerLostBeforePin {
+    runner: RunnerId,
+}
+
+impl RunnerLostBeforePin {
+    /// Supplies complete stored facts to placement reconstitution.
+    pub const fn from_stored(runner: RunnerId) -> Self {
+        Self { runner }
+    }
+
+    /// Returns the exact runner selected before initial pinning.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+}
+
+/// Exact pinned placement retained after its runner is lost.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LostPinnedRunnerPlacement {
+    pinned: PinnedRunnerPlacement,
+    source: RunnerPlacementLossSource,
+}
+
+impl LostPinnedRunnerPlacement {
+    /// Supplies complete stored facts to placement reconstitution.
+    pub const fn from_stored(
+        pinned: PinnedRunnerPlacement,
+        source: RunnerPlacementLossSource,
+    ) -> Self {
+        Self { pinned, source }
+    }
+
+    /// Borrows the complete pinned facts retained by the loss.
+    pub const fn pinned(&self) -> &PinnedRunnerPlacement {
+        &self.pinned
+    }
+
+    /// Returns the durable source of the loss.
+    pub const fn source(&self) -> RunnerPlacementLossSource {
+        self.source
+    }
+}
+
+/// Complete retained authority retired by explicit runner abandonment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AbandonedRunnerPlacement {
+    /// An exact-identity request was abandoned before first pin.
+    BeforePin(RunnerLostBeforePin),
+    /// A pinned placement was abandoned after loss.
+    Pinned(Box<LostPinnedRunnerPlacement>),
+}
+
 /// Session affinity lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionRunnerPlacementState {
     /// No runner has been pinned for the session.
     Unpinned,
+    /// An exact-identity selection lost its runner before initial pinning.
+    RunnerLostBeforePin(RunnerLostBeforePin),
     /// The session is pinned to the contained runner facts.
     Pinned(PinnedRunnerPlacement),
     /// The pinned runner is lost and awaits explicit replacement.
-    RunnerLost(PinnedRunnerPlacement),
+    RunnerLost(LostPinnedRunnerPlacement),
+    /// Explicit user action terminally retired a lost placement.
+    RunnerAbandoned(AbandonedRunnerPlacement),
 }
 
 /// Session placement and affinity aggregate.
@@ -2390,7 +2464,35 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::Pinned(pinned) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
-        self.state = SessionRunnerPlacementState::RunnerLost(pinned);
+        self.state = SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement {
+            pinned,
+            source: RunnerPlacementLossSource::Connection,
+        });
+        Ok(self)
+    }
+
+    /// Marks an exact-identity selection lost before its initial pin.
+    pub fn mark_runner_lost_before_pin(
+        mut self,
+        runner: RunnerId,
+    ) -> Result<Self, RunnerDomainError> {
+        match (&self.state, &self.request.selector) {
+            (SessionRunnerPlacementState::Unpinned, RunnerSelector::Identity(selected))
+                if *selected == runner => {}
+            (
+                SessionRunnerPlacementState::Unpinned,
+                RunnerSelector::Identity(_) | RunnerSelector::CapabilityClass(_),
+            )
+            | (
+                SessionRunnerPlacementState::Pinned(_)
+                | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+                | SessionRunnerPlacementState::RunnerLost(_)
+                | SessionRunnerPlacementState::RunnerAbandoned(_),
+                _,
+            ) => return Err(RunnerDomainError::InvalidState),
+        }
+        self.state =
+            SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin { runner });
         Ok(self)
     }
 
@@ -2414,8 +2516,53 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::Pinned(pinned) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
-        self.state = SessionRunnerPlacementState::RunnerLost(pinned);
+        self.state = SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement {
+            pinned,
+            source: RunnerPlacementLossSource::Registration,
+        });
         Ok(self)
+    }
+
+    /// Replaces an exact runner lost before pinning without fabricating pinned facts.
+    pub fn replace_lost_runner_before_pin(
+        self,
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<RunnerPrePinReplacement, RunnerDomainError> {
+        let before = match self.state {
+            SessionRunnerPlacementState::RunnerLostBeforePin(before) => before,
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::Pinned(_)
+            | SessionRunnerPlacementState::RunnerLost(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(_) => {
+                return Err(RunnerDomainError::InvalidState);
+            }
+        };
+        match &request.selector {
+            RunnerSelector::Identity(runner) if *runner == registration.runner => {}
+            RunnerSelector::Identity(_) | RunnerSelector::CapabilityClass(_) => {
+                return Err(RunnerDomainError::CorrelationMismatch);
+            }
+        }
+        validate_placement_request(&request, registration)?;
+        if registration.runner == before.runner {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        let revision = self
+            .revision
+            .checked_next()
+            .ok_or(RunnerDomainError::GenerationExhausted)?;
+        Ok(RunnerPrePinReplacement {
+            placement: Self {
+                session: self.session,
+                revision,
+                request: request.clone(),
+                state: SessionRunnerPlacementState::Unpinned,
+            },
+            before,
+            prior_request: self.request,
+            replacement_request: request,
+        })
     }
 
     /// Replaces a lost runner while preserving explicit placement and grant changes.
@@ -2427,11 +2574,21 @@ impl SessionRunnerPlacement {
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
-        let SessionRunnerPlacementState::RunnerLost(before) = self.state else {
-            return Err(RunnerDomainError::InvalidState);
+        let lost = match self.state {
+            SessionRunnerPlacementState::RunnerLost(lost) => lost,
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::Pinned(_)
+            | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(_) => {
+                return Err(RunnerDomainError::InvalidState);
+            }
         };
+        let before = lost.pinned;
         if !registration.is_current() {
             return Err(RunnerDomainError::RegistrationChanged);
+        }
+        if registration.runner == before.runner {
+            return Err(RunnerDomainError::CorrelationMismatch);
         }
         let revision = self
             .revision
@@ -2472,6 +2629,28 @@ impl SessionRunnerPlacement {
             grant,
             grant_change,
         })
+    }
+
+    /// Terminally abandons the exact current lost placement.
+    pub fn abandon_lost_runner(mut self) -> Result<Self, RunnerDomainError> {
+        self.state = match self.state {
+            SessionRunnerPlacementState::RunnerLostBeforePin(lost) => {
+                SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
+                    lost,
+                ))
+            }
+            SessionRunnerPlacementState::RunnerLost(lost) => {
+                SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
+                    Box::new(lost),
+                ))
+            }
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::Pinned(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(_) => {
+                return Err(RunnerDomainError::InvalidState);
+            }
+        };
+        Ok(self)
     }
 
     /// Replaces the pinned credential profile and advances the placement revision.
@@ -2564,55 +2743,173 @@ impl SessionRunnerPlacement {
             request: input.request,
             state: input.state,
         };
-        match &placement.state {
+        let history = input.history;
+        let reconstituted_state = placement.state.clone();
+        match reconstituted_state {
             SessionRunnerPlacementState::Unpinned
-                if placement.revision == RunnerGeneration::one() =>
+                if placement_revision_history_matches(
+                    placement.revision,
+                    &placement.request,
+                    &history,
+                ) =>
             {
                 Ok(placement)
             }
-            SessionRunnerPlacementState::Pinned(stored)
-            | SessionRunnerPlacementState::RunnerLost(stored) => {
-                let pinned_registration =
-                    registration.ok_or(RunnerDomainError::CorruptStoredFacts)?;
-                let mut checked = validate_placement(
-                    placement.session,
+            SessionRunnerPlacementState::RunnerLostBeforePin(lost)
+            | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
+                lost,
+            )) if selector_names_runner(&placement.request.selector, lost.runner)
+                && placement_revision_history_matches(
                     placement.revision,
                     &placement.request,
-                    pinned_registration,
-                    stored.working_directory.clone(),
-                    stored.workspace.clone(),
-                    WorkspaceRevisionMatch::Retained,
-                )?;
-                checked.grant_lineage = stored.grant_lineage;
-                let lineage_is_valid = match (
-                    stored.credential_profile.as_ref(),
-                    stored.grant_lineage,
-                    profileless_tombstone,
-                ) {
-                    (Some(_), Some(lineage), None) => {
-                        lineage.runner == stored.runner && lineage.revision <= placement.revision
-                    }
-                    (None, None, None) => true,
-                    (None, Some(lineage), Some(tombstone)) => {
-                        tombstone.session == placement.session
-                            && tombstone.state == CredentialProfileGrantState::Revoked
-                            && tombstone.lineage() == lineage
-                            && lineage.revision <= placement.revision
-                    }
-                    (None, None, Some(_))
-                    | (Some(_), None, _)
-                    | (Some(_), Some(_), Some(_))
-                    | (None, Some(_), None) => false,
-                };
-                if lineage_is_valid && checked == *stored {
-                    Ok(placement)
-                } else {
-                    Err(RunnerDomainError::CorruptStoredFacts)
-                }
+                    &history,
+                ) =>
+            {
+                Ok(placement)
             }
-            _ => Err(RunnerDomainError::CorruptStoredFacts),
+            SessionRunnerPlacementState::Pinned(stored) => reconstitute_pinned_placement(
+                placement,
+                stored,
+                registration,
+                profileless_tombstone,
+            ),
+            SessionRunnerPlacementState::RunnerLost(lost) => reconstitute_pinned_placement(
+                placement,
+                lost.pinned,
+                registration,
+                profileless_tombstone,
+            ),
+            SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
+                lost,
+            )) => reconstitute_pinned_placement(
+                placement,
+                lost.pinned,
+                registration,
+                profileless_tombstone,
+            ),
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
+                _,
+            )) => Err(RunnerDomainError::CorruptStoredFacts),
         }
     }
+}
+
+fn selector_names_runner(selector: &RunnerSelector, runner: RunnerId) -> bool {
+    match selector {
+        RunnerSelector::Identity(selected) => *selected == runner,
+        RunnerSelector::CapabilityClass(_) => false,
+    }
+}
+
+fn reconstitute_pinned_placement(
+    placement: SessionRunnerPlacement,
+    stored: PinnedRunnerPlacement,
+    registration: Option<&ValidatedRunnerRegistration>,
+    profileless_tombstone: Option<&CredentialProfileGrant>,
+) -> Result<SessionRunnerPlacement, RunnerDomainError> {
+    let pinned_registration = registration.ok_or(RunnerDomainError::CorruptStoredFacts)?;
+    let mut checked = validate_placement(
+        placement.session,
+        placement.revision,
+        &placement.request,
+        pinned_registration,
+        stored.working_directory.clone(),
+        stored.workspace.clone(),
+        WorkspaceRevisionMatch::Retained,
+    )?;
+    checked.grant_lineage = stored.grant_lineage;
+    let lineage_is_valid = match (
+        stored.credential_profile.as_ref(),
+        stored.grant_lineage,
+        profileless_tombstone,
+    ) {
+        (Some(_), Some(lineage), None) => {
+            lineage.runner == stored.runner && lineage.revision <= placement.revision
+        }
+        (None, None, None) => true,
+        (None, Some(lineage), Some(tombstone)) => {
+            let tombstone_is_revoked = match tombstone.state {
+                CredentialProfileGrantState::Active => false,
+                CredentialProfileGrantState::Revoked => true,
+            };
+            tombstone.session == placement.session
+                && tombstone_is_revoked
+                && tombstone.lineage() == lineage
+                && lineage.revision <= placement.revision
+        }
+        (None, None, Some(_))
+        | (Some(_), None, _)
+        | (Some(_), Some(_), Some(_))
+        | (None, Some(_), None) => false,
+    };
+    if lineage_is_valid && checked == stored {
+        Ok(placement)
+    } else {
+        Err(RunnerDomainError::CorruptStoredFacts)
+    }
+}
+
+fn placement_revision_history_matches(
+    mut revision: RunnerGeneration,
+    request: &SessionRunnerPlacementRequest,
+    history: &RunnerPlacementReconstitutionHistory,
+) -> bool {
+    let mut request = request;
+    let replacements = match history {
+        RunnerPlacementReconstitutionHistory::Initial => {
+            return revision == RunnerGeneration::one();
+        }
+        RunnerPlacementReconstitutionHistory::PrePinReplacements(replacements)
+            if !replacements.is_empty() =>
+        {
+            replacements
+        }
+        RunnerPlacementReconstitutionHistory::PrePinReplacements(_) => return false,
+    };
+    for replacement in replacements.iter().rev() {
+        let successor_differs = match request.selector {
+            RunnerSelector::Identity(successor) => successor != replacement.lost_runner,
+            RunnerSelector::CapabilityClass(_) => false,
+        };
+        let predecessor_names_loss = match replacement.prior_request.selector {
+            RunnerSelector::Identity(prior) => prior == replacement.lost_runner,
+            RunnerSelector::CapabilityClass(_) => false,
+        };
+        if replacement.prior_revision.checked_next() != Some(revision)
+            || !predecessor_names_loss
+            || &replacement.replacement_request != request
+            || !successor_differs
+        {
+            return false;
+        }
+        revision = replacement.prior_revision;
+        request = &replacement.prior_request;
+    }
+    revision == RunnerGeneration::one()
+}
+
+/// Append-only history proof used when reconstituting a placement revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunnerPlacementReconstitutionHistory {
+    /// Revision one was created directly from session placement intent.
+    Initial,
+    /// Chronological nonempty lost-before-pin replacement history.
+    PrePinReplacements(Vec<RunnerPrePinReplacementHistory>),
+}
+
+/// One stack-safe element of append-only pre-pin replacement history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerPrePinReplacementHistory {
+    /// Exact predecessor revision consumed by the replacement.
+    pub prior_revision: RunnerGeneration,
+    /// Exact runner retained by the predecessor loss.
+    pub lost_runner: RunnerId,
+    /// Complete predecessor request retained by append-only history.
+    pub prior_request: SessionRunnerPlacementRequest,
+    /// Complete successor request installed by append-only history.
+    pub replacement_request: SessionRunnerPlacementRequest,
 }
 
 /// Complete placement facts loaded from one canonical durable revision.
@@ -2626,6 +2923,8 @@ pub struct SessionRunnerPlacementReconstitutionInput {
     pub request: SessionRunnerPlacementRequest,
     /// The stored domain state.
     pub state: SessionRunnerPlacementState,
+    /// The append-only transition that makes the stored revision reachable.
+    pub history: RunnerPlacementReconstitutionHistory,
 }
 
 struct ValidatedRunnerDispatch {
@@ -2767,34 +3066,7 @@ fn validate_placement(
     workspace: Option<ProvisionedWorkspace>,
     workspace_revision_match: WorkspaceRevisionMatch,
 ) -> Result<PinnedRunnerPlacement, RunnerDomainError> {
-    if !registration.satisfies(&request.selector) {
-        return Err(RunnerDomainError::SelectorMismatch);
-    }
-    if !registration.supports_sandbox(request.sandbox) {
-        return Err(RunnerDomainError::SandboxProfileUnavailable);
-    }
-    if let Some((tool, _)) = request
-        .permission_overrides
-        .iter()
-        .find(|(tool, _)| !registration.catalog_tools.contains(tool))
-    {
-        return Err(RunnerDomainError::ToolUndeclared(tool.clone()));
-    }
-    if request
-        .credential_profile
-        .as_ref()
-        .is_some_and(|profile| registration.profile(profile).is_none())
-    {
-        return Err(RunnerDomainError::CredentialProfileUnavailable);
-    }
-    if let WorkspaceRequirement::RepositoryWorktree { repository } = &request.workspace {
-        let entry = registration
-            .repository(repository)
-            .ok_or(RunnerDomainError::RepositoryUnavailable)?;
-        if entry.credential_profile() != request.credential_profile.as_ref() {
-            return Err(RunnerDomainError::CredentialProfileUnavailable);
-        }
-    }
+    validate_placement_request_against(request, registration)?;
     if let WorkingDirectorySelection::Exact(required) = &request.working_directory
         && required != &directory
     {
@@ -2883,6 +3155,57 @@ fn validate_placement(
     })
 }
 
+fn validate_placement_request(
+    request: &SessionRunnerPlacementRequest,
+    registration: &ValidatedRunnerRegistration,
+) -> Result<(), RunnerDomainError> {
+    if !registration.is_current() {
+        return Err(RunnerDomainError::RegistrationChanged);
+    }
+    validate_placement_request_against(request, registration)
+}
+
+fn validate_placement_request_against(
+    request: &SessionRunnerPlacementRequest,
+    registration: &ValidatedRunnerRegistration,
+) -> Result<(), RunnerDomainError> {
+    if !registration.satisfies(&request.selector) {
+        return Err(RunnerDomainError::SelectorMismatch);
+    }
+    if !registration.supports_sandbox(request.sandbox) {
+        return Err(RunnerDomainError::SandboxProfileUnavailable);
+    }
+    if let Some((tool, _)) = request
+        .permission_overrides
+        .iter()
+        .find(|(tool, _)| !registration.catalog_tools.contains(tool))
+    {
+        return Err(RunnerDomainError::ToolUndeclared(tool.clone()));
+    }
+    if request
+        .credential_profile
+        .as_ref()
+        .is_some_and(|profile| registration.profile(profile).is_none())
+    {
+        return Err(RunnerDomainError::CredentialProfileUnavailable);
+    }
+    match &request.workspace {
+        WorkspaceRequirement::None => {}
+        WorkspaceRequirement::RepositoryWorktree { repository } => {
+            if !registration.supports_workspace(WorkspaceCapability::WorktreePerSession) {
+                return Err(RunnerDomainError::WorkspaceCapabilityUnavailable);
+            }
+            let entry = registration
+                .repository(repository)
+                .ok_or(RunnerDomainError::RepositoryUnavailable)?;
+            if entry.credential_profile() != request.credential_profile.as_ref() {
+                return Err(RunnerDomainError::CredentialProfileUnavailable);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Successful first pin with its optional runner-bound credential grant.
 #[derive(Debug, Eq, PartialEq)]
 pub struct SessionRunnerPin {
@@ -2892,6 +3215,19 @@ pub struct SessionRunnerPin {
     pub grant: Option<CredentialProfileGrant>,
     /// The initial lease emitted by the pin.
     pub lease: RunnerLease,
+}
+
+/// Successful replacement of an exact runner lost before the first pin.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerPrePinReplacement {
+    /// The successor unpinned placement at the next positive revision.
+    pub placement: SessionRunnerPlacement,
+    /// The exact lost identity consumed by replacement.
+    pub before: RunnerLostBeforePin,
+    /// The complete request retained by the loss.
+    pub prior_request: SessionRunnerPlacementRequest,
+    /// The complete successor request installed by replacement.
+    pub replacement_request: SessionRunnerPlacementRequest,
 }
 
 /// Successful explicit placement replacement.
@@ -3395,6 +3731,7 @@ mod tests {
     const ENROLLMENT: u128 = 0x7100;
     const RUNNER: u128 = 0x7200;
     const REPLACEMENT_RUNNER: u128 = 0x7201;
+    const THIRD_RUNNER: u128 = 0x7202;
     const AUTHENTICATION: u128 = 0x7300;
     const LEASE: u128 = 0x7400;
     const ATTEMPT: u128 = 0x7500;
@@ -3561,6 +3898,17 @@ mod tests {
         }
     }
 
+    fn exact_placement_request(runner: RunnerId) -> SessionRunnerPlacementRequest {
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(runner),
+            working_directory: WorkingDirectorySelection::Exact(directory("/workspace/session")),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        }
+    }
+
     fn directory(value: &str) -> RunnerWorkingDirectory {
         RunnerWorkingDirectory::try_new(value.to_owned())
             .expect("fixture working directories are valid")
@@ -3673,9 +4021,16 @@ mod tests {
         placement: &SessionRunnerPlacement,
     ) -> Option<RunnerCredentialGrantLineage> {
         match placement.state() {
-            SessionRunnerPlacementState::Pinned(pinned)
-            | SessionRunnerPlacementState::RunnerLost(pinned) => pinned.grant_lineage,
-            SessionRunnerPlacementState::Unpinned => None,
+            SessionRunnerPlacementState::Pinned(pinned) => pinned.grant_lineage,
+            SessionRunnerPlacementState::RunnerLost(lost) => lost.pinned.grant_lineage,
+            SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
+                lost,
+            )) => lost.pinned.grant_lineage,
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
+                _,
+            )) => None,
         }
     }
 
@@ -3970,6 +4325,7 @@ mod tests {
             revision: placement.revision,
             request: placement.request,
             state: placement.state,
+            history: RunnerPlacementReconstitutionHistory::Initial,
         }
     }
 
@@ -5569,8 +5925,8 @@ mod tests {
             .expect("the narrowed advertisement remains allowed");
         let expected = pin_for_expected_state
             .placement
-            .mark_runner_lost()
-            .expect("the fixture placement is pinned");
+            .reconcile_registration(&narrowed_registration)
+            .expect("registration narrowing is explicit runner loss");
 
         assert_eq!(
             pin_for_offer.placement.offer_lease(
@@ -5891,8 +6247,267 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv044_lost_before_pin_requires_the_exact_selected_runner() {
+        let selected = runner_id(RUNNER);
+        let foreign = runner_id(REPLACEMENT_RUNNER);
+        let capability_selected =
+            SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request());
+        let exact_selected =
+            SessionRunnerPlacement::new(session_id(SESSION), exact_placement_request(selected));
+
+        assert_eq!(
+            capability_selected.mark_runner_lost_before_pin(selected),
+            Err(RunnerDomainError::InvalidState),
+        );
+        assert_eq!(
+            exact_selected.mark_runner_lost_before_pin(foreign),
+            Err(RunnerDomainError::InvalidState),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_pre_pin_replacement_advances_unpinned_without_pinned_facts() {
+        let selected = runner_id(RUNNER);
+        let replacement_registration = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let initial_request = exact_placement_request(selected);
+        let replacement_request = exact_placement_request(replacement_registration.runner());
+        let lost = SessionRunnerPlacement::new(session_id(SESSION), initial_request.clone())
+            .mark_runner_lost_before_pin(selected)
+            .expect("the exact selection may be lost before pinning");
+        let expected_revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture states revision two");
+        let replacement = lost
+            .replace_lost_runner_before_pin(replacement_request.clone(), &replacement_registration)
+            .expect("a distinct current runner installs a successor request");
+
+        assert_eq!(replacement.placement.revision(), expected_revision);
+        assert_eq!(
+            replacement.placement.state(),
+            &SessionRunnerPlacementState::Unpinned,
+        );
+        assert_eq!(replacement.before.runner(), selected);
+        assert_eq!(replacement.prior_request, initial_request);
+        assert_eq!(replacement.replacement_request, replacement_request);
+    }
+
+    #[test]
+    fn s32_inv044_pre_pin_replacement_requires_repository_workspace_capability() {
+        let selected = runner_id(RUNNER);
+        let replacement_runner = runner_id(REPLACEMENT_RUNNER);
+        let replacement_registration = enrollment_for(replacement_runner)
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("inspect"), tool("deploy"), tool("sync")],
+                    [profile("readonly"), profile("admin")],
+                    [],
+                    sandbox_profiles(),
+                    [RunnerRepositoryEntry::new(repository_key(), None)],
+                ),
+                &catalog(),
+            )
+            .expect("the repository inventory is valid without workspace capability");
+        let lost =
+            SessionRunnerPlacement::new(session_id(SESSION), exact_placement_request(selected))
+                .mark_runner_lost_before_pin(selected)
+                .expect("the exact selection may be lost before pinning");
+        let replacement_request = SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(replacement_runner),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: repository_key(),
+            },
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        };
+
+        assert_eq!(
+            lost.replace_lost_runner_before_pin(replacement_request, &replacement_registration,),
+            Err(RunnerDomainError::WorkspaceCapabilityUnavailable),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_connection_loss_rejects_same_runner_replacement() {
+        let (registration, mut pin) = pinned("readonly");
+        let prior_grant = pin.grant.take().expect("the pin carries its grant");
+        let request = pin.placement.request().clone();
+        let lost = pin
+            .placement
+            .mark_runner_lost()
+            .expect("the pinned runner may be lost through its connection");
+
+        assert_eq!(
+            lost.replace_lost_runner(
+                request,
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_registration_loss_label_does_not_authorize_same_runner_replacement() {
+        let (registration, mut pin) = pinned("readonly");
+        let prior_grant = pin.grant.take().expect("the pin carries its grant");
+        let request = pin.placement.request().clone();
+        let mut pinned = validate_placement(
+            pin.placement.session(),
+            pin.placement.revision(),
+            &request,
+            &registration,
+            directory("/workspace/session"),
+            None,
+            WorkspaceRevisionMatch::Exact,
+        )
+        .expect("the fixture registration validates the pinned facts");
+        pinned.grant_lineage = Some(prior_grant.lineage());
+        let lost = SessionRunnerPlacement::reconstitute(
+            SessionRunnerPlacementReconstitutionInput {
+                session: pin.placement.session(),
+                revision: pin.placement.revision(),
+                request: request.clone(),
+                state: SessionRunnerPlacementState::RunnerLost(
+                    LostPinnedRunnerPlacement::from_stored(
+                        pinned,
+                        RunnerPlacementLossSource::Registration,
+                    ),
+                ),
+                history: RunnerPlacementReconstitutionHistory::Initial,
+            },
+            pin.placement.session(),
+            Some(&registration),
+            None,
+        )
+        .expect("complete stored loss facts reconstitute");
+
+        assert_eq!(
+            lost.replace_lost_runner(
+                request,
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_abandonment_retires_the_exact_lost_pre_pin_state() {
+        let selected = runner_id(RUNNER);
+        let lost =
+            SessionRunnerPlacement::new(session_id(SESSION), exact_placement_request(selected))
+                .mark_runner_lost_before_pin(selected)
+                .expect("the exact selection may be lost before pinning");
+        let abandoned = lost
+            .abandon_lost_runner()
+            .expect("the lost pre-pin selection may be abandoned");
+
+        assert_eq!(
+            abandoned.state(),
+            &SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
+                RunnerLostBeforePin::from_stored(selected)
+            ),),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_unpinned_successor_reconstitution_requires_pre_pin_history() {
+        let selected = runner_id(RUNNER);
+        let replacement_registration = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let lost =
+            SessionRunnerPlacement::new(session_id(SESSION), exact_placement_request(selected))
+                .mark_runner_lost_before_pin(selected)
+                .expect("the exact selection may be lost before pinning");
+        let prior_revision = lost.revision();
+        let prior_request = lost.request().clone();
+        let replacement = lost
+            .replace_lost_runner_before_pin(
+                exact_placement_request(replacement_registration.runner()),
+                &replacement_registration,
+            )
+            .expect("a distinct current runner installs a successor request");
+        let initial_history = placement_reconstitution_input(replacement.placement);
+        let mut replacement_history = initial_history.clone();
+        replacement_history.history =
+            RunnerPlacementReconstitutionHistory::PrePinReplacements(vec![
+                RunnerPrePinReplacementHistory {
+                    prior_revision,
+                    lost_runner: selected,
+                    prior_request,
+                    replacement_request: initial_history.request.clone(),
+                },
+            ]);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(initial_history, session_id(SESSION), None, None,),
+            Err(RunnerDomainError::CorruptStoredFacts),
+        );
+        let restored = SessionRunnerPlacement::reconstitute(
+            replacement_history,
+            session_id(SESSION),
+            None,
+            None,
+        )
+        .expect("append-only pre-pin replacement history authenticates revision two");
+        assert_eq!(restored.state(), &SessionRunnerPlacementState::Unpinned);
+    }
+
+    #[test]
+    fn s32_inv044_pre_pin_reconstitution_rejects_a_truncated_predecessor_chain() {
+        let second_runner = runner_id(REPLACEMENT_RUNNER);
+        let third_runner = runner_id(THIRD_RUNNER);
+        let second_request = exact_placement_request(second_runner);
+        let third_request = exact_placement_request(third_runner);
+        let input = SessionRunnerPlacementReconstitutionInput {
+            session: session_id(SESSION),
+            revision: RunnerGeneration::try_from_u64(3).expect("three is a positive generation"),
+            request: third_request.clone(),
+            state: SessionRunnerPlacementState::Unpinned,
+            history: RunnerPlacementReconstitutionHistory::PrePinReplacements(vec![
+                RunnerPrePinReplacementHistory {
+                    prior_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("two is a positive generation"),
+                    lost_runner: second_runner,
+                    prior_request: second_request,
+                    replacement_request: third_request,
+                },
+            ]),
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), None, None),
+            Err(RunnerDomainError::CorruptStoredFacts),
+        );
+    }
+
+    #[test]
+    fn s32_inv044_lost_before_pin_reconstitution_requires_an_identity_selector() {
+        let selected = runner_id(RUNNER);
+        let input = SessionRunnerPlacementReconstitutionInput {
+            session: session_id(SESSION),
+            revision: RunnerGeneration::one(),
+            request: profileless_placement_request(),
+            state: SessionRunnerPlacementState::RunnerLostBeforePin(
+                RunnerLostBeforePin::from_stored(selected),
+            ),
+            history: RunnerPlacementReconstitutionHistory::Initial,
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), None, None),
+            Err(RunnerDomainError::CorruptStoredFacts),
+        );
+    }
+
+    #[test]
     fn s32_inv045_replacement_advances_a_revoked_grant_revision() {
-        let registration = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
         let prior_grant = pin
             .grant
@@ -5908,7 +6523,7 @@ mod tests {
         let replaced = lost
             .replace_lost_runner(
                 placement_request(profile("readonly")),
-                &registration,
+                &replacement,
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
@@ -5931,9 +6546,10 @@ mod tests {
     #[test]
     fn s32_inv044_replacement_change_retains_policy_only_request_change() {
         let registration = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let before_request = placement_request(profile("readonly"));
         let after_request = SessionRunnerPlacementRequest {
-            selector: RunnerSelector::Identity(registration.runner()),
+            selector: RunnerSelector::Identity(replacement.runner()),
             ..before_request.clone()
         };
         let mut pin = SessionRunnerPlacement::new(session_id(SESSION), before_request.clone())
@@ -5962,16 +6578,13 @@ mod tests {
         let replaced = lost
             .replace_lost_runner(
                 after_request.clone(),
-                &registration,
+                &replacement,
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
             )
-            .expect("the exact-runner request selects the same pinned facts");
+            .expect("the exact-runner request selects the replacement runner");
 
-        let mut after_without_grant_advance = replaced.change.after.clone();
-        after_without_grant_advance.grant_lineage = replaced.change.before.grant_lineage;
-        assert_eq!(replaced.change.before, after_without_grant_advance);
         assert_eq!(
             replaced.change.after.grant_lineage,
             replaced.grant.as_ref().map(CredentialProfileGrant::lineage),
@@ -5983,6 +6596,7 @@ mod tests {
     #[test]
     fn s32_inv045_profileless_replacement_retains_grant_lineage() {
         let registration = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
         let prior_grant = pin
             .grant
@@ -5995,7 +6609,7 @@ mod tests {
         let profileless = first_lost
             .replace_lost_runner(
                 profileless_placement_request(),
-                &registration,
+                &replacement,
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
@@ -6031,7 +6645,7 @@ mod tests {
 
     #[test]
     fn s32_inv044_inv045_profileless_placement_reconstitutes_with_exact_tombstone() {
-        let registration = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
         let prior_grant = pin
             .grant
@@ -6044,7 +6658,7 @@ mod tests {
         let profileless = lost
             .replace_lost_runner(
                 profileless_placement_request(),
-                &registration,
+                &replacement,
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
@@ -6060,7 +6674,7 @@ mod tests {
             SessionRunnerPlacement::reconstitute(
                 input.clone(),
                 session_id(SESSION),
-                Some(&registration),
+                Some(&replacement),
                 None,
             ),
             Err(RunnerDomainError::CorruptStoredFacts)
@@ -6068,7 +6682,7 @@ mod tests {
         let restored = SessionRunnerPlacement::reconstitute(
             input,
             session_id(SESSION),
-            Some(&registration),
+            Some(&replacement),
             Some(&tombstone),
         )
         .expect("the exact revoked tombstone authenticates retained profileless lineage");
@@ -6133,6 +6747,7 @@ mod tests {
     #[test]
     fn s32_inv045_profileless_lineage_rejects_an_omitted_tombstone() {
         let registration = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let mut pin = pinned("readonly").1;
         let prior_grant = pin
             .grant
@@ -6145,7 +6760,7 @@ mod tests {
         let profileless = first_lost
             .replace_lost_runner(
                 profileless_placement_request(),
-                &registration,
+                &replacement,
                 directory("/workspace/session"),
                 None,
                 Some(prior_grant),
@@ -6870,10 +7485,11 @@ mod tests {
             .placement
             .mark_runner_lost()
             .expect("the narrowed placement can be marked lost");
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
         let replaced = lost
             .replace_lost_runner(
                 placement_request(profile("readonly")),
-                &registration,
+                &replacement,
                 directory("/workspace/session"),
                 None,
                 Some(narrowed.grant.grant),

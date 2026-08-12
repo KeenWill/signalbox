@@ -29,7 +29,7 @@ pub const MAX_SANDBOX_PROFILES: usize = 2;
 /// Maximum advertised credential profiles.
 pub const MAX_PROFILES: usize = 64;
 /// Maximum advertised repository entries.
-pub const MAX_REPOSITORIES: usize = signalbox_domain::RunnerAdvertisement::MAX_REPOSITORIES;
+pub const MAX_REPOSITORIES: usize = RunnerAdvertisement::MAX_REPOSITORIES;
 /// Maximum facts retained in one leak page.
 pub const MAX_LEAK_PAGE_FACTS: usize = 64;
 

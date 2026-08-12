@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use signalbox_application::ModelCallCredentialReference;
-use signalbox_domain::{ResolvedProviderTarget, SessionId};
+use signalbox_domain::{FastMode, ResolvedProviderTarget, SessionId};
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 /// One model-family credential entry in a complete session snapshot.
@@ -88,6 +88,7 @@ pub enum SessionCredentialPinError {
 #[derive(Clone, Debug)]
 pub struct ModelCredentialFamilyCatalog {
     families: Arc<HashMap<ResolvedProviderTarget, ModelCredentialFamilyRoute>>,
+    fast_targets: Arc<HashMap<ResolvedProviderTarget, ResolvedProviderTarget>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,7 +116,28 @@ impl ModelCredentialFamilyCatalog {
         }
         Ok(Self {
             families: Arc::new(families),
+            fast_targets: Arc::new(HashMap::new()),
         })
+    }
+
+    /// Adds each capability-authorized selected-to-serving fast-target route.
+    pub fn with_fast_targets(
+        mut self,
+        entries: impl IntoIterator<Item = (ResolvedProviderTarget, ResolvedProviderTarget)>,
+    ) -> Result<Self, ModelCredentialFamilyCatalogError> {
+        let mut fast_targets = HashMap::new();
+        for (selected, serving) in entries {
+            if !self.families.contains_key(&selected) || !self.families.contains_key(&serving) {
+                return Err(ModelCredentialFamilyCatalogError::ConflictingTarget);
+            }
+            if let Some(previous) = fast_targets.insert(selected, serving)
+                && previous != serving
+            {
+                return Err(ModelCredentialFamilyCatalogError::ConflictingTarget);
+            }
+        }
+        self.fast_targets = Arc::new(fast_targets);
+        Ok(self)
     }
 
     /// Resolves the configuration family for one exact provider target.
@@ -125,10 +147,40 @@ impl ModelCredentialFamilyCatalog {
             .map(|route| route.family.as_ref())
     }
 
-    pub(crate) fn migration_fallback_family(&self, target: ResolvedProviderTarget) -> Option<&str> {
+    /// Resolves the credential family for the effective serving target.
+    pub fn family_for_call(
+        &self,
+        selected: ResolvedProviderTarget,
+        fast_mode: FastMode,
+    ) -> Option<&str> {
         self.families
-            .get(&target)
+            .get(&self.serving_target(selected, fast_mode))
+            .map(|route| route.family.as_ref())
+    }
+
+    pub(crate) fn migration_fallback_family_for_call(
+        &self,
+        selected: ResolvedProviderTarget,
+        fast_mode: FastMode,
+    ) -> Option<&str> {
+        self.families
+            .get(&self.serving_target(selected, fast_mode))
             .and_then(|route| route.migration_fallback_family.as_deref())
+    }
+
+    fn serving_target(
+        &self,
+        selected: ResolvedProviderTarget,
+        fast_mode: FastMode,
+    ) -> ResolvedProviderTarget {
+        match fast_mode {
+            FastMode::Disabled => selected,
+            FastMode::Enabled => self
+                .fast_targets
+                .get(&selected)
+                .copied()
+                .unwrap_or(selected),
+        }
     }
 }
 
@@ -266,7 +318,7 @@ pub async fn current_session_credential_with_migration_fallback(
 mod tests {
     use std::sync::Arc;
 
-    use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget};
+    use signalbox_domain::{FastMode, ProviderModelIdentity, ResolvedProviderTarget};
     use sqlx::types::Uuid;
 
     use super::{
@@ -298,8 +350,34 @@ mod tests {
 
         assert_eq!(catalog.family(target), Some(configured_family.as_ref()));
         assert_eq!(
-            catalog.migration_fallback_family(target),
+            catalog.migration_fallback_family_for_call(target, FastMode::Disabled),
             Some(migration_family.as_ref())
+        );
+    }
+
+    #[test]
+    fn fast_call_uses_the_serving_target_credential_family() {
+        let selected_family = Arc::<str>::from("standard-family");
+        let serving_family = Arc::<str>::from("fast-family");
+        let selected =
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(1)));
+        let serving =
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(2)));
+        let catalog = ModelCredentialFamilyCatalog::try_new([
+            (selected, Arc::clone(&selected_family), None),
+            (serving, Arc::clone(&serving_family), None),
+        ])
+        .expect("both credential families are valid")
+        .with_fast_targets([(selected, serving)])
+        .expect("the serving route names declared targets");
+
+        assert_eq!(
+            catalog.family_for_call(selected, FastMode::Disabled),
+            Some(selected_family.as_ref())
+        );
+        assert_eq!(
+            catalog.family_for_call(selected, FastMode::Enabled),
+            Some(serving_family.as_ref())
         );
     }
 }

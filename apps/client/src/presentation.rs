@@ -18,9 +18,10 @@ use signalbox_process_protocol::{
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
-    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolApprovalEventDecider,
-    ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, UsageProvenance,
+    ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth, RunnerProjection,
+    RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+    RunnerStateTransitionState, SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision,
+    ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -1075,12 +1076,69 @@ impl<'a> Output<'a> {
         selection: &str,
         placement_version: u64,
         placement: &str,
+        runner: Option<&RunnerProjection>,
     ) -> io::Result<()> {
-        writeln!(
+        write!(
             self.stdout,
             "{session_id} defaults_version={defaults_version} {selection} \
              placement_version={placement_version} {placement}"
-        )
+        )?;
+        if let Some(runner) = runner {
+            write!(self.stdout, " runner_selector=")?;
+            match runner.selector() {
+                RunnerProjectionSelector::Runner { runner_id } => {
+                    write!(self.stdout, "runner runner_selector_runner={runner_id}")?;
+                }
+                RunnerProjectionSelector::CapabilityClass { name } => write!(
+                    self.stdout,
+                    "capability_class runner_selector_capability={}",
+                    self.render_field(name.as_str(), TextField::DelimitedOnLine)
+                )?,
+            }
+            if let Some(runner_id) = runner.runner_id() {
+                write!(self.stdout, " runner={runner_id}")?;
+            }
+            write!(
+                self.stdout,
+                " runner_placement_revision={} runner_sandbox={}",
+                runner.placement_revision().value(),
+                runner_sandbox_profile(runner.sandbox_profile())
+            )?;
+            if let Some(profile) = runner.credential_profile() {
+                write!(
+                    self.stdout,
+                    " runner_credential_profile={}",
+                    self.render_field(profile.as_str(), TextField::DelimitedOnLine)
+                )?;
+            }
+            if let Some(repository) = runner.repository() {
+                write!(
+                    self.stdout,
+                    " runner_repository={}",
+                    self.render_field(repository.as_str(), TextField::DelimitedOnLine)
+                )?;
+            }
+            if let Some(directory) = runner.working_directory() {
+                write!(
+                    self.stdout,
+                    " runner_working_directory={}",
+                    self.render_field(directory.as_str(), TextField::DelimitedOnLine)
+                )?;
+            }
+            if let Some(health) = runner.connection_health() {
+                write!(
+                    self.stdout,
+                    " runner_connection_health={}",
+                    runner_connection_health(health)
+                )?;
+            }
+            write!(
+                self.stdout,
+                " runner_state={}",
+                runner_projection_state(runner.state())
+            )?;
+        }
+        writeln!(self.stdout)
     }
 
     pub(crate) fn session_placement_updated(
@@ -1358,6 +1416,7 @@ impl<'a> Output<'a> {
         let mut rendered_snapshot = tempfile::tempfile()?;
         {
             let mut staged = Output::new(&mut rendered_snapshot, &mut *self.stderr, self.raw);
+            staged.snapshot_runner(snapshot.runner())?;
             staged.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
             staged.render_usage(snapshot)?;
         }
@@ -1371,7 +1430,67 @@ impl<'a> Output<'a> {
         snapshot: &mut TranscriptSnapshot,
         displayed: &mut SnapshotIdentitySet,
     ) -> Result<(), ClientError> {
+        self.snapshot_runner(snapshot.runner())?;
         self.render_snapshot(snapshot, Some(displayed), SnapshotSelection::All, true)
+    }
+
+    fn snapshot_runner(&mut self, runner: Option<&RunnerProjection>) -> io::Result<()> {
+        let Some(runner) = runner else {
+            return Ok(());
+        };
+        write!(self.stdout, "runner_snapshot selector=")?;
+        match runner.selector() {
+            RunnerProjectionSelector::Runner { runner_id } => {
+                write!(self.stdout, "runner selector_runner={runner_id}")?;
+            }
+            RunnerProjectionSelector::CapabilityClass { name } => write!(
+                self.stdout,
+                "capability_class selector_capability={}",
+                self.render_field(name.as_str(), TextField::DelimitedOnLine)
+            )?,
+        }
+        if let Some(runner_id) = runner.runner_id() {
+            write!(self.stdout, " runner={runner_id}")?;
+        }
+        write!(
+            self.stdout,
+            " placement_revision={} sandbox={}",
+            runner.placement_revision().value(),
+            runner_sandbox_profile(runner.sandbox_profile())
+        )?;
+        if let Some(profile) = runner.credential_profile() {
+            write!(
+                self.stdout,
+                " credential_profile={}",
+                self.render_field(profile.as_str(), TextField::DelimitedOnLine)
+            )?;
+        }
+        if let Some(repository) = runner.repository() {
+            write!(
+                self.stdout,
+                " repository={}",
+                self.render_field(repository.as_str(), TextField::DelimitedOnLine)
+            )?;
+        }
+        if let Some(directory) = runner.working_directory() {
+            write!(
+                self.stdout,
+                " working_directory={}",
+                self.render_field(directory.as_str(), TextField::DelimitedOnLine)
+            )?;
+        }
+        if let Some(health) = runner.connection_health() {
+            write!(
+                self.stdout,
+                " connection_health={}",
+                runner_connection_health(health)
+            )?;
+        }
+        writeln!(
+            self.stdout,
+            " state={}",
+            runner_projection_state(runner.state())
+        )
     }
 
     pub(crate) fn terminal_material(
@@ -1640,6 +1759,32 @@ impl<'a> Output<'a> {
                     "event={cursor} session={session_id} tool_batch_transition \
                      turn={turn_id} call={model_call_id} state=recovery_required \
                      tool_attempt={tool_attempt_id}"
+                ),
+            },
+            SessionEvent::RunnerStateTransition {
+                runner_id,
+                placement_revision,
+                sandbox_profile,
+                working_directory,
+                state,
+            } => match working_directory {
+                Some(working_directory) => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} runner_state_transition \
+                     runner={runner_id} placement_revision={} sandbox={} \
+                     working_directory={} state={}",
+                    placement_revision.value(),
+                    runner_sandbox_profile(*sandbox_profile),
+                    self.render_field(working_directory.as_str(), TextField::DelimitedOnLine,),
+                    runner_state_transition_state(*state),
+                ),
+                None => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} runner_state_transition \
+                     runner={runner_id} placement_revision={} sandbox={} state={}",
+                    placement_revision.value(),
+                    runner_sandbox_profile(*sandbox_profile),
+                    runner_state_transition_state(*state),
                 ),
             },
             SessionEvent::ToolApprovalDecided {
@@ -1993,6 +2138,24 @@ impl<'a> Output<'a> {
                 "turn={turn_id} position={position} state=active_awaiting_tool_recovery \
                  attempt={ended_attempt_id} tool_attempt={recovery_tool_attempt_id}"
             ),
+            TurnState::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision,
+                tool_attempt_id,
+            } => match tool_attempt_id {
+                Some(tool_attempt_id) => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=active_awaiting_runner_recovery \
+                     runner={runner_id} placement_revision={} tool_attempt={tool_attempt_id}",
+                    placement_revision.value()
+                ),
+                None => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=active_awaiting_runner_recovery \
+                     runner={runner_id} placement_revision={} tool_attempt=none",
+                    placement_revision.value()
+                ),
+            },
             TurnState::Failed {
                 terminal_frontier_id,
                 terminal_attempt_id,
@@ -2676,6 +2839,45 @@ fn model_call_state(state: ModelCallState) -> &'static str {
     }
 }
 
+const fn runner_sandbox_profile(profile: RunnerSandboxProfile) -> &'static str {
+    match profile {
+        RunnerSandboxProfile::Ambient => "ambient",
+        RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
+    }
+}
+
+const fn runner_connection_health(health: RunnerConnectionHealth) -> &'static str {
+    match health {
+        RunnerConnectionHealth::Connected => "connected",
+        RunnerConnectionHealth::Suspect => "suspect",
+        RunnerConnectionHealth::Shutdown => "shutdown",
+        RunnerConnectionHealth::Lost => "lost",
+    }
+}
+
+const fn runner_projection_state(state: RunnerProjectionState) -> &'static str {
+    match state {
+        RunnerProjectionState::Unpinned => "unpinned",
+        RunnerProjectionState::Pinned => "pinned",
+        RunnerProjectionState::RunnerLostBeforePin => "runner_lost_before_pin",
+        RunnerProjectionState::RunnerLost => "runner_lost",
+        RunnerProjectionState::RunnerAbandoned => "runner_abandoned",
+    }
+}
+
+const fn runner_state_transition_state(state: RunnerStateTransitionState) -> &'static str {
+    match state {
+        RunnerStateTransitionState::Pinned => "pinned",
+        RunnerStateTransitionState::Suspect => "suspect",
+        RunnerStateTransitionState::Connected => "connected",
+        RunnerStateTransitionState::RunnerLostBeforePin => "runner_lost_before_pin",
+        RunnerStateTransitionState::RunnerLost => "runner_lost",
+        RunnerStateTransitionState::Replaced => "replaced",
+        RunnerStateTransitionState::WorkingDirectoryChanged => "working_directory_changed",
+        RunnerStateTransitionState::Abandoned => "abandoned",
+    }
+}
+
 const fn current_model_call_state(state: CurrentModelCallState) -> &'static str {
     match state {
         CurrentModelCallState::Prepared {} => "prepared",
@@ -2967,7 +3169,10 @@ mod tests {
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
+        ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass, RunnerConnectionHealth,
+        RunnerCredentialProfileName, RunnerPlacementRevision, RunnerProjection,
+        RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
+        RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage, SessionEvent,
         ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
         TurnState, UsageProvenance,
     };
@@ -3505,6 +3710,103 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         assert!(rendered.contains("state=queued"));
         assert!(rendered.contains("queued user text"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn session_summary_renders_its_complete_runner_projection() {
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                    .expect("the fixture capability class is valid"),
+            },
+            Some(wire_uuid(2)),
+            RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            Some(
+                RunnerCredentialProfileName::try_new(String::from("readonly"))
+                    .expect("the fixture credential profile is valid"),
+            ),
+            Some(
+                RunnerRepositoryKey::try_new(String::from("signalbox"))
+                    .expect("the fixture repository key is valid"),
+            ),
+            Some(
+                RunnerWorkingDirectory::try_new(String::from("workspace root\nproject"))
+                    .expect("the fixture working directory is valid"),
+            ),
+            Some(RunnerConnectionHealth::Suspect),
+            RunnerProjectionState::Pinned,
+        )
+        .expect("the fixture projection is coherent");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        Output::new(&mut stdout, &mut stderr, false)
+            .session_summary(
+                wire_uuid(1),
+                4,
+                "model=alias alias=fast",
+                2,
+                "placement=pathless",
+                Some(&projection),
+            )
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            00000000-0000-0000-0000-000000000001 defaults_version=4 model=alias alias=fast placement_version=2 placement=pathless runner_selector=capability_class runner_selector_capability=linux.workspace runner=00000000-0000-0000-0000-000000000002 runner_placement_revision=3 runner_sandbox=workspace_restricted runner_credential_profile=readonly runner_repository=signalbox runner_working_directory=workspace\u{20}root\u{a}project runner_connection_health=suspect runner_state=pinned
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn followed_snapshot_renders_its_complete_authoritative_runner_projection() {
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                    .expect("the fixture capability class is valid"),
+            },
+            Some(wire_uuid(2)),
+            RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            Some(
+                RunnerCredentialProfileName::try_new(String::from("readonly"))
+                    .expect("the fixture credential profile is valid"),
+            ),
+            Some(
+                RunnerRepositoryKey::try_new(String::from("signalbox"))
+                    .expect("the fixture repository key is valid"),
+            ),
+            Some(
+                RunnerWorkingDirectory::try_new(String::from("workspace root\nproject"))
+                    .expect("the fixture working directory is valid"),
+            ),
+            Some(RunnerConnectionHealth::Suspect),
+            RunnerProjectionState::Pinned,
+        )
+        .expect("the fixture projection is coherent");
+        let mut snapshot = TranscriptSnapshot::from_messages_with_runner(
+            9,
+            Some(projection),
+            std::iter::empty::<ServerMessage>(),
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .followed_snapshot(&mut snapshot, &mut displayed)
+            .expect("runner snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            runner_snapshot selector=capability_class selector_capability=linux.workspace runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted credential_profile=readonly repository=signalbox working_directory=workspace\u{20}root\u{a}project connection_health=suspect state=pinned
+        "#]]
+        .assert_eq(&rendered);
         assert!(stderr.is_empty());
     }
 
@@ -4370,6 +4672,55 @@ mod tests {
             event=1 session=00000000-0000-0000-0000-000000000001 model_call_transition turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 state=cancellation_requested
         "#]]
         .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_runner_working_directory_change() {
+        let rendered = render_event(SessionEvent::RunnerStateTransition {
+            runner_id: wire_uuid(2),
+            placement_revision: RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: Some(
+                RunnerWorkingDirectory::try_new(String::from("workspace root\nproject"))
+                    .expect("the fixture working directory is valid"),
+            ),
+            state: RunnerStateTransitionState::WorkingDirectoryChanged,
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory=workspace\u{20}root\u{a}project state=working_directory_changed
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_distinguishes_default_from_literal_none_working_directory() {
+        let default_directory = render_event(SessionEvent::RunnerStateTransition {
+            runner_id: wire_uuid(2),
+            placement_revision: RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: None,
+            state: RunnerStateTransitionState::Pinned,
+        });
+        let literal_none = render_event(SessionEvent::RunnerStateTransition {
+            runner_id: wire_uuid(2),
+            placement_revision: RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: Some(
+                RunnerWorkingDirectory::try_new(String::from("none"))
+                    .expect("the fixture working directory is valid"),
+            ),
+            state: RunnerStateTransitionState::Pinned,
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted state=pinned
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory=none state=pinned
+        "#]]
+        .assert_eq(&format!("{default_directory}{literal_none}"));
     }
 
     #[test]

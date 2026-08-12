@@ -45,9 +45,11 @@ use crate::{
     },
     commit_failure_is_ambiguous,
     mapping::{
-        ToolApprovalDecisionSourceStorageKind, dangerous_tool_auto_approval_from_str,
-        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
-        session_id_to_uuid, tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
+        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+        tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
@@ -442,7 +444,10 @@ impl PostgresToolLoopRepository {
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
                 | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement,
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
@@ -1456,6 +1461,127 @@ pub(crate) async fn load_active_batch_from_connection(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
+/// Loads the exact frontier from which a runner-recovery interrupt must
+/// continue. A recovery wait retaining a tool round uses that round's yielded
+/// boundary; a wait without one uses the turn's starting frontier.
+pub(crate) async fn load_runner_recovery_source_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Option<ResolvedContextFrontierSnapshot>, ToolLoopRepositoryError> {
+    let row = sqlx::query(
+        "SELECT lifecycle.active_tool_round_call_id,
+                lifecycle.starting_frontier_id,
+                round.boundary_kind,
+                round.boundary_frontier_id
+           FROM turn_lifecycle AS lifecycle
+           LEFT JOIN tool_round AS round
+             ON round.producing_model_call_id =
+                    lifecycle.active_tool_round_call_id
+            AND round.turn_id = lifecycle.turn_id
+            AND round.session_id = lifecycle.session_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+            AND goal_turn_is_runtime_relevant(lifecycle.session_id,
+                                              lifecycle.turn_id)",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let active_tool_round: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
+    let frontier = if active_tool_round.is_some() {
+        let boundary_kind: String = required(&row, "boundary_kind")?;
+        if boundary_kind != "continuing" {
+            return Err(
+                ToolLoopCorruption::Inconsistent("runner recovery tool round boundary").into(),
+            );
+        }
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "boundary_frontier_id")?)
+    } else {
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?)
+    };
+    load_snapshot(connection, session, frontier).await.map(Some)
+}
+
+pub(crate) async fn load_runner_recovery_batch_without_attempt(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    yielded_attempt: signalbox_domain::TurnAttemptId,
+) -> Result<Option<ToolBatch>, ToolLoopRepositoryError> {
+    load_runner_recovery_cancellation_batch(connection, session, turn, yielded_attempt, None).await
+}
+
+pub(crate) async fn load_runner_recovery_cancellation_batch(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    yielded_attempt: signalbox_domain::TurnAttemptId,
+    interrupted_attempt: Option<ToolAttemptId>,
+) -> Result<Option<ToolBatch>, ToolLoopRepositoryError> {
+    let producing_call = sqlx::query_scalar::<_, Uuid>(
+        "SELECT active_tool_round_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'active'
+            AND active_phase_kind = 'awaiting_runner_recovery'
+            AND runner_recovery_tool_attempt_id IS NOT DISTINCT FROM $3
+            AND active_tool_round_call_id IS NOT NULL",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(interrupted_attempt.map(tool_attempt_id_to_uuid))
+    .fetch_optional(&mut *connection)
+    .await?
+    .map(signalbox_domain::ModelCallId::from_uuid);
+    let Some(producing_call) = producing_call else {
+        return Ok(None);
+    };
+    let round = sqlx::query(
+        "SELECT boundary_kind, boundary_frontier_id
+           FROM tool_round
+          WHERE producing_model_call_id = $1
+            AND session_id = $2
+            AND turn_id = $3",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ToolLoopCorruption::Missing("runner recovery tool round"))?;
+    if required::<String>(&round, "boundary_kind")? != "continuing" {
+        return Err(ToolLoopCorruption::Inconsistent("runner recovery tool round boundary").into());
+    }
+    let frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
+    let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    retired_attempts.retain(|attempt| Some(*attempt) != interrupted_attempt);
+    ToolBatchReconstitutionInput::new(
+        session,
+        turn,
+        producing_call,
+        load_snapshot(connection, session, frontier).await?,
+        load_requests(connection, producing_call, session, turn).await?,
+        load_approvals(connection, producing_call).await?,
+        load_runner_recovery_attempts(connection, producing_call, interrupted_attempt).await?,
+        ToolBatchPhaseReconstitutionInput::Executing {
+            turn_attempt: yielded_attempt,
+        },
+    )
+    .with_retired_attempts(retired_attempts)
+    .reconstitute()
+    .map(Some)
+    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+}
+
 pub(crate) async fn load_recovery_batch_by_attempt(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1496,7 +1622,8 @@ pub(crate) async fn load_recovery_batch_by_attempt(
     }
     let frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
-    let retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    retired_attempts.retain(|attempt| *attempt != recovery_attempt);
     ToolBatchReconstitutionInput::new(
         session,
         turn,
@@ -1504,7 +1631,7 @@ pub(crate) async fn load_recovery_batch_by_attempt(
         load_snapshot(connection, session, frontier).await?,
         load_requests(connection, producing_call, session, turn).await?,
         load_approvals(connection, producing_call).await?,
-        load_attempts(connection, producing_call).await?,
+        load_runner_recovery_attempts(connection, producing_call, Some(recovery_attempt)).await?,
         ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
             attempt: recovery_attempt,
         },
@@ -1774,7 +1901,7 @@ async fn load_window_result_denials(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id,
+                approval.user_command_id,
                 approval.delegate_model_selection_id,
                 approval.delegate_model_call_id, approval.rationale
            FROM resolve_context_frontier_members($1, $2) AS member
@@ -1924,7 +2051,7 @@ async fn load_approvals(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id,
+                approval.user_command_id,
                 approval.delegate_model_selection_id,
                 approval.delegate_model_call_id, approval.rationale
            FROM tool_approval_decision AS approval
@@ -1945,7 +2072,7 @@ pub(crate) async fn decode_approvals(
 ) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
     let user_commands = rows
         .iter()
-        .map(|row| row.try_get::<Option<Uuid>, _>("owner_command_id"))
+        .map(|row| row.try_get::<Option<Uuid>, _>("user_command_id"))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -2004,7 +2131,7 @@ async fn decode_approval(
             .into());
         }
     };
-    let user_command: Option<Uuid> = row.try_get("owner_command_id")?;
+    let user_command: Option<Uuid> = row.try_get("user_command_id")?;
     let source = required::<String>(&row, "decision_source")?;
     let source_kind = tool_approval_decision_source_from_str(&source).ok_or_else(|| {
         ToolLoopRepositoryError::from(ToolLoopCorruption::Unsupported {
@@ -2212,6 +2339,38 @@ async fn load_attempts(
     rows.into_iter().map(decode_attempt).collect()
 }
 
+/// Restores a runner-recovery round after its exact interrupted attempt has
+/// been terminalized. The current-attempt view intentionally hides terminal
+/// pure and idempotent attempts whose lease remains lost; this recovery-only
+/// loader adds back only the attempt authenticated by the lifecycle wait.
+async fn load_runner_recovery_attempts(
+    connection: &mut PgConnection,
+    producing_call: signalbox_domain::ModelCallId,
+    interrupted_attempt: Option<ToolAttemptId>,
+) -> Result<Vec<ReconstitutedToolAttempt>, ToolLoopRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT attempt.*
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+          WHERE request.producing_model_call_id = $1
+            AND (
+                EXISTS (
+                    SELECT 1
+                      FROM runner_current_tool_attempt AS current
+                     WHERE current.attempt_id = attempt.attempt_id
+                )
+                OR attempt.attempt_id = $2
+            )
+          ORDER BY request.request_ordinal",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(interrupted_attempt.map(tool_attempt_id_to_uuid))
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter().map(decode_attempt).collect()
+}
+
 /// Loads the round's physical-attempt identities that
 /// `runner_current_tool_attempt` hides as retired claimed-retry predecessors,
 /// so batch reconstitution restores the durable retired-identity inventory and
@@ -2333,7 +2492,7 @@ pub(crate) async fn load_approvals_by_request(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, decision_kind, decision_source, denial_reason,
-                owner_command_id, delegate_model_selection_id, delegate_model_call_id, rationale
+                user_command_id, delegate_model_selection_id, delegate_model_call_id, rationale
            FROM tool_approval_decision
           WHERE request_id = ANY($1)",
     )
@@ -2380,21 +2539,24 @@ pub(crate) async fn load_attempts_by_id(
 }
 
 fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryError> {
-    match required::<String>(row, "terminal_disposition_kind")?.as_str() {
-        "completed" => match required::<String>(row, "result_content_kind")?.as_str() {
-            "text" => Ok(ToolAttemptEnd::Completed {
-                result: ToolResultContent::Text(
-                    ToolResultText::try_new(required(row, "result_text")?)
-                        .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
-                ),
-            }),
-            value => Err(ToolLoopCorruption::Unsupported {
-                field: "result_content_kind",
-                value: value.to_owned(),
+    let stored_disposition = required::<String>(row, "terminal_disposition_kind")?;
+    match tool_attempt_disposition_from_str(&stored_disposition) {
+        Some(ToolAttemptDispositionStorageKind::Completed) => {
+            match required::<String>(row, "result_content_kind")?.as_str() {
+                "text" => Ok(ToolAttemptEnd::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(required(row, "result_text")?)
+                            .map_err(|_| ToolLoopCorruption::Inconsistent("tool result text"))?,
+                    ),
+                }),
+                value => Err(ToolLoopCorruption::Unsupported {
+                    field: "result_content_kind",
+                    value: value.to_owned(),
+                }
+                .into()),
             }
-            .into()),
-        },
-        "known_failed" => {
+        }
+        Some(ToolAttemptDispositionStorageKind::KnownFailed) => {
             let kind = decode_error_kind(&required::<String>(row, "error_kind")?)?;
             let detail = row
                 .try_get::<Option<String>, _>("error_detail")?
@@ -2407,14 +2569,19 @@ fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryE
                 error: ToolExecutionError::new(kind, detail),
             })
         }
-        "awaiting_child" => Ok(ToolAttemptEnd::AwaitingChild {
-            spawning_request: tool_request_id_from_uuid(required(row, "wait_spawning_request_id")?),
-            child: session_id_from_uuid(required(row, "wait_child_session_id")?),
-        }),
-        "ambiguous" => Ok(ToolAttemptEnd::Ambiguous),
-        value => Err(ToolLoopCorruption::Unsupported {
+        Some(ToolAttemptDispositionStorageKind::AwaitingChild) => {
+            Ok(ToolAttemptEnd::AwaitingChild {
+                spawning_request: tool_request_id_from_uuid(required(
+                    row,
+                    "wait_spawning_request_id",
+                )?),
+                child: session_id_from_uuid(required(row, "wait_child_session_id")?),
+            })
+        }
+        Some(ToolAttemptDispositionStorageKind::Ambiguous) => Ok(ToolAttemptEnd::Ambiguous),
+        None => Err(ToolLoopCorruption::Unsupported {
             field: "terminal_disposition_kind",
-            value: value.to_owned(),
+            value: stored_disposition,
         }
         .into()),
     }
@@ -2601,7 +2768,7 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
         ToolAttemptEnd::Completed {
             result: ToolResultContent::Text(text),
         } => (
-            "completed",
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
             Some("text"),
             Some(text.as_str()),
             None,
@@ -2610,7 +2777,7 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
             None,
         ),
         ToolAttemptEnd::KnownFailed { error } => (
-            "known_failed",
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::KnownFailed),
             None,
             None,
             Some(encode_error_kind(error.kind())),
@@ -2622,7 +2789,7 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
             spawning_request,
             child,
         } => (
-            "awaiting_child",
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::AwaitingChild),
             None,
             None,
             None,
@@ -2630,7 +2797,15 @@ fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
             Some(tool_request_id_to_uuid(*spawning_request)),
             Some(session_id_to_uuid(*child)),
         ),
-        ToolAttemptEnd::Ambiguous => ("ambiguous", None, None, None, None, None, None),
+        ToolAttemptEnd::Ambiguous => (
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Ambiguous),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
     }
 }
 
@@ -2727,8 +2902,8 @@ async fn persist_batch_decision(
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
-             owner_command_id)
-         VALUES ($1, $2, 'owner_command', $3, $4)",
+             user_command_id)
+         VALUES ($1, $2, 'user_command', $3, $4)",
     )
     .bind(tool_request_id_to_uuid(applied.resolution().request()))
     .bind(decision_kind)
@@ -2818,7 +2993,8 @@ async fn persist_batch_decision(
             require_single(rows, "approved tool execution phase")?;
         }
         ActiveTurnPhase::AwaitingChild { .. }
-        | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+        | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
             return Err(ToolLoopRepositoryError::InvalidTransition(
                 "approval command cannot enter recovery",
             ));

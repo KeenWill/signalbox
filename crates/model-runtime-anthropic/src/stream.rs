@@ -21,7 +21,7 @@ use signalbox_model_runtime::{
     LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
     ProviderJsonNestingValidator, ProviderMessageId, ProviderReportedModel, RefusalEvidence,
     SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-    ToolName, validate_provider_json_nesting,
+    ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
 use crate::response::{convert_usage, map_finish};
@@ -38,6 +38,19 @@ pub(crate) enum StreamStep {
     Continue,
     /// The stream reached typed terminal evidence; stop reading.
     Terminal(Box<TerminalEvidence>),
+}
+
+/// Whether records this chunk framed sit behind the one being applied now.
+///
+/// This is the axis that separates a withheld answer from a stated negative: a
+/// terminal raised on the last record of a chunk discards nothing, while one
+/// raised earlier drops records the decoder never scanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaterRecords {
+    /// Records the caller framed but has not applied yet follow this one.
+    Unapplied,
+    /// This is the last record the chunk framed, so nothing follows it.
+    AllApplied,
 }
 
 enum BlockBuilder {
@@ -59,6 +72,12 @@ enum BlockBuilder {
 }
 
 /// Incremental decoder for one message stream.
+/// The one SSE event whose payload can open a tool call.
+///
+/// Named once because two rules depend on it: dispatch, and whether a payload
+/// that never parsed leaves the tool question unexamined.
+const CONTENT_BLOCK_START_EVENT: &str = "content_block_start";
+
 pub(crate) struct StreamDecoder {
     exchange: ExchangeFacts,
     started: bool,
@@ -70,6 +89,8 @@ pub(crate) struct StreamDecoder {
     finish: Option<FinishReason>,
     declared_stop_sequences: Vec<String>,
     tool_call_ids: BTreeSet<String>,
+    discarded_unexamined_bytes: bool,
+    later_records: LaterRecords,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
@@ -90,6 +111,8 @@ impl StreamDecoder {
             finish: None,
             declared_stop_sequences,
             tool_call_ids: BTreeSet::new(),
+            discarded_unexamined_bytes: false,
+            later_records: LaterRecords::AllApplied,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -103,16 +126,19 @@ impl StreamDecoder {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> StreamStep {
         let Some(event) = record.event.as_deref() else {
-            return self.violation("SSE record without an event name");
+            return self.undecoded_violation("SSE record without an event name");
         };
         if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
-            return self.violation(format!("SSE event payload exceeds the JSON bound: {error}"));
+            return self.unparsed_payload_violation(
+                event,
+                format!("SSE event payload exceeds the JSON bound: {error}"),
+            );
         }
         match event {
             "ping" => StreamStep::Continue,
             "error" => self.apply_error(record),
             "message_start" => self.apply_message_start(record, correlation, sink),
-            "content_block_start" => self.apply_block_start(record, correlation, sink),
+            CONTENT_BLOCK_START_EVENT => self.apply_block_start(record, correlation, sink),
             "content_block_delta" => self.apply_block_delta(record, correlation, sink),
             "content_block_stop" => self.apply_block_stop(record, correlation, sink),
             "message_delta" => self.apply_message_delta(record, correlation, sink),
@@ -123,13 +149,97 @@ impl StreamDecoder {
         }
     }
 
+    /// Whether a tool call had opened in the events decoded so far.
+    ///
+    /// `tool_call_ids` records every `tool_use` block the stream opened and is
+    /// never drained, so it answers this at any point in the decode. Across
+    /// events the decoder read and classified, the negative case is the stated
+    /// fact rather than an absence; material that never decoded is answered by
+    /// [`Self::tool_calls_at_decode_failure`] instead.
+    fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
+        if !self.tool_call_ids.is_empty() {
+            ToolCallsAtLoss::Opened
+        } else if self.discarded_unexamined_bytes {
+            ToolCallsAtLoss::Unobserved
+        } else {
+            match self.later_records {
+                LaterRecords::Unapplied => ToolCallsAtLoss::Unobserved,
+                LaterRecords::AllApplied => ToolCallsAtLoss::NoneOpened,
+            }
+        }
+    }
+
+    /// Records that the transport accepted bytes no record ever carried into
+    /// this decoder — a partial record held by the framer when the stream was
+    /// cancelled or failed. Those bytes are discarded unexamined, so from this
+    /// point the decoder can no longer state that no tool call opened.
+    pub(crate) fn note_discarded_unexamined_bytes(&mut self) {
+        self.discarded_unexamined_bytes = true;
+    }
+
+    /// Records whether this chunk framed records the caller has not applied yet.
+    ///
+    /// Not sticky: it holds only while such records exist. A terminal built
+    /// during the apply below discards them, and the evidence is constructed
+    /// inside `apply`, so the decoder has to know before it is called rather
+    /// than be corrected afterwards.
+    pub(crate) fn note_later_records(&mut self, later_records: LaterRecords) {
+        self.later_records = later_records;
+    }
+
+    /// The tool fact for a violation raised by material that never decoded.
+    ///
+    /// An SSE record with no event name, a payload rejected by the JSON bound
+    /// or by typed-event parsing, a stream whose framing ended inside an
+    /// incomplete record, and every `content_block_start` exit taken before its
+    /// inner `content_block` parses all leave unexamined the one place a
+    /// `tool_use` block can open, so "none opened" would claim a negative about
+    /// bytes the decoder never read. A block already recorded still stands.
+    ///
+    /// The scope is deliberately that narrow. The SSE event name is examined —
+    /// it is what dispatched the handler — and no other event type opens a tool
+    /// call: a `content_block_delta` carries arguments for a block already
+    /// opened, and `message_start` is rejected outright if it carries content
+    /// blocks. Their unparsed payloads therefore cannot hide a tool call
+    /// opening, and those handlers state the negative rather than withhold it.
+    fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
+        if self.tool_call_ids.is_empty() {
+            ToolCallsAtLoss::Unobserved
+        } else {
+            ToolCallsAtLoss::Opened
+        }
+    }
+
+    /// Protocol-violation evidence for material that never decoded.
+    pub(crate) fn undecoded_violation_evidence(
+        &self,
+        detail: impl Into<String>,
+    ) -> TerminalEvidence {
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::StreamProtocolViolation {
+                detail: detail.into(),
+            },
+            exchange: self.exchange.clone(),
+            reported_model: self.reported_model.clone(),
+            finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_decode_failure(),
+            usage: self.usage,
+        })
+    }
+
+    fn undecoded_violation(&self, detail: impl Into<String>) -> StreamStep {
+        StreamStep::Terminal(Box::new(self.undecoded_violation_evidence(detail)))
+    }
+
     /// Evidence for a stream that ended without `message_stop`.
     pub(crate) fn lost(self, interruption: StreamInterruption) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::StreamEndedWithoutTerminalMarker { interruption },
             exchange: self.exchange,
             reported_model: self.reported_model,
             finish_reported: self.finish,
+            tool_calls,
             usage: self.usage,
         })
     }
@@ -141,6 +251,7 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
@@ -154,12 +265,28 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
 
     fn violation(&self, detail: impl Into<String>) -> StreamStep {
         StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
+    }
+
+    /// A violation raised without examining the payload of the named event.
+    ///
+    /// The event name is already decoded — it is what dispatches the handler —
+    /// and only `content_block_start` carries material that can open a tool
+    /// call. For every other name the discriminator settles the question, so
+    /// the negative is stated rather than withheld even though the payload
+    /// itself never parsed.
+    fn unparsed_payload_violation(&self, event: &str, detail: impl Into<String>) -> StreamStep {
+        if event == CONTENT_BLOCK_START_EVENT {
+            self.undecoded_violation(detail)
+        } else {
+            self.violation(detail)
+        }
     }
 
     /// Whether an error classification names no failure at all, and so adds
@@ -191,7 +318,10 @@ impl StreamDecoder {
         event: &str,
     ) -> Result<T, Box<StreamStep>> {
         serde_json::from_str(&record.data).map_err(|error| {
-            Box::new(self.violation(format!("malformed {event} event payload: {error}")))
+            Box::new(self.unparsed_payload_violation(
+                event,
+                format!("malformed {event} event payload: {error}"),
+            ))
         })
     }
 
@@ -308,25 +438,29 @@ impl StreamDecoder {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> StreamStep {
         if !self.started {
-            return self.violation("content_block_start before message_start");
+            return self.undecoded_violation("content_block_start before message_start");
         }
         if self.finish.is_some() {
-            return self.violation("content_block_start after the stop_reason");
+            return self.undecoded_violation("content_block_start after the stop_reason");
         }
         let event: ContentBlockStartEvent = match self.parse(record, "content_block_start") {
             Ok(event) => event,
             Err(step) => return *step,
         };
         if event.event_type != "content_block_start" {
-            return self.violation("content_block_start payload has the wrong discriminator");
+            return self
+                .undecoded_violation("content_block_start payload has the wrong discriminator");
         }
         if self.open_blocks.contains_key(&event.index) || self.closed.contains_key(&event.index) {
-            return self.violation(format!("content_block_start reopens index {}", event.index));
+            return self
+                .undecoded_violation(format!("content_block_start reopens index {}", event.index));
         }
         let content_block = match parse_response_block(&event.content_block) {
             Ok(block) => block,
             Err(error) => {
-                return self.violation(format!("malformed content_block_start payload: {error}"));
+                return self.undecoded_violation(format!(
+                    "malformed content_block_start payload: {error}"
+                ));
             }
         };
         let builder = match content_block {
@@ -719,7 +853,7 @@ mod tests {
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
         ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderMessageId,
         ProviderReportedModel, ProviderRequestId, SseFraming, SseRecord, StreamInterruption,
-        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
@@ -1093,7 +1227,200 @@ mod tests {
             Some(ProviderReportedModel::new("model-exact-1"))
         );
         assert_eq!(loss.finish_reported, None);
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
         assert_eq!(loss.usage.input_tokens, Some(25));
+    }
+
+    /// a stream cut off mid-tool-call carries that fact typed.
+    ///
+    /// `tool_call_ids` records the opened block and is never drained, so the
+    /// fact survives to the loss whether or not the call ever produced an
+    /// argument delta or a proposal.
+    #[test]
+    fn a_stream_lost_after_a_tool_call_opened_reports_it_on_the_loss() {
+        let (evidence, _) = drive_to_eof(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{}}}\n\n",
+        ]);
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("EOF before message_stop must never read as success");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// An event that never decoded withholds the fact rather than stating a
+    /// negative: a `tool_use` block opens inside a `content_block_start`
+    /// payload, so an unparsed event could itself have been one.
+    #[test]
+    fn an_event_that_never_decodes_withholds_the_tool_fact() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an undecodable event is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// The nested `content_block_start` payload is the block's own material, so
+    /// a malformed one leaves exactly the tool question unexamined.
+    #[test]
+    fn a_malformed_content_block_start_payload_withholds_the_tool_fact() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a malformed content_block_start is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// An undecodable event does not erase a block already recorded, so the
+    /// withholding above is not a blanket refusal to answer.
+    #[test]
+    fn an_undecodable_event_after_a_tool_call_still_reports_it() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{}}}\n\n",
+            b"event: content_block_delta\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an undecodable event is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// A semantic rejection of a *decoded* event still states the negative, so
+    /// the withholding is scoped to material that never parsed.
+    #[test]
+    fn a_decoded_event_rejected_on_semantics_still_reports_none_opened() {
+        let (evidence, _) = drive(&[message_start(), message_start()]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a duplicate message_start is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// A well-formed `content_block_start` opening a text block at index 0.
+    ///
+    /// Plumbing: three exits below reject this same record for reasons that have
+    /// nothing to do with its payload, which is exactly the point — the payload
+    /// never parses, whatever the reason.
+    fn text_block_start() -> &'static [u8] {
+        b"event: content_block_start\n\
+          data: {\"type\":\"content_block_start\",\"index\":0,\
+          \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+    }
+
+    #[track_caller]
+    fn assert_block_start_withholds(chunks: &[&[u8]]) {
+        let (evidence, _) = drive(chunks);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a rejected content_block_start is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// Rejected before `message_start`: the exit precedes even the outer parse,
+    /// so the block payload is unexamined.
+    #[test]
+    fn a_content_block_start_before_message_start_withholds() {
+        assert_block_start_withholds(&[text_block_start()]);
+    }
+
+    /// Rejected for its outer discriminator: the event decoded, but its inner
+    /// `content_block` is still a `RawValue`.
+    #[test]
+    fn a_content_block_start_with_a_wrong_discriminator_withholds() {
+        assert_block_start_withholds(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"quasar\",\"index\":0,\
+              \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        ]);
+    }
+
+    /// Rejected for reopening an index: likewise decided before the payload.
+    #[test]
+    fn a_content_block_start_reopening_an_index_withholds() {
+        assert_block_start_withholds(&[message_start(), text_block_start(), text_block_start()]);
+    }
+
+    /// A payload that never parsed still states the negative when its event
+    /// name precludes a tool call: the name is decoded, and only
+    /// `content_block_start` opens one.
+    #[test]
+    fn an_unparsed_non_start_event_payload_states_the_negative() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: message_delta\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an unparsed event payload is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// The same unparsed payload under the one event name that can open a tool
+    /// call withholds, which is what makes the rule a statement about the name.
+    #[test]
+    fn an_unparsed_content_block_start_payload_withholds() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an unparsed event payload is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A record with no event name at all withholds: without a name the rule
+    /// above has nothing to decide on.
+    #[test]
+    fn a_record_without_an_event_name_withholds() {
+        let (evidence, _) = drive(&[message_start(), b"data: {\"type\":\"ping\"}\n\n"]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a record without an event name is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A `content_block_delta` cannot open a tool call — it carries arguments
+    /// for a block already opened — so its rejection states the negative. This
+    /// is what keeps the withholding above scoped to `content_block_start`.
+    #[test]
+    fn a_rejected_content_block_delta_still_reports_none_opened() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":9,\
+              \"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a delta for an unopened index is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
     }
 
     #[test]

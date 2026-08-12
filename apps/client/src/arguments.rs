@@ -710,364 +710,508 @@ enum ReviewSubcommand {
 
 #[derive(Debug, ClapArgs)]
 struct CreateReviewTargetArguments {
+    /// Identity assigned to the new review target.
     #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
     target_id: CanonicalUuid,
+    /// Opaque canonical provider key, for example `github`.
     #[arg(long)]
     provider: String,
+    /// Opaque canonical repository key.
     #[arg(long)]
     repository: String,
+    /// Positive provider-local change-request number.
     #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
     change_request: CanonicalU64,
+    /// Frozen head revision under review.
     #[arg(long)]
     head_revision: String,
+    /// Frozen revision the change request diffs against.
     #[arg(long)]
     base_revision: String,
+    /// Immediate stack parent target, if this one continues a review stack.
     #[arg(long, value_name = "TARGET", value_parser = canonical_uuid)]
     stack_parent_target_id: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct StartReviewRunArguments {
+    /// Review target the new run belongs to.
     #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
     target_id: CanonicalUuid,
+    /// Identity assigned to the new review run.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
+    /// Identity assigned to the run's sole session-backed pass.
     #[arg(value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: CanonicalUuid,
+    /// Review workflow the pass executes.
     #[arg(long, value_enum)]
     workflow: ReviewWorkflowArgument,
+    /// Session backing the pass.
     #[arg(long, value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
+    /// Accepted input that started the pass's session turn.
     #[arg(long, value_name = "INPUT", value_parser = canonical_uuid)]
     accepted_input_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct ActivateReviewPassArguments {
+    /// Run owning the pass being activated.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
+    /// Queued pass being bound to its active turn.
     #[arg(value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: CanonicalUuid,
+    /// Canonical active turn the pass binds to.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewFindingArguments {
+    /// Run owning the read-only pass.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
+    /// Read-only pass concluding with this finding.
     #[arg(value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: CanonicalUuid,
+    /// Active turn producing the finding.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: CanonicalUuid,
+    /// Output frontier the finding is recorded against.
     #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
     output_frontier_id: CanonicalUuid,
+    /// Identity assigned to the new finding.
     #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
     finding_id: CanonicalUuid,
+    /// Exact opaque file-path key.
     #[arg(long)]
     file_path: String,
+    /// Optional positive first line of the finding location; required with `--line-end`.
     #[arg(long, requires = "line_end", value_parser = review_line_number)]
     line_start: Option<CanonicalU64>,
+    /// Optional positive final line of the finding location; required with `--line-start`.
     #[arg(long, requires = "line_start", value_parser = review_line_number)]
     line_end: Option<CanonicalU64>,
+    /// Optional side of the frozen diff the finding refers to.
     #[arg(long, value_enum)]
     diff_side: Option<ReviewDiffSideArgument>,
+    /// Short exact finding title.
     #[arg(long)]
     title: String,
+    /// Exact explanatory finding body.
     #[arg(long)]
     body: String,
+    /// Severity classification for the finding.
     #[arg(long, value_enum)]
     severity: ReviewSeverityArgument,
+    /// Producer confidence that the issue is real, in basis points.
     #[arg(long, value_parser = review_confidence)]
     is_real_confidence: CanonicalU64,
+    /// Producer confidence that the severity label is correct, in basis points.
     #[arg(long, value_parser = review_confidence)]
     severity_label_confidence: CanonicalU64,
+    /// Opaque canonical category key.
     #[arg(long)]
     category: String,
+    /// Optional exact recommended repair for the finding.
     #[arg(long)]
     recommended_fix: Option<String>,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewFindingsArguments {
+    /// Run owning the read-only pass.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
+    /// Read-only pass concluding with this finding inventory.
     #[arg(value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: CanonicalUuid,
+    /// Active turn producing the findings.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: CanonicalUuid,
+    /// Output frontier the findings are recorded against.
     #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
     output_frontier_id: CanonicalUuid,
+    /// Read the complete JSON finding inventory from one file.
     #[arg(long, value_name = "PATH")]
     findings_file: PathBuf,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct CompleteReviewPassArguments {
+    /// Run owning the pass being completed.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
+    /// Pass reaching a terminal outcome.
     #[arg(value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: CanonicalUuid,
+    /// Terminal outcome the pass concludes with.
     #[arg(long, value_enum)]
     outcome: ReviewTerminalOutcomeArgument,
+    /// Turn that produced the outcome; the evidence supplied must match the outcome.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: Option<CanonicalUuid>,
+    /// Output frontier reached on success; the evidence supplied must match the outcome.
     #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
     output_frontier_id: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewFindingEventArguments {
+    /// Run owning the pass recording the event.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
+    /// Result-bearing pass recording the event.
     #[arg(value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: CanonicalUuid,
+    /// Active turn recording the event.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: CanonicalUuid,
+    /// Output frontier the event is recorded against; omitted only for a blocked-with-reason event.
     #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
     output_frontier_id: Option<CanonicalUuid>,
+    /// Finding the event applies to.
     #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
     finding_id: CanonicalUuid,
+    /// Positive ordinal position of this event in the finding's event sequence.
     #[arg(long, value_name = "DECIMAL", value_parser = review_event_ordinal)]
     event_ordinal: CanonicalU64,
+    /// Finding-machine event kind; the accompanying options must match the selected kind.
     #[arg(long, value_enum)]
     event: ReviewFindingEventArgument,
+    /// Explanation accompanying a rejected or blocked-with-reason event.
     #[arg(long)]
     reason: Option<String>,
+    /// Finding a duplicate or superseded event references.
     #[arg(long, value_name = "FINDING", value_parser = canonical_uuid)]
     referenced_finding_id: Option<CanonicalUuid>,
+    /// External link accompanying a blocked-with-reason event, if published externally.
     #[arg(long, value_name = "LINK", value_parser = canonical_uuid)]
     external_link_id: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct StartReviewOrchestrationArguments {
+    /// Identity assigned to the new orchestration attempt.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
+    /// Review target the orchestration operates on.
     #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
     target_id: CanonicalUuid,
+    /// Caller-chosen version identifying this concern set.
     #[arg(long)]
     concern_set_version: String,
+    /// Named daemon-owned template for the import stage.
     #[arg(long, value_name = "NAME", value_parser = template_name)]
     import_template_name: String,
+    /// Named daemon-owned template for the judgment stage.
     #[arg(long, value_name = "NAME", value_parser = template_name)]
     judgment_template_name: String,
+    /// Named daemon-owned template for the repair stage.
     #[arg(long, value_name = "NAME", value_parser = template_name)]
     repair_template_name: String,
+    /// Named daemon-owned template for the publication stage.
     #[arg(long, value_name = "NAME", value_parser = template_name)]
     publication_template_name: String,
+    /// Read the frozen concern-member list from one JSON file.
     #[arg(long, value_name = "PATH")]
     concerns_file: PathBuf,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewImportOutcomeArguments {
+    /// Orchestration attempt the import stage belongs to.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
+    /// Terminal import-stage outcome; the evidence supplied must match the outcome.
     #[arg(long, value_enum)]
     outcome: ReviewTerminalOutcomeArgument,
+    /// Import pass producing the outcome; omitted only when the outcome is cancelled.
     #[arg(long, value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: Option<CanonicalUuid>,
+    /// External link recorded on success, if any.
     #[arg(long, value_name = "LINK", value_parser = canonical_uuid)]
     external_link_id: Option<CanonicalUuid>,
+    /// Digest of the imported context recorded on success.
     #[arg(long, value_name = "DIGEST", value_parser = canonical_digest)]
     context_digest: Option<CanonicalDigest>,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewConcernOutcomeArguments {
+    /// Orchestration attempt the concern belongs to.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
+    /// Concern key within the attempt's frozen concern set.
     #[arg(value_name = "CONCERN")]
     concern: String,
+    /// Terminal concern-member outcome.
     #[arg(long, value_enum)]
     outcome: ReviewTerminalOutcomeArgument,
+    /// Pass producing the outcome; omitted only when the outcome is cancelled.
     #[arg(long, value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewJudgmentPlanArguments {
+    /// Orchestration attempt the judgment plan belongs to.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
+    /// Judgment pass producing the plan.
     #[arg(value_name = "ANALYSIS_PASS", value_parser = canonical_uuid)]
     analysis_pass_id: CanonicalUuid,
+    /// Read the complete JSON judgment-plan member list from one file.
     #[arg(long, value_name = "PATH")]
     members_file: PathBuf,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewJudgmentEffectArguments {
+    /// Orchestration attempt the judgment effect belongs to.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
+    /// Finding the judgment-plan member applies to.
     #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
     finding_id: CanonicalUuid,
+    /// Terminal result of applying the judgment-plan member.
     #[arg(long, value_enum)]
     outcome: ReviewJudgmentEffectOutcomeArgument,
+    /// Pass that recorded the finding-machine event; present only when applied.
     #[arg(long, value_name = "PASS", value_parser = canonical_uuid)]
     event_pass_id: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewRepairOutcomesArguments {
+    /// Orchestration attempt the repair outcomes belong to.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
+    /// Read the complete JSON repair-outcome list from one file.
     #[arg(long, value_name = "PATH")]
     outcomes_file: PathBuf,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct RecordReviewPublicationOutcomesArguments {
+    /// Orchestration attempt the publication outcomes belong to.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
+    /// Read the complete JSON publication-outcome list from one file.
     #[arg(long, value_name = "PATH")]
     outcomes_file: PathBuf,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct ReserveReviewExternalLinkArguments {
+    /// Finding the reserved link will publish.
     #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
     finding_id: CanonicalUuid,
+    /// Identity assigned to the reserved external link.
     #[arg(value_name = "LINK", value_parser = canonical_uuid)]
     external_link_id: CanonicalUuid,
+    /// Hosting provider receiving the publication.
     #[arg(long)]
     provider: String,
+    /// Provider object kind reserved for the link.
     #[arg(long, value_enum)]
     object_kind: ReviewExternalObjectKindArgument,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct AttachReviewExternalLinkArguments {
+    /// Previously reserved external link being attached.
     #[arg(value_name = "LINK", value_parser = canonical_uuid)]
     external_link_id: CanonicalUuid,
+    /// Run owning the pass that wrote the object.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
+    /// Pass that wrote the provider object.
     #[arg(value_name = "PASS", value_parser = canonical_uuid)]
     pass_id: CanonicalUuid,
+    /// Active turn that wrote the provider object.
     #[arg(long, value_name = "TURN", value_parser = canonical_uuid)]
     turn_id: CanonicalUuid,
+    /// Output frontier the write is recorded against.
     #[arg(long, value_name = "FRONTIER", value_parser = canonical_uuid)]
     output_frontier_id: CanonicalUuid,
+    /// Opaque provider object identity created by the write.
     #[arg(long)]
     external_object: String,
+    /// Positive ordinal of the finding-machine event this link attaches to.
     #[arg(long, value_name = "DECIMAL", value_parser = review_event_ordinal)]
     event_ordinal: CanonicalU64,
+    /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct ReviewAttemptArguments {
+    /// Orchestration attempt to read.
     #[arg(value_name = "ATTEMPT", value_parser = canonical_uuid)]
     attempt_id: CanonicalUuid,
 }
 
 #[derive(Debug, ClapArgs)]
 struct ReviewTargetArguments {
+    /// Review target to read.
     #[arg(value_name = "TARGET", value_parser = canonical_uuid)]
     target_id: CanonicalUuid,
 }
 
 #[derive(Debug, ClapArgs)]
 struct ReviewRunArguments {
+    /// Selected review run.
     #[arg(value_name = "RUN", value_parser = canonical_uuid)]
     run_id: CanonicalUuid,
 }
 
 #[derive(Debug, ClapArgs)]
 struct ReviewFindingArguments {
+    /// Review finding to read.
     #[arg(value_name = "FINDING", value_parser = canonical_uuid)]
     finding_id: CanonicalUuid,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ReviewWorkflowArgument {
+    /// Import provider-side review context.
     ImportExternalContext,
+    /// Produce findings without mutation.
     ReadOnlyReview,
+    /// Judge proposed findings.
     JudgeFindings,
+    /// Deduplicate proposed findings.
     DedupeFindings,
+    /// Publish findings to the provider.
     PublishReview,
+    /// Repair accepted findings.
     FixFindings,
+    /// Propagate one reviewed stack edge.
     PropagateStack,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ReviewTerminalOutcomeArgument {
+    /// The stage completed successfully.
     Succeeded,
+    /// The stage failed.
     Failed,
+    /// The stage needs external resolution.
     Blocked,
+    /// The stage was cancelled.
     Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ReviewFindingEventArgument {
+    /// Record that the finding was accepted.
     Accepted,
+    /// Record that the finding was rejected.
     Rejected,
+    /// Record that the finding duplicates another finding.
     Duplicate,
+    /// Record that a later finding supersedes this one.
     Superseded,
+    /// Record that the finding no longer applies.
     Stale,
+    /// Record that the finding was repaired.
     Fixed,
+    /// Record that publication or repair was blocked.
     BlockedWithReason,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ReviewJudgmentEffectOutcomeArgument {
+    /// The judgment disposition was applied.
     Applied,
+    /// Applying the judgment disposition failed.
     Failed,
+    /// Applying the judgment disposition needs external resolution.
     Blocked,
+    /// Applying the judgment disposition was cancelled.
     Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ReviewExternalObjectKindArgument {
+    /// Provider review object.
     Review,
+    /// Provider review thread.
     ReviewThread,
+    /// Provider inline review comment.
     ReviewComment,
+    /// Provider change-request comment.
     ChangeRequestComment,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ReviewDiffSideArgument {
+    /// Frozen base side.
     Left,
+    /// Frozen head side.
     Right,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ReviewSeverityArgument {
+    /// Informational observation.
     Info,
+    /// Low-severity defect.
     Low,
+    /// Medium-severity defect.
     Medium,
+    /// High-severity defect.
     High,
+    /// Critical defect.
     Critical,
 }
 
@@ -1212,7 +1356,9 @@ struct ImportedArguments {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ImportedRelationshipArgument {
+    /// Continue from the selected imported boundary.
     Resume,
+    /// Branch from the selected imported boundary.
     Fork,
 }
 
@@ -1517,13 +1663,17 @@ struct ImportArguments {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ImportFormatArgument {
+    /// Claude Code session JSONL under Signalbox converter version two.
     ClaudeCode,
+    /// Codex rollout JSONL under Signalbox converter version one.
     Codex,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum DangerousToolAutoApprovalArgument {
+    /// Require explicit approval for every dangerous tool call.
     Disabled,
+    /// Automatically approve every dangerous tool call without prompting.
     ApproveAll,
 }
 

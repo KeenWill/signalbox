@@ -1,3 +1,8 @@
+//! The interactive terminal chat loop: reads stdin on a background thread,
+//! dispatches `:stop`, `:steer`, `:approve`, `:deny`, `:transcript`, `:model`,
+//! and `:quit` commands, and renders the session's live turn and delegation
+//! events as they arrive over `ProcessClient`.
+
 use std::{
     fmt,
     future::Future,
@@ -1213,6 +1218,7 @@ fn update_turns_from_event(
         | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::RunnerStateTransition { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ChildSpawned { .. }
         | SessionEvent::ChildWaiting { .. }

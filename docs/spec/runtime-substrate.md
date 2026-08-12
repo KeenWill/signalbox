@@ -9,18 +9,22 @@ adapter implementation was verified through PR #320
 (`agent/claude-cli-adapter`); its derived version pin, gated compatibility
 smoke, twice-daily schedule, and workflow-self-change trigger were verified
 through PR #468 (`agent/claude-cli-smoke`), including the credential-free
-version gate against the installed pinned executable. The Codex CLI adapter
-stack comprises PR #264 (`agent/codex-cli-wrap`) and PR #268
-(`agent/codex-cli-pin-smoke`); its escalation closeout is PR #317
-(`agent/escalation-closeout`). The Codex CLI compatibility-smoke automation was
-verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
-ambient-skill catalog probe, and pinned version were verified against the
-`0.146.0` executable through PR #321 (`renovate/openai-codex-0.x`). Its
-twice-daily schedule and workflow-self-change trigger were verified through PR
-#471 (`agent/codex-smoke-schedule`). The `signalboxd` names this page states for
-the composition root, its telemetry, and the production `FileCredentialAccess`
-were verified through PR #258 (`agent/signalboxd-rename`); the Anthropic
-adapter's server-side `fallback`-block recognition was verified through PR #280
+version gate against the installed pinned executable. Its request-scoped file
+credential delivery and authenticated live smoke are verified against this PR
+(`agent/claude-cli-credential-delivery`). The Codex CLI adapter stack comprises
+PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
+escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
+compatibility-smoke automation was verified through PR #333
+(`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
+probe, and pinned version were verified against the `0.146.0` executable through
+PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
+workflow-self-change trigger were verified through PR #471
+(`agent/codex-smoke-schedule`). The `signalboxd` names this page states for the
+composition root, its telemetry, and the production `FileCredentialAccess` were
+verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
+adapter-scoped file catalogs are verified against this PR
+(`agent/credential-pools-parser`). The Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
 ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
 persistence-repository families in the operator-failure inventory were verified
@@ -38,10 +42,13 @@ composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
 the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
 Anthropic compatibility smoke was verified through PR #465
 (`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
-#466 (`agent/openai-api-smoke`). This page covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the four provider adapters; and their
-credential boundaries. Layer-2 authorization and evidence classification
+#466 (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
+carried in boundary-loss evidence is verified against this PR
+(`agent/typed-loss-cause`), against every streamed and buffered loss path in the
+four adapters. This page covers the provider-neutral operation, observation, and
+evidence vocabulary; SSE framing; structured-output and tool decode;
+`ScriptedModel`; the four provider adapters; and their credential boundaries.
+Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -239,6 +246,40 @@ strings appear only as retained detail inside already-classified variants:
   unintelligible success body, unexpected HTTP status, stream ended without
   terminal marker, stream protocol violation) and the partial facts observed
   before the loss.
+
+The partial facts include `ToolCallsAtLoss`: whether a tool call had opened in
+the response material the adapter decoded before the loss — opened, none opened,
+or unobserved. A tool call can open without producing any observation, because a
+provider may announce a call's identity and name and then be cut off before any
+argument fragment while the proposal observation is emitted only on
+finalization; and `LossCause` answers only *how* the exchange was lost. Without
+this fact the distinction is reachable only by reading a rendered violation
+detail, which the terminal-evidence rule above forbids. Like `finish_reported`,
+it reports the decoded prefix and nothing beyond it: none opened says no tool
+call opened in what the adapter decoded, never that the provider sent none.
+`Unobserved` is the honest answer where an adapter is not positioned to know — a
+body that never parsed, a decode abandoned with content blocks unexamined, a
+streamed record or CLI event that failed its framing, JSON-bound, or typed-event
+decode, a stream whose framing ended inside an incomplete record, material the
+runner read off the transport but never delivered to a decoder — a framed record
+dropped when cancellation lands mid-chunk, a CLI line past the event bound, a
+partial line lost when a deadline drops the reader — a loss raised by a layer
+that reads no response material, and every Codex CLI loss raised before the
+agent-message envelope parses, since that adapter's item lifecycle carries no
+tool item.
+
+The dividing line is whether the adapter examined the material that could open a
+tool call, not whether it accepted that material. A record read and then
+rejected on semantics has been examined, so it states none opened; material
+discarded before examination withholds. Examination does not require a full
+parse: where a type discriminator alone precludes a tool call — an SSE event
+name that is not `content_block_start`, a Claude CLI event type that is not
+`assistant` — the question is settled without parsing the payload, and the
+negative is stated. Nor does a rejection make the whole response unexamined:
+rejecting the final content block of a buffered body leaves nothing unread and
+states the negative, while the same rejection with blocks still behind it
+withholds. A tool call an earlier record already established outranks the
+withholding in every adapter.
 
 **Committed unimplemented functionality — provider non-acceptance evidence.** No
 present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
@@ -994,28 +1035,68 @@ Claude Code version; any mismatch is stream-protocol boundary loss, not a
 relaxed invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
-`system/init`. Assistant `text`, `thinking`, `redacted_thinking`, and `tool_use`
-blocks become typed observations and assistant parts. A tool proposal must name
-the private MCP namespace, match a declared schema name, carry a unique nonempty
-id and object arguments, and receive exactly one matching user `tool_result`
-whose sole text block is the fixed acknowledgement. Only a terminal `result`
-event can establish success or refusal; an error `result` and a nonzero process
-exit produce typed provider-error evidence. Exit zero without it is
+`system/init`. Nonterminal `system/status`, `system/hook_started`,
+`system/hook_progress`, `system/hook_response`, `system/api_retry`, and
+`system/thinking_tokens` lifecycle events are discarded, so they neither
+masquerade as initialization nor mask the later typed terminal or process-exit
+classification. Their remaining members become dropped redaction context, and
+the two envelope fields that are not provider content — `type` and `subtype` —
+are removed before that. A lifecycle `session_id` is removed on the same ground
+only where it equals the identity `system/init` retained: a differing value is
+stream-protocol boundary loss exactly as it is on a `result` event, and a value
+carried before any `init` has correlated a session is not a repeated identity at
+all, so it stays provider content and seeds the lookbehind. Dropping it on an
+unchecked claim would let a credential prefix spelled there escape the shape
+redactor through a later field (INV-035). Assistant `text`, `thinking`,
+`redacted_thinking`, and `tool_use` blocks become typed observations and
+assistant parts. A tool proposal must name the private MCP namespace, match a
+declared schema name, carry a unique nonempty id and object arguments, and
+receive exactly one matching user `tool_result` whose sole text block is the
+fixed acknowledgement. Only a terminal `result` event can establish success or
+refusal. The selected alias in `system/init` remains the provider-reported
+model; the first assistant event may name the provider-resolved model, but every
+later assistant event must repeat that same value. That resolved model is
+retained only for this comparison and reaches no record, so it seeds a redaction
+lookbehind of its own — a credential prefix ending it would otherwise escape the
+shape redactor through a text block continuing it, which under ambient delivery
+no exact-value redaction downstream can catch (INV-035). Every assistant
+envelope repeats and discards the field beside its own content, so each one
+re-seeds that lookbehind ahead of its content blocks rather than only the first:
+content that spends the lookbehind in one event must not leave the next event's
+text unguarded. A repeat re-seeds only once the previous registration has been
+spent; while it is still live it already governs. Each discarded source holds an
+independent lookbehind: the emitted identifier's adjacency to its record, the
+chronological dropped provider text, and this discarded field are judged
+separately, so bytes from one never sit between another's credential marker and
+the continuation completing it. An error `result` and a nonzero process exit
+produce typed provider-error evidence. Exit zero without it is
 `BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
 JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose alone never becomes
 terminal evidence. A success must satisfy the operation's any/named tool choice,
 with a structured-output contract represented as the required named MCP tool.
 Provider usage is retained only where the CLI reports it.
 
-The adapter accepts only its configured non-secret `CredentialReference` and
-leaves subscription-login resolution inside Claude Code. It clears the child
-environment and forwards only home/Claude-config, executable and temporary path,
-XDG, locale/terminal, certificate, and credential-free proxy values; proxy
-userinfo and unusable credential-home paths fail before spawn. It never locates,
-reads, copies, or logs a credential store. Provider-controlled text,
-identifiers, errors, reasoning, and tool JSON pass through the same
-credential-shape and cross-fragment redaction discipline as the Codex CLI
-adapter before observations or terminal evidence leave the crate.
+Ambient delivery leaves subscription-login resolution inside Claude Code, and an
+ambient adapter accepts only its one configured non-secret
+`CredentialReference`. File delivery is not so limited: the adapter holds the
+complete adapter-scoped catalog of declared `claude_cli` file profiles and
+resolves whichever reference the operation pins, so a historical session keeps
+the profile it was created with even when the configured default has moved on,
+and two Claude families may prefer different profiles. It resolves that
+reference during cancellable preparation, rejects an empty, non-UTF-8, or
+NUL-bearing value, and writes the exact value to a mode-0600 credential file in
+a private request-scoped settings store. That store's mode-0600 `settings.json`
+configures Claude's `apiKeyHelper` to invoke a mode-0600 request-scoped script
+through the fixed `/bin/sh` interpreter. The script preserves the exact file
+bytes using only shell builtins and resolves no executable through `PATH`. The
+credential, script, settings, and existing MCP support files share the temporary
+directory; the adapter replaces only the already allowlisted `CLAUDE_CONFIG_DIR`
+value with that directory and still never adds `ANTHROPIC_API_KEY` itself to the
+child process environment. Dropping the prepared capability removes the
+directory. The exact value remains in the one-shot capability so
+provider-controlled observations and terminal evidence receive exact-value
+redaction in addition to the CLI credential-shape and cross-fragment discipline.
+Proxy userinfo and unusable credential-home paths still fail before spawn.
 
 The output-token ceiling is enforced by the cleared child environment, while
 reasoning level and fast mode use the explicit preparation mappings owned by
@@ -1079,9 +1160,12 @@ The workflow reports on every pull request without a path filter, and its
 secretless eligibility job, the credentialed job condition, and the
 always-running required aggregate apply the same three repository-name
 comparisons and the same fork exclusions the Codex smoke section describes,
-against a path gate of `crates/model-runtime-claude-cli/**`. Manual dispatch
-remains available, and a path-filtered push to `main` reruns the smoke after
-merge.
+against a path gate of `crates/model-runtime-claude-cli/**` together with the
+shared `crates/model-runtime/src/cli_process.rs`. That shared file is in the
+gate because the child environment assembly the credential delivery depends on
+lives there rather than in the adapter crate, so a change to it moves the
+surface this smoke proves. Manual dispatch remains available, and a
+path-filtered push to `main` reruns the smoke after merge.
 
 Installation differs from the Codex smoke in one respect. The Codex package
 ships its platform binary as an optional dependency and needs no lifecycle
@@ -1091,9 +1175,13 @@ runs that installer as its own named step, so the same package-authored code
 runs explicitly and reviewably rather than as an implicit side effect of
 installation, and still before any step carries a credential.
 
-How the smoke credential reaches the CLI is not settled.
-[Claude Code CLI smoke credential delivery](../open-questions.md#claude-code-cli-smoke-credential-delivery)
-owns that decision; until it closes, the live job cannot authenticate.
+The gated workflow writes the environment-scoped API key to a mode-0600 source
+file using shell builtins before the live test process starts. The test receives
+only that non-secret path and supplies a file-backed `CredentialAccess`; the
+adapter performs the request-scoped settings-store delivery above. The source
+file is removed by an always-running cleanup step. The live exchange therefore
+exercises the same file-delivery boundary as signalboxd without placing the key
+in the test process or CLI child environment.
 
 ## Credential-access boundary
 
@@ -1107,20 +1195,21 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   the direct HTTP adapters call it for exactly two purposes — building request
   authentication and seeding the credential-redaction machinery that scrubs
   provider-controlled output.
-- Direct HTTP adapters call `CredentialAccess::resolve` during preparation of
-  each physical request; nothing is cached. Why: per-request resolution makes
-  rotation visible without a daemon restart. Resolution races the cancellation
-  signal so a blocked read cannot hold a cancelled operation. Failures are
-  reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
-  secret bytes.
-- The production implementation is signalboxd's `FileCredentialAccess`. The
-  present pre-pool composition maps singleton provider environment paths. The
-  committed credential-pool child instead supplies the complete map of every
-  `file` profile reference to its catalog path, whatever direct HTTP adapter
-  consumes it. Each resolve rereads the mapped file and feeds the selected
-  runtime. No present composition implements that replacement.
-- The resolved value is scoped to the one prepared request as a
-  sensitivity-marked HTTP header; execute performs no second lookup.
+- Direct HTTP adapters and Claude CLI file delivery call
+  `CredentialAccess::resolve` during preparation of each physical request;
+  nothing is cached. Why: per-request resolution makes rotation visible without
+  a daemon restart. Resolution races the cancellation signal so a blocked read
+  cannot hold a cancelled operation. Failures are reference-only (`Unmapped`,
+  `Unavailable`, `Unreadable`) and never contain secret bytes.
+- The production implementation is signalboxd's `FileCredentialAccess`.
+  Composition supplies each adapter with the complete map of every `file`
+  profile reference declared for that adapter to its catalog path. A profile
+  declared for another adapter remains unmapped. Each resolve rereads the mapped
+  file and feeds the selected runtime.
+- A direct HTTP adapter scopes the resolved value to the one prepared request as
+  a sensitivity-marked HTTP header; execute performs no second lookup. Claude
+  file delivery instead retains it in the one-shot capability for the private
+  settings write and exact-value redaction described above.
 - Provider-controlled text is credential-sanitized before leaving the adapter:
   terminal-evidence text (error messages, raw bodies, transport detail, reported
   identifiers) is redacted with the exact preparation-time value before any
@@ -1274,6 +1363,3 @@ failures after staleness handling.
 - [Codex CLI fixture validation](../open-questions.md#codex-cli-fixture-validation)
   owns how a pin bump will prove that the recorded offline event-shape fixtures
   still represent the installed CLI.
-- [Claude Code CLI smoke credential delivery](../open-questions.md#claude-code-cli-smoke-credential-delivery)
-  owns how the Claude compatibility smoke's credential reaches the wrapped CLI
-  through the adapter's credential-free child-environment allowlist.

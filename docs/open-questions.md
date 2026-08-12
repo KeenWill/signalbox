@@ -150,6 +150,23 @@ request against a quiet `main` rather than inside the compaction stack.
 Raised as a review finding and dispositioned with this condition attached:
 https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
+## Goal mode
+
+- **What a consumer does when its generation closes mid-operation.** A consumer
+  reads the authority a turn ran under, works, and commits afterwards, so a
+  generation stopped or achieved in between was open when read and closed when
+  committed. Binding the read to the commit is committed unimplemented
+  functionality in [goal mode](spec/goal-mode.md); what the consumer should then
+  do is not decided. Escalating treats the closure as a reason to ask a human,
+  which is safe but turns an ordinary stop into an interruption for work already
+  performed. Refusing treats it as withdrawn authority, which is stricter but
+  discards a decision the model already paid for. The choice is observable and
+  belongs to whichever consumer binds it first. Blocks nothing today, because no
+  consumer rechecks.
+
+Raised as a review finding on the dispatch-goal work:
+https://github.com/KeenWill/signalbox/pull/562#discussion_r3760635157
+
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
@@ -219,20 +236,20 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   as an enforced pin-bump gate; it does not block the existing mechanical pin or
   live compatibility gates.
 
-## Claude Code CLI smoke credential delivery
+## Codex CLI image capability features
 
-- **How the compatibility-smoke credential reaches the wrapped CLI.** The
-  adapter clears the child environment and forwards only an allowlist that
-  deliberately carries no direct credential value, with a unit test asserting
-  `ANTHROPIC_API_KEY` never reaches the child; the CLI is expected to resolve
-  its own login from the forwarded credential home. An environment-scoped API
-  key therefore reaches the smoke's test process but not the CLI it spawns.
-  Decide whether the adapter's allowlist gains an explicit direct-credential
-  variable — a deliberate narrowing of that contract, with the accepted exposure
-  recorded — or the workflow writes a credential store the CLI reads under the
-  already-forwarded credential home. Blocks the live Claude compatibility smoke
-  from authenticating; it blocks neither the derived pin nor the credential-free
-  version gate, both of which are in force.
+- **Whether the pinned CLI's image features return once accepted input carries
+  images.** The adapter hard-disables `image_generation` and `view_image`. Each
+  adds a model-visible tool that the adapter's structured-output envelope does
+  not carry, and `view_image` — which loads a local image file into the
+  conversation context — is enabled by default in the pinned inventory, so
+  classifying it as non-capability would leave it live rather than merely
+  acknowledged. Accepted input is text-only today, so neither feature has
+  anything to act on. When the content extensions recorded under accepted-input
+  content above carry image and file content, decide whether either name is
+  re-enabled and how the bytes reach the spawned CLI. Blocks re-enabling either
+  name; it does not block the present disables, which stand on the capability
+  rule alone.
 
 ## Model fallback and provenance
 
@@ -351,9 +368,13 @@ The questions below remain open.
   Blocks runner-side tool registry and executor implementation.
 - **Daemon Git push transport.** `git_push_configured` is implemented as a
   declaration and executor over an injected transport, but no production
-  `GitPushTransport` exists. The remote authority, credential and destination
-  policy, and production transport remain undecided; until they are decided the
-  tool stays absent from the daemon registry. Blocks daemon-side Git push.
+  `GitPushTransport` exists. Remote authority and destination policy are decided
+  and stated under
+  [remote destination authority](spec/git-authority-threat-model.md#remote-destination-authority):
+  destinations are durable records an operator mints, scoped by workspace
+  identity, and `https` only. The credential policy for a push and the
+  production transport itself remain undecided; until they are decided the tool
+  stays absent from the daemon registry. Blocks daemon-side Git push.
 - **Workspace portability between runners.** Moving a session that owns a
   workspace to another runner requires that workspace to exist, or to be
   reconstructible, on the destination. Version one never carries a workspace
@@ -462,6 +483,28 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
+- **Turn-origin instructions in the approval-judge request.** The delegated
+  request context carries session-scoped authority — the goal generation the
+  judged turn is bound to, the template name, and the system prompt frozen for
+  that turn — but no turn-origin content. A delegation-origin child turn's exact
+  parent-supplied task is therefore not shown, so a child created from a broad
+  template may ask for an effect its delegated task never covered while the
+  judge sees only the wider session authority. Freezing that task alongside the
+  session-level fields is undecided, because each added field is further
+  attacker-influenced text placed inside the judge's own prompt, and the
+  injection posture is what makes any session-derived context admissible at all.
+  Recorded as a design question rather than a blocker; authority the context
+  does not settle escalates rather than approves.
+- **Per-template thread-resolution policy.** Whether a session template may
+  choose its own posture toward
+  [`change_request_thread_resolve`](spec/tool-loop.md#provider-bridge-and-daemon-catalog)
+  — so that one template resolves the reviewer threads it has answered while
+  another may only reply and leave resolution to the reviewer — is undecided.
+  Deciding it requires the template configuration surface to carry per-template
+  tool posture at all, which is itself open under
+  [Template storage and authoring](#template-storage-and-authoring). Recorded as
+  a design question rather than a blocker; it blocks only a per-template choice,
+  never the posture the daemon composition already applies.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
   remain undecided.
@@ -497,6 +540,25 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   `git` usage sees. Recorded as a design question rather than a blocker; the
   forced configuration and the effective-URL check remain the version-one
   boundary.
+- **Several bound workspaces per session, and explicit session relocation.** A
+  session binds one workspace root, derived from the configured root by the
+  fixed session-UUID formula owned by
+  [configuration and credentials](spec/configuration-and-credentials.md#derived-session-workspace-roots),
+  which is what keeps the set of roots the daemon can open a property of
+  deployment configuration alone. Two operations are anticipated on that
+  mechanism and are inexpressible today: a session bound to several workspaces
+  at once, and an operator moving or pinning a session's workspace deliberately.
+  Both are explicit rebinds of the per-session instance rather than anything
+  derived from placement — they compose with runner placement without being
+  selected by it, and the workspace portability question under
+  [scheduling and runners](#scheduling-and-runners) owns carrying a workspace
+  between runners rather than rebinding one inside a daemon. Deciding them needs
+  what names a further root without letting a session name a path, how the
+  isolation comparisons that today refuse a directory shared between two
+  sessions read across several roots one session holds, and what a rebind owes
+  executors already retained against the previous root. Recorded as a design
+  question rather than a blocker; the one-root-per-session derivation remains
+  correct until it is answered. (S15)
 
 ## Identity, credentials, and resource governance
 

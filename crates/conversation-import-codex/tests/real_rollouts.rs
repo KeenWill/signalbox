@@ -1,3 +1,10 @@
+//! Opt-in validation that real, locally supplied Codex rollout JSONL files
+//! convert through `CodexRolloutJsonlConverter` without failure and without
+//! writing any rollout content to test output.
+//!
+//! Ignored by default; set `SIGNALBOX_RUN_REAL_CODEX_IMPORT=1` and point
+//! `SIGNALBOX_REAL_CODEX_ROLLOUTS` at one or more rollout roots to run it.
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

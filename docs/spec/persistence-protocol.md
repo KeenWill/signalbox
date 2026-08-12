@@ -1,15 +1,26 @@
 # Persistence protocol
 
+The runner-state transition outbox representation, relational source checks, and
+dispatch projection were verified against this PR
+(`agent/runner-event-outbox-persistence`). The established-successor outbox
+source check was re-verified against this PR
+(`agent/daemon-runner-health-events`).
+
+The runner-recovery turn-phase representation and read boundary were verified
+against this PR (`agent/runner-awaiting-recovery-persistence`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
-through PR #254 (`agent/fix-parked-approval-interrupt`) and was verified again
-in PR #227 (`agent/review-workflow-persistence`); the metadata command issuer
-proof was verified through PR #265 (`agent/tool-batch-tier0`); the
-`apps/signalboxd` migration-invocation home was verified through PR #258
+through PR #254 (`agent/fix-parked-approval-interrupt`), was verified again in
+PR #227 (`agent/review-workflow-persistence`), through this PR
+(`agent/runner-placement-loss-persistence`), and again in this PR
+(`agent/git-remote-authority`); the metadata command issuer proof was verified
+through PR #265 (`agent/tool-batch-tier0`); the `apps/signalboxd`
+migration-invocation home was verified through PR #258
 (`agent/signalboxd-rename`); the model-identity frontier shape was verified
 through PR #272 (`agent/mid-session-model`); the runner lease-admission trigger
 lock was verified against PR #267 (`agent/runner-persistence`); the current
@@ -47,15 +58,17 @@ endpoint locks were verified through this PR
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
 pointer-lock admission is verified through this PR
-(`agent/model-settings-execution`). This page covers the Postgres representation
-in `crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+(`agent/model-settings-execution`). The runner placement loss-source,
+lost-before-pin, pre-pin replacement, and abandonment records are verified
+through this PR (`agent/runner-placement-loss-persistence`). This page covers
+the Postgres representation in `crates/persistence` (source and migrations),
+migration discipline, durable command storage and replay equality, the
+fail-closed reconstitution boundary, the lock protocol, pending-steering durable
+state, the corruption taxonomy, commit-ambiguity handling, and the transactional
+outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -115,8 +128,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-one files, `202607180001` through
-`202608030003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty-nine files, `202607180001` through
+`202608110003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -294,6 +307,20 @@ Representation rules, all enforced in the schema:
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
+- Migration `202608080100` closes runner placement history over
+  `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
+  `abandoned` records. Each event retains the complete facts required by its
+  state shape: pre-pin records retain exact request history without pinned or
+  registration facts, while pinned loss and abandonment retain the complete
+  pinned snapshot. Pre-pin reconstitution authenticates the revision-one request
+  against the exact `created` record and reads every later replacement and lost
+  predecessor instead of inferring history from a revision. The generic
+  placement snapshot writer refuses loss, either replacement, and abandonment
+  because those transitions require connection/loss, durable-command, scheduler,
+  and outbox authority outside the placement aggregate. **Committed
+  unimplemented functionality.** No present adapter installs those transitions;
+  their dedicated orchestration transactions will install these same checked
+  records, and direct snapshot storage cannot stand in for those transactions.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -356,19 +383,60 @@ Representation rules, all enforced in the schema:
   proof. Those lifecycle checks preserve the immutable next-safe-point command
   receipt, so equal replay after either transition still returns the original
   applied pending-steering result (INV-012, INV-016).
-- The runner-orchestration slice adds the `awaiting_runner_recovery` active
-  phase to `turn_lifecycle` with payload columns total only for that
-  discriminator: the exact lost runner, the positive placement revision the loss
-  was projected against, and a nullable tool attempt naming the physical attempt
-  the loss interrupted. Deferred checks require that runner and revision to name
-  the session's current lost placement, require a present tool attempt to belong
-  to the same session and to be the attempt the loss recorded, and admit the
-  phase only while that placement is `RunnerLost` or `RunnerLostBeforePin`. The
-  lifecycle transition matrix admits the phase exactly where
-  `awaiting_tool_recovery` is admitted, and restart reconstitutes it from those
-  correlated facts rather than from the stored discriminator. Without this shape
-  the loss transaction has nowhere to store the phase and restart cannot rebuild
-  it.
+- Migration `202608080101` adds the `awaiting_runner_recovery` active phase to
+  `turn_lifecycle` with payload columns total only for that discriminator: the
+  exact lost runner, the positive placement revision the loss was projected
+  against, and a nullable tool attempt naming the physical attempt the loss
+  interrupted. Deferred checks require that runner and revision to name the
+  session's current lost placement. A present tool attempt must be either the
+  in-flight source retained by an exact retryable lease loss or the terminal
+  ambiguous source of a side-effecting execution-possible loss. It must also be
+  the current physical attempt for its request, be the attempt the loss
+  recorded, and carry runner-lease lineage to that exact runner and placement
+  revision; its issuing turn attempt must be the same yielded chain-tip that
+  authorizes the wait, and its producing call must be the exact active
+  tool-round boundary retained by that wait. A nullable interrupted-attempt arm
+  admits a retained continuing tool round only when its current attempt
+  inventory contains no prepared, in-flight, or ambiguous physical attempt;
+  retired claimed-retry predecessors are historical inventory and do not block
+  that arm. A present interrupted attempt must be the round's sole current
+  prepared, in-flight, or ambiguous attempt. Lifecycle-side checks and reverse
+  checks from placement heads, physical and turn attempts, lease events, and
+  lease heads lock the shared session-scheduler row before evaluating the
+  relationship, so a concurrent placement, attempt, or lease advance cannot
+  leave a wait validated against stale loss evidence. The lifecycle transition
+  matrix admits the phase from an already-active running boundary only after
+  that exact live attempt has ended by yielding to a durable wait, never
+  directly from queued work, and restart reconstitutes it from those correlated
+  facts rather than from the stored discriminator. An interrupt closing the wait
+  extends the retained active tool round's exact yielded frontier, or the turn's
+  starting frontier when no tool round exists; the authenticated
+  interrupt-effect record rejects any other same-session frontier. A retained
+  round with no interrupted physical attempt appends its proposal-ordered tool
+  closures before the cancellation entry. When loss interrupted an ambiguous
+  physical attempt, the same stop instead commits the existing
+  tool-reconciliation terminal shape, so cancellation never erases or
+  reclassifies the ambiguity. Without this shape the loss transaction has
+  nowhere to store the phase and restart cannot rebuild it. The same migration
+  adds the optional interrupted-attempt fact to the exact placement-loss record,
+  and the runner persistence read boundary round-trips both nullable arms.
+  **Committed unimplemented functionality.** No present adapter produces the
+  phase: the dedicated runner-loss propagation transaction will install it under
+  the lock order below. Independently of that future writer, a present
+  interrupted-attempt fact on the placement-loss record is admitted only for one
+  of two exact lease-derived shapes: an in-flight retryable attempt whose loss
+  proves no execution or whose pure/idempotent effect permits successor
+  reissuance, or a terminal ambiguous side-effecting attempt whose execution may
+  have occurred. Both carry physical runner-lease lineage to the record's exact
+  lost runner and placement revision, and the same active runner-recovery
+  tool-round boundary names the attempt. Stopping the wait retires retryable
+  authority before releasing the active slot. The claimed-retry reservation
+  writer takes that same scheduler lock and rechecks that the exact
+  lease-derived source attempt remains in flight, so stale authority loaded
+  before the stop cannot be reserved afterward. No-execution and pure work
+  become known crash loss and cancel, while execution-possible idempotent work
+  becomes ambiguous and requires reconciliation. A same-session foreign or older
+  same-placement attempt therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
@@ -533,8 +601,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Eleven explicit lock statements live
-in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Fourteen explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -562,7 +630,14 @@ in the schema instead:
   `turn_lifecycle` row before it admits a prepared judge call; and
 - the deferred approval-decision authority trigger in that migration takes
   `FOR UPDATE` on the `tool_request` row before it checks for a nonterminal
-  judge call and validates the decision's frozen-posture authority.
+  judge call and validates the decision's frozen-posture authority; and
+- the runner-recovery completeness checker and its placement-, attempt-, and
+  lease-side rechecks in migration `202608080101` each take `FOR UPDATE` on the
+  session scheduler row before re-reading the active recovery lifecycle,
+  placement, and execution-loss relationship; and
+- the turn-attempt and tool-round before-insert guards in that migration share
+  one `FOR UPDATE` helper that serializes new continuation evidence against the
+  same session scheduler before either immutable row becomes visible.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -824,11 +899,11 @@ Locks per transaction, in acquisition order:
   placement, current credential grant when present, and lease heads in the total
   order above. The initial dispatch transaction then stores workspace receipt
   consumption, pin, grant, `InFlight` attempt, and offered lease together. Claim
-  locks enrollment, runner, registration, and lease in that order and commits
-  before acknowledgement. Result admission takes the session scheduler first,
-  then the applicable runner and lease rows without acquiring an earlier omitted
-  lock, and commits the checked terminal attempt observation and claimed-lease
-  completion together.
+  locks the session scheduler first, followed by enrollment, runner,
+  registration, and lease in that order, and commits before acknowledgement.
+  Result admission takes the session scheduler first, then the applicable runner
+  and lease rows without acquiring an earlier omitted lock, and commits the
+  checked terminal attempt observation and claimed-lease completion together.
 
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger

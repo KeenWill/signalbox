@@ -115,10 +115,12 @@ silent one, and is left as a known limitation rather than reproducing
 `cargo run`'s environment here.
 
 The daemon's default Anthropic key path is
-`$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
-is `$HOME/.config/signalbox/github-token`, overridable with
-`SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and `SIGNALBOX_DEV_GITHUB_TOKEN_FILE`
-respectively. The devenv Brave key path defaults to
+`$HOME/.config/signalbox/anthropic-api-key`, written into the seeded model
+catalog's Anthropic credential profile rather than passed in the environment,
+and overridable with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` at the moment that
+copy is seeded; edit the seeded catalog to change it afterwards. The default
+code-host token path is `$HOME/.config/signalbox/github-token`, overridable with
+`SIGNALBOX_DEV_GITHUB_TOKEN_FILE`. The devenv Brave key path defaults to
 `$DEVENV_STATE/dev-instance/brave-api-key` and is overridable with
 `SIGNALBOX_DEV_BRAVE_API_KEY_FILE`. No credential material is committed or
 generated. The
@@ -175,11 +177,12 @@ signalbox-materialize-config config/signalboxd.example.toml \
   target/signalboxd.live.toml "$supervisor"
 ```
 
-The live path then runs only when all three opt-in values are supplied:
+Review that runtime copy and point its Anthropic credential profile's `file` at
+a mode-`0600` file containing only the API-key bytes. The live path then runs
+only when both opt-in values are supplied:
 
 ```console
 SIGNALBOX_E2E_CONFIG_FILE=target/signalboxd.live.toml \
-SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
 SIGNALBOX_E2E_SELECTION_ID=a5fec003-0edd-4118-96d1-18af31157bd3 \
   cargo test -p signalbox-client --test end_to_end \
     terminal_client_completes_the_real_anthropic_path \
@@ -206,12 +209,12 @@ production connection configuration.
 
 The same harness can run the production runtime bridge against Anthropic. Review
 the checked-in example, materialize `target/signalboxd.live.toml` with the setup
-command above, put only the API-key bytes in a mode-`0600` file, then run:
+command above, and point its Anthropic credential profile at the mode-`0600` key
+file before running:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
 SIGNALBOX_CONFIG_FILE=target/signalboxd.live.toml \
-ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
   cargo run -p signalboxd --bin signalbox-debug -- \
   --anthropic a5fec003-0edd-4118-96d1-18af31157bd3 \
   "Reply with exactly: signalbox smoke ok"

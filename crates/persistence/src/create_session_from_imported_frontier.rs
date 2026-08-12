@@ -51,8 +51,7 @@ use crate::{
 
 const STORAGE_VERSION: i16 = 5;
 pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 5;
-// Applied migrations freeze this legacy storage spelling.
-const USER_INITIATED: &str = "owner_initiated";
+const USER_INITIATED: &str = "user_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
 const APPLIED: &str = "applied";
 
@@ -376,7 +375,21 @@ impl ImportedSessionRepository {
             Some(CommandKind::CreateSessionFromImportedFrontier) => {
                 load_creation_from_connection(&mut connection, command_id).await
             }
-            Some(_) => Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id }),
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::ReplaceSessionMetadata
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest
+                | CommandKind::ReviewWorkflow
+                | CommandKind::ReviewOrchestration
+                | CommandKind::CompactSession
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement
+                | CommandKind::RegisterWorkspace
+                | CommandKind::MintGitRemote
+                | CommandKind::WithdrawGitRemote,
+            ) => Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
 }
@@ -410,10 +423,25 @@ async fn existing_outcome(
     command: CreateSessionFromImportedFrontier,
     kind: CommandKind,
 ) -> Result<CreateSessionFromImportedFrontierOutcome, ImportedSessionRepositoryError> {
-    if kind != CommandKind::CreateSessionFromImportedFrontier {
-        return Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse {
-            command_id: command.command_id(),
-        });
+    match kind {
+        CommandKind::CreateSessionFromImportedFrontier => {}
+        CommandKind::CreateSession
+        | CommandKind::ReplaceSessionDefaults
+        | CommandKind::ReplaceSessionMetadata
+        | CommandKind::SubmitInput
+        | CommandKind::DecideToolRequest
+        | CommandKind::ReviewWorkflow
+        | CommandKind::ReviewOrchestration
+        | CommandKind::CompactSession
+        | CommandKind::Goal
+        | CommandKind::UpdateSessionPlacement
+        | CommandKind::RegisterWorkspace
+        | CommandKind::MintGitRemote
+        | CommandKind::WithdrawGitRemote => {
+            return Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse {
+                command_id: command.command_id(),
+            });
+        }
     }
     let recorded = load_creation_from_connection(connection, command.command_id())
         .await?
