@@ -46,7 +46,6 @@ const PERMISSION_MASK: u32 = 0o7777;
 const PUBLICATION_DIRECTORY: &str = ".publish-v1";
 const UPLOADS_DIRECTORY: &str = "uploads-v1";
 const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
-const NAMESPACE_MARKER_TEMPORARY: &str = ".signalbox-blob-namespace-v1.tmp";
 const MAX_NAMESPACE_MARKER_BYTES: u64 = 128;
 const TEMPORARY_NAME_ATTEMPTS: usize = 16;
 const MAX_BACKING_DEVICE_NODES: usize = 64;
@@ -187,6 +186,7 @@ impl OpenedFilesystemBlobRoot {
 pub struct FilesystemBlobStaging {
     uploads_directory: fs::File,
     identity: FilesystemNamespaceIdentity,
+    sweep_on_drop: bool,
 }
 
 impl std::fmt::Debug for FilesystemBlobStaging {
@@ -224,6 +224,7 @@ impl FilesystemBlobStaging {
         Ok(Self {
             uploads_directory,
             identity: opened.identity,
+            sweep_on_drop: true,
         })
     }
 
@@ -237,10 +238,18 @@ impl FilesystemBlobStaging {
         sweep_private_temporary_directory(&self.uploads_directory)?;
         self.uploads_directory.sync_all()
     }
+
+    /// Prevents cleanup after the daemon has lost its exclusive staging guard.
+    pub const fn disarm_sweep_on_drop(&mut self) {
+        self.sweep_on_drop = false;
+    }
 }
 
 impl Drop for FilesystemBlobStaging {
     fn drop(&mut self) {
+        if !self.sweep_on_drop {
+            return;
+        }
         let _ = sweep_private_temporary_directory(&self.uploads_directory);
         let _ = self.uploads_directory.sync_all();
     }
@@ -1098,33 +1107,7 @@ fn initialize_namespace_marker(
 }
 
 fn create_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
-    let mut marker = match openat(
-        root,
-        NAMESPACE_MARKER_TEMPORARY,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
-    ) {
-        Ok(marker) => fs::File::from(marker),
-        Err(source) if source == rustix::io::Errno::EXIST => {
-            unlinkat(root, NAMESPACE_MARKER_TEMPORARY, AtFlags::empty())
-                .map_err(io::Error::from)?;
-            root.sync_all()?;
-            fs::File::from(
-                openat(
-                    root,
-                    NAMESPACE_MARKER_TEMPORARY,
-                    OFlags::WRONLY
-                        | OFlags::CREATE
-                        | OFlags::EXCL
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC,
-                    Mode::RUSR | Mode::WUSR,
-                )
-                .map_err(io::Error::from)?,
-            )
-        }
-        Err(source) => return Err(io::Error::from(source)),
-    };
+    let (temporary, mut marker) = create_temporary_blob_file(Arc::new(root.try_clone()?))?;
     fchmod(&marker, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
     if !private_regular_file_metadata(&marker.metadata()?) {
         return Err(io::Error::new(
@@ -1134,20 +1117,13 @@ fn create_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
     }
     marker.write_all(expected)?;
     marker.sync_all()?;
-    match renameat_with(
-        root,
-        NAMESPACE_MARKER_TEMPORARY,
-        root,
-        NAMESPACE_MARKER,
-        RenameFlags::NOREPLACE,
-    ) {
-        Ok(()) => root.sync_all(),
-        Err(source) if source == rustix::io::Errno::EXIST => {
-            unlinkat(root, NAMESPACE_MARKER_TEMPORARY, AtFlags::empty())
-                .map_err(io::Error::from)?;
+    match temporary.publish_noclobber(root, OsStr::new(NAMESPACE_MARKER))? {
+        None => root.sync_all(),
+        Some(temporary) => {
+            temporary.remove()?;
+            root.sync_all()?;
             Err(io::Error::from(io::ErrorKind::AlreadyExists))
         }
-        Err(source) => Err(io::Error::from(source)),
     }
 }
 
@@ -1771,23 +1747,28 @@ mod tests {
     }
 
     #[test]
-    fn inv059_interrupted_namespace_marker_is_replaced_before_atomic_publication() {
+    fn inv059_namespace_initialization_leaves_another_attempts_temporary_file_untouched() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
-        let temporary = root.path().join(NAMESPACE_MARKER_TEMPORARY);
-        fs::write(&temporary, b"partial").expect("the fixture writes an interrupted marker");
+        let temporary = root.path().join(".tmp-concurrent-marker-attempt");
+        let concurrent_content = b"another initializer still owns this file";
+        fs::write(&temporary, concurrent_content)
+            .expect("the fixture writes another attempt's temporary marker");
         fs::set_permissions(&temporary, fs::Permissions::from_mode(FILE_MODE))
-            .expect("the interrupted marker is private");
+            .expect("the other attempt's marker is private");
 
         open_bound_fixture(root.path(), PRIMARY_NAMESPACE, NamespaceBindingState::New)
-            .expect("new startup replaces only its reserved interrupted marker");
+            .expect("new startup publishes through its own temporary marker");
         let marker =
             fs::read(root.path().join(NAMESPACE_MARKER)).expect("the final marker is readable");
         let expected_marker = format!("{}\n", Uuid::from_u128(PRIMARY_NAMESPACE));
 
         assert_eq!(marker, expected_marker.as_bytes());
-        assert!(!temporary.exists());
+        assert_eq!(
+            fs::read(temporary).expect("the other attempt's marker remains readable"),
+            concurrent_content
+        );
     }
 
     #[test]
@@ -1866,6 +1847,32 @@ mod tests {
         drop(staging);
 
         assert!(!spool.exists());
+    }
+
+    #[test]
+    fn disarmed_staging_drop_leaves_spools_for_the_guard_holder() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let mut staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let spool = root
+            .path()
+            .join(UPLOADS_DIRECTORY)
+            .join("replacement-upload");
+        let spool_content = b"owned by the replacement daemon";
+        fs::write(&spool, spool_content).expect("the fixture creates a replacement spool");
+        fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the replacement spool is private");
+
+        staging.disarm_sweep_on_drop();
+        drop(staging);
+
+        assert_eq!(
+            fs::read(spool).expect("disarmed cleanup leaves the replacement spool"),
+            spool_content
+        );
     }
 
     #[test]

@@ -1304,7 +1304,7 @@ async fn run_hub(
         return Err(error);
     }
 
-    let blob_store_registry =
+    let mut blob_store_registry =
         match BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()).await
         {
             Ok(registry) => registry,
@@ -1607,14 +1607,20 @@ async fn run_hub(
     // extend the shutdown window. Guard loss is different: tasks are cancelled
     // immediately and the old fenced sessions must be terminated before
     // returning control to process exit.
-    drop(blob_store_registry);
     if outcome == ShutdownOutcome::GuardLost {
+        if let Some(registry) = blob_store_registry.as_mut() {
+            registry.disarm_staging_sweep();
+        }
+        drop(blob_store_registry);
         let _ = database.close().await;
-    } else if should_close_pool(&Ok(outcome))
-        && let Err(error) = database.close().await
-    {
-        report_database_close_failure(&error);
-        outcome = database_close_failure_outcome(outcome);
+    } else {
+        drop(blob_store_registry);
+        if should_close_pool(&Ok(outcome))
+            && let Err(error) = database.close().await
+        {
+            report_database_close_failure(&error);
+            outcome = database_close_failure_outcome(outcome);
+        }
     }
     Ok(outcome)
 }

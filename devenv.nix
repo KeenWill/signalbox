@@ -61,6 +61,7 @@ let
   daemonBraveApiKeyFile = "${stateRoot}/brave-api-key";
   daemonBlobStagingDirectory = "${stateRoot}/blob-staging";
   daemonBlobPrimaryDirectory = "${stateRoot}/blobs-primary";
+  blobStorageSupported = pkgs.stdenv.isLinux;
 
   # The daemon validates the socket's parent directory before binding: it must
   # be owned by the effective user and be mode exactly 0700, and no ancestor
@@ -443,21 +444,25 @@ in
           if profile is None:
               raise SystemExit("example config has no anthropic-primary profile")
           profile["file"] = credential_path
-          blob_storage = document.get("blob_storage")
-          if blob_storage is None:
-              raise SystemExit("example config has no blob_storage table")
-          blob_storage["staging_directory"] = str(Path(sys.argv[3]).absolute())
-          stores = blob_storage.get("stores", [])
-          primary = next(
-              (entry for entry in stores if entry.get("name") == "primary"),
-              None,
-          )
-          if primary is None:
-              raise SystemExit("example config has no primary blob store")
-          primary["root_directory"] = str(Path(sys.argv[4]).absolute())
+          if sys.argv[5] == "true":
+              blob_storage = document.get("blob_storage")
+              if blob_storage is None:
+                  raise SystemExit("example config has no blob_storage table")
+              blob_storage["staging_directory"] = str(Path(sys.argv[3]).absolute())
+              stores = blob_storage.get("stores", [])
+              primary = next(
+                  (entry for entry in stores if entry.get("name") == "primary"),
+                  None,
+              )
+              if primary is None:
+                  raise SystemExit("example config has no primary blob store")
+              primary["root_directory"] = str(Path(sys.argv[4]).absolute())
+          else:
+              document.pop("blob_storage", None)
           config_path.write_text(tomlkit.dumps(document))
         ''} "$seeded_daemon_config" "$seed_key_file" \
-          ${shellArg daemonBlobStagingDirectory} ${shellArg daemonBlobPrimaryDirectory}
+          ${shellArg daemonBlobStagingDirectory} ${shellArg daemonBlobPrimaryDirectory} \
+          ${shellArg (pkgs.lib.boolToString blobStorageSupported)}
         chmod 644 "$seeded_daemon_config"
         mv -f "$seeded_daemon_config" ${shellArg daemonConfigFile}
       fi

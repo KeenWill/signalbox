@@ -136,6 +136,11 @@ impl BlobStoreRegistry {
     pub const fn staging(&self) -> &FilesystemBlobStaging {
         &self.staging
     }
+
+    /// Prevents staging cleanup after the database singleton guard is lost.
+    pub const fn disarm_staging_sweep(&mut self) {
+        self.staging.disarm_sweep_on_drop();
+    }
 }
 
 #[derive(Clone, Debug)]
