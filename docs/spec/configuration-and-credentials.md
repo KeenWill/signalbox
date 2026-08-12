@@ -34,6 +34,10 @@ verified against this PR (`agent/mcp-bridge-wiring`).
 The rule binding one provider-model spelling to one adapter is verified against
 this PR (`agent/adapter-model-catalogs`).
 
+The blob catalog and input-modality grammar below are the foundation proposal
+from PR #553 (`agent/blob-storage-foundation`) and become verified with its
+implementing child stack.
+
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
 
@@ -194,8 +198,13 @@ likewise connection and migration errors) into a generic `Infrastructure` class
 carrying only its phase, so an operator cannot distinguish an unreadable catalog
 from an unknown field, bad version, or invalid limit (see Open edges). The six
 unconditional deployment paths are accepted without I/O at environment parsing
-time; both catalogs and every template prompt file are read during startup. No
-credential file is read at startup (see credential lifecycle below).
+time; both catalogs and every template prompt file are read during startup.
+Provider and integration credential files remain lazy. A currently routed S3
+blob store is the sole static-file exception: after database connection and the
+configuration-independent recovery scan, startup reads that explicit credential
+to perform the marker and lifecycle checks owned by
+[blob storage](blob-storage.md#stores-routing-and-configuration), before socket
+admission or scheduling.
 
 The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
 constructs each adapter with its defaults. The
@@ -515,11 +524,11 @@ fail-closed:
   real charge and a metered equivalent, so an accepted contradiction silently
   misreports spend, and inferring it would overwrite an operator's statement
   about the two deliveries where the answer genuinely varies. Parsing opens no
-  credential path and contacts no provider, so every admitted credential stays
-  lazy, matching the no-preflight rule below. Billing kind belongs to
-  authentication, not to the adapter a mapping selects. A profile name is
-  otherwise opaque to code: no build-provided constant is compared against it,
-  so a deployment names its accounts as it chooses.
+  credential-profile path and contacts no provider, so every admitted profile
+  credential stays lazy, matching the no-preflight rule below. Billing kind
+  belongs to authentication, not to the adapter a mapping selects. A profile
+  name is otherwise opaque to code: no build-provided constant is compared
+  against it, so a deployment names its accounts as it chooses.
 - At least one `[[credential_pools]]` entry is required.
   [Credential pools and selection](#credential-pools-and-selection) owns its
   complete grammar and admission rules.
@@ -544,13 +553,20 @@ provenance of these layers are owned by
 [Model and session settings](model-session-settings.md).
 
 Each `[[models]]` record declares its capability surface with
-`reasoning_levels`, `fast_mode`, and `service_tiers`. Omitted arrays are empty,
-and omitted fast mode means `unsupported`. `request_control` authorizes the
-adapter's request-level fast control. `alternate_target` additionally requires
-`fast_target_id`; that identity must name a non-selectable `[[serving_targets]]`
-record with its own exact `model_family`, provider model, `max_output_tokens`,
-and `context_window_tokens`. Every serving record states its family, and that
-family must name one declared `[[adapter_mappings]]` entry; the mapping, not the
+`reasoning_levels`, `fast_mode`, `service_tiers`, and `input_modalities`.
+`input_modalities` is a nonempty array from the closed set `text`, `image`, and
+`document`; it rejects duplicates and must contain `text`. Omission means
+exactly `["text"]`. Every `[[serving_targets]]` record admits the same member
+and default. The model-capability process projection always materializes the
+selectable record's modalities in the closed order `text`, `image`, `document`,
+and call preparation uses the effective serving record's set. Omitted reasoning
+and service-tier arrays are empty, and omitted fast mode means `unsupported`.
+`request_control` authorizes the adapter's request-level fast control.
+`alternate_target` additionally requires `fast_target_id`; that identity must
+name a non-selectable `[[serving_targets]]` record with its own exact
+`model_family`, provider model, `max_output_tokens`, and
+`context_window_tokens`. Every serving record states its family, and that family
+must name one declared `[[adapter_mappings]]` entry; the mapping, not the
 selectable record naming the target, supplies the serving record's adapter and
 credential pool, so nothing is inferred from the pointing model. At preparation
 the enabled call resolves that family's pinned reference from the session's
@@ -575,6 +591,15 @@ Single-shot import rejects a source above the configured value before
 conversion. Begin rejects a declaration above the configured value before
 assembly, append rejects the first observed size above it, and commit rechecks
 the value against the actual appended byte count.
+
+The optional `[blob_storage]` table, its one-through-32 store catalog, distinct
+store-name and namespace-UUID bindings, exact filesystem and S3 fields, static
+credential grammar, routes, bounds, and absent-state compatibility are owned by
+the
+[blob-storage configuration contract](blob-storage.md#stores-routing-and-configuration).
+This configuration loader rejects every disagreement before runtime composition
+and applies the ordinary protected-file checks to the explicit S3 credential
+file; no ambient credential source enters the resulting adapter configuration.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
 contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional
@@ -1157,10 +1182,10 @@ cannot; this contract says which for every delivery, and there is no third case.
 - `file` — *required.* The daemon rejects only equal lexically normalized paths.
   An ordinary copy of the key file is admissible and indistinguishable from a
   second credential. This is an accepted limit rather than an oversight, and its
-  reason is the no-startup-preflight rule: a `file` credential is never opened
-  before preparation, so no filesystem identity exists at admission, and buying
-  one would trade that rule away for a guarantee an ordinary `cp` defeats
-  anyway.
+  reason is the provider/integration no-startup-preflight rule: a `file` profile
+  credential is never opened before preparation, so no filesystem identity
+  exists at admission, and buying one would trade that rule away for a guarantee
+  an ordinary `cp` defeats anyway.
 - `codex_home` — *partly established, and not admitted by this build.* Device
   and inode identity under the custody walk, together with the forced file
   credential backend, establish that two homes are distinct *stores*.
@@ -1276,8 +1301,8 @@ operation performs no filesystem lookup and follows no symlink. For one adapter,
 one normalized absolute file path may appear on only one profile in a document:
 two spellings of one path are not independent credentials and cannot authorize
 two attempts in one successor chain. That test is deliberately lexical only.
-signalboxd opens no credential file before preparation, so a startup identity
-check would trade the no-startup-preflight rule in
+signalboxd opens no provider or integration credential file before preparation,
+so a startup identity check would trade the no-startup-preflight rule in
 [credential lifecycle](#credential-lifecycle) for a guarantee an ordinary copy
 defeats anyway. Two distinct paths that a symlink, a hard link, or a copy
 resolves to the same secret therefore remain two members. The accepted cost is
@@ -1299,9 +1324,9 @@ implementing children satisfy.
 One further rule sits here because no present composition applies it: after
 configuration-independent recovery and before scheduling, startup establishes
 each `codex_home` identity as its delivery contract requires; every other
-credential remains lazy, matching the no-preflight rule below. The agreement
-between a delivery and its `billing_kind` is *not* one of these — this build
-enforces it for every delivery, reserved spellings included, and
+credential-profile delivery remains lazy, matching the no-preflight rule below.
+The agreement between a delivery and its `billing_kind` is *not* one of these —
+this build enforces it for every delivery, reserved spellings included, and
 [the credential catalog](#the-static-model-alias-and-web-fetch-catalog) states
 it.
 
@@ -2623,10 +2648,14 @@ deployment-side rules that code cannot enforce are stated in
   adapter boundary then refuses exactly as it already refuses an empty file;
   narrowing never invents a credential.
 
-- **No startup preflight.** signalboxd never reads a credential file at boot, so
-  a missing or unsynced credential cannot block startup or the recovery scan.
-  Why: recovery of acknowledged work must not depend on any provider or
-  integration credential (INV-034).
+- **No provider or integration startup preflight.** signalboxd never reads a
+  provider or integration credential file at boot, so a missing or unsynced one
+  cannot block startup or the recovery scan. Why: recovery of acknowledged work
+  must not depend on provider or integration authority (INV-034). The explicit
+  static credential for a currently routed S3 blob store is the sole exception:
+  it is read only after the configuration-independent recovery scan, and its
+  authenticated namespace and lifecycle probes gate socket admission and
+  scheduling as the blob-storage contract requires.
 
 - **Session credential history.** First handling of every native or imported
   session-creation command appends event ordinal 1 to that session's credential
