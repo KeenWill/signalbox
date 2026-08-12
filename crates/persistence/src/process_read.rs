@@ -1848,7 +1848,7 @@ impl ProcessReadRepository {
                 transcript_approval.decision_kind AS transcript_decision_kind,
                 transcript_approval.decision_source AS transcript_decision_source,
                 transcript_approval.denial_reason AS transcript_denial_reason,
-                transcript_approval.owner_command_id AS transcript_user_command_id,
+                transcript_approval.user_command_id AS transcript_user_command_id,
                 transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
                 transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
                 transcript_approval.rationale AS transcript_decision_rationale
@@ -4179,7 +4179,7 @@ async fn open_transcript_entry_cursor(
             transcript_approval.decision_kind AS transcript_decision_kind,
             transcript_approval.decision_source AS transcript_decision_source,
             transcript_approval.denial_reason AS transcript_denial_reason,
-            transcript_approval.owner_command_id AS transcript_user_command_id,
+            transcript_approval.user_command_id AS transcript_user_command_id,
             transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
             transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
             transcript_approval.rationale AS transcript_decision_rationale
