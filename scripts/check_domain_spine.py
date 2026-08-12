@@ -87,6 +87,15 @@ CFG_ATTRIBUTE = re.compile(r"^#\[cfg\((.*)\)\]$")
 MOD_HEADER = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
 )
+# An anonymous const's initializer block is a transparent item container:
+# an inherent impl inside `const _: () = { ... };` attaches its methods to
+# the type crate-wide, exactly as at column 0.
+TRANSPARENT_BLOCK = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+_\s*:.*=\s*\{\s*$"
+)
+OUT_OF_LINE_MOD = re.compile(
+    r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
 IMPL_KEYWORD = re.compile(r"^\s*impl\b")
 
 
@@ -365,17 +374,44 @@ def parse_source_methods(
                 continue
             remainder = header[opener:]
             block_depth = remainder.count("{") - remainder.count("}")
+            body_test_configured = False
+            body_attribute_continuation = 0
             while block_depth > 0 and index + 1 < len(lines):
                 index += 1
                 body_line = lines[index]
-                if block_depth == 1 and not excluded:
-                    method = IMPL_METHOD.match(body_line)
-                    if method:
-                        methods.setdefault(target, set()).add(method.group(1))
+                if block_depth == 1:
+                    body_stripped = body_line.strip()
+                    if body_attribute_continuation > 0:
+                        body_attribute_continuation += body_line.count(
+                            "["
+                        ) - body_line.count("]")
+                    else:
+                        cfg = CFG_ATTRIBUTE.match(body_stripped)
+                        if cfg:
+                            if cfg_removes_from_library(cfg.group(1)):
+                                body_test_configured = True
+                        elif body_stripped.startswith("#["):
+                            body_attribute_continuation = body_line.count(
+                                "["
+                            ) - body_line.count("]")
+                        else:
+                            method = IMPL_METHOD.match(body_line)
+                            if (
+                                method
+                                and not excluded
+                                and not body_test_configured
+                            ):
+                                methods.setdefault(target, set()).add(
+                                    method.group(1)
+                                )
+                            if body_stripped:
+                                body_test_configured = False
                 block_depth += body_line.count("{") - body_line.count("}")
             index += 1
             continue
-        if at_item_position and MOD_HEADER.match(line):
+        if at_item_position and (
+            MOD_HEADER.match(line) or TRANSPARENT_BLOCK.match(line)
+        ):
             gated = test_configured or any(module_test_gated)
             test_configured = False
             entry_depth = depth
@@ -406,6 +442,47 @@ def parse_source_methods(
             module_test_gated.pop()
         index += 1
     return methods, failures
+
+
+def collect_test_gated_module_files(source_root: Path) -> set[Path]:
+    """Paths loaded by out-of-line `mod` declarations under a test cfg.
+
+    A `#[cfg(test)] mod helpers;` loads a separate file whose contents are
+    absent from library builds; the per-file scan cannot see the declaring
+    module's gate, so those files (and their subdirectories) are excluded
+    up front. A `#[path = ...]` override is invisible here — its string is
+    blanked — which can only fail loud: a file is never excluded on the
+    strength of an attribute this scan cannot read.
+    """
+    excluded: set[Path] = set()
+    for path in sorted(source_root.rglob("*.rs")):
+        test_configured = False
+        attribute_continuation = 0
+        for line in blank_comments_and_strings(path.read_text()).splitlines():
+            declared = OUT_OF_LINE_MOD.match(line)
+            if declared:
+                if test_configured:
+                    if path.name in ("lib.rs", "mod.rs", "main.rs"):
+                        base = path.parent
+                    else:
+                        base = path.parent / path.stem
+                    excluded.add(base / f"{declared.group(1)}.rs")
+                    excluded.add(base / declared.group(1))
+                test_configured = False
+                continue
+            stripped = line.strip()
+            if attribute_continuation > 0:
+                attribute_continuation += line.count("[") - line.count("]")
+            else:
+                cfg = CFG_ATTRIBUTE.match(stripped)
+                if cfg:
+                    if cfg_removes_from_library(cfg.group(1)):
+                        test_configured = True
+                elif stripped.startswith("#["):
+                    attribute_continuation = line.count("[") - line.count("]")
+                elif stripped:
+                    test_configured = False
+    return excluded
 
 
 def parse_macro_surface_types(text: str) -> set[str]:
@@ -716,7 +793,13 @@ def main() -> int:
                 home_section.setdefault(name, IDENTITY_SECTION)
         source_methods: dict[str, set[str]] = {}
         macro_surface: set[str] = set()
+        test_gated_files = collect_test_gated_module_files(lib_path.parent)
         for path in sorted(lib_path.parent.rglob("*.rs")):
+            if any(
+                path == gated or gated in path.parents
+                for gated in test_gated_files
+            ):
+                continue
             found, unparsed = parse_source_methods(crate, path)
             for name, methods in found.items():
                 source_methods.setdefault(name, set()).update(methods)

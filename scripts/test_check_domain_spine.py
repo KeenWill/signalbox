@@ -58,10 +58,18 @@ impl Widget {
         0
     }
 
+    #[cfg(test)]
+    pub fn body_test_helper(&self) -> u64 {
+        self.value
+    }
+
     fn double(&self) -> u64 {
         self.value * 2
     }
 }
+
+#[cfg(test)]
+mod helpers;
 
 /// One fixture failure type.
 pub struct WidgetError;
@@ -209,6 +217,17 @@ def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+HELPERS_MODULE = """\
+//! Fixture helpers loaded by a test-gated out-of-line module.
+
+impl super::Widget {
+    pub fn helpers_only(&self) -> u64 {
+        self.value
+    }
+}
+"""
+
+
 def write_fixture(
     root: Path,
     widget: str = WIDGET_BASELINE,
@@ -222,6 +241,10 @@ def write_fixture(
     (root / "docs").mkdir(exist_ok=True)
     (domain_src / "lib.rs").write_text(DOMAIN_LIB, encoding="utf-8")
     (domain_src / "widget.rs").write_text(widget, encoding="utf-8")
+    (domain_src / "widget").mkdir(exist_ok=True)
+    (domain_src / "widget" / "helpers.rs").write_text(
+        HELPERS_MODULE, encoding="utf-8"
+    )
     (application_src / "lib.rs").write_text(APPLICATION_LIB, encoding="utf-8")
     (application_src / "service.rs").write_text(service, encoding="utf-8")
     (root / "docs" / "domain-spine.md").write_text(spine, encoding="utf-8")
@@ -249,7 +272,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="signalbox-domain-spine-") as directory:
         root = Path(directory)
 
-        # The baseline agrees everywhere: declared methods match source,
+        # The baseline agrees everywhere — including a method-level
+        # `#[cfg(test)] pub fn` inside a production impl and a test-gated
+        # out-of-line `mod helpers;` whose file impls the listed type:
         # accessor-comment declarations count, a doc-comment impl example, a
         # nested-block-comment impl, test-configured impls and modules
         # (including a multi-line attribute between the cfg and its item),
@@ -378,6 +403,41 @@ def main() -> int:
             "production inline module is scanned",
             "domain::widget::Widget has public method nested_method() with no"
             " declaration in the 'domain: widget' section",
+        )
+
+        # Dropping the cfg from the out-of-line module declaration makes
+        # the helpers file library surface again.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "#[cfg(test)]\nmod helpers;", "mod helpers;"
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "ungated out-of-line module is scanned",
+            "domain::widget::Widget has public method helpers_only() with no"
+            " declaration in the 'domain: widget' section",
+        )
+
+        # An impl inside an anonymous const's initializer attaches methods
+        # crate-wide; the block is a transparent item container.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE
+            + "\nconst _: () = {\n"
+            "    impl Widget {\n"
+            "        pub fn from_const_block(&self) -> u64 {\n"
+            "            self.value\n"
+            "        }\n"
+            "    }\n"
+            "};\n",
+        )
+        expect_failure(
+            run_checker(root),
+            "anonymous-const impl body is scanned",
+            "domain::widget::Widget has public method from_const_block() with"
+            " no declaration in the 'domain: widget' section",
         )
 
         # `#[cfg(not(test))]` is library surface, not a test fixture.
