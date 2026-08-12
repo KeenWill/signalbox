@@ -2546,7 +2546,7 @@ mod tests {
             request_id: "0198f0d2-1111-7000-8000-00000000002a",
             tool: "change_request_thread_resolve",
             arguments_kind: signalbox_domain::ToolArgumentsKind::Json,
-            arguments: r#"{"thread_id":"PRRT_1"}"#,
+            arguments: r#"{"number":17,"repository":"owner/repository","thread_id":"PRRT_1"}"#,
         };
         let context =
             SessionAuthorityContext::new(Some(goal_statement("resolve the review")), None, None);

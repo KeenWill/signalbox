@@ -22,6 +22,9 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The change-request-scoped thread mutation contracts and their pre-dispatch
+ownership confirmation are verified through this PR (`agent/thread-ownership`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -960,10 +963,28 @@ The declarations and compact result objects are:
   the first 100 threads and, within each, the first 100 comments. A thread
   carries opaque id, resolution and outdated posture, path, optional line,
   comments, and `comments_truncated`; the outer result carries `truncated`.
-- `change_request_thread_reply` accepts an opaque `thread_id` and nonempty
-  `body`; it returns the created comment node id and URL.
-- `change_request_thread_resolve` accepts one opaque `thread_id`; it returns
-  that identity and the acknowledged resolution posture.
+- `change_request_thread_reply` accepts `repository`, `number`, an opaque
+  `thread_id`, and nonempty `body`; it returns the created comment node id and
+  URL. The named change request is the mutation's authority target: an opaque
+  thread identity alone is globally scoped, so without these coordinates neither
+  an approval decision over the arguments nor the executor could tell a thread
+  in the granted change request from one anywhere else the credential reaches.
+  Before dispatching the mutation, the GitHub adapter resolves the thread node
+  and confirms the code host places it inside exactly that change request. A
+  thread the code host does not place there — including an identity that
+  resolves to no node or to a node of another type — fails closed with the fixed
+  semantic detail
+  `requested review thread was not found in the named change request`, and no
+  mutation request is dispatched. The repository comparison follows the code
+  host's case-insensitive repository addressing; the number must match exactly.
+  Ownership-check failures keep read classification: an infrastructure failure
+  during the confirmation reports that the mutation was never dispatched and is
+  never commit-ambiguous. A review thread never moves between change requests,
+  so the confirmation cannot be invalidated between the two requests.
+- `change_request_thread_resolve` accepts `repository`, `number`, and one opaque
+  `thread_id` under the same pre-dispatch ownership confirmation as
+  `change_request_thread_reply`; it returns that thread identity and the
+  acknowledged resolution posture.
 - `change_request_ci_job_log` accepts `repository` and a positive `job_id`; it
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive
