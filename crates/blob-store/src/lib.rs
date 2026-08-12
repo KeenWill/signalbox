@@ -16,6 +16,12 @@ pub const MAX_BLOB_STORE_NAME_BYTES: usize = 64;
 /// Maximum bytes one adapter range operation may retain in memory.
 pub const MAX_BLOB_RANGE_BYTES: u64 = 4_194_304;
 
+/// Maximum durable store identities in one version-one deployment catalog.
+pub const MAX_BLOB_STORES: usize = 32;
+
+/// Maximum UTF-8 bytes in one durable recorded object key.
+pub const MAX_BLOB_OBJECT_KEY_BYTES: usize = 1024;
+
 /// A validated durable deployment identity for one blob store.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BlobStoreName(Arc<str>);
@@ -96,6 +102,7 @@ impl BlobObjectKey {
         let value = value.into();
         let path = std::path::Path::new(value.as_ref());
         let safe = !value.is_empty()
+            && value.len() <= MAX_BLOB_OBJECT_KEY_BYTES
             && !value.contains('\0')
             && !value.contains('\\')
             && !path.is_absolute()
@@ -423,7 +430,10 @@ impl Error for BlobStoreError {
 mod tests {
     use signalbox_domain::BlobDigest;
 
-    use super::{BlobObjectKey, BlobStoreName, ExpectedBlob, MAX_BLOB_STORE_NAME_BYTES};
+    use super::{
+        BlobObjectKey, BlobStoreName, ExpectedBlob, MAX_BLOB_OBJECT_KEY_BYTES,
+        MAX_BLOB_STORE_NAME_BYTES,
+    };
 
     #[test]
     fn object_key_is_content_derived_and_sharded() {
@@ -453,6 +463,13 @@ mod tests {
                 .expect("the canonical fixture is admitted")
                 .as_str(),
             admitted
+        );
+    }
+
+    #[test]
+    fn recorded_object_key_rejects_oversized_spelling() {
+        assert!(
+            BlobObjectKey::try_from_recorded("a".repeat(MAX_BLOB_OBJECT_KEY_BYTES + 1)).is_err()
         );
     }
 

@@ -9,7 +9,12 @@ functionality and carries only its stated compatibility constraint.
 The blob digest and external spelling, deterministic object-key producer,
 streaming whole-object and ranged store contract, filesystem publication,
 verification, and corrupt-object repair behavior, and shared store conformance
-suite are verified against PR #555 (`agent/blob-storage-substrate`).
+suite are verified against PR #555 (`agent/blob-storage-substrate`; via PR #581
+`agent/blob-storage-catalog`).
+
+The append-only identity, store-binding, and verified-replica catalog and its
+transactional registration behavior are verified against this implementing
+change (`agent/blob-storage-catalog`).
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
