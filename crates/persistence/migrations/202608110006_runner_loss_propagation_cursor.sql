@@ -1,5 +1,5 @@
 -- Every durable runner loss owns one restartable, bounded session-propagation
--- cursor. Losses already absorbed by migration 202608080104's compatibility
+-- cursor. Losses already absorbed by migration 202608110005's compatibility
 -- baseline begin complete without inventing a processed session identity. A
 -- loss committed after that migration but before this one begins pending when
 -- an affected current placement still retains an older baseline.
@@ -25,6 +25,13 @@ CREATE TABLE runner_connection_loss_propagation (
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE INDEX runner_session_placement_loss_propagation_page
+    ON runner_session_placement_record (
+        loss_fence_enrollment_id,
+        session_id,
+        event_ordinal
+    );
 
 INSERT INTO runner_connection_loss_propagation (
     enrollment_id,

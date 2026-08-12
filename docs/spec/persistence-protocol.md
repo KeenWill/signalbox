@@ -343,7 +343,7 @@ Representation rules, all enforced in the schema:
 - Migration `202608110006` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction. Migration backfill marks a
   loss completed only when no affected current placement remains: losses already
-  absorbed into `202608100004`'s compatibility baseline complete, while a loss
+  absorbed into `202608110005`'s compatibility baseline complete, while a loss
   committed after that migration with an older placement baseline stays pending.
   A repeatable-read page authenticates the exact loss source and returns at most
   64 current pinned or exact-identity unpinned placements whose baselines
