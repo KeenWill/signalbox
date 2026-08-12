@@ -529,7 +529,8 @@ BEGIN
      WHERE enrollment_id = NEW.registration_enrollment_id
      FOR SHARE;
     IF NOT FOUND THEN
-        RETURN NEW;
+        RAISE EXCEPTION 'runner lease offer lacks connection authority'
+            USING ERRCODE = '23514';
     END IF;
     SELECT *
       INTO connection
@@ -608,16 +609,15 @@ BEGIN
       FROM runner_connection_authority_head
      WHERE enrollment_id = offered.registration_enrollment_id
      FOR SHARE;
-    IF offered.offer_connection_epoch IS NULL THEN
-        IF authority.enrollment_id IS NOT NULL THEN
-            RAISE EXCEPTION
-                'runner lease claim connection differs from its offer'
-                USING ERRCODE = '23514';
-        END IF;
-        RETURN NEW;
+    IF authority.enrollment_id IS NULL THEN
+        RAISE EXCEPTION 'runner lease claim lacks connection authority'
+            USING ERRCODE = '23514';
     END IF;
-    IF authority.enrollment_id IS NULL
-       OR authority.connection_epoch IS DISTINCT FROM
+    IF offered.offer_connection_epoch IS NULL THEN
+        RAISE EXCEPTION 'runner lease claim lacks offer connection authority'
+            USING ERRCODE = '23514';
+    END IF;
+    IF authority.connection_epoch IS DISTINCT FROM
             offered.offer_connection_epoch
        OR authority.latest_loss_epoch IS DISTINCT FROM
             offered.offer_loss_epoch

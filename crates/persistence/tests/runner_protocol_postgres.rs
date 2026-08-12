@@ -879,6 +879,36 @@ async fn stored_pin_fixture_with_authorization(
     ),
     Box<dyn Error>,
 > {
+    let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
+        pool,
+        authorize,
+        fixture_catalog,
+        fixture_overrides,
+        fixture_effect_kind,
+    )
+    .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store.store_pin(&pin, &registration).await?;
+    Ok((store, expected_enrollment, registration, pin))
+}
+
+async fn prepared_pin_fixture_with_authorization(
+    pool: &PgPool,
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_overrides: RunnerToolPermissionOverrides,
+    fixture_effect_kind: &'static str,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+    ),
+    Box<dyn Error>,
+> {
     insert_session(pool).await?;
     insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     set_fixture_physical_attempt_effect(pool, INITIAL_PHYSICAL_ATTEMPT, fixture_effect_kind)
@@ -912,7 +942,6 @@ async fn stored_pin_fixture_with_authorization(
             offer_request(),
         )
         .expect("the validated registration pins the placement");
-    store.store_pin(&pin, &registration).await?;
     Ok((store, expected_enrollment, registration, pin))
 }
 
@@ -934,6 +963,9 @@ async fn stored_credentialless_pin_fixture(
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -1131,6 +1163,105 @@ async fn insert_lease_generation_direct(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn migrated_unconnected_later_lease_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        RunnerLease,
+    ),
+    Box<dyn Error>,
+> {
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
+        .await?;
+    let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
+        pool,
+        authorized,
+        catalog(),
+        no_permission_overrides(),
+        "effect_free",
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, 1, 1, 'connected', 'established')",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .execute(pool)
+    .await?;
+    store.store_pin(&pin, &registration).await?;
+    let correlation = pin.lease.correlation();
+    let mut lease_completion = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, 2, 'claimed')",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 2
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, 3, 'completed')",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 3
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *lease_completion)
+    .await?;
+    lease_completion.commit().await?;
+    sqlx::query("ALTER TABLE runner_connection_event DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM runner_connection_event")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_connection_event ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    migrate(pool).await?;
+    terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
+    let lease = pin
+        .placement
+        .offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            authorized(LATER_LEASE_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("the legacy placement prepares a later lease");
+    Ok((store, expected_enrollment, registration, lease))
 }
 
 async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Error> {
@@ -3268,16 +3399,24 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     MIGRATOR
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
-    let (_, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
+    let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
+        &pool,
+        authorized,
+        catalog(),
+        no_permission_overrides(),
+        "effect_free",
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO runner_connection_event
             (enrollment_id, connection_epoch, event_ordinal,
              state_kind, cause_kind)
          VALUES ($1, 1, 1, 'connected', 'established')",
     )
-    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(registration.registration().enrollment().into_uuid())
     .execute(&pool)
     .await?;
+    store.store_pin(&pin, &registration).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
@@ -4076,6 +4215,9 @@ async fn s31_inv042_current_registration_preserves_complete_placement() -> Resul
     let registration = store
         .register(&expected_enrollment, expanded_advertisement())
         .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         SessionRunnerPlacementRequest {
@@ -4138,6 +4280,9 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
         .await?;
     let directory = RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
         .expect("the fixture working directory is valid");
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         SessionRunnerPlacementRequest {
@@ -4199,6 +4344,9 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
         .await?;
     let repository = WorkspaceRepositoryKey::try_new("signalbox".to_owned())
         .expect("the repository key is valid");
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let directory = RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
         .expect("the fixture working directory is valid");
     let placement = SessionRunnerPlacement::new(
@@ -4417,6 +4565,9 @@ async fn s30_inv009_inv042_initial_pin_locks_scheduler_before_placement()
         store.insert_enrollment(&expected_enrollment).await?;
         let registration = store
             .register(&expected_enrollment, advertisement())
+            .await?;
+        store
+            .open_connection(expected_enrollment.enrollment())
             .await?;
         let session = SessionId::from_uuid(uuid(SESSION));
         let placement = SessionRunnerPlacement::new(
@@ -5141,6 +5292,9 @@ async fn s30_combined_tool_override_survives_omitted_runner_availability()
     let registration = store
         .register(&expected_enrollment, advertisement())
         .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         SessionRunnerPlacementRequest {
@@ -5219,6 +5373,9 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -5312,6 +5469,9 @@ async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenan
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -5746,6 +5906,9 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
     let registration = store
         .register(&expected_enrollment, advertisement())
         .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         SessionRunnerPlacementRequest {
@@ -5995,6 +6158,9 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -7901,6 +8067,9 @@ async fn s32_inv009_inv044_nullable_runner_wait_ignores_retired_claimed_retry_at
     let registration = store
         .register(&expected_enrollment, advertisement())
         .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         session,
         SessionRunnerPlacementRequest {
@@ -8322,6 +8491,9 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
     let registration = store
         .register(&expected_enrollment, advertisement())
         .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         session,
         SessionRunnerPlacementRequest {
@@ -8519,6 +8691,9 @@ async fn prepare_runner_recovery_tool_round(
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let placement = SessionRunnerPlacement::new(
         session,
@@ -10111,6 +10286,9 @@ async fn s32_inv009_inv044_runner_loss_rejects_retired_claimed_retry_attempt()
     let registration = store
         .register(&expected_enrollment, advertisement())
         .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         SessionRunnerPlacementRequest {
@@ -11421,6 +11599,7 @@ async fn s32_inv002_inv044_runner_replacement_authenticates_historical_pin_regis
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
     let first_registration = store.register(&first_enrollment, advertisement()).await?;
+    store.open_connection(first_enrollment.enrollment()).await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         exact_runner_request(first_enrollment.runner()),
@@ -11644,6 +11823,9 @@ async fn s32_inv045_pin_grant_requires_complete_registration_inventory()
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, expanded_advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -12164,6 +12346,9 @@ async fn s32_inv044_profile_replacement_preserves_workspace_origin_revision()
         .await?;
     let working_directory = RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
         .expect("the fixture working directory is valid");
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let workspace_placement_revision = RunnerGeneration::one();
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -12721,6 +12906,7 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
     let first_registration = store.register(&first_enrollment, advertisement()).await?;
+    store.open_connection(first_enrollment.enrollment()).await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
         working_directory: WorkingDirectorySelection::RunnerDefault,
@@ -12798,6 +12984,7 @@ async fn s32_inv002_inv044_runner_replacement_rejects_stale_workspace_generation
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
     let first_registration = store.register(&first_enrollment, advertisement()).await?;
+    store.open_connection(first_enrollment.enrollment()).await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
         working_directory: WorkingDirectorySelection::RunnerDefault,
@@ -13053,6 +13240,7 @@ async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
     let first_registration = store.register(&first_enrollment, advertisement()).await?;
+    store.open_connection(first_enrollment.enrollment()).await?;
     let first_directory = RunnerWorkingDirectory::try_new("/workspace/first".to_owned())
         .expect("the first runner directory is valid");
     let placement = SessionRunnerPlacement::new(
@@ -13451,6 +13639,7 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
     let first_enrollment = enrollment();
     store.insert_enrollment(&first_enrollment).await?;
     let first_registration = store.register(&first_enrollment, advertisement()).await?;
+    store.open_connection(first_enrollment.enrollment()).await?;
     let profiled_request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
         working_directory: WorkingDirectorySelection::RunnerDefault,
@@ -13893,6 +14082,9 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
     let registration = store
         .register(&expected_enrollment, advertisement())
         .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         SessionRunnerPlacementRequest {
@@ -13977,6 +14169,9 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -14327,6 +14522,9 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let request = SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(class()),
@@ -15037,6 +15235,58 @@ async fn s32_inv044_loss_epoch_rejects_connected_source() -> Result<(), Box<dyn 
     .expect_err("a live connection cannot mint a terminal loss fence");
 
     assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: a new lease offer cannot exist before the enrollment has
+/// a durable live-connection authority head.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_lease_offer_requires_connection_authority() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = unmigrated_postgres().await?;
+    let (store, _, _, lease) = migrated_unconnected_later_lease_fixture(&pool).await?;
+    let rejected = store
+        .store_lease(&lease)
+        .await
+        .expect_err("a lease offer requires a durable live-connection authority head");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: a claim cannot turn a legacy or corrupted null-baseline
+/// offer into execution capability without a durable connection authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_lease_claim_requires_connection_authority() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = unmigrated_postgres().await?;
+    let (store, _, registration, lease) = migrated_unconnected_later_lease_fixture(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         DISABLE TRIGGER runner_lease_generation_connection_loss_fence",
+    )
+    .execute(&pool)
+    .await?;
+    store.store_lease(&lease).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ENABLE TRIGGER runner_lease_generation_connection_loss_fence",
+    )
+    .execute(&pool)
+    .await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the exact fixture offer correlation prepares its claim");
+    let rejected = store
+        .store_lease(&claimed)
+        .await
+        .expect_err("a null-baseline lease cannot claim without connection authority");
+
+    assert_store_check_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -15950,6 +16200,7 @@ async fn s32_inv032_inv044_same_epoch_established_event_cannot_publish_recovery(
             RunnerConnectionTransition::HeartbeatMissed,
         )
         .await?;
+    let mut same_epoch = pool.begin().await?;
     sqlx::query(
         "INSERT INTO runner_connection_event
             (enrollment_id, connection_epoch, event_ordinal,
@@ -15958,8 +16209,17 @@ async fn s32_inv032_inv044_same_epoch_established_event_cannot_publish_recovery(
     )
     .bind(expected_enrollment.enrollment().into_uuid())
     .bind(Decimal::from(connection.epoch().get()))
-    .execute(&pool)
+    .execute(&mut *same_epoch)
     .await?;
+    sqlx::query(
+        "UPDATE runner_connection_authority_head
+            SET connection_event_ordinal = 3
+          WHERE enrollment_id = $1",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .execute(&mut *same_epoch)
+    .await?;
+    same_epoch.commit().await?;
     let rejected = append_runner_state_transition_for_test(
         &pool,
         RunnerStateTransitionOutboxTestEvent::new(
