@@ -31,11 +31,15 @@ The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 rejection payloads, its application transaction boundary, and its atomic
 PostgreSQL command transaction are verified against this PR
 (`agent/runner-abandonment-transaction`). Its process-protocol adapter is
-verified against this PR (`agent/runner-abandonment-process`).
+verified against this PR (`agent/runner-abandonment-process`). The closed
+pre-pin replacement result and rejection payloads, application transaction
+boundary, and atomic PostgreSQL transaction for a different exact live runner
+are verified against this PR (`agent/runner-pre-pin-replacement`).
 
-**Committed unimplemented functionality.** No current application, persistence,
-or process-protocol adapter handles replacement. Future adapters must preserve
-the closed transaction constraints below.
+**Committed unimplemented functionality.** No current adapter handles a
+pending-enrollment target, same-runner re-enrollment, pinned replacement
+staging, or the replacement process request. Future adapters must preserve the
+closed constraints below for those slices.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
@@ -625,9 +629,9 @@ replay returns its original identities, registration, advertisement, and
 authority while opening a fresh connection epoch.
 
 **Committed unimplemented functionality.** No present pending enrollment can
-perform the one future user-command-bound workspace operation. Same-runner
-recovery and replacement-command handling are also unimplemented; no present
-daemon or runner command surface provides them.
+perform the one future user-command-bound workspace operation or be consumed by
+a session replacement. Same-runner recovery and pinned replacement staging are
+also unimplemented; no present daemon or runner command surface provides them.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
