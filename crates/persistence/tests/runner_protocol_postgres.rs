@@ -105,12 +105,21 @@ const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
     "runner placement loss source cannot be inferred from legacy rows";
+const LEGACY_PLACEMENT_LOSS_FENCE_REFUSAL: &str =
+    "runner placement loss fence requires empty placement history";
 
 #[derive(Clone, Copy)]
 struct PhysicalAttemptFacts {
     attempt: u128,
     request: u128,
     turn: u128,
+}
+
+#[derive(sqlx::FromRow)]
+struct LeaseOfferAuthorityRow {
+    offer_connection_epoch: Decimal,
+    offer_connection_event_ordinal: Decimal,
+    offer_loss_epoch: Decimal,
 }
 
 const INITIAL_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
@@ -3710,7 +3719,7 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
         .load_current_connection_loss(expected_enrollment.enrollment())
         .await?
         .expect("the migrated terminal connection has a loss fence");
-    let lease_offer_authority: (Decimal, Decimal, Decimal) = sqlx::query_as(
+    let lease_offer_authority: LeaseOfferAuthorityRow = sqlx::query_as(
         "SELECT offer_connection_epoch,
                 offer_connection_event_ordinal,
                 offer_loss_epoch
@@ -3726,57 +3735,51 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     assert_eq!(loaded.connection_epoch().get(), 1);
     assert_eq!(loaded.connection_event_ordinal(), 2);
     assert_eq!(
-        lease_offer_authority,
-        (Decimal::ONE, Decimal::from(2_u64), Decimal::ONE)
+        lease_offer_authority.offer_connection_epoch,
+        Decimal::from(loaded.connection_epoch().get())
+    );
+    assert_eq!(
+        lease_offer_authority.offer_connection_event_ordinal,
+        Decimal::from(loaded.connection_event_ordinal())
+    );
+    assert_eq!(
+        lease_offer_authority.offer_loss_epoch,
+        Decimal::from(loaded.loss_epoch().get())
     );
     drop(pool);
     Ok(())
 }
 
-/// INV-043 / INV-044: upgrading a pinned placement preserves its durable lease
-/// and records the latest migrated loss as the compatibility baseline.
+/// INV-043 / INV-044: the placement loss fence refuses history whose exact
+/// authorization baseline was not recorded when the placement was appended.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_inv043_inv044_placement_loss_fence_migration_backfills_pinned_state()
+async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
-    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
-    insert_terminal_connection_loss_before_cursor_migration(
-        &pool,
-        expected_enrollment.enrollment(),
-        connection.epoch(),
-    )
-    .await?;
-    let loss = store
-        .load_current_connection_loss(expected_enrollment.enrollment())
-        .await?
-        .expect("the pre-upgrade terminal connection owns a loss epoch");
-    migrate(&pool).await?;
-    let baseline: (Uuid, Decimal) = sqlx::query_as(
-        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
-           FROM runner_session_placement_record
-          WHERE session_id = $1 AND event_kind = 'pinned'",
-    )
-    .bind(pin.placement.session().into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    let loaded = store
-        .load_lease(
-            pin.lease.correlation().lease,
-            pin.lease.correlation().generation,
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
         )
-        .await?
-        .expect("the pre-upgrade lease remains durable");
+        .await?;
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("legacy placement history has no exact loss baseline");
 
-    assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
-    assert_eq!(baseline.1, Decimal::from(loss.loss_epoch().get()));
-    assert_eq!(loaded, pin.lease);
+    assert!(
+        refusal
+            .to_string()
+            .contains(LEGACY_PLACEMENT_LOSS_FENCE_REFUSAL)
+    );
     drop(pool);
     Ok(())
 }
@@ -4978,15 +4981,6 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         no_permission_overrides(),
         "effect_free",
     )
-    .await?;
-    sqlx::query(
-        "INSERT INTO runner_connection_event
-            (enrollment_id, connection_epoch, event_ordinal,
-             state_kind, cause_kind)
-         VALUES ($1, 1, 1, 'connected', 'established')",
-    )
-    .bind(registration.registration().enrollment().into_uuid())
-    .execute(&pool)
     .await?;
     store.store_pin(&pin, &registration).await?;
     drop_pre_loss_fence_compatibility_tables(&pool).await?;
