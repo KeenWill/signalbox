@@ -166,7 +166,8 @@ async fn inspect_existing(
             | CommandKind::UpdateSessionPlacement
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
-            | CommandKind::WithdrawGitRemote,
+            | CommandKind::WithdrawGitRemote
+            | CommandKind::PromotePendingRunner,
         ) => Ok(ClaimInspection::Conflicting),
     }
 }

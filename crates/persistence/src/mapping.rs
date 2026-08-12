@@ -537,6 +537,8 @@ pub(crate) enum DurableCommandKind {
     MintGitRemote,
     /// Git remote withdrawal.
     WithdrawGitRemote,
+    /// Deployment-scoped pending-runner promotion.
+    PromotePendingRunner,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -558,6 +560,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::RegisterWorkspace => "register_workspace",
         DurableCommandKind::MintGitRemote => "mint_git_remote",
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
+        DurableCommandKind::PromotePendingRunner => "promote_pending_runner",
     }
 }
 
@@ -580,6 +583,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "register_workspace" => Some(DurableCommandKind::RegisterWorkspace),
         "mint_git_remote" => Some(DurableCommandKind::MintGitRemote),
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
+        "promote_pending_runner" => Some(DurableCommandKind::PromotePendingRunner),
         _ => None,
     }
 }
@@ -610,6 +614,122 @@ pub(crate) fn workspace_origin_from_str(value: &str) -> Option<WorkspaceOrigin> 
     match value {
         "operator_registered" => Some(WorkspaceOrigin::OperatorRegistered),
         "daemon_derived" => Some(WorkspaceOrigin::DaemonDerived),
+        _ => None,
+    }
+}
+
+/// Closed stored result kinds for pending-runner promotion commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromotePendingRunnerResultStorageKind {
+    Applied,
+    Rejected,
+}
+
+pub(crate) const fn promote_pending_runner_result_to_str(
+    value: PromotePendingRunnerResultStorageKind,
+) -> &'static str {
+    match value {
+        PromotePendingRunnerResultStorageKind::Applied => "applied",
+        PromotePendingRunnerResultStorageKind::Rejected => "rejected",
+    }
+}
+
+pub(crate) fn promote_pending_runner_result_from_str(
+    value: &str,
+) -> Option<PromotePendingRunnerResultStorageKind> {
+    match value {
+        "applied" => Some(PromotePendingRunnerResultStorageKind::Applied),
+        "rejected" => Some(PromotePendingRunnerResultStorageKind::Rejected),
+        _ => None,
+    }
+}
+
+/// Closed stored rejection kinds for pending-runner promotion commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromotePendingRunnerRejectionStorageKind {
+    NoPendingRunnerEnrollment,
+    PendingRequestMismatch,
+    PendingRequestDisconnected,
+    ActiveRunnerNotLost,
+}
+
+pub(crate) const fn promote_pending_runner_rejection_to_str(
+    value: PromotePendingRunnerRejectionStorageKind,
+) -> &'static str {
+    match value {
+        PromotePendingRunnerRejectionStorageKind::NoPendingRunnerEnrollment => {
+            "no_pending_runner_enrollment"
+        }
+        PromotePendingRunnerRejectionStorageKind::PendingRequestMismatch => {
+            "pending_request_mismatch"
+        }
+        PromotePendingRunnerRejectionStorageKind::PendingRequestDisconnected => {
+            "pending_request_disconnected"
+        }
+        PromotePendingRunnerRejectionStorageKind::ActiveRunnerNotLost => "active_runner_not_lost",
+    }
+}
+
+pub(crate) fn promote_pending_runner_rejection_from_str(
+    value: &str,
+) -> Option<PromotePendingRunnerRejectionStorageKind> {
+    match value {
+        "no_pending_runner_enrollment" => {
+            Some(PromotePendingRunnerRejectionStorageKind::NoPendingRunnerEnrollment)
+        }
+        "pending_request_mismatch" => {
+            Some(PromotePendingRunnerRejectionStorageKind::PendingRequestMismatch)
+        }
+        "pending_request_disconnected" => {
+            Some(PromotePendingRunnerRejectionStorageKind::PendingRequestDisconnected)
+        }
+        "active_runner_not_lost" => {
+            Some(PromotePendingRunnerRejectionStorageKind::ActiveRunnerNotLost)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) const fn runner_non_lost_connection_state_to_str(
+    value: signalbox_domain::RunnerNonLostConnectionState,
+) -> &'static str {
+    match value {
+        signalbox_domain::RunnerNonLostConnectionState::Connected => "connected",
+        signalbox_domain::RunnerNonLostConnectionState::Suspect => "suspect",
+        signalbox_domain::RunnerNonLostConnectionState::Shutdown => "shutdown",
+    }
+}
+
+pub(crate) fn runner_non_lost_connection_state_from_str(
+    value: &str,
+) -> Option<signalbox_domain::RunnerNonLostConnectionState> {
+    match value {
+        "connected" => Some(signalbox_domain::RunnerNonLostConnectionState::Connected),
+        "suspect" => Some(signalbox_domain::RunnerNonLostConnectionState::Suspect),
+        "shutdown" => Some(signalbox_domain::RunnerNonLostConnectionState::Shutdown),
+        _ => None,
+    }
+}
+
+pub(crate) const fn runner_connection_state_to_str(
+    value: crate::runner_protocol::RunnerConnectionState,
+) -> &'static str {
+    match value {
+        crate::runner_protocol::RunnerConnectionState::Connected => "connected",
+        crate::runner_protocol::RunnerConnectionState::Suspect => "suspect",
+        crate::runner_protocol::RunnerConnectionState::Shutdown => "shutdown",
+        crate::runner_protocol::RunnerConnectionState::Lost => "lost",
+    }
+}
+
+pub(crate) fn runner_connection_state_from_str(
+    value: &str,
+) -> Option<crate::runner_protocol::RunnerConnectionState> {
+    match value {
+        "connected" => Some(crate::runner_protocol::RunnerConnectionState::Connected),
+        "suspect" => Some(crate::runner_protocol::RunnerConnectionState::Suspect),
+        "shutdown" => Some(crate::runner_protocol::RunnerConnectionState::Shutdown),
+        "lost" => Some(crate::runner_protocol::RunnerConnectionState::Lost),
         _ => None,
     }
 }
@@ -1905,10 +2025,12 @@ mod tests {
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
-        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        PlanEventStorageKind, PositiveOrdinalMappingError,
+        PromotePendingRunnerRejectionStorageKind, PromotePendingRunnerResultStorageKind,
+        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
+        SessionPlacementResultStorageKind, StoredModelSettingsError,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
@@ -1927,25 +2049,29 @@ mod tests {
         durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
-        plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
-        repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
-        repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
-        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
-        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
-        repo_watch_thread_state_to_str, runner_placement_loss_source_from_str,
-        runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
-        session_creation_cause_from_str, session_creation_cause_to_str, session_id_from_uuid,
-        session_id_to_uuid, session_placement_event_kind_from_str,
-        session_placement_event_kind_to_str, session_placement_rejection_from_str,
-        session_placement_result_kind_from_str, session_placement_result_kind_to_str,
-        tool_approval_decision_source_from_str, tool_approval_decision_source_to_str,
-        tool_approval_posture_from_str, tool_approval_posture_to_str,
-        tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
-        tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
-        turn_id_to_uuid,
+        plan_event_kind_from_str, plan_event_kind_to_str,
+        promote_pending_runner_rejection_from_str, promote_pending_runner_rejection_to_str,
+        promote_pending_runner_result_from_str, promote_pending_runner_result_to_str,
+        repo_watch_check_conclusion_from_str, repo_watch_check_conclusion_to_str,
+        repo_watch_checks_outcome_from_str, repo_watch_checks_outcome_to_str,
+        repo_watch_event_kind_from_str, repo_watch_event_kind_to_str,
+        repo_watch_mergeable_state_from_str, repo_watch_mergeable_state_to_str,
+        repo_watch_pull_request_lifecycle_from_str, repo_watch_pull_request_lifecycle_to_str,
+        repo_watch_reaction_change_from_str, repo_watch_reaction_change_to_str,
+        repo_watch_review_state_from_str, repo_watch_review_state_to_str,
+        repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
+        runner_connection_state_from_str, runner_connection_state_to_str,
+        runner_non_lost_connection_state_from_str, runner_non_lost_connection_state_to_str,
+        runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
+        runner_sandbox_from_str, runner_sandbox_to_str, session_creation_cause_from_str,
+        session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
+        session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+        session_placement_rejection_from_str, session_placement_result_kind_from_str,
+        session_placement_result_kind_to_str, tool_approval_decision_source_from_str,
+        tool_approval_decision_source_to_str, tool_approval_posture_from_str,
+        tool_approval_posture_to_str, tool_attempt_disposition_from_str,
+        tool_attempt_disposition_to_str, tool_permission_default_from_str,
+        tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
     };
 
     #[test]
@@ -2854,6 +2980,105 @@ mod tests {
             Some(DurableCommandKind::CompactSession)
         );
         assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn promote_pending_runner_command_kind_mapping_is_closed() {
+        assert_eq!(
+            durable_command_kind_to_str(DurableCommandKind::PromotePendingRunner),
+            "promote_pending_runner"
+        );
+        assert_eq!(
+            durable_command_kind_from_str("promote_pending_runner"),
+            Some(DurableCommandKind::PromotePendingRunner)
+        );
+        assert_eq!(durable_command_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn pending_runner_promotion_result_mappings_are_closed() {
+        assert_eq!(
+            promote_pending_runner_result_from_str(promote_pending_runner_result_to_str(
+                PromotePendingRunnerResultStorageKind::Applied,
+            )),
+            Some(PromotePendingRunnerResultStorageKind::Applied)
+        );
+        assert_eq!(
+            promote_pending_runner_result_from_str(promote_pending_runner_result_to_str(
+                PromotePendingRunnerResultStorageKind::Rejected,
+            )),
+            Some(PromotePendingRunnerResultStorageKind::Rejected)
+        );
+        assert_eq!(
+            promote_pending_runner_rejection_from_str(promote_pending_runner_rejection_to_str(
+                PromotePendingRunnerRejectionStorageKind::NoPendingRunnerEnrollment,
+            )),
+            Some(PromotePendingRunnerRejectionStorageKind::NoPendingRunnerEnrollment)
+        );
+        assert_eq!(
+            promote_pending_runner_rejection_from_str(promote_pending_runner_rejection_to_str(
+                PromotePendingRunnerRejectionStorageKind::PendingRequestMismatch,
+            )),
+            Some(PromotePendingRunnerRejectionStorageKind::PendingRequestMismatch)
+        );
+        assert_eq!(
+            promote_pending_runner_rejection_from_str(promote_pending_runner_rejection_to_str(
+                PromotePendingRunnerRejectionStorageKind::PendingRequestDisconnected,
+            )),
+            Some(PromotePendingRunnerRejectionStorageKind::PendingRequestDisconnected)
+        );
+        assert_eq!(
+            promote_pending_runner_rejection_from_str(promote_pending_runner_rejection_to_str(
+                PromotePendingRunnerRejectionStorageKind::ActiveRunnerNotLost,
+            )),
+            Some(PromotePendingRunnerRejectionStorageKind::ActiveRunnerNotLost)
+        );
+        assert_eq!(
+            runner_non_lost_connection_state_from_str(runner_non_lost_connection_state_to_str(
+                signalbox_domain::RunnerNonLostConnectionState::Connected,
+            )),
+            Some(signalbox_domain::RunnerNonLostConnectionState::Connected)
+        );
+        assert_eq!(
+            runner_non_lost_connection_state_from_str(runner_non_lost_connection_state_to_str(
+                signalbox_domain::RunnerNonLostConnectionState::Suspect,
+            )),
+            Some(signalbox_domain::RunnerNonLostConnectionState::Suspect)
+        );
+        assert_eq!(
+            runner_non_lost_connection_state_from_str(runner_non_lost_connection_state_to_str(
+                signalbox_domain::RunnerNonLostConnectionState::Shutdown,
+            )),
+            Some(signalbox_domain::RunnerNonLostConnectionState::Shutdown)
+        );
+        assert_eq!(promote_pending_runner_result_from_str("unknown"), None);
+        assert_eq!(promote_pending_runner_rejection_from_str("unknown"), None);
+        assert_eq!(runner_non_lost_connection_state_from_str("unknown"), None);
+        assert_eq!(
+            runner_connection_state_from_str(runner_connection_state_to_str(
+                crate::runner_protocol::RunnerConnectionState::Connected,
+            )),
+            Some(crate::runner_protocol::RunnerConnectionState::Connected)
+        );
+        assert_eq!(
+            runner_connection_state_from_str(runner_connection_state_to_str(
+                crate::runner_protocol::RunnerConnectionState::Suspect,
+            )),
+            Some(crate::runner_protocol::RunnerConnectionState::Suspect)
+        );
+        assert_eq!(
+            runner_connection_state_from_str(runner_connection_state_to_str(
+                crate::runner_protocol::RunnerConnectionState::Shutdown,
+            )),
+            Some(crate::runner_protocol::RunnerConnectionState::Shutdown)
+        );
+        assert_eq!(
+            runner_connection_state_from_str(runner_connection_state_to_str(
+                crate::runner_protocol::RunnerConnectionState::Lost,
+            )),
+            Some(crate::runner_protocol::RunnerConnectionState::Lost)
+        );
+        assert_eq!(runner_connection_state_from_str("unknown"), None);
     }
 
     #[test]

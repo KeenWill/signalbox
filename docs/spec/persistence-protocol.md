@@ -12,13 +12,15 @@ startup resumption of every pending cursor were verified against this PR
 (`agent/runner-loss-daemon-propagation`). The registration-reconciliation
 cursor, exact registration-loss cause, and per-session transaction were verified
 against this PR (`agent/runner-registration-reconciliation`). Pending-successor
-enrollment admission and exact receipt replay were verified against this PR
-(`agent/runner-pending-successor-promotion`). Creation-command runner placement
-and revision-one readback were verified against this PR
+enrollment admission and exact receipt replay were verified against the parent
+slice (`agent/runner-pending-successor-promotion`). Creation-command runner
+placement and revision-one readback were verified against this PR
 (`agent/runner-creation-placement-persistence`). The reference-only
 placement-change entry, successor-placement foreign key, and exact final-member
 frontier link were verified against this PR
-(`agent/runner-placement-semantic-persistence`).
+(`agent/runner-placement-semantic-persistence`). The deployment-scoped
+pending-successor activation transaction was verified against this PR
+(`agent/runner-pending-successor-activation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -408,6 +410,19 @@ Representation rules, all enforced in the schema:
   physical connection; later advertisement mutation remains refused. Existing
   request receipts migrate as active authority. Promotion is not part of this
   migration and remains a separate command-authorized transaction.
+- Migration `202608110012` adds the typed `promote_pending_runner` command and
+  atomically activates one connected pending candidate only while its exact
+  predecessor remains durably lost. The durable command claim precedes the
+  runner lock subsequence; the transaction then locks both enrollments in
+  canonical identity order, both connection heads in runner-identity order, and
+  the pending candidate's registration head. Success appends the predecessor
+  revocation and candidate activation audit rows, advances both enrollment
+  heads, and records the complete promoted-runner receipt together. Every
+  refusal is a terminal typed command result, so equal replay is independent of
+  later connection changes. The immutable pending relation remains as admission
+  history, while an applied command is required for every pending-to-active
+  state. No session scheduler, placement, grant, lease, workspace, turn, or
+  frontier row participates.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -687,7 +702,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-five explicit lock statements
+`crates/persistence/src/lock_inventory.rs`. Twenty-six explicit lock statements
 live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
@@ -737,7 +752,12 @@ live in the schema instead:
 - the pending-successor registration and connection guards in migration
   `202608110008` take `FOR SHARE` or `FOR UPDATE`, respectively, on the
   candidate enrollment before admitting its first registration or a physical
-  connection.
+  connection; and
+- the pending-successor admission guard in migration `202608110012` checks the
+  predecessor's exact current lost connection head under `FOR SHARE` when
+  inserting the immutable relation. Later activation uses the reviewed Rust lock
+  subsequence above; the relation remains historical if the predecessor
+  reconnects.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here

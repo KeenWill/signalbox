@@ -54,10 +54,11 @@ impl <Identity> {
 }
 ```
 
-The twenty-seven identities defined in `lib.rs`:
+The twenty-eight identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
+pub struct RunnerEnrollmentRequestId(/* private */);
 pub struct SessionId(/* private */);
 pub struct DelegationMessageId(/* private */);
 pub struct ImportedConversationId(/* private */);
@@ -5825,6 +5826,44 @@ impl<Transaction: UpdateSessionPlacementTransaction>
 }
 ```
 
+## application: promote_pending_runner
+
+```rust
+pub struct PromotePendingRunnerRequest { /* private */ }
+impl PromotePendingRunnerRequest {
+    pub fn try_new(
+        command: DurableCommandId,
+        pending_request: RunnerEnrollmentRequestId,
+    ) -> Result<Self, InvalidDurableCommandId>;
+}
+
+pub trait PromotePendingRunnerTransaction {
+    type Error;
+    fn handle(
+        &mut self,
+        command: PromotePendingRunner,
+    ) -> impl Future<Output = Result<PromotePendingRunnerOutcome, Self::Error>> + Send;
+}
+
+pub enum PromotePendingRunnerOutcome {
+    Recorded(PromotePendingRunnerResult),
+    ConflictingReuse { command: DurableCommandId },
+}
+
+pub struct PromotePendingRunnerService<Transaction> { /* private */ }
+impl<Transaction> PromotePendingRunnerService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: PromotePendingRunnerTransaction>
+    PromotePendingRunnerService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: PromotePendingRunnerRequest,
+    ) -> Result<PromotePendingRunnerOutcome, Transaction::Error>;
+}
+```
+
 ## application: create_session_from_imported_frontier
 
 ```rust
@@ -8519,6 +8558,48 @@ impl RunnerAdvertisement {
     pub fn repositories(&self) -> impl Iterator<Item = &RunnerRepositoryEntry>;
 }
 
+pub struct PromotePendingRunner { /* private */ }
+impl PromotePendingRunner {
+    pub const fn new(
+        command: DurableCommandId,
+        pending_request: RunnerEnrollmentRequestId,
+    ) -> Self;
+    pub const fn command(&self) -> DurableCommandId;
+    pub const fn pending_request(&self) -> RunnerEnrollmentRequestId;
+}
+pub enum RunnerNonLostConnectionState {
+    Connected,
+    Suspect,
+    Shutdown,
+}
+pub struct PromotedRunnerEnrollment { /* private */ }
+impl PromotedRunnerEnrollment {
+    pub const fn new(
+        pending_request: RunnerEnrollmentRequestId,
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        registration_revision: RunnerGeneration,
+    ) -> Self;
+    // accessors: pending_request(), enrollment(), runner(), registration_revision()
+}
+pub enum PromotePendingRunnerRejection {
+    NoPendingRunnerEnrollment,
+    PendingRequestMismatch {
+        pending_request: RunnerEnrollmentRequestId,
+    },
+    PendingRequestDisconnected {
+        pending_request: RunnerEnrollmentRequestId,
+    },
+    ActiveRunnerNotLost {
+        runner: RunnerId,
+        connection_state: RunnerNonLostConnectionState,
+    },
+}
+pub enum PromotePendingRunnerResult {
+    Applied(PromotedRunnerEnrollment),
+    Rejected(PromotePendingRunnerRejection),
+}
+
 pub enum RunnerEnrollmentState {
     Pending,
     Active,
@@ -10345,7 +10426,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types          |
 | -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 27                    |
+| domain: lib.rs identities                          | 28                    |
 | domain: actor                                      | 1                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
@@ -10381,13 +10462,14 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 70                    |
+| domain: runner                                     | 75                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **771 (+12 free fn)** |
+| **signalbox-domain total**                         | **777 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
 | application: update_session_placement              | 4 (incl. 1 trait)     |
+| application: promote_pending_runner                | 4 (incl. 1 trait)     |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
@@ -10407,4 +10489,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **251 (+1 free fn)**  |
+| **signalbox-application total**                    | **255 (+1 free fn)**  |

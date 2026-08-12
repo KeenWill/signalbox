@@ -9,7 +9,9 @@
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::Decimal;
-use signalbox_application::{ImportedConversationConverter, ImportedConversationStore};
+use signalbox_application::{
+    ImportedConversationConverter, ImportedConversationStore, PromotePendingRunnerOutcome,
+};
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, ApprovedToolRequest,
@@ -20,21 +22,23 @@ use signalbox_domain::{
     DirectModelSelection, DurableCommandId, EndedToolAttempt, ImportedConversation,
     ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
     ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
-    PerInputConfigurationChoices, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
-    RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
-    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
-    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
-    RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry, RunnerSandboxProfile,
-    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    PerInputConfigurationChoices, PromotePendingRunner, PromotePendingRunnerRejection,
+    PromotePendingRunnerResult, PromotedRunnerEnrollment, ProvisionedWorkspace,
+    ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement, RunnerAuthenticationId,
+    RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
+    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
+    RunnerLostBeforePin, RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -58,6 +62,7 @@ use signalbox_persistence::{
         ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
         ProcessTranscriptEntry,
     },
+    runner_promotion::PromotePendingRunnerRepository,
     runner_protocol::{
         IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
         RunnerConnectionEpoch, RunnerConnectionLossSessionDisposition, RunnerConnectionState,
@@ -96,6 +101,8 @@ const LATER_AUTHENTICATION: u128 = 0x9302;
 const ENROLLMENT_REQUEST: u128 = 0x9350;
 const PENDING_ENROLLMENT_REQUEST: u128 = 0x9351;
 const SECOND_PENDING_ENROLLMENT_REQUEST: u128 = 0x9352;
+const PROMOTE_PENDING_RUNNER_COMMAND: u128 = 0x9360;
+const SECOND_PROMOTE_PENDING_RUNNER_COMMAND: u128 = 0x9361;
 const SESSION: u128 = 0x9400;
 const FOREIGN_SESSION: u128 = 0x9401;
 const SECOND_SESSION: u128 = 0x9402;
@@ -114,6 +121,7 @@ const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608110004;
 const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608110005;
 const PRE_REGISTRATION_RECONCILIATION_MIGRATION: i64 = 202608110006;
 const PRE_PENDING_SUCCESSOR_MIGRATION: i64 = 202608110007;
+const PRE_PENDING_PROMOTION_MIGRATION: i64 = 202608110011;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -133,6 +141,107 @@ struct LeaseOfferAuthorityRow {
     offer_connection_epoch: Decimal,
     offer_connection_event_ordinal: Decimal,
     offer_loss_epoch: Decimal,
+}
+
+struct PendingPromotionFixture {
+    store: RunnerProtocolStore,
+    predecessor_enrollment: RunnerEnrollmentId,
+    predecessor_runner: RunnerId,
+    candidate_enrollment: RunnerEnrollmentId,
+    candidate_runner: RunnerId,
+    candidate_request: RunnerEnrollmentRequestId,
+    candidate_registration: RunnerGeneration,
+}
+
+async fn pending_promotion_fixture(
+    pool: PgPool,
+) -> Result<PendingPromotionFixture, Box<dyn Error>> {
+    let store = RunnerProtocolStore::new(pool, catalog());
+    let active = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?;
+    let active_connection = store
+        .open_connection(active.receipt().enrollment().enrollment())
+        .await?;
+    store
+        .transition_connection(
+            active.receipt().enrollment().enrollment(),
+            active_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let pending = store
+        .enroll_pristine(pristine_enrollment_request(
+            PENDING_ENROLLMENT_REQUEST,
+            REPLACEMENT_ENROLLMENT,
+            REPLACEMENT_RUNNER,
+            REPLACEMENT_AUTHENTICATION,
+        ))
+        .await?;
+    let candidate_registration =
+        RunnerGeneration::try_from_u64(pending.receipt().registration().revision().get())
+            .expect("the fixture registration revision is positive");
+    Ok(PendingPromotionFixture {
+        store,
+        predecessor_enrollment: active.receipt().enrollment().enrollment(),
+        predecessor_runner: active.receipt().enrollment().runner(),
+        candidate_enrollment: pending.receipt().enrollment().enrollment(),
+        candidate_runner: pending.receipt().enrollment().runner(),
+        candidate_request: pending.receipt().request(),
+        candidate_registration,
+    })
+}
+
+async fn unauthorized_pending_activation(
+    pool: &PgPool,
+    candidate: RunnerEnrollmentId,
+) -> sqlx::Error {
+    let mut transaction = pool
+        .begin()
+        .await
+        .expect("the malformed promotion transaction begins");
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit
+            (enrollment_id, revision, runner_id,
+             authentication_reference_id, allowed_class_count, state_kind)
+         SELECT enrollment_id, 2, runner_id,
+                authentication_reference_id, allowed_class_count, 'active'
+           FROM runner_enrollment
+          WHERE enrollment_id = $1",
+    )
+    .bind(candidate.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect("the unchecked active audit row is staged");
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit_allowed_class
+            (enrollment_id, revision, capability_class)
+         SELECT enrollment_id, 2, capability_class
+           FROM runner_enrollment_allowed_class
+          WHERE enrollment_id = $1",
+    )
+    .bind(candidate.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect("the unchecked active audit classes are staged");
+    sqlx::query(
+        "UPDATE runner_enrollment
+            SET revision = 2, state_kind = 'active'
+          WHERE enrollment_id = $1",
+    )
+    .bind(candidate.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect("the unchecked current state is staged");
+    transaction
+        .commit()
+        .await
+        .expect_err("deferred completeness rejects activation without a promotion command")
 }
 
 const INITIAL_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
@@ -3117,7 +3226,7 @@ async fn make_accepted_turn_direct_root(
     transaction.commit().await
 }
 
-async fn append_runner_registration_loss_projection(
+async fn complete_runner_lease_projection(
     store: &RunnerProtocolStore,
     registration: &StoredValidatedRunnerRegistration,
     pin: &SessionRunnerPin,
@@ -3130,6 +3239,13 @@ async fn append_runner_registration_loss_projection(
         .complete(pin.lease.correlation())
         .expect("the exact claimed fixture lease correlation completes");
     store.store_lease(&completed).await?;
+    Ok(())
+}
+
+async fn append_runner_registration_loss_after_completed_lease_projection(
+    store: &RunnerProtocolStore,
+    pin: &SessionRunnerPin,
+) -> Result<(), Box<dyn Error>> {
     let pending = store.load_pending_registration_reconciliations().await?;
     store
         .reconcile_registration_session(pending[0], pin.placement.session())
@@ -3138,6 +3254,15 @@ async fn append_runner_registration_loss_projection(
         .complete_registration_reconciliation(pending[0])
         .await?;
     Ok(())
+}
+
+async fn append_runner_registration_loss_projection(
+    store: &RunnerProtocolStore,
+    registration: &StoredValidatedRunnerRegistration,
+    pin: &SessionRunnerPin,
+) -> Result<(), Box<dyn Error>> {
+    complete_runner_lease_projection(store, registration, pin).await?;
+    append_runner_registration_loss_after_completed_lease_projection(store, pin).await
 }
 
 async fn append_same_runner_replacement_projection(
@@ -3979,6 +4104,382 @@ async fn s30_inv042_pending_successor_migration_preserves_active_request_receipt
     assert_eq!(receipt.authority(), RunnerEnrollmentAuthority::Active);
     assert_eq!(receipt.enrollment(), &expected_enrollment);
     assert_eq!(receipt.registration(), &registration);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042 / INV-044: a connected pending successor atomically becomes active
+/// only while its exact predecessor remains durably lost.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_inv044_pending_successor_promotion_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let repository = PromotePendingRunnerRepository::new(pool.clone());
+    let command = PromotePendingRunner::new(
+        DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND)),
+        fixture.candidate_request,
+    );
+    let expected = PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Applied(
+        PromotedRunnerEnrollment::new(
+            fixture.candidate_request,
+            fixture.candidate_enrollment,
+            fixture.candidate_runner,
+            fixture.candidate_registration,
+        ),
+    ));
+
+    let applied = repository.handle(command).await?;
+    let replayed = repository.handle(command).await?;
+    let predecessor = fixture
+        .store
+        .load_enrollment(fixture.predecessor_enrollment)
+        .await?
+        .expect("the revoked predecessor reads back");
+    let mut candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the active successor reads back");
+    let pending = fixture
+        .store
+        .load_pending_enrollment(fixture.candidate_request)
+        .await?;
+    let candidate_active_state = candidate.state();
+    let revoked = fixture.store.revoke_enrollment(&mut candidate).await?;
+    let reloaded_revoked = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the revision-three revocation reads back");
+
+    assert_eq!(applied, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        predecessor.state(),
+        signalbox_domain::RunnerEnrollmentState::Revoked
+    );
+    assert_eq!(
+        candidate_active_state,
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    assert_eq!(candidate.runner(), fixture.candidate_runner);
+    assert_eq!(pending, None);
+    assert!(revoked);
+    assert_eq!(
+        reloaded_revoked.state(),
+        signalbox_domain::RunnerEnrollmentState::Revoked
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: a disconnected pending candidate produces one terminal recorded
+/// rejection even if it connects before equal replay.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_pending_successor_promotion_records_disconnected_rejection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    let repository = PromotePendingRunnerRepository::new(pool.clone());
+    let command = PromotePendingRunner::new(
+        DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND)),
+        fixture.candidate_request,
+    );
+    let expected = PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Rejected(
+        PromotePendingRunnerRejection::PendingRequestDisconnected {
+            pending_request: fixture.candidate_request,
+        },
+    ));
+
+    let rejected = repository.handle(command).await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let replayed = repository.handle(command).await?;
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the pending successor reads back");
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Pending
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: predecessor reconnection is recorded as active-not-lost and equal
+/// replay does not reinterpret a later terminal connection transition.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_pending_successor_promotion_records_active_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let predecessor_connection = fixture
+        .store
+        .open_connection(fixture.predecessor_enrollment)
+        .await?;
+    let repository = PromotePendingRunnerRepository::new(pool.clone());
+    let command = PromotePendingRunner::new(
+        DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND)),
+        fixture.candidate_request,
+    );
+    let expected = PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Rejected(
+        PromotePendingRunnerRejection::ActiveRunnerNotLost {
+            runner: fixture.predecessor_runner,
+            connection_state: signalbox_domain::RunnerNonLostConnectionState::Connected,
+        },
+    ));
+
+    let rejected = repository.handle(command).await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.predecessor_enrollment,
+            predecessor_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let replayed = repository.handle(command).await?;
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-042: an unseen command records no-pending, and equal replay
+/// returns that result without consulting later state.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv042_pending_successor_promotion_records_no_pending()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = PromotePendingRunnerRepository::new(pool.clone());
+    let pending_request = RunnerEnrollmentRequestId::from_uuid(uuid(PENDING_ENROLLMENT_REQUEST));
+    let command = PromotePendingRunner::new(
+        DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND)),
+        pending_request,
+    );
+    let expected = PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Rejected(
+        PromotePendingRunnerRejection::NoPendingRunnerEnrollment,
+    ));
+
+    let rejected = repository.handle(command).await?;
+    let replayed = repository.handle(command).await?;
+    let conflicting = repository
+        .handle(PromotePendingRunner::new(
+            command.command(),
+            RunnerEnrollmentRequestId::from_uuid(uuid(SECOND_PENDING_ENROLLMENT_REQUEST)),
+        ))
+        .await?;
+    let expected_conflict = PromotePendingRunnerOutcome::ConflictingReuse {
+        command: command.command(),
+    };
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(conflicting, expected_conflict);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-001 / INV-042: a command naming a different request records the exact
+/// mismatch and equal replay returns it unchanged.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv042_pending_successor_promotion_records_request_mismatch()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    let repository = PromotePendingRunnerRepository::new(pool.clone());
+    let observed = RunnerEnrollmentRequestId::from_uuid(uuid(SECOND_PENDING_ENROLLMENT_REQUEST));
+    let command = PromotePendingRunner::new(
+        DurableCommandId::from_uuid(uuid(SECOND_PROMOTE_PENDING_RUNNER_COMMAND)),
+        observed,
+    );
+    let expected = PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Rejected(
+        PromotePendingRunnerRejection::PendingRequestMismatch {
+            pending_request: observed,
+        },
+    ));
+
+    let rejected = repository.handle(command).await?;
+    let replayed = repository.handle(command).await?;
+    let pending = fixture
+        .store
+        .load_pending_enrollment(fixture.candidate_request)
+        .await?
+        .expect("the original pending request remains installed");
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(pending.receipt().request(), fixture.candidate_request);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042 / INV-044: migration 202608110012 preserves a valid pending
+/// predecessor relation and makes that exact candidate promotable.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_inv044_pending_successor_promotion_upgrades_existing_candidate()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_PENDING_PROMOTION_MIGRATION, &pool)
+        .await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    migrate(&pool).await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let repository = PromotePendingRunnerRepository::new(pool.clone());
+    let command = PromotePendingRunner::new(
+        DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND)),
+        fixture.candidate_request,
+    );
+    let expected = PromotePendingRunnerOutcome::Recorded(PromotePendingRunnerResult::Applied(
+        PromotedRunnerEnrollment::new(
+            fixture.candidate_request,
+            fixture.candidate_enrollment,
+            fixture.candidate_runner,
+            fixture.candidate_registration,
+        ),
+    ));
+
+    let applied = repository.handle(command).await?;
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the migrated candidate reads back active");
+
+    assert_eq!(applied, expected);
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: the relational state rejects a pending-to-active transition that
+/// lacks the exact applied deployment-scoped command.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_pending_successor_cannot_activate_without_command() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+
+    let rejected = unauthorized_pending_activation(&pool, fixture.candidate_enrollment).await;
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: a pending candidate keeps its predecessor active until the same
+/// command transaction activates the candidate and revokes the predecessor.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_pending_successor_prevents_independent_predecessor_revocation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    let mut predecessor = fixture
+        .store
+        .load_enrollment(fixture.predecessor_enrollment)
+        .await?
+        .expect("the active predecessor reads back");
+
+    let rejected = fixture
+        .store
+        .revoke_enrollment(&mut predecessor)
+        .await
+        .expect_err("revocation outside promotion lacks the candidate transition");
+    let reloaded = fixture
+        .store
+        .load_enrollment(fixture.predecessor_enrollment)
+        .await?
+        .expect("the refused predecessor remains active");
+
+    assert_store_check_violation(rejected);
+    assert_eq!(
+        reloaded.state(),
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: an applied promotion receipt must name the exact pending relation;
+/// an ordinary active enrollment and registration cannot counterfeit it.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_applied_promotion_rejects_nonpending_enrollment() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let active = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?;
+    let command = DurableCommandId::from_uuid(uuid(PROMOTE_PENDING_RUNNER_COMMAND));
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'promote_pending_runner', 1, transaction_timestamp())",
+    )
+    .bind(command.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO promote_pending_runner_command
+            (command_id, pending_request_id, result_kind,
+             result_enrollment_id, result_runner_id,
+             result_registration_revision)
+         VALUES ($1, $2, 'applied', $3, $4, $5)",
+    )
+    .bind(command.into_uuid())
+    .bind(active.receipt().request().into_uuid())
+    .bind(active.receipt().enrollment().enrollment().into_uuid())
+    .bind(active.receipt().enrollment().runner().into_uuid())
+    .bind(Decimal::from(
+        active.receipt().registration().revision().get(),
+    ))
+    .execute(&mut *transaction)
+    .await?;
+
+    let rejected = transaction
+        .commit()
+        .await
+        .expect_err("an ordinary active enrollment is not a pending promotion result");
+
+    assert_foreign_key_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -19155,6 +19656,7 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     let session = pin.placement.session();
     let (placement_event_ordinal, placement_revision) =
         placement_outbox_facts(&pool, session, "pinned").await?;
+    complete_runner_lease_projection(&store, &registration, &pin).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
@@ -19175,7 +19677,7 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     store
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
-    append_runner_registration_loss_projection(&store, &registration, &pin).await?;
+    append_runner_registration_loss_after_completed_lease_projection(&store, &pin).await?;
     let mut replacement = pool.begin().await?;
     append_same_runner_replacement_projection(&mut replacement, session, None).await?;
     replacement.commit().await?;

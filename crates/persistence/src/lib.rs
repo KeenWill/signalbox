@@ -28,6 +28,7 @@ pub mod repo_watch_dispatch;
 pub mod review_orchestration;
 pub mod review_workflow;
 mod review_workflow_command;
+pub mod runner_promotion;
 pub mod runner_protocol;
 pub mod scheduler;
 pub mod session;

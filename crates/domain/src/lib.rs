@@ -215,19 +215,20 @@ pub use runner::{
     CredentialProfileGrantReplacement, CredentialProfileGrantState, CredentialProfileName,
     CredentialProfilePlacementReplacement, CredentialProfilePolicy, CredentialToolApproval,
     LostPinnedRunnerPlacement, PinnedRunnerPlacement, PreparedRunnerRegistration,
-    ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog,
-    RunnerClaimedAttemptReplacement, RunnerCredentialGrantChange, RunnerCredentialGrantLineage,
-    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentReconstitutionInput,
-    RunnerEnrollmentState, RunnerGeneration, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseLoss,
-    RunnerLeaseNoExecutionProof, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerLeaseRetryAuthority, RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin,
-    RunnerPlacementChange, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementReplacement, RunnerPrePinReplacement, RunnerPrePinReplacementHistory,
-    RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory, SessionRunnerPin,
-    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    PromotePendingRunner, PromotePendingRunnerRejection, PromotePendingRunnerResult,
+    PromotedRunnerEnrollment, ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass,
+    RunnerCatalog, RunnerClaimedAttemptReplacement, RunnerCredentialGrantChange,
+    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
+    RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseNoExecutionProof, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority, RunnerLeaseRetryPreparation,
+    RunnerLeaseState, RunnerLostBeforePin, RunnerNonLostConnectionState, RunnerPlacementChange,
+    RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory, RunnerPlacementReplacement,
+    RunnerPrePinReplacement, RunnerPrePinReplacementHistory, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
     ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
     WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceRecovery,
@@ -410,6 +411,11 @@ define_identity!(
     ///
     /// This identity does not prove that the command was applied.
     DurableCommandId
+);
+
+define_identity!(
+    /// Identifies one stable runner-created enrollment request.
+    RunnerEnrollmentRequestId
 );
 
 define_identity!(

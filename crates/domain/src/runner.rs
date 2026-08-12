@@ -4,6 +4,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    hash::{Hash, Hasher},
     num::NonZeroU64,
     sync::{
         Arc,
@@ -12,12 +13,147 @@ use std::{
 };
 
 use crate::{
-    ApprovedToolRequest, AuthorizedToolAttempt, EndedToolAttempt, NormalizedToolArguments,
-    RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId,
-    ToolArgumentsKind, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch,
-    ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass, ToolName,
-    ToolPermissionDefault, WorkspaceManifestId,
+    ApprovedToolRequest, AuthorizedToolAttempt, DurableCommandId, EndedToolAttempt,
+    NormalizedToolArguments, RunnerAuthenticationId, RunnerEnrollmentId, RunnerEnrollmentRequestId,
+    RunnerId, RunnerLeaseId, SessionId, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
+    ToolAttemptId, ToolBatch, ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass,
+    ToolName, ToolPermissionDefault, WorkspaceManifestId,
 };
+
+/// Complete deployment-scoped request to activate one pending runner.
+#[derive(Clone, Copy, Debug)]
+pub struct PromotePendingRunner {
+    command: DurableCommandId,
+    pending_request: RunnerEnrollmentRequestId,
+}
+
+/// Comparison equality covers the complete caller payload except its command identity.
+impl PartialEq for PromotePendingRunner {
+    fn eq(&self, other: &Self) -> bool {
+        self.pending_request == other.pending_request
+    }
+}
+
+impl Eq for PromotePendingRunner {}
+
+impl Hash for PromotePendingRunner {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.pending_request.hash(state);
+    }
+}
+
+impl PromotePendingRunner {
+    /// Labels the durable command and exact pending enrollment request.
+    pub const fn new(
+        command: DurableCommandId,
+        pending_request: RunnerEnrollmentRequestId,
+    ) -> Self {
+        Self {
+            command,
+            pending_request,
+        }
+    }
+
+    /// Returns the user-global durable command identity.
+    pub const fn command(&self) -> DurableCommandId {
+        self.command
+    }
+
+    /// Returns the exact pending enrollment-request identity.
+    pub const fn pending_request(&self) -> RunnerEnrollmentRequestId {
+        self.pending_request
+    }
+}
+
+/// Non-lost connection state retained by a rejected promotion command.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerNonLostConnectionState {
+    /// The runner connection is currently usable.
+    Connected,
+    /// The runner connection is within the heartbeat grace window.
+    Suspect,
+    /// The runner connection ended through an orderly shutdown.
+    Shutdown,
+}
+
+/// Exact active enrollment produced by a successful pending-runner promotion.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PromotedRunnerEnrollment {
+    pending_request: RunnerEnrollmentRequestId,
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    registration_revision: RunnerGeneration,
+}
+
+impl PromotedRunnerEnrollment {
+    /// Constructs the complete terminal command receipt.
+    pub const fn new(
+        pending_request: RunnerEnrollmentRequestId,
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        registration_revision: RunnerGeneration,
+    ) -> Self {
+        Self {
+            pending_request,
+            enrollment,
+            runner,
+            registration_revision,
+        }
+    }
+
+    /// Returns the pending request consumed by promotion.
+    pub const fn pending_request(self) -> RunnerEnrollmentRequestId {
+        self.pending_request
+    }
+
+    /// Returns the promoted enrollment identity.
+    pub const fn enrollment(self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the promoted logical runner identity.
+    pub const fn runner(self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the exact registration revision retained by activation.
+    pub const fn registration_revision(self) -> RunnerGeneration {
+        self.registration_revision
+    }
+}
+
+/// Closed authoritative rejection for one pending-runner promotion.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PromotePendingRunnerRejection {
+    /// No pending successor exists in this deployment.
+    NoPendingRunnerEnrollment,
+    /// A different request currently owns the pending successor slot.
+    PendingRequestMismatch {
+        /// Request identity supplied by the user command.
+        pending_request: RunnerEnrollmentRequestId,
+    },
+    /// The exact pending successor has no current connected transport.
+    PendingRequestDisconnected {
+        /// Request identity supplied by the user command.
+        pending_request: RunnerEnrollmentRequestId,
+    },
+    /// The active predecessor is not durably lost.
+    ActiveRunnerNotLost {
+        /// Logical predecessor runner identity.
+        runner: RunnerId,
+        /// Current non-lost connection state.
+        connection_state: RunnerNonLostConnectionState,
+    },
+}
+
+/// Terminal durable result of one deployment-scoped runner promotion.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PromotePendingRunnerResult {
+    /// The pending successor became the active enrollment.
+    Applied(PromotedRunnerEnrollment),
+    /// Current typed state refused the command.
+    Rejected(PromotePendingRunnerRejection),
+}
 
 const NAME_MAX_BYTES: usize = 64;
 const EXACT_VALUE_MAX_BYTES: usize = 4_096;
