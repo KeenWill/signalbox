@@ -100,12 +100,13 @@ authority as unsettled.
 that binds its read to its commit. It resolves the statement again when it
 commits, under the lock the commit takes, and compares it against the one it
 read. Equal statements commit the decision. A statement that resolved before and
-resolves to nothing now belongs to a generation that closed, and one resolving
-to different bytes belongs to a generation that was replaced; either escalates
-to a human rather than committing a decision formed under authority no longer in
-force. A judge that read no statement decided without one, so a generation
-attached since withdraws nothing and leaves that decision alone: the comparison
-pins withdrawal, not novelty.
+resolves to nothing now belongs to a generation that closed, whether it was
+stopped, achieved, or replaced by a supersession — a replacement closes the
+generation the decision was formed under rather than restating it, so it too
+resolves to nothing. That escalates to a human rather than committing a decision
+formed under authority no longer in force. A judge that read no statement
+decided without one, so a generation attached since withdraws nothing and leaves
+that decision alone: the comparison pins withdrawal, not novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while
@@ -289,10 +290,14 @@ a closed generation cannot reopen — but not which recommendation was
 substituted, so a retry offering a different recommendation from the one first
 offered is admitted as an exact replay. The structural answer is for the record
 to carry both, after which a replay compares the offered value against the
-stored offered value and needs no such proof. Until then the exposure is latent
-rather than live: no caller retries a completion with a recommendation other
-than the one it first offered, because the only uncertain-commit path fails an
-in-flight judge as ambiguous instead of re-entering completion.
+stored offered value and needs no such proof. The same loss admits the mirror
+case: a provider's own escalation, committed while the authority was open and
+followed by a withdrawal, is indistinguishable from a substituted one, so a
+retry offering an approval or a denial is admitted there too. Until then the
+exposure is latent rather than live: no caller retries a completion with a
+recommendation other than the one it first offered, because the only
+uncertain-commit path fails an in-flight judge as ambiguous instead of
+re-entering completion.
 
 ## Open edges
 
