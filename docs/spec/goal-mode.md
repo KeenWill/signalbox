@@ -7,10 +7,12 @@ and terminal-client verbs. The domain and persistence surface was verified
 through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
 process, and terminal surfaces were verified through PR #384
 (`agent/goal-mode-runtime`). Dispatch-composed commissions and the generation a
-turn's authority resolves to are verified against this PR
-(`agent/dispatch-session-goals`). This bottom specification diff owns both stack
-slices. Identity and durable-command mechanics remain owned by
-[identity and commands](identity-and-commands.md), turn execution by
+turn's authority resolves to were verified through PR #562
+(`agent/dispatch-session-goals`). Resolving that authority again when a consumer
+commits is verified against this PR (`agent/judge-completion-recheck`). This
+bottom specification diff owns both stack slices. Identity and durable-command
+mechanics remain owned by [identity and commands](identity-and-commands.md),
+turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
@@ -94,16 +96,30 @@ still open, so a goal already stopped or achieved supplies no statement. Any
 other shape resolves to no statement, leaving the consumer to treat the
 authority as unsettled.
 
-**Implemented behavior.** A consumer that reads the authority, performs work,
-and commits a decision afterwards resolves the statement again when it commits,
-under the same lock the commit takes, and compares it against the one it read.
-Equal statements commit the decision. A statement that resolved before and
+**Implemented behavior.** The delegated tool-approval judge is the one consumer
+that binds its read to its commit. It resolves the statement again when it
+commits, under the lock the commit takes, and compares it against the one it
+read. Equal statements commit the decision. A statement that resolved before and
 resolves to nothing now belongs to a generation that closed, and one resolving
 to different bytes belongs to a generation that was replaced; either escalates
 to a human rather than committing a decision formed under authority no longer in
-force. A consumer that read no statement decided without one, so a generation
+force. A judge that read no statement decided without one, so a generation
 attached since withdraws nothing and leaves that decision alone: the comparison
 pins withdrawal, not novelty.
+
+**Implemented behavior.** The commit-time resolution is not the reading
+resolution. Reading binds a recorded generation exactly, so a supersession while
+a turn is parked cannot broaden what the consumer is shown. Committing asks
+whether the authority the decision was formed under is still in force, so a
+recorded generation supplies its statement only while it remains open. A
+resolution that bound the generation exactly at commit time would compare a
+statement against itself and find withdrawn authority intact.
+
+**Committed unimplemented functionality.** No consumer other than the approval
+judge resolves the authority it read a second time when it commits. Such a
+consumer commits under the statement as it stood at its read. A future consumer
+binding its own read to its own commit follows the escalation rule above rather
+than choosing again.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no
@@ -267,6 +283,4 @@ context feeding an escalation instruction rather than a commit gate.
 ## Open edges
 
 **Deferred or undecided work.** No goal-mode open question is recorded by this
-version-one contract. The one it carried — what a consumer does when the
-generation it read closes before it commits — is
-[decided](../open-questions.md#goal-mode) and implemented above: it escalates.
+version-one contract.

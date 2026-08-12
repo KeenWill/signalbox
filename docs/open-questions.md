@@ -150,25 +150,6 @@ request against a quiet `main` rather than inside the compaction stack.
 Raised as a review finding and dispositioned with this condition attached:
 https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
-## Goal mode
-
-- **What a consumer does when its generation closes mid-operation. Decided: it
-  escalates.** A consumer reads the authority a turn ran under, works, and
-  commits afterwards, so a generation stopped or achieved in between was open
-  when read and closed when committed. The two candidates were escalating, which
-  treats the closure as a reason to ask a human, and refusing, which treats it
-  as withdrawn authority and discards a decision the model already paid for.
-  Escalation was chosen because a closed generation leaves the request needing a
-  decision that no authority now covers, and a human is the only remaining
-  source of one; refusing would answer the request under an authority that no
-  longer exists, which is the failure the recheck exists to prevent. Owner
-  ruling 2026-08-11, implemented for the approval judge in
-  [goal mode](spec/goal-mode.md). A later consumer binding its own read to its
-  own commit follows this ruling rather than reopening it.
-
-Raised as a review finding on the dispatch-goal work:
-https://github.com/KeenWill/signalbox/pull/562#discussion_r3760635157
-
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
