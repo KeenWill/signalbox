@@ -2065,14 +2065,10 @@ async fn decode_approval(
                 rationale.ok_or(ToolLoopCorruption::Missing("delegate rationale"))?,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
-            // A delegate denial's stored reason is derived from its rationale;
-            // rows written before that derivation existed carry none.
-            if let ToolApprovalDecision::Deny { ref reason } = decision {
-                let derived = ToolDenialReason::from_rationale(&rationale);
-                if reason.is_some() && *reason != derived {
-                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
-                }
-            }
+            let stored_denial_reason = match &decision {
+                ToolApprovalDecision::Approve => None,
+                ToolApprovalDecision::Deny { reason } => reason.clone(),
+            };
             let approval = DelegateToolApproval::try_new(
                 request_record,
                 DirectModelSelection::from_uuid(
@@ -2085,7 +2081,7 @@ async fn decode_approval(
                 rationale,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate authority"))?;
-            ToolApprovalResolutionReconstitutionInput::delegate(approval)
+            ToolApprovalResolutionReconstitutionInput::delegate(approval, stored_denial_reason)
         }
         ToolApprovalDecisionSourceStorageKind::PolicyAuto
         | ToolApprovalDecisionSourceStorageKind::SessionBlanket => {

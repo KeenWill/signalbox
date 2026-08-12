@@ -1013,7 +1013,10 @@ pub struct ToolApprovalResolutionReconstitutionInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum StoredToolApprovalEvidence {
     UserCommand(PreparedDecideToolRequest),
-    Delegate(Box<DelegateToolApproval>),
+    Delegate {
+        approval: Box<DelegateToolApproval>,
+        stored_denial_reason: Option<ToolDenialReason>,
+    },
     PolicyAuto(ToolRequestId),
     SessionBlanket {
         request: ToolRequestId,
@@ -1029,10 +1032,22 @@ impl ToolApprovalResolutionReconstitutionInput {
         }
     }
 
-    /// Supplies one authority-checked delegate decision and its recorded call.
-    pub fn delegate(approval: DelegateToolApproval) -> Self {
+    /// Supplies one authority-checked delegate decision, its recorded call,
+    /// and the denial reason exactly as stored beside the decision.
+    ///
+    /// The stored reason is authoritative for reconstitution: rows written
+    /// before reason derivation existed carry none and keep rendering none,
+    /// while a present stored reason must equal the derivation from the
+    /// recorded rationale.
+    pub fn delegate(
+        approval: DelegateToolApproval,
+        stored_denial_reason: Option<ToolDenialReason>,
+    ) -> Self {
         Self {
-            evidence: StoredToolApprovalEvidence::Delegate(Box::new(approval)),
+            evidence: StoredToolApprovalEvidence::Delegate {
+                approval: Box::new(approval),
+                stored_denial_reason,
+            },
         }
     }
 
@@ -1086,9 +1101,27 @@ impl ToolApprovalResolutionReconstitutionInput {
                 }
                 DecideToolRequestResult::Applied(_) | DecideToolRequestResult::Rejected(_) => None,
             },
-            StoredToolApprovalEvidence::Delegate(approval) => {
-                ToolApprovalResolution::delegate(approval)
-            }
+            StoredToolApprovalEvidence::Delegate {
+                approval,
+                stored_denial_reason,
+            } => ToolApprovalResolution::delegate(approval).and_then(|mut resolution| {
+                match &mut resolution.decision {
+                    ToolApprovalDecision::Approve => {
+                        stored_denial_reason.is_none().then_some(resolution)
+                    }
+                    ToolApprovalDecision::Deny { reason } => match stored_denial_reason {
+                        // The stored reason is authoritative: legacy rows
+                        // written before derivation existed keep their absent
+                        // reason on every read path.
+                        None => {
+                            *reason = None;
+                            Some(resolution)
+                        }
+                        Some(stored) if reason.as_ref() == Some(stored) => Some(resolution),
+                        Some(_) => None,
+                    },
+                }
+            }),
             StoredToolApprovalEvidence::PolicyAuto(request) => {
                 Some(ToolApprovalResolution::policy_auto(*request))
             }
@@ -1752,9 +1785,12 @@ mod tests {
             rationale.clone(),
         )
         .expect("delegated authority may deny");
-        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(approval)
-            .reconstitute()
-            .expect("checked delegate evidence restores its decision");
+        let stored_reason = ToolDenialReason::try_new(String::from(JUDGE_RATIONALE))
+            .expect("fixture rationale is an admitted reason");
+        let resolution =
+            ToolApprovalResolutionReconstitutionInput::delegate(approval, Some(stored_reason))
+                .reconstitute()
+                .expect("checked delegate evidence restores its decision");
 
         assert_eq!(
             resolution.decider(),
@@ -1770,6 +1806,66 @@ mod tests {
                 )
             }
         );
+    }
+
+    /// A pre-derivation delegate denial stored no reason; reconstitution must
+    /// keep rendering none rather than deriving one the durable decision
+    /// never carried, and must reject a stored reason the rationale cannot
+    /// derive.
+    #[test]
+    fn delegate_reconstitution_preserves_the_stored_denial_reason() {
+        const SUBJECT_REQUEST_SEED: u128 = 60;
+        const SUBJECT_SESSION_SEED: u128 = 1;
+        const SUBJECT_TURN_SEED: u128 = 2;
+        const ISSUING_CALL_SEED: u128 = 3;
+        const SUBJECT_TOOL_NAME: &str = "current_time";
+        const SUBJECT_ARGUMENTS: &str = "{}";
+        const JUDGE_MODEL_SEED: u128 = 61;
+        const JUDGE_CALL_SEED: u128 = 62;
+        const JUDGE_RATIONALE: &str = "scope exceeded";
+
+        let request = ToolRequestReconstitutionInput::new(
+            tool_request_id(SUBJECT_REQUEST_SEED),
+            session_id(SUBJECT_SESSION_SEED),
+            turn_id(SUBJECT_TURN_SEED),
+            model_call_id(ISSUING_CALL_SEED),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from(SUBJECT_TOOL_NAME)).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from(SUBJECT_ARGUMENTS))
+                .expect("fixture arguments are valid"),
+        )
+        .with_approval_posture(ToolApprovalPosture::Delegated)
+        .into_request();
+        let approval = || {
+            DelegateToolApproval::try_new(
+                &request,
+                DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED)),
+                model_call_id(JUDGE_CALL_SEED),
+                DelegateApprovalRecommendation::Deny,
+                ToolDecisionRationale::try_new(String::from(JUDGE_RATIONALE))
+                    .expect("fixture rationale is admitted"),
+            )
+            .expect("delegated authority may deny")
+        };
+
+        let legacy = ToolApprovalResolutionReconstitutionInput::delegate(approval(), None)
+            .reconstitute()
+            .expect("a legacy reason-free denial reconstitutes");
+        assert_eq!(
+            legacy.decision(),
+            &ToolApprovalDecision::Deny { reason: None }
+        );
+
+        let mismatched = ToolApprovalResolutionReconstitutionInput::delegate(
+            approval(),
+            Some(
+                ToolDenialReason::try_new(String::from("unrelated stored text"))
+                    .expect("fixture reason is admitted"),
+            ),
+        )
+        .reconstitute()
+        .expect_err("a stored reason the rationale cannot derive is rejected");
+        drop(mismatched);
     }
 
     #[test]
