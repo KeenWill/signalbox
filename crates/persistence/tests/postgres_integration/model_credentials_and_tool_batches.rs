@@ -1031,6 +1031,49 @@ async fn s31_inv004_inv043_batch_reload_restores_retired_attempt_identities()
     Ok(())
 }
 
+/// The frontiers the outbox reports for one turn's tool-batch transitions.
+///
+/// Draining the outbox and matching its events is plumbing irrelevant to the
+/// behavior under test, so it lives here rather than in a test body
+/// (`docs/agents/testing-style.md` rules 2 and 3). Reporting the frontiers
+/// themselves rather than booleans also lets a caller assert the value it
+/// expects, which a boolean cannot distinguish from a missing event (rule 6).
+struct ObservedToolBatchFrontiers {
+    proposed: Option<ContextFrontierId>,
+    results_projected: Option<ContextFrontierId>,
+}
+
+async fn observed_tool_batch_frontiers(
+    pool: &PgPool,
+    turn: TurnId,
+    producing_call: ModelCallId,
+) -> Result<ObservedToolBatchFrontiers, OutboxDispatchError> {
+    let mut proposed = None;
+    let mut results_projected = None;
+    drain_outbox(pool, |event| match event.kind() {
+        DispatchedOutboxEventKind::ToolBatchTransition {
+            turn: event_turn,
+            producing_call: event_call,
+            state: DispatchedToolBatchState::Proposed { frontier },
+        } if *event_turn == turn && *event_call == producing_call => {
+            proposed = Some(*frontier);
+        }
+        DispatchedOutboxEventKind::ToolBatchTransition {
+            turn: event_turn,
+            producing_call: event_call,
+            state: DispatchedToolBatchState::ResultsProjected { frontier },
+        } if *event_turn == turn && *event_call == producing_call => {
+            results_projected = Some(*frontier);
+        }
+        _ => {}
+    })
+    .await?;
+    Ok(ObservedToolBatchFrontiers {
+        proposed,
+        results_projected,
+    })
+}
+
 /// S02 / S10 / S11 / INV-005 / INV-006 / INV-019 / INV-027 / INV-036: one confirmed
 /// proposal survives a repository restart, records a replay-safe user
 /// decision, executes through an exact durable fence, and projects one
@@ -1128,23 +1171,23 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
         .await?
         .expect("the revalidated batch still has work");
     assert_eq!(prepared_attempt.state(), CurrentToolAttemptState::Prepared);
-    assert!(matches!(
-        tool_repository
-            .reread_ambiguous_authorization(fixture.session, fixture.turn, tool_attempt)
-            .await?,
-        ToolAttemptAuthorizationStatus::Prepared(ref attempt)
-            if attempt.attempt() == tool_attempt
-    ));
+    let prepared_reread = tool_repository
+        .reread_ambiguous_authorization(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let ToolAttemptAuthorizationStatus::Prepared(prepared_reread) = prepared_reread else {
+        panic!("an unauthorized attempt must reread as prepared");
+    };
+    assert_eq!(prepared_reread.attempt(), tool_attempt);
     let authorized_attempt = tool_repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
-    assert!(matches!(
-        tool_repository
-            .reread_ambiguous_authorization(fixture.session, fixture.turn, tool_attempt)
-            .await?,
-        ToolAttemptAuthorizationStatus::InFlight(ref reread)
-            if reread == &authorized_attempt
-    ));
+    let in_flight_reread = tool_repository
+        .reread_ambiguous_authorization(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let ToolAttemptAuthorizationStatus::InFlight(in_flight_reread) = in_flight_reread else {
+        panic!("an authorized attempt must reread as in flight");
+    };
+    assert_eq!(in_flight_reread, authorized_attempt);
     let impossible_preflight_error = sqlx::query(
         "UPDATE tool_attempt
             SET state_kind = 'terminal',
@@ -1180,41 +1223,49 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(seed + 81, seed + 80, direct(seed + 82)))
         .await?;
-    for (entry, payload_kind, request_reference, attempt_reference) in [
-        (
-            Uuid::from_u128(seed + 83),
-            "tool_closed_by_turn_end",
-            Some(request.into_uuid()),
-            None,
-        ),
-        (
-            Uuid::from_u128(seed + 84),
-            "tool_execution_result",
-            None,
-            Some(tool_attempt.into_uuid()),
-        ),
-    ] {
-        let cross_session_result_error = sqlx::query(
-            "INSERT INTO semantic_transcript_entry
+    // Unrolled rather than looped so each rejected reference reads on its own
+    // (`docs/agents/testing-style.md` rules 2 and 3). The two cases differ in
+    // which reference column is populated, which is the behavior under test.
+    let cross_session_closed_error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
                 (source_session_id, semantic_entry_id, payload_kind,
                  tool_result_request_id, tool_result_attempt_id)
              VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(unrelated_session)
-        .bind(entry)
-        .bind(payload_kind)
-        .bind(request_reference)
-        .bind(attempt_reference)
-        .execute(&pool)
-        .await
-        .expect_err("tool-result references must belong to the entry's source session");
-        assert_eq!(
-            cross_session_result_error
-                .as_database_error()
-                .and_then(|error| error.code()),
-            Some("23503".into())
-        );
-    }
+    )
+    .bind(unrelated_session)
+    .bind(Uuid::from_u128(seed + 83))
+    .bind("tool_closed_by_turn_end")
+    .bind(Some(request.into_uuid()))
+    .bind(None::<Uuid>)
+    .execute(&pool)
+    .await
+    .expect_err("tool-result references must belong to the entry's source session");
+    assert_eq!(
+        cross_session_closed_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23503".into())
+    );
+    let cross_session_result_error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 tool_result_request_id, tool_result_attempt_id)
+             VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(unrelated_session)
+    .bind(Uuid::from_u128(seed + 84))
+    .bind("tool_execution_result")
+    .bind(None::<Uuid>)
+    .bind(Some(tool_attempt.into_uuid()))
+    .execute(&pool)
+    .await
+    .expect_err("tool-result references must belong to the entry's source session");
+    assert_eq!(
+        cross_session_result_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23503".into())
+    );
 
     let resolved = restarted_repository
         .load_active_batch(fixture.session, fixture.turn)
@@ -1275,7 +1326,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             (SELECT count(*) FROM tool_approval_decision
               WHERE request_id = $2
                 AND decision_kind = 'approve'
-                AND decision_source = 'owner_command'),
+                AND decision_source = 'user_command'),
             (SELECT count(*) FROM tool_attempt
               WHERE attempt_id = $3
                 AND state_kind = 'terminal'
@@ -1389,33 +1440,12 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             .is_none(),
         "the atomic continuation no longer exposes the completed batch"
     );
-    let mut proposed_event = false;
-    let mut results_event = false;
-    drain_outbox(&pool, |event| match event.kind() {
-        DispatchedOutboxEventKind::ToolBatchTransition {
-            turn,
-            producing_call,
-            state:
-                DispatchedToolBatchState::Proposed {
-                    frontier: proposed_frontier,
-                },
-        } if *turn == fixture.turn && *producing_call == fixture.call => {
-            proposed_event = *proposed_frontier == parked.yielded_snapshot().frontier().snapshot();
-        }
-        DispatchedOutboxEventKind::ToolBatchTransition {
-            turn,
-            producing_call,
-            state:
-                DispatchedToolBatchState::ResultsProjected {
-                    frontier: result_frontier,
-                },
-        } if *turn == fixture.turn && *producing_call == fixture.call => {
-            results_event = *result_frontier == continuation_frontier;
-        }
-        _ => {}
-    })
-    .await?;
-    assert!(proposed_event && results_event);
+    let observed = observed_tool_batch_frontiers(&pool, fixture.turn, fixture.call).await?;
+    assert_eq!(
+        observed.proposed,
+        Some(parked.yielded_snapshot().frontier().snapshot())
+    );
+    assert_eq!(observed.results_projected, Some(continuation_frontier));
 
     pool.close().await;
     drop(container);
