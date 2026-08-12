@@ -51,10 +51,11 @@ use crate::lock_inventory::{
     RUNNER_REGISTRATION_RECONCILIATION_STATE, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
-    ToolAttemptDispositionStorageKind, runner_placement_loss_source_from_str,
-    runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
-    tool_attempt_disposition_to_str, tool_permission_default_from_str,
-    tool_permission_default_to_str,
+    RunnerLossPropagationStateStorageKind, ToolAttemptDispositionStorageKind,
+    runner_loss_propagation_state_from_str, runner_loss_propagation_state_to_str,
+    runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
+    runner_sandbox_from_str, runner_sandbox_to_str, tool_attempt_disposition_to_str,
+    tool_permission_default_from_str, tool_permission_default_to_str,
 };
 use crate::outbox::{
     self, DispatchedRunnerState, OutboxEvent, RunnerConnectionOutboxSource, RunnerStateOutboxEvent,
@@ -1151,10 +1152,11 @@ impl RunnerProtocolStore {
             .decode_column::<Option<Uuid>>("propagated_through_session_id")?
             .map(session_id);
         let state: String = cursor.decode_column("state_kind")?;
-        let complete = match state.as_str() {
-            "pending" => false,
-            "completed" => true,
-            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        let complete = match runner_loss_propagation_state_from_str(&state)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+        {
+            RunnerLossPropagationStateStorageKind::Pending => false,
+            RunnerLossPropagationStateStorageKind::Completed => true,
         };
         let sessions = if complete {
             Vec::new()
@@ -1165,7 +1167,18 @@ impl RunnerProtocolStore {
                    JOIN runner_session_placement_record AS placement
                      ON placement.session_id = current_placement.session_id
                     AND placement.event_ordinal = current_placement.event_ordinal
-                  WHERE placement.loss_fence_enrollment_id = $1
+                   JOIN runner_enrollment AS lost_enrollment
+                     ON lost_enrollment.enrollment_id = $1
+                  WHERE (
+                        placement.loss_fence_enrollment_id = $1
+                        OR (
+                            placement.loss_fence_enrollment_id IS NULL
+                            AND placement.state_kind = 'unpinned'
+                            AND placement.selector_kind = 'identity'
+                            AND placement.selector_runner_id =
+                                lost_enrollment.runner_id
+                        )
+                    )
                     AND (
                         placement.observed_runner_loss_epoch IS NULL
                         OR placement.observed_runner_loss_epoch < $2
@@ -4064,10 +4077,13 @@ async fn append_runner_connection_loss_epoch(
         "INSERT INTO runner_connection_loss_propagation
             (enrollment_id, loss_epoch, propagated_through_session_id,
              state_kind)
-         VALUES ($1, $2, NULL, 'pending')",
+         VALUES ($1, $2, NULL, $3)",
     )
     .bind(enrollment.into_uuid())
     .bind(Decimal::from(loss_epoch.get()))
+    .bind(runner_loss_propagation_state_to_str(
+        RunnerLossPropagationStateStorageKind::Pending,
+    ))
     .execute(&mut *connection)
     .await?;
     sqlx::query(head_statement)
