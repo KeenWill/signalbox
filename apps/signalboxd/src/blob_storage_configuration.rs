@@ -234,8 +234,12 @@ fn parse_configuration(
 }
 
 fn parse_store(table: &Table) -> Result<BlobStoreConfiguration, BlobStorageConfigurationError> {
-    let namespace_id = Uuid::parse_str(required_string(table, "namespace_id")?)
-        .map_err(|_| BlobStorageConfigurationError)?;
+    let namespace_text = required_string(table, "namespace_id")?;
+    let namespace_id =
+        Uuid::parse_str(namespace_text).map_err(|_| BlobStorageConfigurationError)?;
+    if namespace_text != namespace_id.hyphenated().to_string() {
+        return Err(BlobStorageConfigurationError);
+    }
     match required_string(table, "kind")? {
         "filesystem" => {
             reject_unknown_fields(table, &["name", "namespace_id", "kind", "root_directory"])?;
@@ -535,6 +539,21 @@ generated_artifact = "archive"
         );
 
         assert!(parse(&duplicate).is_err());
+    }
+
+    #[test]
+    fn catalog_rejects_noncanonical_namespace_identity_text() {
+        let uppercase = VALID.replace(
+            "5a100001-0000-0000-0000-000000000001",
+            "5A100001-0000-0000-0000-000000000001",
+        );
+        let compact = VALID.replace(
+            "5a100001-0000-0000-0000-000000000001",
+            "5a100001000000000000000000000001",
+        );
+
+        assert!(parse(&uppercase).is_err());
+        assert!(parse(&compact).is_err());
     }
 
     #[test]
