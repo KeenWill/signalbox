@@ -439,6 +439,12 @@ impl RepositoryWatchTask {
                 Ok(())
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
+                // A competing watcher owns the durable cursor now, and a
+                // reused entry never resets its published flag, so the
+                // freshness map no longer describes the baseline the next
+                // attempt will load. Invalidate it rather than let stale
+                // settled metadata authorize reuse of the competitor's state.
+                self.poller.invalidate_freshness();
                 Err(RepositoryWatchAttemptError::Persistence)
             }
         }
@@ -1024,6 +1030,16 @@ impl GitHubRepositoryPoller {
         for freshness in self.freshness().values_mut() {
             freshness.published = true;
         }
+    }
+
+    /// Drops every freshness entry, published or not. After a commit conflict
+    /// the durable cursor carries a competing watcher's baseline, so entries
+    /// recorded against this process's superseded baseline no longer describe
+    /// what the next attempt will load as its previous observation; kept in
+    /// place, a published entry could authorize reusing the competitor's
+    /// state under stale settled and skip metadata.
+    fn invalidate_freshness(&self) {
+        self.freshness().clear();
     }
 
     fn forget_pull_request(&self, number: u64) {
@@ -4537,6 +4553,39 @@ mod tests {
             Arc::strong_count(&fixture.poller),
             1,
             "a drained poller has no child still holding it"
+        );
+    }
+
+    /// After a commit conflict the durable baseline belongs to a competing
+    /// watcher, so entries recorded and published against the superseded
+    /// baseline must authorize no further reuse.
+    #[test]
+    fn invalidated_freshness_authorizes_no_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        // Arbitrary: reuse authorization is keyed by the number alone, so any
+        // listed pull number exercises it.
+        let number = 7_u64;
+        fixture
+            .poller
+            .record_fetched_pull_request(number, PULL_UPDATED_AT, true);
+        fixture.poller.publish_freshness();
+        assert!(
+            fixture
+                .poller
+                .pull_request_is_unchanged(number, PULL_UPDATED_AT),
+            "a published settled entry authorizes reuse"
+        );
+
+        fixture.poller.invalidate_freshness();
+
+        assert!(
+            !fixture
+                .poller
+                .pull_request_is_unchanged(number, PULL_UPDATED_AT),
+            "an invalidated record authorizes nothing"
         );
     }
 
