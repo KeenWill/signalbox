@@ -1402,15 +1402,34 @@ async fn drop_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), s
     Ok(())
 }
 
+/// The `creation_cause` a fixture writes.
+///
+/// `202608110001_user_role_storage_vocabulary` renamed the stored value, so a
+/// fixture seeding a pool held at an earlier migration by `MIGRATOR.run_to`
+/// must write the retired spelling: the `CHECK` in force there admits nothing
+/// else, and the insert fails with `23514` before the migration under test
+/// runs. Fully migrated pools take the current spelling.
+const CURRENT_CREATION_CAUSE: &str = "user_initiated";
+const RETIRED_CREATION_CAUSE: &str = "owner_initiated";
+
 async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Error> {
+    insert_session_for_with_creation_cause(pool, session, CURRENT_CREATION_CAUSE).await
+}
+
+async fn insert_session_for_with_creation_cause(
+    pool: &PgPool,
+    session: Uuid,
+    creation_cause: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query("ALTER TABLE session DISABLE TRIGGER ALL")
         .execute(pool)
         .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
-         VALUES ($1, 'owner_initiated', 'none')",
+         VALUES ($1, $2, 'none')",
     )
     .bind(session)
+    .bind(creation_cause)
     .execute(pool)
     .await?;
     sqlx::query("ALTER TABLE session ENABLE TRIGGER ALL")
@@ -1671,6 +1690,11 @@ async fn connection_outbox_source(
     ))
 }
 
+/// Seeds the session a `MIGRATOR.run_to` pool can still accept.
+async fn insert_legacy_session(pool: &PgPool) -> Result<(), sqlx::Error> {
+    insert_session_for_with_creation_cause(pool, uuid(SESSION), RETIRED_CREATION_CAUSE).await
+}
+
 async fn insert_physical_attempt(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
@@ -1786,8 +1810,8 @@ async fn replace_approval_with_user_command(
         .await?;
     let updated = sqlx::query(
         "UPDATE tool_approval_decision
-            SET decision_source = 'owner_command',
-                owner_command_id = $2
+            SET decision_source = 'user_command',
+                user_command_id = $2
           WHERE request_id = $1",
     )
     .bind(uuid(facts.request))
@@ -3543,7 +3567,7 @@ async fn runner_wire_migration_rejects_legacy_placement_history() -> Result<(), 
 async fn runner_loss_migration_rejects_legacy_rows_without_source() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
-    insert_session(&pool).await?;
+    insert_legacy_session(&pool).await?;
     sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
@@ -4558,7 +4582,7 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
-    insert_session(&pool).await?;
+    insert_legacy_session(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
     let expected = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -4612,7 +4636,7 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
-    insert_session(&pool).await?;
+    insert_legacy_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
