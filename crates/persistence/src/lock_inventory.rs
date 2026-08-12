@@ -85,6 +85,49 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
           WHERE session_id = $1
           FOR UPDATE";
 
+pub(crate) const SUBMIT_INPUT_RUNNER_RECOVERY_ATTEMPT: &str =
+    "SELECT tool_attempt.state_kind, tool_attempt.terminal_disposition_kind,
+            lease.effect_class AS lease_effect_class,
+            lease_event.state_kind AS lease_state_kind
+       FROM turn_lifecycle AS lifecycle
+       JOIN runner_current_session_placement AS placement_head
+         ON placement_head.session_id = lifecycle.session_id
+       JOIN runner_session_placement_record AS placement
+         ON placement.session_id = placement_head.session_id
+        AND placement.event_ordinal = placement_head.event_ordinal
+       JOIN tool_attempt
+         ON tool_attempt.attempt_id = lifecycle.runner_recovery_tool_attempt_id
+        AND tool_attempt.turn_id = lifecycle.turn_id
+        AND tool_attempt.session_id = lifecycle.session_id
+       JOIN runner_physical_attempt_lease_binding AS binding
+         ON binding.attempt_id = tool_attempt.attempt_id
+       JOIN runner_lease_generation AS lease
+         ON lease.lease_id = binding.lease_id
+        AND lease.attempt_id = tool_attempt.attempt_id
+        AND lease.session_id = tool_attempt.session_id
+       JOIN runner_session_placement_record AS leased_placement
+         ON leased_placement.session_id = lease.session_id
+        AND leased_placement.event_ordinal = lease.placement_event_ordinal
+       JOIN runner_current_lease_event AS lease_head
+         ON lease_head.lease_id = lease.lease_id
+        AND lease_head.generation = lease.generation
+       JOIN runner_lease_event AS lease_event
+         ON lease_event.lease_id = lease_head.lease_id
+        AND lease_event.generation = lease_head.generation
+        AND lease_event.event_ordinal = lease_head.event_ordinal
+      WHERE lifecycle.session_id = $1
+        AND lifecycle.turn_id = $2
+        AND lifecycle.state_kind = 'active'
+        AND lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+        AND lifecycle.runner_recovery_tool_attempt_id = $3
+        AND placement.state_kind = 'runner_lost'
+        AND placement.interrupted_tool_attempt_id = tool_attempt.attempt_id
+        AND placement.lost_runner_id = lease.runner_id
+        AND placement.placement_revision = leased_placement.placement_revision
+        AND leased_placement.state_kind = 'pinned'
+        AND leased_placement.pinned_runner_id = placement.lost_runner_id
+      FOR UPDATE OF tool_attempt";
+
 pub(crate) const DELEGATION_TERMINATION_SESSION_FRONTIER: &str =
     "SELECT lock_delegation_termination_session_frontier($1, $2)";
 
@@ -295,6 +338,11 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
                 AND record.event_ordinal = current_placement.event_ordinal
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
+
+pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "SELECT session_id
+               FROM session_scheduler
+              WHERE session_id = $1
+              FOR UPDATE";
 
 pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, event.state_kind,
                     lease_generation.attempt_id,

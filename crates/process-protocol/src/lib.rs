@@ -249,6 +249,46 @@ impl From<CanonicalU64> for String {
     }
 }
 
+/// A positive unsigned 64-bit value encoded as its shortest decimal string.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PositiveCanonicalU64(u64);
+
+impl PositiveCanonicalU64 {
+    /// Checks that the represented wire integer is positive.
+    pub const fn try_new(value: u64) -> Result<Self, CanonicalValueError> {
+        if value == 0 {
+            return Err(CanonicalValueError::Decimal);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the positive numeric value.
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<String> for PositiveCanonicalU64 {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(parse_decimal_u64(&value)?)
+    }
+}
+
+impl From<PositiveCanonicalU64> for String {
+    fn from(value: PositiveCanonicalU64) -> Self {
+        value.0.to_string()
+    }
+}
+
+impl From<signalbox_domain::RunnerGeneration> for PositiveCanonicalU64 {
+    fn from(value: signalbox_domain::RunnerGeneration) -> Self {
+        Self(value.get())
+    }
+}
+
 /// A lowercase 32-byte digest encoded as exactly 64 hexadecimal characters.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -4522,6 +4562,16 @@ pub enum TurnState {
         /// Ambiguous tool attempt awaiting recovery.
         recovery_tool_attempt_id: CanonicalUuid,
     },
+    /// The turn is parked on replacement of one exact lost runner placement.
+    ActiveAwaitingRunnerRecovery {
+        /// Runner whose durable loss owns this wait.
+        runner_id: CanonicalUuid,
+        /// Positive placement revision against which loss was projected.
+        placement_revision: PositiveCanonicalU64,
+        /// Physical tool attempt interrupted by loss, or null when none exists.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_attempt_id: Option<CanonicalUuid>,
+    },
     /// The turn terminalized as failed.
     Failed {
         /// Exact terminal frontier.
@@ -4622,6 +4672,12 @@ enum RawTurnState {
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_tool_attempt_id: CanonicalUuid,
+    },
+    ActiveAwaitingRunnerRecovery {
+        runner_id: CanonicalUuid,
+        placement_revision: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_attempt_id: Option<CanonicalUuid>,
     },
     Failed {
         terminal_frontier_id: CanonicalUuid,
@@ -4750,6 +4806,20 @@ impl<'de> Deserialize<'de> for TurnState {
             } => Self::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
+            },
+            RawTurnState::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision,
+                tool_attempt_id,
+            } => Self::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision: PositiveCanonicalU64::try_new(placement_revision.value())
+                    .map_err(|_| {
+                        serde::de::Error::custom(
+                            "runner recovery requires a positive placement revision",
+                        )
+                    })?,
+                tool_attempt_id,
             },
             RawTurnState::Failed {
                 terminal_frontier_id,
@@ -7738,29 +7808,30 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 mod tests {
     use super::{
         BillingRateVersion, CanonicalDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
-        ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
-        ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
-        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, DelegationMessageDirection, DelegationOutcome, DelegationPolicy,
-        DelegationProvenance, DelegationReason, DelegationToolRequestState, DelegationWaitMode,
-        DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail,
-        FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
-        FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
-        GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
-        ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
-        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-        ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
-        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
-        PROTOCOL_VERSION, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
-        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
-        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        CanonicalValueError, ClientFrame, ClientRequest, CommandId, ContentFragment,
+        ConversationCursor, ConversationImportFormat, ConversationImportRejectionClass,
+        ConversationImportSource, ConversationOrigin, ConversationOriginFilter,
+        ConversationSummary, CurrentModelCall, CurrentModelCallState, DelegationMessageDirection,
+        DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
+        DelegationToolRequestState, DelegationWaitMode, DescendantTerminationScope,
+        EffectiveModelSettings, ErrorCode, ErrorDetail, FailedModelCallCause,
+        FailedModelCallDisposition, FailedTerminalModelCall, FastMode, FastModeOverlay,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, GoalBlockedProvenance,
+        GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
+        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
+        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
+        ModelCallState, ModelCallTokenUsage, ModelCapabilities, ModelChangeAdjustment,
+        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+        ModelSettingsSnapshot, OpenAiServiceTier, PROTOCOL_VERSION, PositiveCanonicalU64,
+        ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -8581,6 +8652,100 @@ mod tests {
         assert_delegation_terminal_state_rejected("stopped", "child_completed");
         assert_delegation_terminal_state_rejected("already_terminal", "parent_cancelled");
         Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_round_trips_interrupted_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: uuid(2),
+            placement_revision: PositiveCanonicalU64::try_new(3)
+                .expect("the fixture revision is positive"),
+            tool_attempt_id: Some(uuid(4)),
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_runner_recovery",
+                "runner_id": "00000000-0000-0000-0000-000000000002",
+                "placement_revision": "3",
+                "tool_attempt_id": "00000000-0000-0000-0000-000000000004"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_revision_rejects_zero_before_state_construction() {
+        assert_eq!(
+            PositiveCanonicalU64::try_new(0),
+            Err(CanonicalValueError::Decimal),
+        );
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_round_trips_explicit_absent_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: uuid(2),
+            placement_revision: PositiveCanonicalU64::try_new(3)
+                .expect("the fixture revision is positive"),
+            tool_attempt_id: None,
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_runner_recovery",
+                "runner_id": "00000000-0000-0000-0000-000000000002",
+                "placement_revision": "3",
+                "tool_attempt_id": null
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_requires_nullable_attempt_member() {
+        let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "active_awaiting_runner_recovery",
+            "runner_id": "00000000-0000-0000-0000-000000000002",
+            "placement_revision": "3"
+        }))
+        .expect_err("the nullable tool attempt remains a required wire member");
+
+        assert!(rejected.to_string().contains("tool_attempt_id"));
+    }
+
+    /// INV-044: runner-recovery wire state preserves the positive placement
+    /// revision required by its relational source.
+    #[test]
+    fn inv044_runner_recovery_turn_state_rejects_zero_placement_revision() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","model_settings":null,"state":{"type":"active_awaiting_runner_recovery","runner_id":"00000000-0000-0000-0000-000000000003","placement_revision":"0","tool_attempt_id":null}}}"#,
+        );
+    }
+
+    /// INV-044: the public state type cannot be inhabited with the zero
+    /// placement revision rejected by its enclosing frame.
+    #[test]
+    fn inv044_runner_recovery_turn_state_direct_decode_rejects_zero_revision() {
+        let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "active_awaiting_runner_recovery",
+            "runner_id": "00000000-0000-0000-0000-000000000003",
+            "placement_revision": "0",
+            "tool_attempt_id": null
+        }))
+        .expect_err("the public runner-recovery state requires a positive revision");
+
+        assert!(rejected.to_string().contains("positive placement revision"));
     }
 
     #[test]
