@@ -3201,7 +3201,7 @@ private enum SynchronizationFixture {
         "state":{
           "type":"queued",
           "accepted_input_id":17,
-          "content":"fixture prompt"
+          "content":[{"type":"text","text":"fixture prompt"}]
         }
       }
       """
@@ -3218,7 +3218,7 @@ private enum SynchronizationFixture {
         "state":{
           "type":"queued",
           "accepted_input_id":"\(acceptedInput)",
-          "content":"fixture prompt",
+          "content":[{"type":"text","text":"fixture prompt"}],
           "fixture_unadmitted":true
         }
       }
@@ -3524,7 +3524,7 @@ private enum SynchronizationFixture {
         "state":{
           "type":"queued",
           "accepted_input_id":"\(acceptedInput)",
-          "content":"fixture user input"
+          "content":[{"type":"text","text":"fixture user input"}]
         }
       }
       """
@@ -3541,7 +3541,7 @@ private enum SynchronizationFixture {
         "state":{
           "type":"queued",
           "accepted_input_id":"\(secondAcceptedInput)",
-          "content":"fixture second user input"
+          "content":[{"type":"text","text":"fixture second user input"}]
         }
       }
       """
@@ -3901,7 +3901,7 @@ private enum SynchronizationFixture {
           "accepted_input_id":"\(acceptedInput)",
           "turn_id":"\(turn)",
           "acceptance_position":"1",
-          "content":"fixture user input"
+          "content":[{"type":"text","text":"fixture user input"}]
         }
       }
       """
