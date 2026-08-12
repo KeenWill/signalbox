@@ -1,7 +1,8 @@
 # Identity, commands, and telemetry correlation
 
-The user-vocabulary surface on this page was re-verified through PR #378
-(`agent/user-vocabulary`).
+The user-vocabulary surface on this page was re-verified through this PR
+(`agent/storage-vocabulary-rename`), which renamed the stored actor and issuer
+discriminators this page states.
 
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity
@@ -408,10 +409,10 @@ claimed identifier under a different claimed agency. For metadata replacement,
 the recorded actor is also the applied last-writer provenance.
 
 Storage follows the closed-discriminator convention: `actor_kind`
-(`owner`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
+(`user`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
 in `submit_input_command` and `replace_session_metadata_command`. Metadata
-receipts additionally carry constructor-selected `issuer_kind` (`owner`/`tool`)
+receipts additionally carry constructor-selected `issuer_kind` (`user`/`tool`)
 and `issuer_tool_request_id` columns, sealed separately from the actor
 projection. The issuer migration fixes every pre-issuer receipt to the user
 agency that its legacy constructor required, rather than trusting the actor
