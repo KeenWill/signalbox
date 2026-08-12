@@ -2,6 +2,17 @@
 
 use crate::*;
 
+fn attachment_content(digest: BlobDigest) -> UserContent {
+    UserContent::try_parts(vec![UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::File,
+        media_type: DeclaredMediaType::try_new(String::from("application/octet-stream"))
+            .expect("the fixture media type is valid"),
+        display_filename: None,
+    }])
+    .expect("the fixture attachment content is canonical")
+}
+
 /// S01 / INV-002 / INV-008 / INV-012: the Postgres adapters preserve
 /// application command outcomes, return the complete current session
 /// projection, and keep infrastructure failure nonterminal.
@@ -3560,6 +3571,251 @@ async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), 
         expected
     );
     fixture.finish().await;
+    Ok(())
+}
+
+/// INV-061: a newly queued input is rejected when the complete prospective
+/// rendered frontier, rather than either input alone, exceeds the attachment
+/// verification bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_digest = BlobDigest::digest(b"first prospective attachment");
+    let second_digest = BlobDigest::digest(b"second prospective attachment");
+    let maximum = NonZeroU64::new(10).expect("the fixture attachment bound is positive");
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('prospective_queue', $1)",
+    )
+    .bind(Uuid::from_u128(0xb330))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7)")
+        .bind(first_digest.as_bytes().as_slice())
+        .bind(second_digest.as_bytes().as_slice())
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'prospective_queue', 'first'),
+                ($2, 'prospective_queue', 'second')",
+    )
+    .bind(first_digest.as_bytes().as_slice())
+    .bind(second_digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb331));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xb332, 0xb331, direct(0xb333)))
+        .await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_maximum_attachment_bytes(maximum);
+    let first = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+        session,
+        attachment_content(first_digest),
+        delivery,
+    );
+    assert!(matches!(
+        repository
+            .handle(
+                first,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    let second = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+        session,
+        attachment_content(second_digest),
+        delivery,
+    );
+    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AttachmentBytesTooLarge {
+            session,
+            maximum_bytes: maximum,
+        },
+    ));
+    assert_eq!(
+        repository
+            .handle(
+                second.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+            )
+            .await?,
+        expected
+    );
+    assert_eq!(
+        repository
+            .handle(
+                second,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb33a)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb33b))),
+            )
+            .await?,
+        expected
+    );
+    let effects: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effects, (1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: pending steering is rejected when it would make a queued
+/// successor's eventual rendered frontier exceed the attachment bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let queued_digest = BlobDigest::digest(b"queued prospective attachment");
+    let steering_digest = BlobDigest::digest(b"steering prospective attachment");
+    let maximum = NonZeroU64::new(10).expect("the fixture attachment bound is positive");
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('prospective_steering', $1)",
+    )
+    .bind(Uuid::from_u128(0xb340))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7)")
+        .bind(queued_digest.as_bytes().as_slice())
+        .bind(steering_digest.as_bytes().as_slice())
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'prospective_steering', 'queued'),
+                ($2, 'prospective_steering', 'steering')",
+    )
+    .bind(queued_digest.as_bytes().as_slice())
+    .bind(steering_digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb341));
+    let active_turn = TurnId::from_uuid(Uuid::from_u128(0xb342));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xb343, 0xb341, direct(0xb344)))
+        .await?;
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_maximum_attachment_bytes(maximum);
+    repository
+        .handle(
+            start_input(
+                0xb345,
+                0xb341,
+                "active text origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb346)),
+            Some(active_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xb347),
+            starting_frontier: Uuid::from_u128(0xb348),
+            initial_attempt: Uuid::from_u128(0xb349),
+        },
+    )
+    .await?;
+    let queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+        session,
+        attachment_content(queued_digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: active_turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    assert!(matches!(
+        repository
+            .handle(
+                queued,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+        session,
+        attachment_content(steering_digest),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: active_turn,
+        },
+    );
+    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AttachmentBytesTooLarge {
+            session,
+            maximum_bytes: maximum,
+        },
+    ));
+    assert_eq!(
+        repository
+            .handle(
+                steering.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+                None,
+            )
+            .await?,
+        expected
+    );
+    assert_eq!(
+        repository
+            .handle(
+                steering,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34f)),
+                None,
+            )
+            .await?,
+        expected
+    );
+    let effects: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1
+                    AND turn_id <> $2),
+                (SELECT count(*) FROM accepted_input WHERE session_id = $1
+                    AND disposition_kind = 'pending_steering')",
+    )
+    .bind(session.into_uuid())
+    .bind(active_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effects, (2, 1, 0));
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 

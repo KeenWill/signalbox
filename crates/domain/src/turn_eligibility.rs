@@ -2382,6 +2382,77 @@ impl AcceptedInputSchedulingProjection {
             .find(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
     }
 
+    /// Returns accepted-input origins retained by the exact base from which
+    /// the earliest queued turn would be rendered.
+    ///
+    /// This is absent while a turn is active or when no queued turn exists.
+    /// It deliberately excludes the queued turn's own origin; callers can
+    /// append queued origins in [`Self::turns`] order to project each eventual
+    /// rendered frontier without manufacturing semantic entries or frontier
+    /// identities.
+    pub fn earliest_queued_rendered_base_origins(&self) -> Option<Vec<AcceptedInputId>> {
+        if self.active_turn().is_some() {
+            return None;
+        }
+        let index = self
+            .turns
+            .iter()
+            .position(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)?;
+        let queued = &self.turns[index];
+        let preceding_non_accepted_terminal = self
+            .preceding_non_accepted_successors
+            .get(&queued.turn())
+            .and_then(|predecessor| self.preceding_non_accepted_terminals.get(predecessor))
+            .map(|(snapshot, _)| snapshot);
+        let base = if index == 0 && preceding_non_accepted_terminal.is_none() {
+            let seed = self
+                .initial_seed_frontier
+                .and_then(|frontier| self.snapshots.get(&frontier));
+            self.latest_compaction_result
+                .and_then(|frontier| self.snapshots.get(&frontier))
+                .filter(|latest| seed.is_some_and(|seed| seed.is_semantic_prefix_of(latest)))
+                .or(seed)
+        } else {
+            let terminal = preceding_non_accepted_terminal.or_else(|| {
+                index
+                    .checked_sub(1)
+                    .and_then(|predecessor| self.turns[predecessor].terminal_frontier())
+            })?;
+            self.latest_compaction_result
+                .and_then(|frontier| self.snapshots.get(&frontier))
+                .filter(|latest| terminal.is_semantic_prefix_of(latest))
+                .or(Some(terminal))
+        };
+        let mut origins = Vec::new();
+        let mut distinct = BTreeSet::new();
+        for reference in base.into_iter().flat_map(|base| base.ordered_entries()) {
+            let accepted_input = match self.semantic_entries.get(&reference)?.payload() {
+                SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+                | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input, ..
+                } => Some(*accepted_input),
+                SemanticTranscriptEntryPayload::TurnFailed { .. }
+                | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+                | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+                | SemanticTranscriptEntryPayload::DelegationResult { .. }
+                | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+                | SemanticTranscriptEntryPayload::ContextSummary { .. }
+                | SemanticTranscriptEntryPayload::TurnCancelled { .. }
+                | SemanticTranscriptEntryPayload::AssistantText { .. }
+                | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolClosed { .. }
+                | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+                | SemanticTranscriptEntryPayload::Imported { .. } => None,
+            };
+            if let Some(accepted_input) = accepted_input.filter(|value| distinct.insert(*value)) {
+                origins.push(accepted_input);
+            }
+        }
+        Some(origins)
+    }
+
     /// Borrows one complete resolved snapshot from this checked projection.
     pub fn resolved_snapshot(
         &self,

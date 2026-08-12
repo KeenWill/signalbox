@@ -11,24 +11,25 @@ use signalbox_domain::{
     AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
     AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
     AcceptedInputStartingLineage, AcceptedInputTurnSchedulingRecord,
-    AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
-    AppliedInterruptCommandResult, AssistantText, AttachmentDisplayFilename, AttachmentKind,
-    BlobDigest, CancellationStopDisposition, CancelledModelCallTurnIdentities,
-    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringReconstitutionInput,
-    ContextCompactionId, ContextCompactionModelCallReconstitutionInput,
-    ContextCompactionModelCallState, ContextCompactionRange, ContextCompactionReconstitutionInput,
-    ContextCompactionTokenUsage, ContextFrontierId, ContinuationRoundReconstitutionInput,
-    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
-    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
-    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
-    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
-    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
-    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
-    NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
-    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
+    AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
+    ActiveTurnSchedulingReconstitutionInput, Actor, AppliedInterruptCommandResult, AssistantText,
+    AttachmentDisplayFilename, AttachmentKind, BlobDigest, CancellationStopDisposition,
+    CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
+    ConsumedSteeringReconstitutionInput, ContextCompactionId,
+    ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
+    ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
+    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
+    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
+    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
+    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
+    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
+    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
+    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
+    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
+    OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
@@ -866,6 +867,13 @@ where
         ));
     }
 
+    let frontier_command = command.clone();
+    if maximum_attachment_bytes.is_some() {
+        sqlx::query("SAVEPOINT submit_input_attachment_frontier")
+            .execute(&mut *connection)
+            .await?;
+    }
+
     if matches!(
         command.delivery(),
         DeliveryRequest::Interrupt {
@@ -893,6 +901,16 @@ where
         model_capabilities,
     )
     .await?;
+    let prior_queued_inputs = scheduling
+        .as_ref()
+        .map(|scheduling| {
+            scheduling
+                .turns()
+                .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
+                .map(|turn| turn.accepted_input().id())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let recorded = prepared.result().clone();
     let interrupt = match prepared.result() {
         SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) => {
@@ -1657,9 +1675,227 @@ where
         }
         None => {}
     }
+    if let Some(maximum_bytes) = maximum_attachment_bytes {
+        if matches!(recorded, SubmitInputResult::Applied(_))
+            && prospective_attachment_frontier_exceeds_bound(
+                connection,
+                frontier_command.session(),
+                &prior_queued_inputs,
+                &recorded,
+                maximum_bytes,
+            )
+            .await?
+        {
+            sqlx::query("ROLLBACK TO SAVEPOINT submit_input_attachment_frontier")
+                .execute(&mut *connection)
+                .await?;
+            let rejected = frontier_command.prepare_attachment_bytes_too_large(maximum_bytes);
+            let recorded = rejected.result().clone();
+            insert_prepared_command(connection, &rejected).await?;
+            insert_prepared_effects(connection, rejected).await?;
+            sqlx::query("RELEASE SAVEPOINT submit_input_attachment_frontier")
+                .execute(&mut *connection)
+                .await?;
+            return Ok(TransactionDecision::Commit(
+                SubmitInputHandlingOutcome::Recorded(recorded),
+            ));
+        }
+        sqlx::query("RELEASE SAVEPOINT submit_input_attachment_frontier")
+            .execute(&mut *connection)
+            .await?;
+    }
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
+}
+
+async fn prospective_attachment_frontier_exceeds_bound(
+    connection: &mut PgConnection,
+    session: SessionId,
+    prior_queued_inputs: &[AcceptedInputId],
+    result: &SubmitInputResult,
+    maximum_bytes: NonZeroU64,
+) -> Result<bool, SubmitInputRepositoryError> {
+    let current = match load_session_from_connection(connection, session).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            return Err(SubmitInputCorruption::Inconsistent(
+                "provisionally applied input session disappeared",
+            )
+            .into());
+        }
+        Err(SessionRepositoryError::Database(error)) => return Err(error.into()),
+        Err(SessionRepositoryError::Corruption(error)) => {
+            return Err(SubmitInputCorruption::CurrentSession(error).into());
+        }
+    };
+    let scheduling = load_scheduling_projection(connection, current).await?;
+    let (base_origins, check_base) =
+        match require_live_execution_for_restart(connection, session).await {
+            Ok(execution) => {
+                let mut distinct = BTreeSet::new();
+                let mut origins = execution
+                    .frontier_entries()
+                    .filter_map(|entry| match entry.payload() {
+                        InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                            accepted_input,
+                        }
+                        | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                            accepted_input,
+                            ..
+                        } => distinct.insert(*accepted_input).then_some(*accepted_input),
+                        InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+                        | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+                        | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+                        | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
+                        | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+                        | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+                        | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
+                        | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                        | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                        | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                        | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+                        | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
+                        | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
+                        | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
+                origins.extend(
+                    execution
+                        .active_turn()
+                        .pending_steering()
+                        .iter()
+                        .map(|pending| pending.accepted_input())
+                        .filter(|accepted_input| distinct.insert(*accepted_input)),
+                );
+                (
+                    origins,
+                    matches!(
+                        result,
+                        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+                    ),
+                )
+            }
+            Err(ModelCallRepositoryError::NoLiveExecution) => (
+                scheduling
+                    .earliest_queued_rendered_base_origins()
+                    .unwrap_or_default(),
+                false,
+            ),
+            Err(error) => return Err(error.into()),
+        };
+    let queued_inputs = scheduling
+        .turns()
+        .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
+        .map(|turn| turn.accepted_input().id())
+        .collect::<Vec<_>>();
+    let first_changed_queue = if check_base {
+        0
+    } else {
+        prior_queued_inputs
+            .iter()
+            .zip(&queued_inputs)
+            .take_while(|(before, after)| before == after)
+            .count()
+    };
+    if !check_base && first_changed_queue == queued_inputs.len() {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "applied turn-origin input left the prospective queue unchanged",
+        )
+        .into());
+    }
+
+    let all_origins = base_origins
+        .iter()
+        .chain(&queued_inputs)
+        .map(|accepted_input| accepted_input.into_uuid())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT part.accepted_input_id, part.blob_digest, blob.byte_length
+           FROM accepted_input_content_part AS part
+           JOIN blob ON blob.digest = part.blob_digest
+          WHERE part.accepted_input_id = ANY($1)
+            AND part.part_kind = 'attachment'
+          ORDER BY part.accepted_input_id, part.position",
+    )
+    .bind(&all_origins)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut attachments = BTreeMap::<AcceptedInputId, Vec<(BlobDigest, u64)>>::new();
+    for row in rows {
+        let accepted_input =
+            accepted_input_id_from_uuid(row.try_get::<Uuid, _>("accepted_input_id")?);
+        let digest = BlobDigest::from_bytes(
+            row.try_get::<Vec<u8>, _>("blob_digest")?
+                .try_into()
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("prospective attachment digest")
+                })?,
+        );
+        let length = positive_u64_from_numeric(row.try_get("byte_length")?).map_err(|_| {
+            SubmitInputCorruption::Inconsistent("prospective attachment byte length")
+        })?;
+        attachments
+            .entry(accepted_input)
+            .or_default()
+            .push((digest, length));
+    }
+    let mut digests = BTreeMap::<BlobDigest, u64>::new();
+    let mut total = 0_u64;
+    for accepted_input in &base_origins {
+        add_prospective_attachment_lengths(
+            &mut digests,
+            &mut total,
+            attachments
+                .get(accepted_input)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+    }
+    if check_base && total > maximum_bytes.get() {
+        return Ok(true);
+    }
+    for (index, accepted_input) in queued_inputs.iter().enumerate() {
+        add_prospective_attachment_lengths(
+            &mut digests,
+            &mut total,
+            attachments
+                .get(accepted_input)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+        if index >= first_changed_queue && total > maximum_bytes.get() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_prospective_attachment_lengths(
+    digests: &mut BTreeMap<BlobDigest, u64>,
+    total: &mut u64,
+    attachments: &[(BlobDigest, u64)],
+) -> Result<(), SubmitInputRepositoryError> {
+    for (digest, length) in attachments {
+        match digests.get(digest) {
+            Some(recorded) if recorded != length => {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "prospective attachment length disagreement",
+                )
+                .into());
+            }
+            Some(_) => {}
+            None => {
+                *total = total
+                    .checked_add(*length)
+                    .ok_or(SubmitInputCorruption::Inconsistent(
+                        "prospective attachment byte length sum",
+                    ))?;
+                digests.insert(*digest, *length);
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn prepare_attachment_admission(
