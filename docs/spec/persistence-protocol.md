@@ -368,7 +368,7 @@ Representation rules, all enforced in the schema:
   transaction cannot strand session projection. **Committed unimplemented
   functionality.** No present daemon transaction retires an unacknowledged
   workspace release.
-- Migration `202608100006` gives every changed registration beyond revision one
+- Migration `202608110007` gives every changed registration beyond revision one
   a pending reconciliation cursor in its registration transaction. An ordered
   page returns at most 64 still-pinned sessions whose pinned registration is
   older, excluding sessions with an exact immutable observation. The
