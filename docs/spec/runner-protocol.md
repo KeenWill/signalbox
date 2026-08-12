@@ -30,11 +30,11 @@ The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 (`agent/runner-replacement-domain-contract`). The closed abandonment result and
 rejection payloads, its application transaction boundary, and its atomic
 PostgreSQL command transaction are verified against this PR
-(`agent/runner-abandonment-transaction`). **Committed unimplemented
-functionality.** No current process-protocol adapter handles abandonment, and no
-current application, persistence, or process-protocol adapter handles
-replacement; the closed transactions below remain compatibility constraints for
-those adapters.
+(`agent/runner-abandonment-transaction`). Its process-protocol adapter is
+verified against this PR (`agent/runner-abandonment-process`). **Committed
+unimplemented functionality.** No current application, persistence, or
+process-protocol adapter handles replacement; the closed transactions below
+remain compatibility constraints for those adapters.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
