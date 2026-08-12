@@ -27,11 +27,15 @@ item. The spine is parsed per `## crate: module` section, taking column-0
    truth is the owning section's impl-block `pub fn` lines plus its
    `// accessors:` comment lists. A public method with no declaration
    fails, as does a declared method the source no longer defines. Types
-   whose surface comes from a column-0 macro invocation naming them
-   (`define_identity!`, `goal_text!`, `bounded_text!`,
-   `positive_position!`) are exempt from the stale direction only — their
-   generated methods are invisible to this textual scan — and an impl
-   header the scan cannot parse fails loudly.
+   minted by a column-0 invocation of `define_identity!`, `goal_text!`,
+   `bounded_text!`, or `positive_position!` are validated in both
+   directions against the macro's expansion contract — the literal
+   `pub fn` names in its macro_rules body — with the identity and
+   position macros' shared shape declared once in the spine's
+   `impl <Identity>`/`impl <Position>` placeholder blocks; a minting
+   macro whose body spells no literal method names would fall back to a
+   stale-direction exemption for its types. An impl header the scan
+   cannot parse fails loudly.
 
 Known limitation of this mechanical check: signatures, associated consts
 and types, trait items, and enum variant lists inside a declaration are
@@ -75,12 +79,21 @@ SECTION_TYPE = re.compile(r"^pub (?:struct|enum) ([A-Za-z_][A-Za-z0-9_]*)")
 MACRO_INVOCATION = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_:]*)!\s*\(([^;]*?)\)\s*;", re.MULTILINE | re.DOTALL
 )
-# The only macros trusted to mint method surface on the types they name; any
-# other invocation naming a listed type earns no stale exemption, so a new
-# method-generating macro must be added here before its types can pass.
-METHOD_MINTING_MACROS = frozenset(
-    {"define_identity", "goal_text", "bounded_text", "positive_position"}
-)
+# The only macros trusted to mint method surface on the types they name,
+# mapped to the spine placeholder impl block that documents the shared
+# shape (None when each minted type carries its own impl-block
+# declarations). Generated method names are extracted from each macro's
+# macro_rules body, so both comparison directions cover macro-backed types;
+# a new method-generating macro must be added here before its types can
+# pass.
+METHOD_MINTING_MACROS: dict[str, str | None] = {
+    "define_identity": "<Identity>",
+    "goal_text": None,
+    "bounded_text": None,
+    "positive_position": "<Position>",
+}
+MACRO_RULES_HEADER = re.compile(r"^macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
+PLACEHOLDER_IMPL = re.compile(r"^impl (<[A-Za-z]+>) \{")
 CAPITALIZED_NAME = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
 ANGLE_TOKEN = re.compile(r"->|<|>|\bfor\b")
 CFG_ATTRIBUTE = re.compile(r"^#\[cfg\((.*)\)\]$")
@@ -288,12 +301,15 @@ def body_brace_offset(header: str) -> int | None:
     """Offset of the impl body's opening brace, None while none is present.
 
     A brace inside the header's angle brackets — a const-generic argument
-    such as `Foo<{ 1 + 1 }>` — is part of the self type, not the body, so
-    the opener is the first brace at angle depth zero (`->` skipped).
-    Angle tracking suspends inside those const braces, where `<` is a
-    comparison operator (`Foo<{ 1 < 2 }>`), not a delimiter.
+    such as `Foo<{ 1 + 1 }>` — or inside square brackets — a where-bound
+    array type such as `[(); { const N: usize = 2; N }]` — is part of the
+    header, not the body, so the opener is the first brace at angle and
+    bracket depth zero (`->` skipped). Depth tracking suspends inside
+    those const braces, where `<` is a comparison operator
+    (`Foo<{ 1 < 2 }>`), not a delimiter.
     """
     angle_depth = 0
+    bracket_depth = 0
     const_brace_depth = 0
     index = 0
     length = len(header)
@@ -313,8 +329,12 @@ def body_brace_offset(header: str) -> int | None:
             angle_depth += 1
         elif char == ">":
             angle_depth -= 1
+        elif char == "[":
+            bracket_depth += 1
+        elif char == "]":
+            bracket_depth -= 1
         elif char == "{":
-            if angle_depth == 0:
+            if angle_depth == 0 and bracket_depth == 0:
                 return index
             const_brace_depth = 1
         index += 1
@@ -345,8 +365,7 @@ def parse_source_methods(
     depth = 0
     module_entry_depths: list[int] = []
     module_test_gated: list[bool] = []
-    test_configured = False
-    attribute_continuation = 0
+    tracker = TestConfigurationTracker()
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -358,8 +377,7 @@ def parse_source_methods(
                 index += 1
                 header = f"{header} {lines[index]}"
             opener = body_brace_offset(header)
-            excluded = test_configured or any(module_test_gated)
-            test_configured = False
+            excluded = tracker.take() or any(module_test_gated)
             if opener is None:
                 index += 1
                 continue
@@ -374,46 +392,25 @@ def parse_source_methods(
                 continue
             remainder = header[opener:]
             block_depth = remainder.count("{") - remainder.count("}")
-            body_test_configured = False
-            body_attribute_continuation = 0
+            body_tracker = TestConfigurationTracker()
             while block_depth > 0 and index + 1 < len(lines):
                 index += 1
                 body_line = lines[index]
-                if block_depth == 1:
-                    body_stripped = body_line.strip()
-                    if body_attribute_continuation > 0:
-                        body_attribute_continuation += body_line.count(
-                            "["
-                        ) - body_line.count("]")
-                    else:
-                        cfg = CFG_ATTRIBUTE.match(body_stripped)
-                        if cfg:
-                            if cfg_removes_from_library(cfg.group(1)):
-                                body_test_configured = True
-                        elif body_stripped.startswith("#["):
-                            body_attribute_continuation = body_line.count(
-                                "["
-                            ) - body_line.count("]")
-                        else:
-                            method = IMPL_METHOD.match(body_line)
-                            if (
-                                method
-                                and not excluded
-                                and not body_test_configured
-                            ):
-                                methods.setdefault(target, set()).add(
-                                    method.group(1)
-                                )
-                            if body_stripped:
-                                body_test_configured = False
+                if block_depth == 1 and not body_tracker.is_attribute(
+                    body_line
+                ):
+                    method = IMPL_METHOD.match(body_line)
+                    if method and not excluded and not body_tracker.pending:
+                        methods.setdefault(target, set()).add(method.group(1))
+                    if body_line.strip():
+                        body_tracker.pending = False
                 block_depth += body_line.count("{") - body_line.count("}")
             index += 1
             continue
         if at_item_position and (
             MOD_HEADER.match(line) or TRANSPARENT_BLOCK.match(line)
         ):
-            gated = test_configured or any(module_test_gated)
-            test_configured = False
+            gated = tracker.take() or any(module_test_gated)
             entry_depth = depth
             depth += line.count("{") - line.count("}")
             if depth > entry_depth:
@@ -421,21 +418,7 @@ def parse_source_methods(
                 module_test_gated.append(gated)
             index += 1
             continue
-        stripped = line.strip()
-        if attribute_continuation > 0:
-            # Continuation lines of a multi-line attribute — such as an
-            # `#[allow(...)]` spelled across lines between `#[cfg(test)]`
-            # and its item — are part of the attribute, not the item.
-            attribute_continuation += line.count("[") - line.count("]")
-        else:
-            cfg = CFG_ATTRIBUTE.match(stripped)
-            if cfg:
-                if cfg_removes_from_library(cfg.group(1)):
-                    test_configured = True
-            elif stripped.startswith("#["):
-                attribute_continuation = line.count("[") - line.count("]")
-            elif stripped:
-                test_configured = False
+        tracker.observe(line)
         depth += line.count("{") - line.count("}")
         while module_entry_depths and depth <= module_entry_depths[-1]:
             module_entry_depths.pop()
@@ -444,73 +427,151 @@ def parse_source_methods(
     return methods, failures
 
 
+class TestConfigurationTracker:
+    """Whether the item being approached is removed from library builds.
+
+    Absorbs attribute lines — including rustfmt's multi-line cfg
+    predicates, accumulated across continuation lines by bracket balance —
+    and clears the pending state on other substantive lines. Item
+    consumers read and reset `pending` through `take()`.
+    """
+
+    def __init__(self) -> None:
+        self.pending = False
+        self._continuation = 0
+        self._parts: list[str] = []
+
+    def take(self) -> bool:
+        pending = self.pending
+        self.pending = False
+        return pending
+
+    def is_attribute(self, line: str) -> bool:
+        """Absorb attribute lines; True when the line was one."""
+        stripped = line.strip()
+        if self._continuation > 0:
+            self._parts.append(stripped)
+            self._continuation += line.count("[") - line.count("]")
+            if self._continuation <= 0:
+                joined = " ".join(self._parts)
+                self._parts = []
+                cfg = CFG_ATTRIBUTE.match(joined)
+                if cfg and cfg_removes_from_library(cfg.group(1)):
+                    self.pending = True
+            return True
+        if not stripped.startswith("#["):
+            return False
+        cfg = CFG_ATTRIBUTE.match(stripped)
+        if cfg:
+            if cfg_removes_from_library(cfg.group(1)):
+                self.pending = True
+            return True
+        balance = line.count("[") - line.count("]")
+        if balance > 0:
+            self._continuation = balance
+            self._parts = [stripped]
+        return True
+
+    def observe(self, line: str) -> None:
+        """Absorb one line outside item context, clearing on substance."""
+        if not self.is_attribute(line) and line.strip():
+            self.pending = False
+
+
 def collect_test_gated_module_files(source_root: Path) -> set[Path]:
     """Paths loaded by out-of-line `mod` declarations under a test cfg.
 
     A `#[cfg(test)] mod helpers;` loads a separate file whose contents are
     absent from library builds; the per-file scan cannot see the declaring
     module's gate, so those files (and their subdirectories) are excluded
-    up front. A `#[path = ...]` override is invisible here — its string is
-    blanked — which can only fail loud: a file is never excluded on the
-    strength of an attribute this scan cannot read.
+    up front — unless another declaration of the same module is reachable
+    in library builds (`#[cfg(not(test))] mod helpers;` alongside the
+    gated one), in which case the file stays scanned. A `#[path = ...]`
+    override is invisible here — its string is blanked — which can only
+    fail loud: a file is never excluded on the strength of an attribute
+    this scan cannot read.
     """
-    excluded: set[Path] = set()
+    gated: set[Path] = set()
+    production: set[Path] = set()
     for path in sorted(source_root.rglob("*.rs")):
-        test_configured = False
-        attribute_continuation = 0
+        tracker = TestConfigurationTracker()
         for line in blank_comments_and_strings(path.read_text()).splitlines():
             declared = OUT_OF_LINE_MOD.match(line)
             if declared:
-                if test_configured:
-                    if path.name in ("lib.rs", "mod.rs", "main.rs"):
-                        base = path.parent
-                    else:
-                        base = path.parent / path.stem
-                    excluded.add(base / f"{declared.group(1)}.rs")
-                    excluded.add(base / declared.group(1))
-                test_configured = False
+                if path.name in ("lib.rs", "mod.rs", "main.rs"):
+                    base = path.parent
+                else:
+                    base = path.parent / path.stem
+                targets = (base / f"{declared.group(1)}.rs", base / declared.group(1))
+                if tracker.take():
+                    gated.update(targets)
+                else:
+                    production.update(targets)
                 continue
-            stripped = line.strip()
-            if attribute_continuation > 0:
-                attribute_continuation += line.count("[") - line.count("]")
-            else:
-                cfg = CFG_ATTRIBUTE.match(stripped)
-                if cfg:
-                    if cfg_removes_from_library(cfg.group(1)):
-                        test_configured = True
-                elif stripped.startswith("#["):
-                    attribute_continuation = line.count("[") - line.count("]")
-                elif stripped:
-                    test_configured = False
-    return excluded
+            tracker.observe(line)
+    return gated - production
 
 
-def parse_macro_surface_types(text: str) -> set[str]:
-    """Type names handed to the column-0 method-minting macro invocations.
+def parse_macro_minted_types(text: str) -> dict[str, str]:
+    """Map minted type name -> macro, from column-0 minting invocations.
 
-    These types keep their declared spine methods without a textual source
-    counterpart (the stale direction skips them). Only the macros in
-    METHOD_MINTING_MACROS qualify — an assertion or derive helper naming a
-    listed type mints nothing, so it earns no exemption. Comments and
-    string contents are blanked before matching, so a commented-out
-    invocation grants nothing and doc comments inside the invocation
-    contribute no names. Only parenthesized invocations are read; a brace
-    or bracket form that mints public surface would need this parser
-    extended.
+    Only the macros in METHOD_MINTING_MACROS qualify — an assertion or
+    derive helper naming a listed type mints nothing. Each invocation
+    mints exactly one type: the first capitalized name in its arguments.
+    Comments and string contents are blanked before matching, so a
+    commented-out invocation grants nothing and doc comments inside the
+    invocation contribute no names. Only parenthesized invocations are
+    read; a brace or bracket form that mints public surface would need
+    this parser extended.
     """
-    names: set[str] = set()
+    minted: dict[str, str] = {}
     for invocation, arguments in MACRO_INVOCATION.findall(
         blank_comments_and_strings(text)
     ):
-        if invocation.split("::")[-1] not in METHOD_MINTING_MACROS:
+        macro = invocation.split("::")[-1]
+        if macro not in METHOD_MINTING_MACROS:
             continue
-        names.update(CAPITALIZED_NAME.findall(arguments))
-    return names
+        first = CAPITALIZED_NAME.search(arguments)
+        if first:
+            minted[first.group(1)] = macro
+    return minted
+
+
+def parse_macro_generated_methods(text: str) -> dict[str, set[str]]:
+    """Public method names each column-0 macro_rules body generates.
+
+    Textual like the rest of the scan: the literal `pub fn` lines in a
+    macro body are its expansion contract, letting minted types face both
+    comparison directions. A minting macro that derived method names from
+    metavariables would extract nothing here, and its types fall back to
+    the stale-direction exemption rather than failing on phantoms.
+    """
+    generated: dict[str, set[str]] = {}
+    lines = blank_comments_and_strings(text).splitlines()
+    index = 0
+    while index < len(lines):
+        header = MACRO_RULES_HEADER.match(lines[index])
+        if header:
+            names = generated.setdefault(header.group(1), set())
+            block_depth = lines[index].count("{") - lines[index].count("}")
+            while block_depth > 0 and index + 1 < len(lines):
+                index += 1
+                body_line = lines[index]
+                method = IMPL_METHOD.match(body_line)
+                if method:
+                    names.add(method.group(1))
+                block_depth += body_line.count("{") - body_line.count("}")
+        index += 1
+    return generated
 
 
 def parse_spine_method_declarations(
     spine_text: str,
-) -> tuple[dict[tuple[str, str], dict[str, set[str]]], list[str]]:
+) -> tuple[
+    dict[tuple[str, str], dict[str, set[str]]],
+    list[str],
+    dict[str, set[str]],
+]:
     """Map (crate, section label) -> type name -> declared method names.
 
     A method is declared by a `pub fn` line inside a section's column-0
@@ -519,10 +580,13 @@ def parse_spine_method_declarations(
     struct`/`pub enum` line. An accessor list continues onto following
     comment lines for as long as each line ends with a comma. Declaring
     the same method twice for one type is reported, matching how the
-    name-level parser rejects duplicate type declarations.
+    name-level parser rejects duplicate type declarations. Placeholder
+    impl blocks (`impl <Identity>`, `impl <Position>`) declare the shared
+    surface of macro-minted types and are returned separately.
     """
     sections: dict[tuple[str, str], dict[str, set[str]]] = {}
     duplicates: list[str] = []
+    placeholders: dict[str, set[str]] = {}
 
     def declare(
         section: tuple[str, str], target: str, names: list[str]
@@ -540,6 +604,7 @@ def parse_spine_method_declarations(
     current_type: str | None = None
     in_impl = False
     impl_type: str | None = None
+    placeholder_target: str | None = None
     header_accum: list[str] | None = None
     accessor_continues = False
     for line in spine_text.splitlines():
@@ -551,6 +616,7 @@ def parse_spine_method_declarations(
             current_type = None
             in_impl = False
             impl_type = None
+            placeholder_target = None
             header_accum = None
             accessor_continues = False
             continue
@@ -565,6 +631,14 @@ def parse_spine_method_declarations(
             continue
         if not in_impl and IMPL_HEADER.match(line):
             accessor_continues = False
+            placeholder = PLACEHOLDER_IMPL.match(line)
+            if placeholder:
+                placeholder_target = placeholder.group(1)
+                placeholders.setdefault(placeholder_target, set())
+                impl_type = None
+                in_impl = True
+                continue
+            placeholder_target = None
             if "{" in line:
                 impl_type = impl_self_type(line)
                 in_impl = "}" not in line.split("{", 1)[1]
@@ -577,15 +651,22 @@ def parse_spine_method_declarations(
             ):
                 if impl_type:
                     declare(current, impl_type, ACCESSOR_NAME.findall(line))
+                elif placeholder_target:
+                    placeholders[placeholder_target].update(
+                        ACCESSOR_NAME.findall(line)
+                    )
                 accessor_continues = line.rstrip().endswith(",")
                 continue
             accessor_continues = False
             method = IMPL_METHOD.match(line)
             if method and impl_type:
                 declare(current, impl_type, [method.group(1)])
+            elif method and placeholder_target:
+                placeholders[placeholder_target].add(method.group(1))
             if line.startswith("}"):
                 in_impl = False
                 impl_type = None
+                placeholder_target = None
             continue
         if ACCESSOR_COMMENT.match(line) or (
             accessor_continues and line.startswith("//")
@@ -598,7 +679,7 @@ def parse_spine_method_declarations(
         declared_type = SECTION_TYPE.match(line)
         if declared_type:
             current_type = declared_type.group(1)
-    return sections, duplicates
+    return sections, duplicates, placeholders
 
 
 def validate_lib_forms(crate: str, lib_rs: Path) -> list[str]:
@@ -773,8 +854,8 @@ def main() -> int:
             )
 
     # Method-surface comparison per listed type, both directions.
-    spine_methods, method_duplicates = parse_spine_method_declarations(
-        spine_text
+    spine_methods, method_duplicates, placeholder_methods = (
+        parse_spine_method_declarations(spine_text)
     )
     failures.extend(method_duplicates)
     for crate, lib_path in CRATES.items():
@@ -792,7 +873,8 @@ def main() -> int:
             for name in identities:
                 home_section.setdefault(name, IDENTITY_SECTION)
         source_methods: dict[str, set[str]] = {}
-        macro_surface: set[str] = set()
+        minted_types: dict[str, str] = {}
+        generated_methods: dict[str, set[str]] = {}
         test_gated_files = collect_test_gated_module_files(lib_path.parent)
         for path in sorted(lib_path.parent.rglob("*.rs")):
             if any(
@@ -804,17 +886,33 @@ def main() -> int:
             for name, methods in found.items():
                 source_methods.setdefault(name, set()).update(methods)
             failures.extend(unparsed)
-            macro_surface.update(parse_macro_surface_types(path.read_text()))
+            text = path.read_text()
+            minted_types.update(parse_macro_minted_types(text))
+            for macro, names in parse_macro_generated_methods(text).items():
+                generated_methods.setdefault(macro, set()).update(names)
         for name, section in sorted(home_section.items()):
             declared = spine_methods.get((crate, section), {}).get(name, set())
             found = source_methods.get(name, set())
+            stale_exempt = False
+            minting_macro = minted_types.get(name)
+            if minting_macro is not None:
+                extracted = generated_methods.get(minting_macro, set())
+                if extracted:
+                    found = found | extracted
+                else:
+                    stale_exempt = True
+                placeholder = METHOD_MINTING_MACROS[minting_macro]
+                if placeholder is not None:
+                    declared = declared | placeholder_methods.get(
+                        placeholder, set()
+                    )
             for method in sorted(found - declared):
                 failures.append(
                     f"{crate}::{section}::{name} has public method {method}()"
                     f" with no declaration in the '{crate}: {section}' section"
                 )
             for method in sorted(declared - found):
-                if name in macro_surface:
+                if stale_exempt:
                     continue
                 failures.append(
                     f"'{crate}: {section}' section declares {name}::{method}(),"

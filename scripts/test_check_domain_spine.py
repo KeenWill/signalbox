@@ -32,10 +32,41 @@ WIDGET_BASELINE = """\
 //! }
 //! ```
 
+macro_rules! bounded_text {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        pub struct $name(String);
+
+        impl $name {
+            pub fn try_new(value: String) -> Result<Self, WidgetError> {
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+    };
+}
+
 bounded_text!(
     /// One fixture bounded text.
     Tag
 );
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos")
+))]
+impl Widget {
+    pub fn multiline_cfg_helper(&self) -> u64 {
+        self.value
+    }
+}
 
 /// One fixture public type.
 pub struct Widget {
@@ -273,8 +304,10 @@ def main() -> int:
         root = Path(directory)
 
         # The baseline agrees everywhere — including a method-level
-        # `#[cfg(test)] pub fn` inside a production impl and a test-gated
-        # out-of-line `mod helpers;` whose file impls the listed type:
+        # `#[cfg(test)] pub fn` inside a production impl, a rustfmt-style
+        # multi-line cfg predicate on a test-only impl, a test-gated
+        # out-of-line `mod helpers;` whose file impls the listed type, and
+        # a macro-minted Tag validated against its expansion contract:
         # accessor-comment declarations count, a doc-comment impl example, a
         # nested-block-comment impl, test-configured impls and modules
         # (including a multi-line attribute between the cfg and its item),
@@ -402,6 +435,60 @@ def main() -> int:
             run_checker(root),
             "production inline module is scanned",
             "domain::widget::Widget has public method nested_method() with no"
+            " declaration in the 'domain: widget' section",
+        )
+
+        # A macro-minted type faces the forward direction too: dropping a
+        # generated method's declaration is drift, per the expansion
+        # contract extracted from the macro_rules body.
+        write_fixture(
+            root,
+            spine=SPINE_BASELINE.replace(
+                "    // accessors: as_str(), into_string()\n",
+                "    // accessor: as_str()\n",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "macro-minted type checked forward",
+            "domain::widget::Tag has public method into_string() with no"
+            " declaration in the 'domain: widget' section",
+        )
+
+        # A where-bound const block is header, not body: the real body
+        # behind it is still scanned.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE
+            + "\nimpl Widget\n"
+            "where\n"
+            "    [(); { 1 + 1 }]: Sized,\n"
+            "{\n"
+            "    pub fn where_gated(&self) -> u64 {\n"
+            "        2\n"
+            "    }\n"
+            "}\n",
+        )
+        expect_failure(
+            run_checker(root),
+            "where-clause const block is not the body opener",
+            "domain::widget::Widget has public method where_gated() with no"
+            " declaration in the 'domain: widget' section",
+        )
+
+        # A module declared under mutually exclusive cfgs is loaded by
+        # library builds; the production declaration wins over the gate.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "#[cfg(test)]\nmod helpers;",
+                "#[cfg(test)]\nmod helpers;\n#[cfg(not(test))]\nmod helpers;",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "production-reachable module stays scanned",
+            "domain::widget::Widget has public method helpers_only() with no"
             " declaration in the 'domain: widget' section",
         )
 
