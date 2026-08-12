@@ -6,9 +6,11 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The durable usage-provenance column and read projection are verified against PR
 `#389` (`agent/cost-accounting`).
 
-Multipart attachment rendering and verification below are the foundation
-proposal from PR #553 (`agent/blob-storage-foundation`) and become verified with
-its implementing child stack.
+Multipart attachment rendering remains part of the foundation proposal from PR
+#553 (`agent/blob-storage-foundation`). Distinct attachment sizing, streamed
+replica verification, typed pre-authorization failure, retryable unavailability,
+and scheduler-capacity handoff are verified against this implementing change
+(`agent/blob-storage-attachment-preparation`).
 
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):

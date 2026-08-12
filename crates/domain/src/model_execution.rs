@@ -1480,6 +1480,16 @@ impl PreparedModelCallRequest {
     ) -> Option<std::num::NonZeroU64> {
         self.attachment_blob_facts.get(&digest).copied()
     }
+
+    /// Iterates over every distinct attachment identity and immutable length in
+    /// digest order.
+    pub fn attachment_blobs(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (crate::BlobDigest, std::num::NonZeroU64)> + '_ {
+        self.attachment_blob_facts
+            .iter()
+            .map(|(digest, byte_length)| (*digest, *byte_length))
+    }
 }
 
 /// Why no prepared request can be resumed.

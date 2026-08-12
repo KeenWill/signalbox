@@ -7,6 +7,10 @@ and preserved interrupt/stop authority were verified against this PR
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+Prepared-call sweep eligibility and scheduler-capacity relinquishment are
+verified against this implementing change
+(`agent/blob-storage-attachment-preparation`).
+
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
 the implementing stack through PR #230 (`agent/frontier-scaling`); the

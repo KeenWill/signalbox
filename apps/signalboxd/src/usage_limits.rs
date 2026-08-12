@@ -214,8 +214,17 @@ where
                 ModelCallCapabilityPreparation::Cancelled => {
                     ModelCallCapabilityPreparation::Cancelled
                 }
+                ModelCallCapabilityPreparation::Deferred => {
+                    ModelCallCapabilityPreparation::Deferred
+                }
                 ModelCallCapabilityPreparation::KnownFailure => {
                     ModelCallCapabilityPreparation::KnownFailure
+                }
+                ModelCallCapabilityPreparation::AttachmentKnownFailure(failure) => {
+                    ModelCallCapabilityPreparation::AttachmentKnownFailure(failure)
+                }
+                ModelCallCapabilityPreparation::AttachmentUnavailable(unavailable) => {
+                    ModelCallCapabilityPreparation::AttachmentUnavailable(unavailable)
                 }
             })
     }

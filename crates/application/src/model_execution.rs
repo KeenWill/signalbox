@@ -1047,6 +1047,8 @@ enum RetainedModelCallExecutionStateKind {
         session: SessionId,
         /// Prepared call whose guarded known-failure closure remains pending.
         call: ModelCallId,
+        /// Typed attachment evidence retained until the closure commit settles.
+        attachment: Option<AttachmentPreparationFailure>,
     },
     /// Ambiguous authorization still has same-incarnation proof of no send.
     AuthorizationNonConsumption {
@@ -1066,14 +1068,66 @@ enum RetainedModelCallExecutionStateKind {
     },
 }
 
+/// A checked attachment prevented a prepared call from becoming send-authorized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachmentPreparationFailure {
+    /// Distinct attachment lengths exceeded the deployment-wide blob ceiling.
+    TooLarge {
+        /// Maximum aggregate attachment bytes admitted for one prepared call.
+        maximum_bytes: u64,
+    },
+    /// No recorded replica could prove the attachment present.
+    Missing {
+        /// Content identity that could not be read from any recorded replica.
+        digest: BlobDigest,
+    },
+    /// Every readable recorded replica disagreed with immutable catalog facts.
+    Corrupt {
+        /// Content identity whose readable replicas failed verification.
+        digest: BlobDigest,
+    },
+    /// At least one candidate was temporarily unavailable, so no terminal
+    /// attachment judgment could be made.
+    Unavailable,
+}
+
+impl ClassifyOperatorFailure for AttachmentPreparationFailure {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Unavailable => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::TooLarge { .. } | Self::Missing { .. } | Self::Corrupt { .. } => {
+                OperatorFailureClass::CallerOrHubBug
+            }
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => "attachment_preparation_too_large",
+            Self::Missing { .. } => "attachment_preparation_missing",
+            Self::Corrupt { .. } => "attachment_preparation_corrupt",
+            Self::Unavailable => "attachment_preparation_unavailable",
+        }
+    }
+}
+
 /// Adapter-local result of credential lookup and capability preparation.
 pub enum ModelCallCapabilityPreparation<Capability> {
     /// A call-bound one-shot capability is ready to move into provider work.
     Ready(Capability),
     /// Durable authority changed while the capability was being prepared.
     Cancelled,
+    /// Bounded infrastructure admission was unavailable; the prepared call
+    /// remains eligible for a later pass.
+    Deferred,
     /// A trustworthy ordinary local failure occurred before send authorization.
     KnownFailure,
+    /// Attachment verification proved a typed trustworthy pre-send failure.
+    AttachmentKnownFailure(AttachmentPreparationFailure),
+    /// At least one candidate was unavailable, so durable `Prepared` remains.
+    AttachmentUnavailable(AttachmentPreparationFailure),
 }
 
 /// Outcome of one exact provider-native prospective input count.
@@ -1231,6 +1285,22 @@ pub enum ModelCallExecutionOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     /// A trustworthy local capability failure closed the prepared call.
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    /// A typed attachment failure durably closed the prepared call.
+    AttachmentPreparationFailed {
+        /// Exact preparation failure proven before authorization.
+        failure: AttachmentPreparationFailure,
+        /// Durable generic failed-turn closure.
+        turn: Box<FailedModelCallTurn>,
+    },
+    /// Attachment infrastructure was unavailable; the call remains prepared.
+    AttachmentUnavailable(AttachmentPreparationFailure),
+    /// A retained typed attachment failure's commit was proven to have landed.
+    AttachmentPreparationFailureAlreadyCommitted {
+        /// Exact preparation failure retained across the ambiguous commit.
+        failure: AttachmentPreparationFailure,
+        /// Prepared call whose closure is now proven durable.
+        call: ModelCallId,
+    },
     /// A retained capability failure's earlier commit was proven to have landed.
     CapabilityFailureAlreadyCommitted(ModelCallId),
     /// The provider observation committed its authoritative result.
@@ -1565,31 +1635,43 @@ where
     > {
         if let Some(retained) = self.retained_state.take() {
             match retained.state {
-                RetainedModelCallExecutionStateKind::CapabilityKnownFailure { session, call } => {
-                    match self.failure.reread_failure(session, call).await {
-                        Ok(RetainedCapabilityFailureStatus::Pending) => {
-                            return self.commit_capability_known_failure(session, call).await;
-                        }
-                        Ok(RetainedCapabilityFailureStatus::AlreadyCommitted) => {
-                            return Ok(
-                                ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call),
-                            );
-                        }
-                        Ok(RetainedCapabilityFailureStatus::Cancelled) => {
-                            return Ok(ModelCallExecutionOutcome::NoWork);
-                        }
-                        Err(error) => {
-                            self.retained_state = Some(RetainedModelCallExecutionState {
-                                state:
-                                    RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
-                                        session,
-                                        call,
-                                    },
-                            });
-                            return Err(ModelCallExecutionError::CapabilityFailureReread(error));
-                        }
+                RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
+                    session,
+                    call,
+                    attachment,
+                } => match self.failure.reread_failure(session, call).await {
+                    Ok(RetainedCapabilityFailureStatus::Pending) => {
+                        return self
+                            .commit_capability_known_failure(session, call, attachment)
+                            .await;
                     }
-                }
+                    Ok(RetainedCapabilityFailureStatus::AlreadyCommitted) => {
+                        return Ok(match attachment {
+                            Some(failure) => {
+                                ModelCallExecutionOutcome::AttachmentPreparationFailureAlreadyCommitted {
+                                    failure,
+                                    call,
+                                }
+                            }
+                            None => {
+                                ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call)
+                            }
+                        });
+                    }
+                    Ok(RetainedCapabilityFailureStatus::Cancelled) => {
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
+                    Err(error) => {
+                        self.retained_state = Some(RetainedModelCallExecutionState {
+                            state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
+                                session,
+                                call,
+                                attachment,
+                            },
+                        });
+                        return Err(ModelCallExecutionError::CapabilityFailureReread(error));
+                    }
+                },
                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                     session: retained_session,
                     prepared,
@@ -1750,7 +1832,9 @@ where
         )
         .map_err(ModelCallExecutionError::Render)?;
         if automatic_tool_round_limit_reached(turn, operation.messages()) {
-            return self.commit_capability_known_failure(session, call).await;
+            return self
+                .commit_capability_known_failure(session, call, None)
+                .await;
         }
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
@@ -1762,8 +1846,29 @@ where
             Ok(ModelCallCapabilityPreparation::Cancelled) => {
                 return Ok(ModelCallExecutionOutcome::NoWork);
             }
+            Ok(ModelCallCapabilityPreparation::Deferred) => {
+                return Ok(ModelCallExecutionOutcome::NoWork);
+            }
             Ok(ModelCallCapabilityPreparation::KnownFailure) => {
-                return self.commit_capability_known_failure(session, call).await;
+                return self
+                    .commit_capability_known_failure(session, call, None)
+                    .await;
+            }
+            Ok(ModelCallCapabilityPreparation::AttachmentKnownFailure(
+                AttachmentPreparationFailure::Unavailable,
+            ))
+            | Ok(ModelCallCapabilityPreparation::AttachmentUnavailable(
+                AttachmentPreparationFailure::Unavailable,
+            )) => {
+                return Ok(ModelCallExecutionOutcome::AttachmentUnavailable(
+                    AttachmentPreparationFailure::Unavailable,
+                ));
+            }
+            Ok(ModelCallCapabilityPreparation::AttachmentKnownFailure(failure))
+            | Ok(ModelCallCapabilityPreparation::AttachmentUnavailable(failure)) => {
+                return self
+                    .commit_capability_known_failure(session, call, Some(failure))
+                    .await;
             }
             Err(error) => {
                 return Err(ModelCallExecutionError::CapabilityPreparation(error));
@@ -1866,6 +1971,7 @@ where
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment: Option<AttachmentPreparationFailure>,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -1891,9 +1997,13 @@ where
                         failed.turn(),
                         TurnTerminalOutcome::CapabilityKnownFailure,
                     );
-                    return Ok(ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(
-                        failed,
-                    )));
+                    return Ok(match attachment {
+                        Some(failure) => ModelCallExecutionOutcome::AttachmentPreparationFailed {
+                            failure,
+                            turn: Box::new(failed),
+                        },
+                        None => ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed)),
+                    });
                 }
                 Err(error)
                     if error.operator_failure_class()
@@ -1906,6 +2016,7 @@ where
                         state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                             session,
                             call,
+                            attachment,
                         },
                     });
                     return Err(ModelCallExecutionError::CapabilityFailureCommit(error));
@@ -3801,6 +3912,80 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct AttachmentFailureProvider {
+        failure: AttachmentPreparationFailure,
+        preparation_count: usize,
+    }
+
+    #[derive(Debug)]
+    struct AttachmentUnavailableProvider;
+
+    impl ModelCallProvider for AttachmentUnavailableProvider {
+        type Capability = ();
+        type Error = FakeError;
+
+        async fn prepare_capability<Cancellation>(
+            &mut self,
+            _operation: PreparedModelOperation,
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            Ok(ModelCallCapabilityPreparation::AttachmentUnavailable(
+                AttachmentPreparationFailure::Unavailable,
+            ))
+        }
+
+        async fn invoke<AcceptancePossible, Cancellation>(
+            &mut self,
+            _authorized: AuthorizedModelCall,
+            _capability: Self::Capability,
+            _acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
+        ) -> Result<CorrelatedModelCallTerminalObservation, Self::Error>
+        where
+            AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            panic!("unavailable attachment preparation must prevent provider interaction")
+        }
+    }
+
+    impl ModelCallProvider for AttachmentFailureProvider {
+        type Capability = ();
+        type Error = FakeError;
+
+        async fn prepare_capability<Cancellation>(
+            &mut self,
+            _operation: PreparedModelOperation,
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            self.preparation_count += 1;
+            Ok(ModelCallCapabilityPreparation::AttachmentKnownFailure(
+                self.failure,
+            ))
+        }
+
+        async fn invoke<AcceptancePossible, Cancellation>(
+            &mut self,
+            _authorized: AuthorizedModelCall,
+            _capability: Self::Capability,
+            _acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
+        ) -> Result<CorrelatedModelCallTerminalObservation, Self::Error>
+        where
+            AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            panic!("attachment failure must prevent provider interaction")
+        }
+    }
+
+    #[derive(Debug)]
     struct BoundaryBlockingProvider {
         crossed: Arc<tokio::sync::Notify>,
         finish: Arc<tokio::sync::Notify>,
@@ -5038,6 +5223,7 @@ mod tests {
                 state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                     session: retained_session,
                     call: retained_call,
+                    attachment: None,
                 },
             }) if *retained_session == session && *retained_call == call
         ));
@@ -5076,6 +5262,7 @@ mod tests {
                 state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                     session: retained_session,
                     call: retained_call,
+                    attachment: None,
                 },
             }) if retained_session == session && retained_call == call
         ));
@@ -5140,6 +5327,145 @@ mod tests {
             "the committed failure must terminalize the prepared call"
         );
         assert_eq!(provider.interaction_count(), 0);
+        assert!(retained.is_none());
+    }
+
+    /// INV-062: a typed attachment failure terminalizes the prepared call
+    /// before durable send authorization or provider interaction.
+    #[tokio::test]
+    async fn inv062_attachment_failure_closes_before_durable_authorization() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let failed = failed_turn_fixture();
+        let attachment_failure = AttachmentPreparationFailure::Missing {
+            digest: BlobDigest::from_bytes([9; 32]),
+        };
+        let provider = AttachmentFailureProvider {
+            failure: attachment_failure,
+            preparation_count: 0,
+        };
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [Ok(failed.clone())].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            provider,
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("the typed attachment failure commits before authorization"),
+            ModelCallExecutionOutcome::AttachmentPreparationFailed {
+                failure: attachment_failure,
+                turn: Box::new(failed),
+            }
+        );
+        let (_, _, failure, _, _, provider, _, _, retained) = service.into_parts();
+        assert_eq!(failure.calls, 1);
+        assert_eq!(provider.preparation_count, 1);
+        assert!(retained.is_none());
+    }
+
+    /// INV-062: typed attachment evidence survives an ambiguous failure
+    /// closure and is returned after the authoritative reread proves commit.
+    #[tokio::test]
+    async fn inv062_ambiguous_attachment_failure_retains_typed_evidence() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let call = request.call().id();
+        let attachment_failure = AttachmentPreparationFailure::Corrupt {
+            digest: BlobDigest::from_bytes([8; 32]),
+        };
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            FakeFailure {
+                errors: [FakeError::CommitAmbiguous].into(),
+                rereads: [Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)].into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            AttachmentFailureProvider {
+                failure: attachment_failure,
+                preparation_count: 0,
+            },
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::CapabilityFailureCommit(
+                FakeError::CommitAmbiguous
+            ))
+        ));
+        assert_eq!(
+            service
+                .execute(identity(99, SessionId::from_uuid))
+                .await
+                .expect("the reread proves the typed attachment closure landed"),
+            ModelCallExecutionOutcome::AttachmentPreparationFailureAlreadyCommitted {
+                failure: attachment_failure,
+                call,
+            }
+        );
+        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 1);
+        assert_eq!(failure.reread_calls, 1);
+        assert_eq!(provider.preparation_count, 1);
+        assert!(retained.is_none());
+    }
+
+    /// INV-062: unavailable attachment verification leaves the exact call
+    /// prepared without durable failure or send authorization.
+    #[tokio::test]
+    async fn inv062_attachment_unavailable_leaves_prepared_without_authorization() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            AttachmentUnavailableProvider,
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("unavailable attachment verification is a typed retryable outcome"),
+            ModelCallExecutionOutcome::AttachmentUnavailable(
+                AttachmentPreparationFailure::Unavailable
+            )
+        );
+        let (_, _, failure, _, _, _, _, _, retained) = service.into_parts();
+        assert_eq!(failure.calls, 0);
         assert!(retained.is_none());
     }
 

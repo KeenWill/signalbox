@@ -3980,7 +3980,8 @@ impl PreparedSteeringConsumption {
 }
 pub struct PreparedModelCallRequest { /* private */ }
 // accessors: session(), turn(), attempt(), dangerous_tool_auto_approval(),
-// model_settings(), call(), frontier_entries(), origin_content(), attachment_byte_length()
+// model_settings(), call(), frontier_entries(), origin_content(), attachment_byte_length(),
+// attachment_blobs()
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
@@ -6336,10 +6337,21 @@ pub enum RetainedModelCallObservationStatus {
 
 pub struct RetainedModelCallExecutionState { /* private */ }
 
+pub enum AttachmentPreparationFailure {
+    TooLarge { maximum_bytes: u64 },
+    Missing { digest: BlobDigest },
+    Corrupt { digest: BlobDigest },
+    Unavailable,
+}
+// impl ClassifyOperatorFailure
+
 pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
     Cancelled,
+    Deferred,
     KnownFailure,
+    AttachmentKnownFailure(AttachmentPreparationFailure),
+    AttachmentUnavailable(AttachmentPreparationFailure),
 }
 
 pub enum ModelCallInputTokenCount {
@@ -6405,6 +6417,15 @@ pub enum ModelCallExecutionOutcome {
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    AttachmentPreparationFailed {
+        failure: AttachmentPreparationFailure,
+        turn: Box<FailedModelCallTurn>,
+    },
+    AttachmentUnavailable(AttachmentPreparationFailure),
+    AttachmentPreparationFailureAlreadyCommitted {
+        failure: AttachmentPreparationFailure,
+        call: ModelCallId,
+    },
     CapabilityFailureAlreadyCommitted(ModelCallId),
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
     ObservationAlreadyCommitted(ModelCallId),
@@ -7967,6 +7988,9 @@ impl<Sweep: EligibilitySweep> InProcessEligibilityWorkSource<Sweep> {
 pub enum SchedulerLoopExit {
     Shutdown,
 }
+
+pub async fn relinquish_scheduler_capacity<Work>(work: Work) -> Work::Output
+where Work: Future;
 
 pub struct SchedulerLoop<WorkSource, Pass> { /* private */ }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
@@ -10449,7 +10473,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 35 (incl. 8 traits)   |
+| application: model_execution                       | 36 (incl. 8 traits)   |
 | application: tool_loop                             | 26 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
@@ -10458,11 +10482,11 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
-| application: scheduler                             | 15 (incl. 5 traits)   |
+| application: scheduler                             | 15 (+1 free fn) (incl. 5 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)    |
 | application: startup_scan                          | 7 (incl. 2 traits)    |
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **253 (+1 free fn)**  |
+| **signalbox-application total**                    | **254 (+2 free fn)**  |

@@ -40,6 +40,12 @@ Provider-neutral ordered attachment stubs and immutable catalog-length
 projection are verified against this implementing change
 (`agent/blob-storage-attachment-rendering`).
 
+Distinct attachment sizing and streamed replica verification, typed
+missing/corrupt closure before send authorization, typed unavailable retry, and
+bounded verification admission, scheduler-capacity handoff, and deadline are
+verified against this implementing change
+(`agent/blob-storage-attachment-preparation`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire
