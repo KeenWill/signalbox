@@ -16,15 +16,16 @@ use signalbox_domain::{
     GoalUserAction, MergeableState, ModelChangeAdjustment, ModelSettingSource,
     ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
     ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
-    RunnerPlacementLossSource, ServiceTier, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
-    SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
-    TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
+    RunnerPlacementLossSource, RunnerSandboxProfile, ServiceTier,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
+    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
+    ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
+    ValidatedModelSettings, WorkspaceOrigin,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
-use crate::approval_judge::FailedApprovalJudgeDisposition;
+use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
 /// Closed delegated-session relationship policy discriminators in PostgreSQL.
 ///
@@ -361,7 +362,7 @@ pub(crate) enum SessionCreationCauseStorageKind {
 /// Encodes a session-creation cause as its closed PostgreSQL spelling.
 pub(crate) const fn session_creation_cause_to_str(value: &SessionCreationCause) -> &'static str {
     match value {
-        SessionCreationCause::UserInitiated => "owner_initiated",
+        SessionCreationCause::UserInitiated => "user_initiated",
         SessionCreationCause::Delegated { .. } => "delegated",
     }
 }
@@ -371,7 +372,7 @@ pub(crate) fn session_creation_cause_from_str(
     value: &str,
 ) -> Option<SessionCreationCauseStorageKind> {
     match value {
-        "owner_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
+        "user_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
         "delegated" => Some(SessionCreationCauseStorageKind::Delegated),
         _ => None,
     }
@@ -486,7 +487,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
     value: ToolApprovalDecisionSourceStorageKind,
 ) -> &'static str {
     match value {
-        ToolApprovalDecisionSourceStorageKind::UserCommand => "owner_command",
+        ToolApprovalDecisionSourceStorageKind::UserCommand => "user_command",
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
@@ -497,7 +498,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
     value: &str,
 ) -> Option<ToolApprovalDecisionSourceStorageKind> {
     match value {
-        "owner_command" => Some(ToolApprovalDecisionSourceStorageKind::UserCommand),
+        "user_command" => Some(ToolApprovalDecisionSourceStorageKind::UserCommand),
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
@@ -1158,6 +1159,50 @@ pub(crate) fn runner_placement_loss_source_from_str(
     match value {
         "connection" => Some(RunnerPlacementLossSource::Connection),
         "registration" => Some(RunnerPlacementLossSource::Registration),
+        _ => None,
+    }
+}
+
+/// Encodes a follower-visible runner state as its closed PostgreSQL spelling.
+pub(crate) const fn dispatched_runner_state_to_str(state: DispatchedRunnerState) -> &'static str {
+    match state {
+        DispatchedRunnerState::Pinned => "pinned",
+        DispatchedRunnerState::Suspect => "suspect",
+        DispatchedRunnerState::Connected => "connected",
+        DispatchedRunnerState::RunnerLostBeforePin => "runner_lost_before_pin",
+        DispatchedRunnerState::RunnerLost => "runner_lost",
+        DispatchedRunnerState::Replaced => "replaced",
+        DispatchedRunnerState::WorkingDirectoryChanged => "working_directory_changed",
+        DispatchedRunnerState::Abandoned => "abandoned",
+    }
+}
+
+/// Decodes a follower-visible runner state from its closed PostgreSQL spelling.
+pub(crate) fn dispatched_runner_state_from_str(value: &str) -> Option<DispatchedRunnerState> {
+    match value {
+        "pinned" => Some(DispatchedRunnerState::Pinned),
+        "suspect" => Some(DispatchedRunnerState::Suspect),
+        "connected" => Some(DispatchedRunnerState::Connected),
+        "runner_lost_before_pin" => Some(DispatchedRunnerState::RunnerLostBeforePin),
+        "runner_lost" => Some(DispatchedRunnerState::RunnerLost),
+        "replaced" => Some(DispatchedRunnerState::Replaced),
+        "working_directory_changed" => Some(DispatchedRunnerState::WorkingDirectoryChanged),
+        "abandoned" => Some(DispatchedRunnerState::Abandoned),
+        _ => None,
+    }
+}
+
+pub(crate) const fn runner_sandbox_to_str(value: RunnerSandboxProfile) -> &'static str {
+    match value {
+        RunnerSandboxProfile::Ambient => "ambient",
+        RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
+    }
+}
+
+pub(crate) fn runner_sandbox_from_str(value: &str) -> Option<RunnerSandboxProfile> {
+    match value {
+        "ambient" => Some(RunnerSandboxProfile::Ambient),
+        "workspace_restricted" => Some(RunnerSandboxProfile::WorkspaceRestricted),
         _ => None,
     }
 }
@@ -1848,11 +1893,13 @@ mod tests {
         FastModeOverlay, FastModeSupport, MergeableState, ModelCapabilities, ModelChangeAdjustment,
         ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
         ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, RunnerPlacementLossSource,
-        ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
-        SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
-        ToolPermissionDefault, TurnId,
+        RunnerSandboxProfile, ServiceTier, SessionConfigurationDefaultsVersion,
+        SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
+        SettingOverlay, ToolApprovalPosture, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
+
+    use crate::outbox::DispatchedRunnerState;
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
@@ -1860,21 +1907,22 @@ mod tests {
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-        StoredModelSettingsError, ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid,
-        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
-        approval_judge_recommendation_to_str, approval_judge_state_from_str,
-        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
-        approval_judge_terminal_disposition_to_str, bound_child_action_from_str,
-        bound_child_action_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
-        delegation_message_direction_from_str, delegation_message_direction_to_str,
-        delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
-        delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
-        delegation_policy_kind_from_str, delegation_policy_kind_to_str,
-        delegation_rejection_kind_from_str, delegation_rejection_kind_to_str,
-        delegation_transition_failure_from_str, delegation_transition_failure_to_str,
-        delegation_update_kind_from_str, delegation_update_kind_to_str,
-        delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
+        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
+        approval_judge_state_from_str, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
+        bound_child_action_from_str, bound_child_action_to_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, delegation_message_direction_from_str,
+        delegation_message_direction_to_str, delegation_outcome_kind_from_str,
+        delegation_outcome_kind_to_str, delegation_outcome_reason_from_str,
+        delegation_outcome_reason_to_str, delegation_policy_kind_from_str,
+        delegation_policy_kind_to_str, delegation_rejection_kind_from_str,
+        delegation_rejection_kind_to_str, delegation_transition_failure_from_str,
+        delegation_transition_failure_to_str, delegation_update_kind_from_str,
+        delegation_update_kind_to_str, delegation_wait_mode_from_str, delegation_wait_mode_to_str,
         delegation_wake_subject_from_str, delegation_wake_subject_to_str,
+        dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
         durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
@@ -1888,14 +1936,16 @@ mod tests {
         repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
         repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str, runner_placement_loss_source_from_str,
-        runner_placement_loss_source_to_str, session_creation_cause_from_str,
-        session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
-        session_placement_event_kind_from_str, session_placement_event_kind_to_str,
-        session_placement_rejection_from_str, session_placement_result_kind_from_str,
-        session_placement_result_kind_to_str, tool_approval_posture_from_str,
-        tool_approval_posture_to_str, tool_attempt_disposition_from_str,
-        tool_attempt_disposition_to_str, tool_permission_default_from_str,
-        tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
+        runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
+        session_creation_cause_from_str, session_creation_cause_to_str, session_id_from_uuid,
+        session_id_to_uuid, session_placement_event_kind_from_str,
+        session_placement_event_kind_to_str, session_placement_rejection_from_str,
+        session_placement_result_kind_from_str, session_placement_result_kind_to_str,
+        tool_approval_decision_source_from_str, tool_approval_decision_source_to_str,
+        tool_approval_posture_from_str, tool_approval_posture_to_str,
+        tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
+        tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
+        turn_id_to_uuid,
     };
 
     #[test]
@@ -2308,6 +2358,57 @@ mod tests {
             Some(SessionCreationCauseStorageKind::Delegated)
         );
         assert_eq!(session_creation_cause_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn tool_approval_decision_source_mapping_is_closed() {
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::UserCommand,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::UserCommand)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::PolicyAuto,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::Delegate,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::Delegate)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
+
+    /// Pins the stored spellings literally rather than only round-tripping
+    /// them. A rename that moved the encoder and the decoder together would
+    /// round-trip perfectly and still fail against every row already written,
+    /// so the round-trip tests above cannot catch it on their own. These are
+    /// the exact strings the closed `CHECK` constraints admit.
+    #[test]
+    fn storage_spells_the_human_principal_user() {
+        assert_eq!(
+            session_creation_cause_to_str(&SessionCreationCause::UserInitiated),
+            "user_initiated"
+        );
+        assert_eq!(
+            tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::UserCommand
+            ),
+            "user_command"
+        );
     }
 
     #[test]
@@ -2832,6 +2933,74 @@ mod tests {
             Some(RunnerPlacementLossSource::Registration),
         );
         assert_eq!(runner_placement_loss_source_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn runner_sandbox_mapping_is_closed() {
+        assert_eq!(
+            runner_sandbox_from_str(runner_sandbox_to_str(RunnerSandboxProfile::Ambient)),
+            Some(RunnerSandboxProfile::Ambient),
+        );
+        assert_eq!(
+            runner_sandbox_from_str(runner_sandbox_to_str(
+                RunnerSandboxProfile::WorkspaceRestricted,
+            )),
+            Some(RunnerSandboxProfile::WorkspaceRestricted),
+        );
+        assert_eq!(runner_sandbox_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn dispatched_runner_state_mapping_is_closed() {
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Pinned,
+            )),
+            Some(DispatchedRunnerState::Pinned),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Suspect,
+            )),
+            Some(DispatchedRunnerState::Suspect),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Connected,
+            )),
+            Some(DispatchedRunnerState::Connected),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::RunnerLostBeforePin,
+            )),
+            Some(DispatchedRunnerState::RunnerLostBeforePin),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::RunnerLost,
+            )),
+            Some(DispatchedRunnerState::RunnerLost),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Replaced,
+            )),
+            Some(DispatchedRunnerState::Replaced),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::WorkingDirectoryChanged,
+            )),
+            Some(DispatchedRunnerState::WorkingDirectoryChanged),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Abandoned,
+            )),
+            Some(DispatchedRunnerState::Abandoned),
+        );
+        assert_eq!(dispatched_runner_state_from_str("unknown"), None);
     }
 
     #[test]

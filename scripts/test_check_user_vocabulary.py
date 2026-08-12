@@ -388,11 +388,15 @@ def main() -> int:
             *expected_diagnostics(
                 "crates/persistence/src/session_metadata.rs", legacy_actor_lines
             ),
+            # Both lines are violations now that storage spells the human
+            # principal `user`: the retired `owner_command` encoding no longer
+            # has a reviewed allowance to hide behind.
             *expected_diagnostics(
                 "apps/signalboxd/tests/offline_tool_loop.rs",
                 mixed_storage_lines,
-                mixed_storage_lines[:1],
             ),
+            'crates/persistence/src/mapping.rs:1: const DECISION_SOURCE: &str '
+            '= "owner_command";',
             *expected_diagnostics(
                 "crates/persistence/migrations/202607180001_create_session.sql",
                 frozen_migration_lines,
@@ -466,25 +470,28 @@ def main() -> int:
         domain_record.write_text(
             'let user_id = "human who approves tools";\n', encoding="utf-8"
         )
+        # Storage now spells the human principal the way the domain does, so
+        # the encoder and both decoders read `user` end to end and need no
+        # allowance at all.
         legacy_actor.write_text(
             "fn encode_actor(actor: Actor) -> EncodedActor {\n"
             "    match actor {\n"
             "        Actor::User => EncodedActor {\n"
-            '            kind: "owner",\n'
+            '            kind: "user",\n'
             "        }\n"
             "    }\n"
             "}\n"
             "fn decode_actor() {\n"
             "    match stored {\n"
-            '        ("owner", None, None) => Ok(Actor::User),\n'
-            '        ("owner" | "model" | "recovery" | "tool", _, _) => {\n'
+            '        ("user", None, None) => Ok(Actor::User),\n'
+            '        ("user" | "model" | "recovery" | "tool", _, _) => {\n'
             "        }\n"
             "    }\n"
             "}\n"
             "fn decode_command() {\n"
             "    match stored {\n"
-            '        ("owner", None) => ReplaceSessionMetadata::new(command_id, session, content),\n'
-            '        ("owner", Some(_)) | ("tool", None) => {\n'
+            '        ("user", None) => ReplaceSessionMetadata::new(command_id, session, content),\n'
+            '        ("user", Some(_)) | ("tool", None) => {\n'
             "        }\n"
             "    }\n"
             "}\n",
@@ -492,8 +499,11 @@ def main() -> int:
         )
         mixed_storage_path.write_text(
             'const PROCESS_ACTOR: &str = "user";\n'
-            'const DECISION_SOURCE: &str = "owner_command";\n',
+            'const DECISION_SOURCE: &str = "user_command";\n',
             encoding="utf-8",
+        )
+        storage_mapping.write_text(
+            'const DECISION_SOURCE: &str = "user_command";\n', encoding="utf-8"
         )
         future_migration.write_text(
             "-- New user actor\nCHECK (actor_kind = 'user');\n",

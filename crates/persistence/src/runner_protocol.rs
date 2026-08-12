@@ -43,12 +43,13 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, ty
 use crate::lock_inventory::{
     RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
-    RUNNER_REGISTRATION_HEAD,
+    RUNNER_REGISTRATION_HEAD, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
     ToolAttemptDispositionStorageKind, runner_placement_loss_source_from_str,
-    runner_placement_loss_source_to_str, tool_attempt_disposition_to_str,
-    tool_permission_default_from_str, tool_permission_default_to_str,
+    runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
+    tool_attempt_disposition_to_str, tool_permission_default_from_str,
+    tool_permission_default_to_str,
 };
 
 #[derive(Clone, Copy)]
@@ -507,6 +508,38 @@ pub struct StoredSessionRunnerPlacement {
     placement: SessionRunnerPlacement,
     registration: Option<StoredValidatedRunnerRegistration>,
     grant: Option<CredentialProfileGrant>,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
+}
+
+/// One relationally authenticated active turn parked on runner loss.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredRunnerRecoveryWait {
+    turn: TurnId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
+}
+
+impl StoredRunnerRecoveryWait {
+    /// Returns the active turn retaining the session's progressing slot.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the exact lost runner.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the positive placement revision against which loss was projected.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the physical tool attempt interrupted by loss, when one exists.
+    pub const fn interrupted_tool_attempt(&self) -> Option<ToolAttemptId> {
+        self.interrupted_tool_attempt
+    }
 }
 
 impl StoredSessionRunnerPlacement {
@@ -530,6 +563,11 @@ impl StoredSessionRunnerPlacement {
         self.grant.as_ref()
     }
 
+    /// Returns the physical tool attempt named by this exact loss record.
+    pub const fn interrupted_tool_attempt(&self) -> Option<ToolAttemptId> {
+        self.interrupted_tool_attempt
+    }
+
     /// Separates the placement from its durable ordinal and pinned evidence.
     pub fn into_parts(
         self,
@@ -538,12 +576,14 @@ impl StoredSessionRunnerPlacement {
         SessionRunnerPlacement,
         Option<StoredValidatedRunnerRegistration>,
         Option<CredentialProfileGrant>,
+        Option<ToolAttemptId>,
     ) {
         (
             self.event_ordinal,
             self.placement,
             self.registration,
             self.grant,
+            self.interrupted_tool_attempt,
         )
     }
 }
@@ -1351,6 +1391,7 @@ impl RunnerProtocolStore {
         authority: PlacementProjectionAuthority,
     ) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
+        lock_runner_session_scheduler(&mut transaction, placement.session()).await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(placement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -1541,6 +1582,7 @@ impl RunnerProtocolStore {
             ));
         }
         let mut transaction = self.pool.begin().await?;
+        lock_runner_session_scheduler(&mut transaction, pin.placement.session()).await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(pin.placement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -1673,12 +1715,97 @@ impl RunnerProtocolStore {
             profileless_tombstone,
         )
         .await?;
+        let interrupted_tool_attempt = row
+            .decode_column::<Option<Uuid>>("interrupted_tool_attempt_id")?
+            .map(tool_attempt_id);
+        let event_kind: String = row.decode_column("event_kind")?;
+        if interrupted_tool_attempt.is_some() && event_kind != "runner_lost" {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
         transaction.commit().await?;
         Ok(Some(StoredSessionRunnerPlacement {
             event_ordinal,
             placement,
             registration,
             grant,
+            interrupted_tool_attempt,
+        }))
+    }
+
+    /// Loads the exact authenticated runner-recovery wait for one session.
+    pub async fn load_runner_recovery_wait(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<StoredRunnerRecoveryWait>, RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let row = sqlx::query(
+            "SELECT turn.turn_id, turn.runner_recovery_runner_id,
+                    turn.runner_recovery_placement_revision,
+                    turn.runner_recovery_tool_attempt_id,
+                    placement.state_kind AS placement_state_kind,
+                    placement.lost_runner_id,
+                    placement.placement_revision,
+                    placement.interrupted_tool_attempt_id,
+                    attempt.turn_id AS interrupted_turn_id,
+                    attempt.session_id AS interrupted_session_id
+               FROM turn_lifecycle AS turn
+               JOIN runner_current_session_placement AS current_placement
+                 ON current_placement.session_id = turn.session_id
+               JOIN runner_session_placement_record AS placement
+                 ON placement.session_id = current_placement.session_id
+                AND placement.event_ordinal = current_placement.event_ordinal
+               LEFT JOIN tool_attempt AS attempt
+                 ON attempt.attempt_id = turn.runner_recovery_tool_attempt_id
+              WHERE turn.session_id = $1
+                AND turn.state_kind = 'active'
+                AND NOT turn.delegation_runtime_terminal
+                AND turn.active_phase_kind = 'awaiting_runner_recovery'",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(transaction.as_mut())
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let turn = TurnId::from_uuid(row.decode_column("turn_id")?);
+        let runner = runner_id(row.decode_column("runner_recovery_runner_id")?);
+        let placement_revision =
+            decode_generation(row.decode_column("runner_recovery_placement_revision")?)?;
+        let interrupted_tool_attempt = row
+            .decode_column::<Option<Uuid>>("runner_recovery_tool_attempt_id")?
+            .map(tool_attempt_id);
+        let placement_state: String = row.decode_column("placement_state_kind")?;
+        let stored_lost_runner = row
+            .decode_column::<Option<Uuid>>("lost_runner_id")?
+            .map(runner_id);
+        let stored_revision = decode_generation(row.decode_column("placement_revision")?)?;
+        let stored_interrupted_attempt = row
+            .decode_column::<Option<Uuid>>("interrupted_tool_attempt_id")?
+            .map(tool_attempt_id);
+        let interrupted_turn = row
+            .decode_column::<Option<Uuid>>("interrupted_turn_id")?
+            .map(TurnId::from_uuid);
+        let interrupted_session = row
+            .decode_column::<Option<Uuid>>("interrupted_session_id")?
+            .map(session_id);
+        if !matches!(
+            placement_state.as_str(),
+            "runner_lost" | "runner_lost_before_pin"
+        ) || stored_lost_runner != Some(runner)
+            || stored_revision != placement_revision
+            || stored_interrupted_attempt != interrupted_tool_attempt
+            || interrupted_tool_attempt.is_some()
+                != (interrupted_turn == Some(turn) && interrupted_session == Some(session))
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        transaction.commit().await?;
+        Ok(Some(StoredRunnerRecoveryWait {
+            turn,
+            runner,
+            placement_revision,
+            interrupted_tool_attempt,
         }))
     }
 
@@ -1858,6 +1985,65 @@ impl RunnerProtocolStore {
         }
         let replacement = replacement.replacement();
         let mut transaction = self.pool.begin().await?;
+        let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+            .bind(source.dispatch.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+        if !scheduler_exists {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::CrossWiredReference,
+            ));
+        }
+        let source_is_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM tool_attempt AS attempt
+                   JOIN runner_lease_generation AS lease
+                     ON lease.attempt_id = attempt.attempt_id
+                    AND lease.session_id = attempt.session_id
+                   JOIN runner_current_lease_event AS lease_head
+                     ON lease_head.lease_id = lease.lease_id
+                    AND lease_head.generation = lease.generation
+                   JOIN runner_lease_event AS lease_event
+                     ON lease_event.lease_id = lease_head.lease_id
+                    AND lease_event.generation = lease_head.generation
+                    AND lease_event.event_ordinal = lease_head.event_ordinal
+                  WHERE attempt.attempt_id = $1
+                    AND attempt.session_id = $2
+                    AND attempt.turn_id = $3
+                    AND attempt.issuing_turn_attempt_id = $4
+                    AND attempt.request_id = $5
+                    AND attempt.dispatch_generation = $6
+                    AND attempt.state_kind = 'in_flight'
+                    AND lease.lease_id = $7
+                    AND lease.generation = $8
+                    AND lease.runner_id = $9
+                    AND lease.tool_name = $10
+                    AND lease_event.state_kind IN (
+                        'lost_execution_possible', 'lost_claimed'
+                    )
+             )",
+        )
+        .bind(source.dispatch.attempt().into_uuid())
+        .bind(source.dispatch.session().into_uuid())
+        .bind(source.dispatch.turn().into_uuid())
+        .bind(source.dispatch.issuing_attempt().into_uuid())
+        .bind(source.dispatch.request().into_uuid())
+        .bind(Decimal::from(source.dispatch.generation().as_u64()))
+        .bind(source.lease.into_uuid())
+        .bind(Decimal::from(source.generation.get()))
+        .bind(source.runner.into_uuid())
+        .bind(source.tool.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !source_is_live {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
         let inserted = sqlx::query(
             "INSERT INTO runner_claimed_retry_attempt_authority
                 (source_lease_id, source_generation,
@@ -1925,8 +2111,16 @@ impl RunnerProtocolStore {
             "SELECT replacement_attempt_id, replacement_session_id,
                     replacement_turn_id, replacement_issuing_turn_attempt_id,
                     replacement_request_id, replacement_dispatch_generation
-               FROM runner_claimed_retry_attempt_authority
-              WHERE source_lease_id = $1 AND source_generation = $2",
+               FROM runner_claimed_retry_attempt_authority AS authority
+               JOIN runner_lease_generation AS lease
+                 ON lease.lease_id = authority.source_lease_id
+                AND lease.generation = authority.source_generation
+               JOIN tool_attempt AS source_attempt
+                 ON source_attempt.attempt_id = lease.attempt_id
+                AND source_attempt.session_id = lease.session_id
+              WHERE authority.source_lease_id = $1
+                AND authority.source_generation = $2
+                AND source_attempt.state_kind = 'in_flight'",
         )
         .bind(lease.into_uuid())
         .bind(Decimal::from(generation.get()))
@@ -2018,6 +2212,17 @@ impl RunnerProtocolStore {
             }
         };
         let mut transaction = self.pool.begin().await?;
+        let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+            .bind(retired.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+        if !scheduler_exists {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::CrossWiredReference,
+            ));
+        }
         let retired_rows = sqlx::query(
             "UPDATE tool_attempt
                 SET state_kind = 'terminal',
@@ -2238,6 +2443,19 @@ impl RunnerProtocolStore {
                  SELECT 1
                    FROM runner_lease_generation
                   WHERE lease_id = $1 AND predecessor_generation = $2
+                 UNION ALL
+                 SELECT 1
+                   FROM turn_runner_recovery_interrupt_effect AS stopped
+                   JOIN tool_attempt AS source_attempt
+                     ON source_attempt.attempt_id =
+                        stopped.interrupted_tool_attempt_id
+                    AND source_attempt.session_id = stopped.session_id
+                    AND source_attempt.turn_id = stopped.turn_id
+                   JOIN runner_lease_generation AS source_lease
+                     ON source_lease.attempt_id = source_attempt.attempt_id
+                    AND source_lease.session_id = source_attempt.session_id
+                  WHERE source_lease.lease_id = $1
+                    AND source_lease.generation = $2
              )",
         )
         .bind(lease.into_uuid())
@@ -2732,7 +2950,7 @@ async fn insert_registration(
         )
         .bind(registration.enrollment().into_uuid())
         .bind(Decimal::from(revision.get()))
-        .bind(encode_sandbox(sandbox))
+        .bind(runner_sandbox_to_str(sandbox))
         .execute(&mut **transaction)
         .await?;
     }
@@ -3119,7 +3337,7 @@ async fn insert_placement_record(
     )
     .bind(workspace_kind)
     .bind(requested_repository)
-    .bind(encode_sandbox(request.sandbox))
+    .bind(runner_sandbox_to_str(request.sandbox))
     .bind(count_decimal(permission_overrides.len())?)
     .bind(state.kind)
     .bind(state.lost_runner)
@@ -4935,6 +5153,7 @@ async fn append_lease_event_in(
     lease: &RunnerLease,
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
+    lock_runner_session_scheduler(transaction, correlation.dispatch.session()).await?;
     let current_event = sqlx::query(RUNNER_LEASE_HEAD)
         .bind(correlation.lease.into_uuid())
         .bind(Decimal::from(correlation.generation.get()))
@@ -4981,6 +5200,23 @@ async fn append_lease_event_in(
     .bind(Decimal::from(event_ordinal))
     .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+async fn lock_runner_session_scheduler(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+) -> Result<(), RunnerProtocolStoreError> {
+    let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+        .bind(session.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .is_some();
+    if !scheduler_exists {
+        return Err(RunnerProtocolStoreError::Corruption(
+            RunnerProtocolCorruption::CrossWiredReference,
+        ));
+    }
     Ok(())
 }
 
@@ -5562,7 +5798,7 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
         workspace_credential_profile: workspace
             .and_then(|workspace| workspace.credential_profile.as_ref())
             .map(CredentialProfileName::as_str),
-        workspace_sandbox: workspace.map(|workspace| encode_sandbox(workspace.sandbox)),
+        workspace_sandbox: workspace.map(|workspace| runner_sandbox_to_str(workspace.sandbox)),
         workspace_relative_path: workspace.map(|workspace| workspace.relative_path.as_str()),
         workspace_recovery_kind,
         workspace_branch_name,
@@ -5767,19 +6003,8 @@ fn decode_approval(value: String) -> Result<CredentialToolApproval, RunnerProtoc
     }
 }
 
-const fn encode_sandbox(sandbox: RunnerSandboxProfile) -> &'static str {
-    match sandbox {
-        RunnerSandboxProfile::Ambient => "ambient",
-        RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
-    }
-}
-
 fn decode_sandbox(value: String) -> Result<RunnerSandboxProfile, RunnerProtocolStoreError> {
-    match value.as_str() {
-        "ambient" => Ok(RunnerSandboxProfile::Ambient),
-        "workspace_restricted" => Ok(RunnerSandboxProfile::WorkspaceRestricted),
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
+    runner_sandbox_from_str(&value).ok_or_else(|| RunnerProtocolCorruption::InvalidEncoding.into())
 }
 
 const fn encode_workspace(workspace: WorkspaceCapability) -> &'static str {
