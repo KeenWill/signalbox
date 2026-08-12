@@ -435,15 +435,17 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 .or_default() += 1;
         }
         // A majority exists only when one verdict holds a strict majority of
-        // the successful repeats; ties and empty runs report no majority.
+        // the REQUESTED repeats, so a lone survivor of a partly failed run
+        // cannot score as a correct majority; ties and empty runs report no
+        // majority.
         let majority = counts
             .iter()
-            .find(|(_, count)| **count * 2 > verdicts.len())
+            .find(|(_, count)| **count * 2 > options.repeats)
             .map(|(label, _)| *label);
         let measured = !verdicts.is_empty();
         let complete = verdicts.len() == options.repeats;
         let stable = complete && counts.len() == 1;
-        let tied = measured && majority.is_none();
+        let tied = measured && majority.is_none() && counts.len() > 1;
         let correct = measured && majority == Some(case.expected.as_str());
         let score = scores.entry(case.category.clone()).or_default();
         score.cases += 1;
