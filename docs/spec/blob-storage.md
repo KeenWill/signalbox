@@ -12,6 +12,14 @@ verification, and corrupt-object repair behavior, and shared store conformance
 suite are verified against PR #555 (`agent/blob-storage-substrate`; via PR #593
 `agent/blob-storage-attachment-frontier-admission`).
 
+The append-only identity, store-binding, and verified-replica catalog and its
+transactional registration behavior are verified against this implementing
+change (`agent/blob-storage-catalog`).
+
+The configuration catalog, route validation, filesystem namespace admission, and
+startup store registry are verified against PR #582
+(`agent/blob-storage-registry`).
+
 The disk-backed upload lifecycle, routed-store-only live deduplication,
 publication-before-registration ordering, process-protocol messages, and shared
 bulk-ingest resource bounds are verified against this implementing change
@@ -131,23 +139,23 @@ grammar and rejects unknown or kind-inapplicable fields. Every catalog query and
 in-memory traversal orders store names by unsigned ASCII bytes; persistence uses
 bytewise `C` collation for that order rather than a deployment locale.
 
-Configured store entries must also name distinct physical namespaces. After
+Configured store entries must also name distinct physical namespaces. Before
 initializing filesystem roots, startup resolves each opened directory's
-canonical path and `(st_dev, st_ino)` identity and rejects equality on either,
-so symlink, relative-component, and bind-mount aliases cannot manufacture
-replica diversity; it also rejects any pair of canonical filesystem roots where
-either contains the other, so one store's control or deterministic object
-namespace cannot occupy another's. An identity that cannot be proved distinct
-fails startup. For S3, the namespace locator is the parsed endpoint's canonical
-URL serialization with default-port and empty-path variance removed, paired with
-the exact bucket; startup rejects a duplicate locator even when store names,
-namespace UUIDs, regions, or credentials differ. One physical namespace is
-represented by one store binding. The bucket marker below additionally detects
-physical aliases whose canonical locators differ. The canonical
-staging-directory path must be disjoint from every filesystem-store root:
-neither path may equal, contain, or be contained by the other. This also
-excludes every store's reserved `.publish-v1` subtree from staging ownership and
-prevents either startup sweep from encountering the other's files.
+canonical path, `(st_dev, st_ino)` identity, and bounded Linux mount-inventory
+ancestry and rejects equality or ancestry overlap on those facts, so symlink,
+relative-component, and bind-mount aliases cannot manufacture replica diversity
+or place one store's control or deterministic object namespace inside another's.
+An identity that cannot be proved distinct fails startup. For S3, the namespace
+locator is the parsed endpoint's canonical URL serialization with default-port
+and empty-path variance removed, paired with the exact bucket; startup rejects a
+duplicate locator even when store names, namespace UUIDs, regions, or
+credentials differ. One physical namespace is represented by one store binding.
+The bucket marker below additionally detects physical aliases whose canonical
+locators differ. The canonical staging-directory path must be disjoint from
+every filesystem-store root: neither path may equal, contain, or be contained by
+the other, including through a bind mount. This also excludes every store's
+reserved `.publish-v1` subtree from staging ownership and prevents either
+startup sweep from encountering the other's files.
 
 Each filesystem root also owns a private exact-mode-0600
 `.signalbox-blob-namespace-v1` marker whose complete bytes are the configured

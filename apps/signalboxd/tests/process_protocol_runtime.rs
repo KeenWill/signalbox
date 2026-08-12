@@ -1966,11 +1966,9 @@ fn transcript_snapshot_start_cursor(
     expected_session: CanonicalUuid,
 ) -> u64 {
     match message {
-        ServerMessage::TranscriptSnapshotStart { session_id, cursor }
-            if *session_id == expected_session =>
-        {
-            cursor.value()
-        }
+        ServerMessage::TranscriptSnapshotStart {
+            session_id, cursor, ..
+        } if *session_id == expected_session => cursor.value(),
         message => panic!("fixture expected transcript-snapshot start, got {message:?}"),
     }
 }
@@ -2769,38 +2767,30 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
         .await?;
 
     let start = response_within(&mut connection).await?;
-    let ServerMessage::SessionsStart {} = start.message() else {
-        panic!("session listing starts explicitly")
-    };
+    assert_eq!(start.message(), &ServerMessage::SessionsStart {});
     let summary = response_within(&mut connection).await?;
-    let ServerMessage::SessionSummary {
-        session_id: listed,
-        defaults_version,
-        model_selection: ModelSelection::Alias {
-            alias_id: listed_alias,
-        },
-        placement_version,
-        placement: listed_placement,
-    } = summary.message()
-    else {
-        panic!("session listing carries one alias summary")
-    };
-    assert_eq!(*listed, session_id);
     assert_eq!(
-        defaults_version.value(),
-        SessionConfigurationDefaultsVersion::first().as_u64()
+        summary.message(),
+        &ServerMessage::SessionSummary {
+            session_id,
+            defaults_version: CanonicalU64::new(
+                SessionConfigurationDefaultsVersion::first().as_u64(),
+            ),
+            model_selection: ModelSelection::Alias { alias_id },
+            placement_version: CanonicalU64::new(
+                signalbox_domain::SessionPlacementVersion::INITIAL.as_u64(),
+            ),
+            placement: expected_placement,
+            runner: None,
+        }
     );
-    assert_eq!(*listed_alias, alias_id);
-    assert_eq!(
-        placement_version.value(),
-        signalbox_domain::SessionPlacementVersion::INITIAL.as_u64()
-    );
-    assert_eq!(listed_placement, &expected_placement);
     let end = response_within(&mut connection).await?;
-    let ServerMessage::SessionsEnd { session_count } = end.message() else {
-        panic!("session listing ends explicitly")
-    };
-    assert_eq!(session_count.value(), 1);
+    assert_eq!(
+        end.message(),
+        &ServerMessage::SessionsEnd {
+            session_count: CanonicalU64::new(1),
+        }
+    );
 
     drop(connection);
     runtime.stop().await

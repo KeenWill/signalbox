@@ -142,15 +142,18 @@ public struct SignalboxSynchronizationSnapshot: Equatable, Sendable {
 
   public let sessionID: SignalboxCanonicalUUID
   public let cursor: SignalboxCanonicalUInt64
+  public let runner: SignalboxRunnerProjection?
   public let records: [Record]
 
   init(
     sessionID: SignalboxCanonicalUUID,
     cursor: SignalboxCanonicalUInt64,
+    runner: SignalboxRunnerProjection? = nil,
     records: [Record]
   ) {
     self.sessionID = sessionID
     self.cursor = cursor
+    self.runner = runner
     self.records = records
   }
 }
@@ -1320,7 +1323,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
-      .inputAccepted, .modelCallTransition, .turnActivated:
+      .inputAccepted, .modelCallTransition, .turnActivated, .runnerStateTransition:
       return false
     }
   }
@@ -1406,6 +1409,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   private var entriesStarted = false
   private var contentEntryIndex: UInt64?
   private var expectedFragmentIndex: UInt64 = 0
+  private let retainedRunnerRecordCount: UInt
+  private let boundaryFitsCapacity: Bool
   private var retainedUTF8Bytes: UInt = 0
   init(
     boundary: SignalboxTranscriptSnapshotBoundary,
@@ -1413,11 +1418,20 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   ) {
     self.boundary = boundary
     self.capacity = capacity
+    let runnerRecordCount: UInt = boundary.runner == nil ? 0 : 1
+    let runnerBytes = boundary.runner?.retainedUTF8Bytes ?? 0
+    retainedRunnerRecordCount = runnerRecordCount
+    retainedUTF8Bytes = runnerBytes
+    boundaryFitsCapacity = runnerRecordCount <= capacity.maximumRecords
+      && runnerBytes <= capacity.maximumUTF8Bytes
   }
   mutating func ingest(
     _ message: SignalboxProcessServerMessage,
     expectedSessionID: SignalboxCanonicalUUID
   ) -> SignalboxSnapshotAccumulatorOutcome {
+    guard boundaryFitsCapacity else {
+      return .invalid("Snapshot exceeded the configured native-client capacity.")
+    }
     if let contentEntryIndex {
       return ingestContent(
         message,
@@ -1591,6 +1605,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         SignalboxSynchronizationSnapshot(
           sessionID: boundary.sessionID,
           cursor: boundary.cursor,
+          runner: boundary.runner,
           records: records
         )
       )
@@ -1640,7 +1655,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     let recordBytes = record.retainedUTF8Bytes
     let (nextBytes, overflowed) = retainedUTF8Bytes.addingReportingOverflow(recordBytes)
     guard
-      UInt(records.count) < capacity.maximumRecords,
+      UInt(records.count).saturatedAdding(retainedRunnerRecordCount) < capacity.maximumRecords,
       !overflowed,
       nextBytes <= capacity.maximumUTF8Bytes
     else {
@@ -1651,6 +1666,27 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     return true
   }
 }
+
+extension SignalboxRunnerProjection {
+  fileprivate var retainedUTF8Bytes: UInt {
+    selector.retainedUTF8Bytes
+      .saturatedAdding(UInt(credentialProfile?.rawValue.utf8.count ?? 0))
+      .saturatedAdding(UInt(repository?.rawValue.utf8.count ?? 0))
+      .saturatedAdding(UInt(workingDirectory?.rawValue.utf8.count ?? 0))
+  }
+}
+
+extension SignalboxRunnerProjectionSelector {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .runner:
+      return 0
+    case .capabilityClass(let name):
+      return UInt(name.rawValue.utf8.count)
+    }
+  }
+}
+
 extension SignalboxSynchronizationSnapshot.Record {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
@@ -2004,7 +2040,7 @@ extension SignalboxProcessSessionEvent {
       .inputAccepted, .turnActivated, .modelCallTransition,
       .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
-      .turnToolReconciliationRequired:
+      .turnToolReconciliationRequired, .runnerStateTransition:
       return nil
     }
   }
@@ -2027,6 +2063,8 @@ extension SignalboxProcessSessionEvent {
     case .toolApprovalDecided(_, _, let decision, _, let rationale):
       return decision.retainedUTF8Bytes
         .saturatedAdding(UInt(rationale?.utf8.count ?? 0))
+    case .runnerStateTransition(_, _, _, let workingDirectory, _):
+      return UInt(workingDirectory?.rawValue.utf8.count ?? 0)
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
