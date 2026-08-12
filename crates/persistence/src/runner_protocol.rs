@@ -1988,9 +1988,15 @@ impl RunnerProtocolStore {
         )
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let authority = match enrollment.state() {
+            RunnerEnrollmentState::Pending => RunnerEnrollmentAuthority::ReplacementPending,
+            RunnerEnrollmentState::Active | RunnerEnrollmentState::Revoked => {
+                RunnerEnrollmentAuthority::Active
+            }
+        };
         let receipt = RunnerEnrollmentReceipt {
             request,
-            authority: stored.authority,
+            authority,
             enrollment,
             registration,
         };
@@ -2056,7 +2062,7 @@ impl RunnerProtocolStore {
                 let registration = pending.commit().map_err(RunnerProtocolStoreError::Domain)?;
                 Ok(RunnerEnrollmentReceipt {
                     request,
-                    authority: stored.authority,
+                    authority,
                     enrollment,
                     registration: StoredValidatedRunnerRegistration {
                         revision,
@@ -2108,13 +2114,19 @@ impl RunnerProtocolStore {
         Ok(loaded)
     }
 
-    /// Applies terminal enrollment revocation under the enrollment row lock.
+    /// Applies terminal enrollment revocation under singleton then enrollment locks.
     pub async fn revoke_enrollment(
         &self,
         enrollment: &mut RunnerEnrollment,
     ) -> Result<bool, RunnerProtocolStoreError> {
         let enrollment_id = enrollment.enrollment();
         let mut transaction = self.pool.begin().await?;
+        // Pristine admission and pending-successor promotion take this
+        // temporary singleton lock before any enrollment row. Revocation must
+        // enter through the same order to avoid a table-lock upgrade cycle.
+        sqlx::query("LOCK TABLE runner_enrollment IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await?;
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)

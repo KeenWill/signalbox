@@ -278,7 +278,7 @@ async fn apply_or_reject_promotion(
     if candidate.state != "pending"
         || candidate.revision != 1
         || predecessor.state != "active"
-        || predecessor.revision != 1
+        || !matches!(predecessor.revision, 1 | 2)
     {
         return Err(PromotePendingRunnerRepositoryError::Corruption(
             "pending enrollment states",
@@ -338,14 +338,25 @@ async fn apply_or_reject_promotion(
         ));
     }
 
-    append_enrollment_audit(connection, &predecessor, 2, "revoked").await?;
+    let predecessor_revoked_revision = predecessor.revision.checked_add(1).ok_or(
+        PromotePendingRunnerRepositoryError::Corruption("predecessor revision exhausted"),
+    )?;
+    append_enrollment_audit(
+        connection,
+        &predecessor,
+        predecessor_revoked_revision,
+        "revoked",
+    )
+    .await?;
     append_enrollment_audit(connection, &candidate, 2, "active").await?;
     let predecessor_updated = sqlx::query(
         "UPDATE runner_enrollment
-            SET revision = 2, state_kind = 'revoked'
-          WHERE enrollment_id = $1 AND revision = 1 AND state_kind = 'active'",
+            SET revision = $2, state_kind = 'revoked'
+          WHERE enrollment_id = $1 AND revision = $3 AND state_kind = 'active'",
     )
     .bind(predecessor.enrollment.into_uuid())
+    .bind(Decimal::from(predecessor_revoked_revision))
+    .bind(Decimal::from(predecessor.revision))
     .execute(&mut *connection)
     .await?
     .rows_affected();

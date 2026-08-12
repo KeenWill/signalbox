@@ -145,6 +145,7 @@ CREATE TABLE promote_pending_runner_command (
             AND rejection_kind IS NULL
             AND result_enrollment_id IS NOT NULL
             AND result_runner_id IS NOT NULL
+            AND result_registration_revision IS NOT NULL
             AND result_registration_revision BETWEEN 1 AND 18446744073709551615
             AND active_enrollment_id IS NULL
             AND active_runner_id IS NULL
@@ -152,6 +153,7 @@ CREATE TABLE promote_pending_runner_command (
         )
         OR (
             result_kind = 'rejected'
+            AND rejection_kind IS NOT NULL
             AND rejection_kind IN (
                 'no_pending_runner_enrollment', 'pending_request_mismatch',
                 'pending_request_disconnected'
@@ -165,6 +167,7 @@ CREATE TABLE promote_pending_runner_command (
         )
         OR (
             result_kind = 'rejected'
+            AND rejection_kind IS NOT NULL
             AND rejection_kind = 'active_runner_not_lost'
             AND result_enrollment_id IS NULL
             AND result_runner_id IS NULL
