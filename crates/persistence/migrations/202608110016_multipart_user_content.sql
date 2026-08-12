@@ -863,7 +863,6 @@ BEGIN
      ORDER BY event_ordinal DESC LIMIT 1;
 
     IF accepted.accepted_input_id IS NULL
-        OR accepted.accepting_command_id IS NOT NULL
         OR accepted.session_id <> NEW.session_id
         OR accepted.delivery_kind <> 'start_when_no_active_turn'
         OR accepted.expected_active_turn_id IS NOT NULL
@@ -993,20 +992,25 @@ BEGIN
          ORDER BY event_ordinal DESC LIMIT 1;
     END IF;
 
-    IF expected_content IS NULL OR NOT EXISTS (
-        SELECT 1
-          FROM accepted_input_content_part AS part
-         WHERE part.accepted_input_id = accepted.accepted_input_id
-           AND part.position = 0
-           AND part.part_kind = 'text'
-           AND part.text_value = expected_content
-           AND NOT EXISTS (
+    IF expected_content IS NULL
+        OR (
+            accepted.accepting_command_id IS NULL
+            AND NOT EXISTS (
                 SELECT 1
-                  FROM accepted_input_content_part AS extra
-                 WHERE extra.accepted_input_id = accepted.accepted_input_id
-                   AND extra.position <> 0
-           )
-    ) THEN
+                  FROM accepted_input_content_part AS part
+                 WHERE part.accepted_input_id = accepted.accepted_input_id
+                   AND part.position = 0
+                   AND part.part_kind = 'text'
+                   AND part.text_value = expected_content
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM accepted_input_content_part AS extra
+                         WHERE extra.accepted_input_id = accepted.accepted_input_id
+                           AND extra.position <> 0
+                   )
+            )
+        )
+    THEN
         RAISE EXCEPTION 'goal turn input does not match its immutable source'
             USING ERRCODE = '23514', CONSTRAINT = 'goal_turn_input_content';
     END IF;
