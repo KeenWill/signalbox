@@ -312,6 +312,11 @@ pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
               WHERE enrollment_id = $1
               FOR SHARE";
 
+pub(crate) const RUNNER_CONNECTION_LOSS_HEAD: &str = "SELECT loss_epoch
+               FROM runner_current_connection_loss
+              WHERE enrollment_id = $1
+              FOR UPDATE";
+
 pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT grant_record.credential_profile_name
                FROM runner_current_credential_grant_audit AS current_audit
                JOIN runner_credential_grant AS grant_record

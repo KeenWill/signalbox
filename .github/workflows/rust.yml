@@ -130,7 +130,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            56962f0dc85ca77bc2e259ed62e2de428e829e3ac1b57dbba18e0b9c18bb0d5d
+            76e6ce87c40e84c918b80bbcb090730f62cf73477bd0883870d5715c88ccf774
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -358,7 +358,7 @@ jobs:
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Only persistence is sharded today — 695 of the 1,089 ignored tests, and
+  # Only persistence is sharded today — 695 of the 1,104 ignored tests, and
   # 22m22s as a single job against roughly 7m at three ways.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it
