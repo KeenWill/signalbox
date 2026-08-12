@@ -1023,7 +1023,7 @@ request, or blob-upload transport request — `create_session`,
 - `blob_upload_begun` with the `expected_digest` and admitted
   `expected_length_bytes`;
 - `blob_upload_already_present` with `digest` and `byte_length`;
-- `blob_upload_appended` with the exact `assembled_size_bytes`;
+- `blob_upload_appended` with the exact `assembled_length_bytes`;
 - `blob_upload_committed` with the verified `digest` and `byte_length`;
 - `blob_upload_aborted` with no additional member;
 - `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
