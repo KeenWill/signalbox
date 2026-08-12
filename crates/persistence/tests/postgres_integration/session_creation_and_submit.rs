@@ -403,7 +403,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000001',
-             'owner_initiated', 'none')",
+             'user_initiated', 'none')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -437,7 +437,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
              result_kind, created_session_id)
          VALUES
             ('10000000-0000-4000-8000-000000000001',
-             'create_session', 1, 'owner_initiated', 'none', 1,
+             'create_session', 1, 'user_initiated', 'none', 1,
              'direct', '70000000-0000-7000-8000-000000000002', NULL,
              'applied', '70000000-0000-7000-8000-000000000001')",
     )
@@ -460,7 +460,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
     assert_eq!(
         stored,
         (
-            "owner_initiated".to_owned(),
+            "user_initiated".to_owned(),
             "none".to_owned(),
             "direct".to_owned(),
             "applied".to_owned()
@@ -554,7 +554,7 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000021',
-             'owner_initiated', 'none')",
+             'user_initiated', 'none')",
     )
     .execute(&mut *session_without_command)
     .await?;
@@ -625,7 +625,7 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000012',
-             'owner_initiated', 'single_source')",
+             'user_initiated', 'single_source')",
     )
     .execute(&pool)
     .await
@@ -652,7 +652,7 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000013',
-             'owner_initiated', 'none')",
+             'user_initiated', 'none')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -686,7 +686,7 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
              result_kind, created_session_id)
          VALUES
             ('10000000-0000-4000-8000-000000000013',
-             'create_session', 1, 'owner_initiated', 'none', 1,
+             'create_session', 1, 'user_initiated', 'none', 1,
              'alias', NULL, '70000000-0000-7000-8000-000000000014',
              'applied', '70000000-0000-7000-8000-000000000013')",
     )
