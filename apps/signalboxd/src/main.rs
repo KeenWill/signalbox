@@ -753,6 +753,17 @@ async fn await_while_guarded<T>(
     }
 }
 
+async fn disarm_staging_sweep_unless_guarded(
+    database: &mut FencedHubDatabase,
+    registry: &mut Option<BlobStoreRegistry>,
+) {
+    if database.check_guard().await.is_err()
+        && let Some(registry) = registry.as_mut()
+    {
+        registry.disarm_staging_sweep();
+    }
+}
+
 /// Derives the shared operator class from one content-free runtime variant.
 ///
 /// Nested error values are inspected only by variant; database, protocol, socket,
@@ -1397,6 +1408,7 @@ async fn run_hub(
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
             drop(blob_executor);
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1415,6 +1427,7 @@ async fn run_hub(
                 SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
             );
             drop(blob_executor);
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1437,6 +1450,7 @@ async fn run_hub(
                 SanitizedStartupCause::Socket(&error),
             );
             drop(blob_executor);
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1451,6 +1465,7 @@ async fn run_hub(
             );
             let _ = runner_listener.cleanup();
             drop(blob_executor);
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1491,6 +1506,7 @@ async fn run_hub(
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
             drop(blob_executor);
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1529,6 +1545,7 @@ async fn run_hub(
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
                 drop(blob_executor);
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
                 let _ = database.close().await;
                 return Err(failure);
@@ -1719,6 +1736,9 @@ async fn run_hub(
     // extend the shutdown window. Guard loss is different: tasks are cancelled
     // immediately and the old fenced sessions must be terminated before
     // returning control to process exit.
+    if outcome != ShutdownOutcome::GuardLost && database.check_guard().await.is_err() {
+        outcome = ShutdownOutcome::GuardLost;
+    }
     if outcome == ShutdownOutcome::GuardLost {
         if let Some(registry) = blob_store_registry.as_ref() {
             registry.disarm_staging_sweep();
@@ -1726,6 +1746,7 @@ async fn run_hub(
         drop(blob_store_registry);
         let _ = database.close().await;
     } else {
+        let close_pool = should_close_pool(&Ok(outcome));
         if let Some(registry) = blob_store_registry.as_ref()
             && registry.sweep_staging().is_err()
         {
@@ -1741,9 +1762,7 @@ async fn run_hub(
             outcome = staging_sweep_failure_outcome(outcome);
         }
         drop(blob_store_registry);
-        if should_close_pool(&Ok(outcome))
-            && let Err(error) = database.close().await
-        {
+        if close_pool && let Err(error) = database.close().await {
             report_database_close_failure(&error);
             outcome = database_close_failure_outcome(outcome);
         }
@@ -2870,6 +2889,18 @@ mod tests {
     fn clean_staging_sweep_failure_becomes_a_runtime_failure() {
         assert_eq!(
             staging_sweep_failure_outcome(ShutdownOutcome::Clean),
+            ShutdownOutcome::RuntimeFailed
+        );
+    }
+
+    #[test]
+    fn staging_sweep_failure_preserves_the_expired_drain_decision() {
+        let outcome = ShutdownOutcome::GraceWindowExpired;
+        let close_pool = should_close_pool(&Ok(outcome));
+
+        assert!(!close_pool);
+        assert_eq!(
+            staging_sweep_failure_outcome(outcome),
             ShutdownOutcome::RuntimeFailed
         );
     }

@@ -465,7 +465,7 @@ impl PostgresRepoWatchDispatchStore {
                             "dispatch initial input targets another session",
                         ));
                     }
-                    if goal.command().session() != session {
+                    if goal.session() != session {
                         return Err(RepoWatchDispatchRepositoryError::Corruption(
                             "dispatch goal targets another session",
                         ));
@@ -532,18 +532,15 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(turn.as_uuid())
                     .execute(&mut *transaction)
                     .await?;
-                    // The tagged context is accepted first, so a dispatched
-                    // session receives its triggering event before it acts. The
-                    // goal turn follows it rather than preceding it: a goal turn
-                    // scheduled first would run the template against the
-                    // statement alone, before the event it is meant to act on.
-                    let (goal_command, goal_accepted_input, goal_turn) =
-                        (goal.command().clone(), goal.accepted_input(), goal.turn());
+                    // The commission adopts the turn just accepted above rather
+                    // than scheduling one of its own, so the session runs its
+                    // template once, against the tagged context, under the
+                    // generation that turn is recorded in.
                     crate::goal::insert_fresh_commissioned_goal(
                         &mut transaction,
-                        goal_command,
-                        crate::goal_turn::GoalTurnCandidates::new(goal_accepted_input, goal_turn),
-                        select_definition,
+                        goal,
+                        accepted_input,
+                        turn,
                     )
                     .await
                     .map_err(RepoWatchDispatchRepositoryError::GoalCommission)?;
