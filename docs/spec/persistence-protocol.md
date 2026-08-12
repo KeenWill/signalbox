@@ -33,8 +33,8 @@ was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
 extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`), with the appends a generation binding an
-already-accepted turn owes verified against this PR
+PR #384 (`agent/goal-mode-runtime`), with the appends owed when a generation
+binds an already-accepted turn verified against this PR
 (`agent/commission-binding`); and the approval-judge call, decision, and posture
 storage were verified through PR #420 (`agent/approval-judge-storage`); the
 approval-judge lifecycle transactions were verified through this PR

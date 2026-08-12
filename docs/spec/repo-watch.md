@@ -392,7 +392,7 @@ the dispatch transaction and a recorded evaluation replays from its committed
 batch without re-entering that transaction, so no surface backfills a goal onto
 a session dispatched without one and none is owed: a database predating
 commissioning is not a supported input, under the pre-alpha compatibility rule
-[AGENTS.md](../../AGENTS.md) states.
+that [AGENTS.md](../../AGENTS.md) states.
 
 **Implemented behavior.** The dispatched work turn is the goal's own turn. Its
 accepted input belongs to the submit command that delivered the tagged context,
