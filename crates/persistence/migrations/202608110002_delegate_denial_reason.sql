@@ -17,8 +17,9 @@
 -- the six POSIX ASCII bytes.
 
 ALTER TABLE tool_approval_decision
-    -- Supersedes tool_approval_decision_shape from
-    -- 202608020015_llm_delegated_tool_approval.sql.
+    -- Supersedes tool_approval_decision_shape as recreated by
+    -- 202608110001_user_role_storage_vocabulary.sql (originally from
+    -- 202608020015_llm_delegated_tool_approval.sql).
     DROP CONSTRAINT tool_approval_decision_shape,
     ADD CONSTRAINT tool_approval_decision_shape
         CHECK (

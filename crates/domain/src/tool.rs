@@ -1788,10 +1788,12 @@ mod tests {
         .expect("delegated authority may deny");
         let stored_reason = ToolDenialReason::try_new(String::from(JUDGE_RATIONALE))
             .expect("fixture rationale is an admitted reason");
-        let resolution =
-            ToolApprovalResolutionReconstitutionInput::delegate(approval, Some(stored_reason))
-                .reconstitute()
-                .expect("checked delegate evidence restores its decision");
+        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(
+            approval,
+            Some(stored_reason.clone()),
+        )
+        .reconstitute()
+        .expect("checked delegate evidence restores its decision");
 
         assert_eq!(
             resolution.decider(),
@@ -1801,10 +1803,7 @@ mod tests {
         assert_eq!(
             resolution.decision(),
             &ToolApprovalDecision::Deny {
-                reason: Some(
-                    ToolDenialReason::try_new(String::from(JUDGE_RATIONALE))
-                        .expect("fixture rationale is an admitted reason")
-                )
+                reason: Some(stored_reason)
             }
         );
     }

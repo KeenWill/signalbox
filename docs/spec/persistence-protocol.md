@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The delegate denial-reason storage — the superseded decision-shape constraint
+and its byte-precise checks — was verified against this PR
+(`agent/judge-denial-reason`).
+
 The runner-recovery turn-phase representation and read boundary were verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 
@@ -122,7 +126,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-five files, `202607180001` through
+`crates/persistence/migrations/` — sixty-eight files, `202607180001` through
 `202608110002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
