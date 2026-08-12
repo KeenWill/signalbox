@@ -125,6 +125,22 @@ impl std::fmt::Debug for FilesystemBlobStore {
 impl FilesystemBlobStore {
     /// Constructs a store at an absolute existing directory.
     pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::try_new_with_locality_policy(root, true)
+    }
+
+    /// Constructs a conformance fixture while retaining every check except
+    /// host backing-device locality, which shared CI cannot establish.
+    #[cfg(feature = "test-support")]
+    pub fn try_new_for_conformance(
+        root: PathBuf,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::try_new_with_locality_policy(root, false)
+    }
+
+    fn try_new_with_locality_policy(
+        root: PathBuf,
+        require_local_backing: bool,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
         if !root.is_absolute() {
             return Err(FilesystemBlobStoreConstructionError::NotAbsolute { root });
         }
@@ -151,12 +167,14 @@ impl FilesystemBlobStore {
         if !private_directory_metadata(&metadata) {
             return Err(FilesystemBlobStoreConstructionError::NotPrivate { root });
         }
-        if !positively_classified_local_filesystem(&root_descriptor).map_err(|source| {
-            FilesystemBlobStoreConstructionError::Inspect {
-                root: root.clone(),
-                source,
-            }
-        })? {
+        let positively_local = !require_local_backing
+            || positively_classified_local_filesystem(&root_descriptor).map_err(|source| {
+                FilesystemBlobStoreConstructionError::Inspect {
+                    root: root.clone(),
+                    source,
+                }
+            })?;
+        if !positively_local {
             return Err(FilesystemBlobStoreConstructionError::UnclassifiedFilesystem { root });
         }
         let root_descriptor = Arc::new(root_descriptor);
@@ -195,6 +213,13 @@ impl FilesystemBlobStore {
                 {
                     Ok(()) => {
                         sync_open_directory(parent).await?;
+                        verify_file_at_key(
+                            self.root.clone(),
+                            key.clone(),
+                            expected,
+                            "verify recorded object key",
+                        )
+                        .await?;
                         return Ok(BlobPutOutcome::AlreadyPresent { key });
                     }
                     Err(error)
@@ -271,6 +296,7 @@ impl FilesystemBlobStore {
             return replace_corrupt_destination(
                 temporary,
                 self.publication_directory.clone(),
+                self.root.clone(),
                 parent,
                 destination_name,
                 key,
@@ -291,6 +317,13 @@ impl FilesystemBlobStore {
                 sync_open_directory(self.publication_directory.clone()).await?;
                 sync_open_directory(parent.clone()).await?;
                 verify_file_in_parent(parent, destination_name, expected).await?;
+                verify_file_at_key(
+                    self.root.clone(),
+                    key.clone(),
+                    expected,
+                    "verify recorded object key",
+                )
+                .await?;
                 Ok(BlobPutOutcome::Published { key })
             }
             Ok(Some(temporary)) => {
@@ -301,6 +334,13 @@ impl FilesystemBlobStore {
                         remove_temporary_file(temporary).await?;
                         sync_open_directory(self.publication_directory.clone()).await?;
                         sync_open_directory(parent).await?;
+                        verify_file_at_key(
+                            self.root.clone(),
+                            key.clone(),
+                            expected,
+                            "verify recorded object key",
+                        )
+                        .await?;
                         Ok(BlobPutOutcome::AlreadyPresent { key })
                     }
                     Err(verification)
@@ -313,6 +353,7 @@ impl FilesystemBlobStore {
                         replace_corrupt_destination(
                             temporary,
                             self.publication_directory.clone(),
+                            self.root.clone(),
                             parent,
                             destination_name,
                             key,
@@ -360,26 +401,7 @@ impl FilesystemBlobStore {
         &self,
         key: &BlobObjectKey,
     ) -> Result<Arc<fs::File>, BlobStoreError> {
-        let relative_parent = std::path::Path::new(key.as_str())
-            .parent()
-            .ok_or_else(|| BlobStoreError::unavailable("derive destination parent"))?;
-        let mut current = self.root.clone();
-        for component in relative_parent.components() {
-            let std::path::Component::Normal(segment) = component else {
-                return Err(BlobStoreError::unavailable("resolve destination parent"));
-            };
-            let segment = segment.to_os_string();
-            let parent = current.clone();
-            let next = tokio::task::spawn_blocking(move || {
-                open_or_create_private_child_directory(&parent, &segment)
-            })
-            .await
-            .map_err(|source| BlobStoreError::io("join destination directory creation", source))?
-            .map_err(|source| BlobStoreError::io("create destination directory", source))?;
-            sync_open_directory(current).await?;
-            current = Arc::new(next);
-        }
-        Ok(current)
+        ensure_destination_parent_from_root(self.root.clone(), key).await
     }
 }
 
@@ -410,6 +432,7 @@ impl BlobStore for FilesystemBlobStore {
 async fn replace_corrupt_destination(
     temporary: TemporaryBlobFile,
     publication_directory: Arc<fs::File>,
+    root: Arc<fs::File>,
     parent: Arc<fs::File>,
     destination_name: OsString,
     key: BlobObjectKey,
@@ -426,6 +449,7 @@ async fn replace_corrupt_destination(
     sync_open_directory(publication_directory).await?;
     sync_open_directory(parent.clone()).await?;
     verify_file_in_parent(parent, destination_name, expected).await?;
+    verify_file_at_key(root, key.clone(), expected, "verify recorded object key").await?;
     Ok(BlobPutOutcome::Repaired { key })
 }
 
@@ -438,6 +462,44 @@ async fn verify_file_in_parent(
         open_private_regular_file_in_directory(parent, destination_name, "verify published object")
             .await?;
     verify_opened_file(&mut file, expected, "verify published object").await
+}
+
+async fn verify_file_at_key(
+    root: Arc<fs::File>,
+    key: BlobObjectKey,
+    expected: ExpectedBlob,
+    operation: &'static str,
+) -> Result<(), BlobStoreError> {
+    let reachable_parent = ensure_destination_parent_from_root(root.clone(), &key).await?;
+    sync_open_directory(reachable_parent).await?;
+    let (mut file, _) = open_private_regular_file(root, key, operation).await?;
+    verify_opened_file(&mut file, expected, operation).await
+}
+
+async fn ensure_destination_parent_from_root(
+    root: Arc<fs::File>,
+    key: &BlobObjectKey,
+) -> Result<Arc<fs::File>, BlobStoreError> {
+    let relative_parent = std::path::Path::new(key.as_str())
+        .parent()
+        .ok_or_else(|| BlobStoreError::unavailable("derive destination parent"))?;
+    let mut current = root;
+    for component in relative_parent.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err(BlobStoreError::unavailable("resolve destination parent"));
+        };
+        let segment = segment.to_os_string();
+        let parent = current.clone();
+        let next = tokio::task::spawn_blocking(move || {
+            open_or_create_private_child_directory(&parent, &segment)
+        })
+        .await
+        .map_err(|source| BlobStoreError::io("join destination directory creation", source))?
+        .map_err(|source| BlobStoreError::io("create destination directory", source))?;
+        sync_open_directory(current).await?;
+        current = Arc::new(next);
+    }
+    Ok(current)
 }
 
 async fn verify_opened_file(
@@ -983,7 +1045,6 @@ fn local_block_transport_leaf(path: &Path) -> bool {
             || component.starts_with(b"mmc")
             || component.starts_with(b"nvme")
             || component.starts_with(b"usb")
-            || component.starts_with(b"virtio")
     })
 }
 
@@ -1083,11 +1144,12 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::CrossesDevices);
     }
 
-    #[test]
-    fn inv059_filesystem_publishes_through_the_retained_parent_descriptor() {
+    #[tokio::test]
+    async fn inv059_filesystem_rejects_an_unreachable_retained_parent_publication() {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
+        let content = b"descriptor-bound bytes";
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         let publication_path = root.path().join("publication");
         let destination_path = root.path().join("destination");
@@ -1121,10 +1183,19 @@ mod tests {
             )
             .expect("the destination descriptor opens"),
         );
+        let root_descriptor = Arc::new(
+            open(
+                root.path(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(fs::File::from)
+            .expect("the root descriptor opens"),
+        );
         let (temporary, mut output) = create_temporary_blob_file(publication)
             .expect("the fixture creates a descriptor-relative temporary file");
         output
-            .write_all(b"descriptor-bound bytes")
+            .write_all(content)
             .expect("the fixture writes the temporary bytes");
         output
             .sync_all()
@@ -1132,23 +1203,50 @@ mod tests {
         fs::rename(&destination_path, &moved_destination)
             .expect("the destination generation is renamed");
         fs::create_dir(&destination_path).expect("a replacement destination path is created");
+        fs::set_permissions(
+            &destination_path,
+            fs::Permissions::from_mode(DIRECTORY_MODE),
+        )
+        .expect("the replacement destination is private");
 
         let outcome = temporary
             .publish_noclobber(&destination, OsStr::new("object"))
             .expect("publication through the retained descriptor succeeds");
+        let key = BlobObjectKey::try_from_recorded("destination/object")
+            .expect("the fixture key is relative");
+        let expected = ExpectedBlob::try_new(
+            BlobDigest::digest(content),
+            u64::try_from(content.len()).expect("the fixture length fits u64"),
+        )
+        .expect("the fixture is nonempty");
+
+        let error = verify_file_at_key(
+            root_descriptor,
+            key,
+            expected,
+            "verify test recorded object key",
+        )
+        .await
+        .expect_err("the replacement tree cannot resolve the published object");
 
         assert!(outcome.is_none());
         assert!(moved_destination.join("object").is_file());
         assert!(!destination_path.join("object").exists());
+        assert_eq!(
+            error.kind(),
+            signalbox_blob_store::BlobStoreFailureKind::NotFound
+        );
     }
 
     #[test]
     fn inv059_filesystem_accepts_only_explicitly_local_block_transport_leaves() {
-        let local = Path::new("/sys/devices/pci0000:00/0000:00:01.0/virtio1/block/vda/vda1");
+        let local = Path::new("/sys/devices/pci0000:00/0000:00:01.0/nvme/nvme0/nvme0n1");
+        let virtio = Path::new("/sys/devices/pci0000:00/0000:00:02.0/virtio1/block/vda");
         let network_block = Path::new("/sys/devices/virtual/block/nbd0");
         let iscsi = Path::new("/sys/devices/platform/host2/session1/target2:0:0/2:0:0:0/block/sdb");
 
         assert!(local_block_transport_leaf(local));
+        assert!(!local_block_transport_leaf(virtio));
         assert!(!local_block_transport_leaf(network_block));
         assert!(!local_block_transport_leaf(iscsi));
     }

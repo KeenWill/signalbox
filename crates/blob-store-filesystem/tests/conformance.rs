@@ -20,7 +20,7 @@ fn try_fixture_in(parent: &Path) -> Option<(TempDir, FilesystemBlobStore)> {
         .tempdir_in(parent)
         .ok()?;
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
-    let store = FilesystemBlobStore::try_new(root.path().to_path_buf()).ok()?;
+    let store = FilesystemBlobStore::try_new_for_conformance(root.path().to_path_buf()).ok()?;
     Some((root, store))
 }
 
@@ -126,7 +126,7 @@ fn filesystem_sweeps_owned_crash_publication_files() {
         .expect("the fixture makes the publication orphan private");
     drop(store);
 
-    let _store = FilesystemBlobStore::try_new(root.path().to_path_buf())
+    let _store = FilesystemBlobStore::try_new_for_conformance(root.path().to_path_buf())
         .expect("the store sweeps a provably owned publication orphan");
 
     assert!(!orphan.exists());
@@ -241,7 +241,7 @@ async fn filesystem_rejects_fifo_candidates_without_waiting_for_a_writer() {
 }
 
 #[tokio::test]
-async fn filesystem_range_reverifies_the_generation_it_reads() {
+async fn inv059_filesystem_range_reverifies_the_generation_it_reads() {
     let (root, store) = fixture();
     let expected = signalbox_blob_store::conformance::expected_fixture();
     let key = BlobObjectKey::for_digest(expected.digest());
@@ -279,7 +279,7 @@ async fn inv059_filesystem_pins_the_validated_root_namespace() {
     std::fs::create_dir(&configured_root).expect("a replacement root is created");
     std::fs::set_permissions(&configured_root, std::fs::Permissions::from_mode(0o700))
         .expect("the replacement root is private");
-    let replacement_store = FilesystemBlobStore::try_new(configured_root.clone())
+    let replacement_store = FilesystemBlobStore::try_new_for_conformance(configured_root.clone())
         .expect("the replacement root is independently usable");
     let expected = signalbox_blob_store::conformance::expected_fixture();
     let key = BlobObjectKey::for_digest(expected.digest());
