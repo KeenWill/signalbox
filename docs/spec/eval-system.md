@@ -5,7 +5,7 @@
 corpus, expectations, trials, and stages are recorded, and how evaluation
 traffic stays unmistakably separate from production traffic. The entire surface
 below is committed ahead of code as Stage 0 of the substrate build, verified
-against this PR (`agent/program-substrate-spec`). Execution, registration,
+against PR #580 (`agent/program-substrate-spec`). Execution, registration,
 journaling, and replay are owned by the substrate page and not restated here;
 model scoring is ordinary session traffic owned by
 [model-call execution](model-call-execution.md); the sandboxed process boundary
@@ -15,24 +15,30 @@ for stage executors is owned by [tool loop](tool-loop.md)'s execution surface.
 
 **Committed unimplemented functionality.** No present surface defines
 evaluations. An evaluation definition is a registered program whose grant list
-includes the corpus, evaluation-recording, and (as needed) session, judge, and
-stage-executor capabilities. Registering an evaluation is inserting rows — never
-a change to this repository. A stock built-in orchestrator ships with the
-substrate so the simplest evaluation — run one executor per case, score with the
-expectation grammar — is a registration row naming a corpus and an executor,
-with no program authored. Why: the evaluation system exists to make creating
-evaluations cheap in the user's own projects, so the zero-authoring path is part
-of the contract, not a convenience added later.
+includes `corpus`, `eval-record`, and as needed `session`, `judge`, and
+`exec-stage` — exactly the substrate's closed capability vocabulary, so an
+evaluation registration can receive every capability this page describes.
+Registering an evaluation is inserting rows — never a change to this repository.
+A stock built-in orchestrator ships with the substrate so the simplest
+evaluation — run one executor per case, score with the expectation grammar — is
+a registration row naming a corpus and an executor, with no program authored.
+Why: the evaluation system exists to make creating evaluations cheap in the
+user's own projects, so the zero-authoring path is part of the contract, not a
+convenience added later.
 
 **Committed unimplemented functionality.** No present surface separates
 evaluation provenance. Sessions created by evaluation programs carry the `eval`
-creation cause with run and trial identity, so one stored predicate separates
-evaluation traffic from production traffic in every reader. Evaluation model
-calls are metered with the same configured billing rates as all traffic, and
-evaluation rows carry durable cost with the rate version that priced them.
-Evaluation verdicts gate nothing: every evaluation surface is report-only until
-repeats, baselines, and comparison views exist, and any future gating is a
-separate decision this page does not commit.
+creation cause with run and trial identity. A session the model delegates from
+inside an evaluation-created session carries its ordinary delegated cause —
+delegation stays the model's autonomy — so the separating predicate is
+transitive, not single-column: evaluation traffic is every session whose
+creation-cause ancestry, followed through the recorded delegation lineage, roots
+in an `eval` cause, and the stored delegation linkage must keep that ancestry
+walkable for as long as evaluation rows are read. Evaluation model calls are
+metered with the same configured billing rates as all traffic. Evaluation
+verdicts gate nothing: every evaluation surface is report-only until repeats,
+baselines, and comparison views exist, and any future gating is a separate
+decision this page does not commit.
 
 ## Corpus and expectations
 
@@ -52,23 +58,31 @@ closed-vocabulary labels, typed numeric constraints (exact-within-tolerance,
 range, count, boolean), and reference-artifact comparisons by named continuous
 metric with thresholds — declared per case, each check optional. A case with a
 missing reference degrades that check to `unmeasured` and never loses its row.
-Reference-artifact checks depend on digest-addressed artifact storage and are
-committed but sequenced behind it.
+Reference-artifact checks depend on the artifact foundation whose aggregate
+boundary is recorded as undecided in
+[open-questions](../open-questions.md#general-purpose-artifacts); they are
+committed as grammar and sequenced strictly behind that foundation, and this
+page commits no artifact-store shape.
 
 ## Trials, stages, and recording
 
 **Committed unimplemented functionality.** No present surface records evaluation
 results. An evaluation run records: run identity with the pinned program digest,
-corpus digest, configuration, and rate version; one trial row per case and
-repeat ordinal; and one stage row per trial stage with a status from the closed
-set `scored`, `skipped`, `infrastructure`, `unmeasured`, plus metrics, error,
-and duration. Stages order cheap to expensive, and a stage failure is recorded
-on its row without discarding the trial's other stages. Aggregation — accuracy
-by slice, stability across repeats, thresholded pass rates, run-versus-run
-comparison — is derived by SQL views over these rows, never stored as opaque
-summaries alone. Repeats are fresh-journal repeats, so verdict stability is
-measured against genuinely re-sampled nondeterminism, while an interrupted run
-resumes by replay without re-spending a model call.
+corpus digest, and configuration; one trial row per case and repeat ordinal; and
+one stage row per trial stage with a status from the closed set `scored`,
+`skipped`, `infrastructure`, `unmeasured`, plus metrics, error, and duration.
+Durable cost is recorded per model call with the model and rate version that
+priced that call — an evaluation may score with one model and judge with
+another, and the configured rate catalog versions each model's rates
+independently, so no single run-level rate version exists; run-level cost is an
+aggregation grouped by model and rate version, never a stored scalar that
+forgets its pricing. Stages order cheap to expensive, and a stage failure is
+recorded on its row without discarding the trial's other stages. Aggregation —
+accuracy by slice, stability across repeats, thresholded pass rates,
+run-versus-run comparison — is derived by SQL views over these rows, never
+stored as opaque summaries alone. Repeats are fresh-journal repeats, so verdict
+stability is measured against genuinely re-sampled nondeterminism, while an
+interrupted run resumes by replay without re-spending a model call.
 
 **Committed unimplemented functionality.** No present surface executes
 evaluation stage code. Heavyweight subject-under-test execution — building a
@@ -92,6 +106,5 @@ judge-evaluation binary and constrains nothing else.
 
 ## Open edges
 
-- Exporters (run scalars and per-case tables toward external trackers) are
-  deferred and unrecorded: the SQL surface is the contract, and no
-  open-questions entry exists because no design is owed yet.
+- Evaluation exporters toward external trackers:
+  [open-questions](../open-questions.md#program-substrate-and-evaluations).

@@ -694,7 +694,24 @@ no accepted aggregate boundary. The reference-not-copy posture review workflows
 take today is owned by [review-workflows](spec/review-workflows.md). A future
 foundation decision must define the artifact aggregate and its authority before
 a workflow can attach one. This blocks general-purpose workflow artifacts, not
-the implemented session and external-link evidence.
+the implemented session and external-link evidence. The
+[program substrate](spec/program-substrate.md) and
+[evaluation system](spec/eval-system.md) defer their large-payload offload and
+reference-artifact checks behind this same foundation decision.
+
+## Program substrate and evaluations
+
+The substrate and evaluation contracts are owned by
+[program-substrate](spec/program-substrate.md) and
+[eval-system](spec/eval-system.md). Two edges remain deferred:
+
+- **Remote and out-of-process program hosts.** The frame protocol is the seam;
+  only the in-daemon host is committed. Hosting programs in a separate
+  supervised process or on remote execution infrastructure requires a future
+  transport decision. Blocks nothing committed.
+- **Evaluation exporters.** Run scalars and per-case tables toward external
+  experiment trackers are deferred; the SQL surface is the contract until a
+  concrete tracker need appears. Blocks nothing committed.
 
 ## Destination features (target model)
 
@@ -705,8 +722,12 @@ and ordering.
 - **Goal identity and lifecycle.** Durable persistent-objective identity and
   lifecycle require a future foundation decision. Blocks platform goal mode.
 - **Standing update-subscription lifecycle.** Identity, lifetime, delivery, and
-  cancellation for standing update subscriptions require a future foundation
-  decision. Blocks the planned callback surface.
+  cancellation for client-facing standing update subscriptions require a future
+  foundation decision. Blocks the planned callback surface. Narrowed: durable
+  program event subscriptions — identity, wake delivery, and cancellation for
+  registered programs — are decided and owned by
+  [program-substrate](spec/program-substrate.md), and are no longer part of this
+  question.
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven

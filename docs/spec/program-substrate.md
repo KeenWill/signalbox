@@ -4,7 +4,7 @@
 registered programs: TypeScript orchestrators that drive sessions, evaluations,
 and repository-watch reactions through a journaled effect protocol. The entire
 surface below is committed ahead of code as Stage 0 of the substrate build,
-verified against this PR (`agent/program-substrate-spec`); each paragraph
+verified against PR #580 (`agent/program-substrate-spec`); each paragraph
 records the compatibility constraint it imposes on present surfaces. Model
 execution remains owned by [model-call execution](model-call-execution.md) and
 the [model-runtime substrate](runtime-substrate.md), sessions and turns by
@@ -24,12 +24,19 @@ versioned in-repo SDK package and to files inside its own registration set; any
 other import is a registration error. Registration stores the exact TypeScript
 source, the stripped JavaScript artifact, a digest of each, the SDK version, the
 frame-contract version, and an explicit capability grant list, as immutable rows
-keyed by unique program name and revision. Execution uses only the stripped
-artifact; the TypeScript source is retained for reading and re-verification.
-This constrains present schema planning: program identity is `(name, revision)`
-plus content digests, and nothing may treat a mutable location — a repository
-path, a branch, a file — as what a program *is*. Why: digest identity is what
-lets an in-flight run keep meaning the code it started with.
+keyed by unique program name and revision. Each digest is SHA-256 in lowercase
+hexadecimal over an exact preimage: for the artifact, the stripped JavaScript
+bytes; for the source, the registration set's files in byte-lexicographic path
+order, each framed as its UTF-8 path, one zero byte, its content length in
+decimal ASCII, one zero byte, then its content bytes. Both registration paths
+and every later verifier compute identity from these preimages alone, so two
+correct implementations cannot disagree about what a program is. Execution uses
+only the stripped artifact; the TypeScript source is retained for reading and
+re-verification. This constrains present schema planning: program identity is
+`(name, revision)` plus content digests, and nothing may treat a mutable
+location — a repository path, a branch, a file — as what a program *is*. Why:
+digest identity is what lets an in-flight run keep meaning the code it started
+with.
 
 **Committed unimplemented functionality.** No present surface pins program
 revisions to runs. Every run records the compiled digest and frame-contract
@@ -73,25 +80,48 @@ JavaScript-engine isolate with no ambient filesystem, network, environment, wall
 clock, or unvirtualized randomness; the only door out of the isolate is the
 frame protocol below. The engine is the pinned `deno_core` crate family; the
 standalone repository is archived and the deno monorepo is its source of truth,
-so the pin is by crate version with upgrades taken deliberately. A native engine
-failure is accepted as a daemon failure while every registered program is the
-operator's own. Why: the isolate's closure is what makes deterministic replay a
-structural property instead of an authoring discipline.
+so the pin is by crate version with upgrades taken deliberately. Every run
+records the engine version it started under. No engine runtime is retained
+across upgrades — per the pre-alpha rule in `AGENTS.md`, keeping superseded
+engines resident would be compatibility machinery for deployments that do not
+exist — so a run that wakes under a newer engine replays under it, protected by
+the fault-not-diverge rule below: an engine-semantics change surfaces as a
+nondeterminism fault whose payload names both engine versions, never as silent
+divergence. A native engine failure is accepted as a daemon failure while every
+registered program is the operator's own. Why: the isolate's closure is what
+makes deterministic replay a structural property instead of an authoring
+discipline.
 
 **Committed unimplemented functionality.** No present surface journals program
 effects. Every nondeterministic act crosses the frame protocol and is recorded
-as append-only journal rows in the same transaction as the effect it records,
-following the transactional-outbox append idiom of the
-[persistence protocol](persistence-protocol.md): a journal that says an effect
-happened is never ahead of or behind the world. Requests (what the program
-asked, in program order) and deliveries (what the host answered, in delivery
-order) are both journaled. The frame vocabulary is: `now`, `random`, `sleep`,
-`await_event`, `effect`, `scope`, and `terminal` requests; `answer`, `wake`,
-`cancel`, and `fault` deliveries. Capability calls are `effect` frames named by
-capability and method, so capability growth never changes the frame contract.
-Effect failures are ordinary answer values a program branches on; only `fault`
-(timeout, memory, nondeterminism) terminates a run from outside, and faults are
-themselves journaled so even a kill replays.
+as append-only journal rows. Requests (what the program asked, in program order)
+and deliveries (what the host answered, in delivery order) are both journaled.
+The frame vocabulary is: `now`, `random`, `sleep`, `await_event`, `effect`,
+`scope`, and `terminal` requests; `answer`, `wake`, `cancel`, and `fault`
+deliveries. Capability calls are `effect` frames named by capability and method,
+so capability growth never changes the frame contract. Effect failures are
+ordinary answer values a program branches on; only `fault` (timeout, memory,
+nondeterminism) terminates a run from outside, and faults are themselves
+journaled so even a kill replays.
+
+**Committed unimplemented functionality.** No present surface synchronizes
+journal rows with effects, and the synchronization guarantee differs by effect
+class. A transactional effect — one whose entire consequence is rows this daemon
+writes, such as session creation, input submission, or evaluation recording —
+commits its `answer` frame in the same transaction as the consequence, following
+the transactional-outbox append idiom of the
+[persistence protocol](persistence-protocol.md), so the journal and the world
+cannot disagree. An external effect — a model call, a stage execution, anything
+whose consequence lives outside this database — journals its `effect` request
+before the operation is issued, and its outcome when the operation reports; a
+crash between the two leaves a journaled request with no answer, and recovery
+follows the capability's declared recovery rule: adopt the outcome when the
+operation's own durable record proves it completed, re-issue only when the
+capability declares the operation idempotent, and otherwise answer the request
+with a journaled `ambiguous` outcome the program must branch on — mirroring the
+external-effect ambiguity contract of [tool loop](tool-loop.md), which forbids
+pretending an unresolved external loss did not happen. Why: one honest ambiguity
+is recoverable; a false exactly-once claim is not.
 
 **Committed unimplemented functionality.** No present surface replays program
 runs. Resume discards nothing and restores nothing: a woken run re-executes its
@@ -107,14 +137,32 @@ points, and each randomness draw is journaled. Why: recording the delivery order
 is the one discipline that buys unrestricted intra-program concurrency without
 restricting the language.
 
+**Committed unimplemented functionality.** No present surface bounds journal
+growth. A long-lived program does not accumulate one unbounded journal:
+`terminal` carries a `continue` outcome that ends the run and starts a successor
+run row — same pinned artifact, explicit continuation arguments, predecessor
+identity recorded — with a fresh journal. Replay cost is therefore bounded per
+run, not per program lifetime, and the built-in dispatch program described below
+continues after each handled event. This is the substrate's only
+journal-bounding mechanism: no checkpointing or journal truncation exists,
+because a journal that can be rewritten is not a journal. Why: continuation
+keeps replay linear in one run's work while every historical run remains a
+complete, immutable record.
+
 **Committed unimplemented functionality.** No present surface parks program
 runs. A run sleeping on a timer or subscription holds no isolate and no memory
 beyond its rows; wake builds a fresh isolate and replays. Sleeping runs survive
-daemon restarts by construction. Large frame payloads are stored by digest in
-the content-addressed blob store once that storage stack lands, and inline below
-a fixed threshold until then; a session outcome journals as the session identity
-plus an outcome digest, never transcript content, because sessions are already
-durable and the journal is thin coordination state only.
+daemon restarts by construction. Frame payloads inline below a fixed threshold;
+offloading larger payloads by digest depends on the artifact foundation whose
+aggregate boundary is recorded as undecided in
+[open-questions](../open-questions.md#general-purpose-artifacts), so until that
+foundation lands, a payload above the threshold is an effect error and no
+payload-store shape is committed here. A session outcome journals as the session
+identity, the exact turn and accepted-input identity that produced it, and an
+outcome digest — never transcript content — because sessions are already durable
+and the journal is thin coordination state only; the recorded turn identity is
+what lets replay authenticate which of a session's turns supplied a delivered
+answer.
 
 **Committed unimplemented functionality.** No present surface re-executes
 evaluation trials. Replay of a run's own journal (resume) and a sibling run with
@@ -129,12 +177,15 @@ resumes.
 programs to events. `await_event` records a durable subscription row naming an
 event kind and filter over the vocabulary that [repository watch](repo-watch.md)
 already stores durably; after a poll's events commit, matching subscriptions
-produce wake rows, and the scheduler resumes the subscribed runs. This
-constrains repository-watch storage now: its cursor and event rows are the
-substrate's event source and must remain readable by subscription matching. The
-present structured-rule dispatch surface is committed to converge onto this
-mechanism — the dispatch action becomes a built-in program, cut over after one
-shadowed live event — after which rules are subscriptions.
+produce wake rows, and the scheduler resumes the subscribed runs. Program
+subscription identity, delivery, and cancellation are decided by this page; the
+previously open standing-subscription foundation question is narrowed in the
+same diff to the client-facing callback surface it still owns. This constrains
+repository-watch storage now: its cursor and event rows are the substrate's
+event source and must remain readable by subscription matching. The present
+structured-rule dispatch surface is committed to converge onto this mechanism —
+the dispatch action becomes a built-in program, cut over after one shadowed live
+event — after which rules are subscriptions.
 
 **Committed unimplemented functionality.** No present surface cancels program
 runs. Cancellation is a user command pair on the
@@ -149,26 +200,34 @@ notice beyond the journal: cancellation is terminal, not advisory.
 ## Driving sessions
 
 **Committed unimplemented functionality.** No present surface lets programs
-create sessions. The session capability wraps the existing create-session,
-input-submission, and turn-scheduling services without new machinery beneath it;
-program-created sessions carry new creation-cause variants (`workflow`, and
-`eval` per the [evaluation system](eval-system.md)) that join the stored
-vocabulary of [sessions and the transcript](sessions-and-transcript.md), so
-program-driven traffic is distinguishable in one predicate everywhere sessions
-are read. Programs drive sessions turn by turn: submit input, await that turn's
-outcome as a typed payload validated against the program's declared schema
-through the structured-output path the
-[model-runtime substrate](runtime-substrate.md) already provides per call, then
-branch. Structure inside one turn is deliberately out of contract: a turn is the
-model's autonomy zone, governed by the same approval judge as every session, and
-a program that needs intra-turn evidence reads the durable transcript through a
-read capability after the fact. Credentials never enter the isolate; sessions,
-model calls, clones, and stage executions all happen host-side under existing
-credential machinery.
+create sessions. The session capability composes the existing create-session,
+input-submission, and turn-scheduling services, extended where the present
+contracts have no room for program agency. Two extensions are committed here and
+owned by the pages they change. First, attribution: the present input surface
+records user issuance, and the closed actor algebra has no program arm, so
+program-issued input carries a verified program issuance — naming the run
+identity — through the actor contract of
+[identity and commands](identity-and-commands.md); a program-driven turn is
+never recorded as user-issued. Second, provenance: program-created sessions
+carry new creation-cause variants (`workflow`, and `eval` per the
+[evaluation system](eval-system.md)) in the stored vocabulary of
+[sessions and the transcript](sessions-and-transcript.md). Programs drive
+sessions turn by turn: submit input, await that turn's outcome as a typed
+payload, then branch. The [model-runtime substrate](runtime-substrate.md)
+already carries an optional per-call structured-output contract, but the session
+path from accepted input through turn preparation to the prepared model
+operation does not; that carriage — a declared output schema recorded on the
+program-issued input, flowing to the prepared call, enforced at the runtime
+boundary — is committed here and updates
+[model-call execution](model-call-execution.md) when implemented. Structure
+inside one turn is deliberately out of contract: a turn is the model's autonomy
+zone, governed by the same approval judge as every session, and a program that
+needs intra-turn evidence reads the durable transcript through a read capability
+after the fact. Credentials never enter the isolate; sessions, model calls,
+clones, and stage executions all happen host-side under existing credential
+machinery.
 
 ## Open edges
 
-- Remote or out-of-process program hosts (the frame protocol is the seam; only
-  the in-daemon host is committed) — recorded in
-  [open-questions](../open-questions.md) if and when a concrete need appears; no
-  entry exists today.
+- Remote and out-of-process program hosts:
+  [open-questions](../open-questions.md#program-substrate-and-evaluations).
