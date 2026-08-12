@@ -610,6 +610,7 @@ private actor MockProcessProtocolState {
         "type": "transcript_snapshot_start",
         "session_id": session.id,
         "cursor": cursor,
+        "runner": NSNull(),
       ]
     ]
     messages.append(contentsOf: fixture.records.prefix(1))

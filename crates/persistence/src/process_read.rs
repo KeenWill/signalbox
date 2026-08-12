@@ -9,14 +9,15 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
-    FrozenAliasDefinition, FrozenModelSelection, ImportedConversationId, ImportedSourceAttestation,
-    ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
-    ModelSelectionRequest, ProviderModelIdentity, ResolvedProviderTarget, RunnerGeneration,
-    RunnerId, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+    AcceptedInputId, ContextFrontierId, CredentialProfileName, DelegationMessageId,
+    DirectModelSelection, FrozenAliasDefinition, FrozenModelSelection, ImportedConversationId,
+    ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
+    ModelCallId, ModelSelectionRequest, ProviderModelIdentity, ResolvedProviderTarget,
+    RunnerCapabilityClass, RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerSelector,
+    RunnerWorkingDirectory, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
     SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
     ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved, VersionedSessionPlacement,
+    TurnModelSettingsResolved, VersionedSessionPlacement, WorkspaceRepositoryKey,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -26,8 +27,9 @@ use crate::{
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
         defaults_version_from_numeric, durable_command_id_from_uuid,
         model_change_adjustments_from_json, model_settings_from_json,
-        model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_decision_source_from_str, tool_attempt_disposition_from_str,
+        model_settings_overlay_from_json, runner_sandbox_from_str, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str,
+        tool_attempt_disposition_from_str,
     },
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
@@ -47,6 +49,95 @@ pub enum ProcessModelSelection {
     Alias(ModelAlias),
 }
 
+/// Closed current state in one process-facing runner projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessRunnerProjectionState {
+    /// No runner has been pinned yet.
+    Unpinned,
+    /// The current placement is pinned.
+    Pinned,
+    /// The exact selected runner was lost before pinning.
+    RunnerLostBeforePin,
+    /// The pinned runner was lost.
+    RunnerLost,
+    /// The lost placement was explicitly abandoned.
+    RunnerAbandoned,
+}
+
+/// Closed current connection health in one process-facing runner projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessRunnerConnectionHealth {
+    /// The runner connection is currently healthy.
+    Connected,
+    /// The connection is inside its missed-heartbeat recovery window.
+    Suspect,
+    /// The connection closed through orderly shutdown.
+    Shutdown,
+    /// The connection reached terminal loss.
+    Lost,
+}
+
+/// Complete current runner placement from one repeatable-read snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessRunnerProjection {
+    selector: RunnerSelector,
+    runner: Option<RunnerId>,
+    placement_revision: RunnerGeneration,
+    sandbox: RunnerSandboxProfile,
+    credential_profile: Option<CredentialProfileName>,
+    repository: Option<WorkspaceRepositoryKey>,
+    working_directory: Option<RunnerWorkingDirectory>,
+    connection_health: Option<ProcessRunnerConnectionHealth>,
+    state: ProcessRunnerProjectionState,
+}
+
+impl ProcessRunnerProjection {
+    /// Borrows the immutable requested selector.
+    pub const fn selector(&self) -> &RunnerSelector {
+        &self.selector
+    }
+
+    /// Returns the current or lost exact runner when the state names one.
+    pub const fn runner(&self) -> Option<RunnerId> {
+        self.runner
+    }
+
+    /// Returns the positive current placement revision.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the explicitly selected sandbox profile.
+    pub const fn sandbox(&self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+
+    /// Borrows the independently nullable requested credential profile.
+    pub const fn credential_profile(&self) -> Option<&CredentialProfileName> {
+        self.credential_profile.as_ref()
+    }
+
+    /// Borrows the independently nullable requested repository key.
+    pub const fn repository(&self) -> Option<&WorkspaceRepositoryKey> {
+        self.repository.as_ref()
+    }
+
+    /// Borrows the independently nullable exact requested directory.
+    pub const fn working_directory(&self) -> Option<&RunnerWorkingDirectory> {
+        self.working_directory.as_ref()
+    }
+
+    /// Returns current connection health exactly while the placement is pinned.
+    pub const fn connection_health(&self) -> Option<ProcessRunnerConnectionHealth> {
+        self.connection_health
+    }
+
+    /// Returns the exact current placement state.
+    pub const fn state(&self) -> ProcessRunnerProjectionState {
+        self.state
+    }
+}
+
 /// One current session summary read from a shared transaction snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSessionSummary {
@@ -54,6 +145,7 @@ pub struct ProcessSessionSummary {
     defaults_version: u64,
     model_selection: ProcessModelSelection,
     placement: signalbox_domain::VersionedSessionPlacement,
+    runner: Option<ProcessRunnerProjection>,
 }
 
 impl ProcessSessionSummary {
@@ -75,6 +167,11 @@ impl ProcessSessionSummary {
     /// Borrows the current immutable placement epoch.
     pub const fn placement(&self) -> &signalbox_domain::VersionedSessionPlacement {
         &self.placement
+    }
+
+    /// Borrows the complete current runner projection when runner placement was requested.
+    pub const fn runner(&self) -> Option<&ProcessRunnerProjection> {
+        self.runner.as_ref()
     }
 }
 
@@ -244,7 +341,8 @@ impl ProcessSessionSummaryReader {
             let placement = load_process_session_placement(transaction, session)
                 .await?
                 .ok_or(ProcessReadCorruption::Missing("session placement"))?;
-            let summary = decode_session_summary(&row, placement)?;
+            let runner = load_process_runner_projection(transaction, session).await?;
+            let summary = decode_session_summary(&row, placement, runner)?;
             self.next_session_after = Some(session_id_to_uuid(summary.session()));
             self.summary_count =
                 self.summary_count
@@ -1018,6 +1116,7 @@ impl ProcessToolApproval {
 pub struct ProcessTranscriptSnapshot {
     session: SessionId,
     cursor: u64,
+    runner: Option<ProcessRunnerProjection>,
     turns: Vec<ProcessTranscriptTurn>,
     model_call_usage: Vec<ProcessTranscriptModelCallUsage>,
     entries: Vec<ProcessTranscriptEntry>,
@@ -1032,6 +1131,11 @@ impl ProcessTranscriptSnapshot {
     /// Returns the global last committed outbox sequence from this snapshot.
     pub const fn cursor(&self) -> u64 {
         self.cursor
+    }
+
+    /// Borrows the current runner placement, absent for a daemon-only session.
+    pub const fn runner(&self) -> Option<&ProcessRunnerProjection> {
+        self.runner.as_ref()
     }
 
     /// Borrows turns in immutable acceptance order.
@@ -1109,6 +1213,7 @@ pub struct ProcessTranscriptReader {
     transaction: Option<Transaction<'static, Postgres>>,
     session: SessionId,
     cursor: u64,
+    runner: Option<ProcessRunnerProjection>,
     lineage_tip: Option<TurnId>,
     latest_frontier: Option<ContextFrontierId>,
     expected_turn_count: u64,
@@ -1128,6 +1233,11 @@ impl ProcessTranscriptReader {
     /// Returns the selected session while the reader is active.
     pub const fn session(&self) -> SessionId {
         self.session
+    }
+
+    /// Borrows the current runner placement from this same repeatable-read snapshot.
+    pub const fn runner(&self) -> Option<&ProcessRunnerProjection> {
+        self.runner.as_ref()
     }
 
     /// Returns the snapshot's global outbox cursor.
@@ -1886,6 +1996,7 @@ impl ProcessReadRepository {
         Ok(Some(ProcessTranscriptSnapshot {
             session: summary.session(),
             cursor: summary.cursor(),
+            runner: reader.runner,
             turns,
             model_call_usage,
             entries,
@@ -1999,6 +2110,7 @@ async fn open_transcript_in_transaction(
         stored_cursor.ok_or(ProcessReadCorruption::Missing("outbox sequence state"))?,
         "outbox cursor",
     )?;
+    let runner = load_process_runner_projection(&mut transaction, requested_session).await?;
     let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
     // INV-039 remains fail-closed on every transcript open: native lineage
     // supersedes the seed as the rendered frontier, not as an integrity fact.
@@ -2012,6 +2124,7 @@ async fn open_transcript_in_transaction(
         transaction: Some(transaction),
         session: requested_session,
         cursor,
+        runner,
         lineage_tip,
         latest_frontier: if lineage_tip.is_none() {
             imported_seed
@@ -2030,6 +2143,174 @@ async fn open_transcript_in_transaction(
         next_entry_index: 0,
         summary: None,
     })
+}
+
+async fn load_process_runner_projection(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+) -> Result<Option<ProcessRunnerProjection>, ProcessReadError> {
+    let row = sqlx::query(
+        "SELECT placement.selector_kind, placement.selector_runner_id,
+                placement.selector_capability_class,
+                placement.directory_selection_kind,
+                placement.requested_working_directory,
+                placement.requested_credential_profile_name,
+                placement.workspace_requirement_kind,
+                placement.requested_repository_key,
+                placement.requested_sandbox_profile,
+                placement.placement_revision, placement.state_kind,
+                placement.pinned_runner_id, placement.lost_runner_id,
+                placement.loss_source_kind,
+                connection.state_kind AS connection_state_kind
+           FROM runner_current_session_placement AS current_placement
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current_placement.session_id
+            AND placement.event_ordinal = current_placement.event_ordinal
+           LEFT JOIN LATERAL (
+                SELECT state_kind
+                  FROM runner_connection_event
+                 WHERE enrollment_id = placement.registration_enrollment_id
+                 ORDER BY connection_epoch DESC, event_ordinal DESC
+                 LIMIT 1
+           ) AS connection ON placement.state_kind = 'pinned'
+          WHERE current_placement.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let selector_kind: String = required(&row, "selector_kind")?;
+    let selector_runner: Option<Uuid> = row.try_get("selector_runner_id")?;
+    let selector_capability: Option<String> = row.try_get("selector_capability_class")?;
+    let selector = match (selector_kind.as_str(), selector_runner, selector_capability) {
+        ("identity", Some(runner), None) => RunnerSelector::Identity(RunnerId::from_uuid(runner)),
+        ("capability_class", None, Some(capability)) => RunnerSelector::CapabilityClass(
+            RunnerCapabilityClass::try_new(capability)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("runner selector"))?,
+        ),
+        _ => return Err(ProcessReadCorruption::Inconsistent("runner selector").into()),
+    };
+
+    let directory_kind: String = required(&row, "directory_selection_kind")?;
+    let requested_directory: Option<String> = row.try_get("requested_working_directory")?;
+    let working_directory = match (directory_kind.as_str(), requested_directory) {
+        ("runner_default", None) => None,
+        ("exact", Some(directory)) => Some(
+            RunnerWorkingDirectory::try_new(directory)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("runner working directory"))?,
+        ),
+        _ => {
+            return Err(
+                ProcessReadCorruption::Inconsistent("runner working directory selection").into(),
+            );
+        }
+    };
+
+    let workspace_kind: String = required(&row, "workspace_requirement_kind")?;
+    let requested_repository: Option<String> = row.try_get("requested_repository_key")?;
+    let repository = match (workspace_kind.as_str(), requested_repository) {
+        ("none", None) => None,
+        ("repository_worktree", Some(repository)) => Some(
+            WorkspaceRepositoryKey::try_new(repository)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("runner repository key"))?,
+        ),
+        _ => return Err(ProcessReadCorruption::Inconsistent("runner workspace request").into()),
+    };
+
+    let credential_profile = row
+        .try_get::<Option<String>, _>("requested_credential_profile_name")?
+        .map(CredentialProfileName::try_new)
+        .transpose()
+        .map_err(|_| ProcessReadCorruption::Inconsistent("runner credential profile"))?;
+    let sandbox_name: String = required(&row, "requested_sandbox_profile")?;
+    let sandbox =
+        runner_sandbox_from_str(&sandbox_name).ok_or(ProcessReadCorruption::Unsupported {
+            field: "runner sandbox profile",
+            value: sandbox_name,
+        })?;
+    let placement_revision = RunnerGeneration::try_from_u64(decode_positive(
+        required(&row, "placement_revision")?,
+        "runner placement revision",
+    )?)
+    .ok_or(ProcessReadCorruption::InvalidOrdinal(
+        "runner placement revision",
+    ))?;
+
+    let state_kind: String = required(&row, "state_kind")?;
+    let pinned_runner = row
+        .try_get::<Option<Uuid>, _>("pinned_runner_id")?
+        .map(RunnerId::from_uuid);
+    let lost_runner = row
+        .try_get::<Option<Uuid>, _>("lost_runner_id")?
+        .map(RunnerId::from_uuid);
+    let loss_source: Option<String> = row.try_get("loss_source_kind")?;
+    let connection_state: Option<String> = row.try_get("connection_state_kind")?;
+    let (runner, state) = match (
+        state_kind.as_str(),
+        pinned_runner,
+        lost_runner,
+        loss_source.as_deref(),
+    ) {
+        ("unpinned", None, None, None) => (None, ProcessRunnerProjectionState::Unpinned),
+        ("pinned", Some(runner), None, None) => {
+            (Some(runner), ProcessRunnerProjectionState::Pinned)
+        }
+        ("runner_lost_before_pin", None, Some(runner), None) => (
+            Some(runner),
+            ProcessRunnerProjectionState::RunnerLostBeforePin,
+        ),
+        ("runner_lost", Some(pinned), Some(lost), Some("connection" | "registration"))
+            if pinned == lost =>
+        {
+            (Some(lost), ProcessRunnerProjectionState::RunnerLost)
+        }
+        ("runner_abandoned", None, Some(lost), None) => {
+            (Some(lost), ProcessRunnerProjectionState::RunnerAbandoned)
+        }
+        ("runner_abandoned", Some(pinned), Some(lost), Some("connection" | "registration"))
+            if pinned == lost =>
+        {
+            (Some(lost), ProcessRunnerProjectionState::RunnerAbandoned)
+        }
+        _ => return Err(ProcessReadCorruption::Inconsistent("runner placement state").into()),
+    };
+    let connection_health = match (state, connection_state.as_deref()) {
+        (ProcessRunnerProjectionState::Pinned, Some("connected")) => {
+            Some(ProcessRunnerConnectionHealth::Connected)
+        }
+        (ProcessRunnerProjectionState::Pinned, Some("suspect")) => {
+            Some(ProcessRunnerConnectionHealth::Suspect)
+        }
+        (ProcessRunnerProjectionState::Pinned, Some("shutdown")) => {
+            Some(ProcessRunnerConnectionHealth::Shutdown)
+        }
+        (ProcessRunnerProjectionState::Pinned, Some("lost")) => {
+            Some(ProcessRunnerConnectionHealth::Lost)
+        }
+        (
+            ProcessRunnerProjectionState::Unpinned
+            | ProcessRunnerProjectionState::RunnerLostBeforePin
+            | ProcessRunnerProjectionState::RunnerLost
+            | ProcessRunnerProjectionState::RunnerAbandoned,
+            None,
+        ) => None,
+        _ => return Err(ProcessReadCorruption::Inconsistent("runner connection health").into()),
+    };
+
+    Ok(Some(ProcessRunnerProjection {
+        selector,
+        runner,
+        placement_revision,
+        sandbox,
+        credential_profile,
+        repository,
+        working_directory,
+        connection_health,
+        state,
+    }))
 }
 
 fn decode_process_session_ancestry(
@@ -2097,6 +2378,7 @@ fn map_seed_validation_error(error: sqlx::Error) -> ProcessReadError {
 fn decode_session_summary(
     row: &PgRow,
     placement: VersionedSessionPlacement,
+    runner: Option<ProcessRunnerProjection>,
 ) -> Result<ProcessSessionSummary, ProcessReadError> {
     let session = session_id_from_uuid(required(row, "session_id")?);
     let defaults_version = decode_positive(
@@ -2127,6 +2409,7 @@ fn decode_session_summary(
         defaults_version,
         model_selection,
         placement,
+        runner,
     })
 }
 

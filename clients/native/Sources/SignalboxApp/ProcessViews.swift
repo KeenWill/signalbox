@@ -1276,6 +1276,24 @@ private struct ProcessImportedContinuationSheet: View {
   }
 }
 
+struct ProcessRunnerTransition: Equatable {
+  let runnerID: SignalboxCanonicalUUID
+  let placementRevision: SignalboxCanonicalUInt64
+  let sandboxProfile: SignalboxRunnerSandboxProfile
+  let workingDirectory: SignalboxRunnerWorkingDirectory?
+  let state: SignalboxRunnerStateTransitionState
+
+  var statusLabel: String {
+    let directoryLabel = workingDirectory.map {
+      "selected directory \(String(reflecting: $0.rawValue))"
+    } ?? "runner-default directory"
+    return SignalboxProcessPresentation.retainedLabel(
+      "Runner \(runnerID.rawValue) · \(state.rawValue) · revision \(placementRevision.rawValue)"
+        + " · sandbox \(sandboxProfile.rawValue) · \(directoryLabel)"
+    )
+  }
+}
+
 private enum ProcessSessionPresentationError: LocalizedError {
   case streamedTextCapacityExceeded
 
@@ -1314,6 +1332,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   @Published private(set) var latestDiagnostic: String?
   @Published private(set) var streamedText: SignalboxProcessStreamedText?
   @Published private(set) var activeTurnID: SignalboxCanonicalUUID?
+  @Published private(set) var runner: SignalboxRunnerProjection?
+  @Published private(set) var runnerTransition: ProcessRunnerTransition?
   @Published private(set) var isSubmitting = false
   @Published private(set) var isDecidingTool = false
   @Published var composerText = ""
@@ -1369,6 +1389,25 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   var canDecideToolRequest: Bool {
     connectedService != nil && !isDecidingTool && mutationBlocksByTurnID.isEmpty
+  }
+
+  var runnerStatusLabel: String? {
+    if let runnerTransition {
+      return runnerTransition.statusLabel
+    }
+    guard let runner else {
+      return nil
+    }
+    let runnerID = runner.runnerID?.rawValue ?? "unassigned"
+    let directoryLabel = runner.workingDirectory.map {
+      "selected directory \(String(reflecting: $0.rawValue))"
+    } ?? "runner-default directory"
+    let healthLabel = runner.connectionHealth.map { " · health \($0.rawValue)" } ?? ""
+    return SignalboxProcessPresentation.retainedLabel(
+      "Runner \(runnerID) · \(runner.state.rawValue)\(healthLabel)"
+        + " · revision \(runner.placementRevision.rawValue)"
+        + " · sandbox \(runner.sandboxProfile.rawValue) · \(directoryLabel)"
+    )
   }
 
   init(
@@ -1721,6 +1760,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         self.phase = phase
       case .authoritativeSnapshot(let snapshot):
         let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+        runner = snapshot.runner
+        runnerTransition = nil
         try normalizer.replaceAll(with: projection.records)
         toolApprovalDecisionsByRequestID = retainedToolApprovalDecisions(
           projection.toolApprovalDecisionsByRequestID
@@ -1746,6 +1787,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           snapshot,
           attributableTo: trigger
         )
+        runner = snapshot.runner
+        runnerTransition = nil
         normalizer.upsert(contentsOf: projection.records)
         toolApprovalDecisionsByRequestID.merge(
           retainedToolApprovalDecisions(projection.toolApprovalDecisionsByRequestID),
@@ -1954,6 +1997,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     acceptedInputTimelineOffsets = [:]
     activity = .unavailable
     activeTurnID = nil
+    runner = nil
+    runnerTransition = nil
     mutationBlocksByTurnID = [:]
     sideSnapshotCursorsByTurnID = [:]
     normalizedTimelineItemIDs = []
@@ -2101,6 +2146,20 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         turnID: turnID,
         at: followed.cursor,
         terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
+      )
+    case .runnerStateTransition(
+      let runnerID,
+      let placementRevision,
+      let sandboxProfile,
+      let workingDirectory,
+      let state
+    ):
+      runnerTransition = ProcessRunnerTransition(
+        runnerID: runnerID,
+        placementRevision: placementRevision,
+        sandboxProfile: sandboxProfile,
+        workingDirectory: workingDirectory,
+        state: state
       )
     case .unknown(let kind, _, let decodingDiagnostic):
       retainUnrecognizedLiveEvent(
@@ -2714,6 +2773,11 @@ struct ProcessSessionDetailScreen: View {
           .foregroundStyle(.secondary)
         Text(viewModel.activity.label)
           .font(.callout.weight(.semibold))
+        if let runnerStatusLabel = viewModel.runnerStatusLabel {
+          Text(runnerStatusLabel)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
       }
       Spacer()
       Text(phaseLabel)
