@@ -1023,6 +1023,13 @@ async fn load_event(
             DispatchedOutboxEventKind::TurnModelSettingsResolved(event)
         }
         INPUT_ACCEPTED => {
+            // The two admitted shapes are the two ways an input is authored:
+            // by an applied submit command, or by the goal machinery, which
+            // mints a commandless input and proves it with a `goal_turn` row.
+            // A generation owning the turn does not disqualify the first shape:
+            // a goal turn bound to a turn a command already accepted — what
+            // repository-watch dispatch commits — is exactly a commanded input
+            // that also carries a `goal_turn` row.
             let row = sqlx::query(
                 "SELECT event.accepted_input_id, event.turn_id,
                         event.acceptance_position, accepted.content_text
@@ -1062,7 +1069,6 @@ async fn load_event(
                     AND (
                         (
                             accepted.accepting_command_id IS NOT NULL
-                            AND goal.turn_id IS NULL
                             AND (
                                 (
                                     accepted.disposition_kind = 'origin_of'
