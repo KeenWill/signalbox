@@ -105,16 +105,23 @@ pub async fn assert_exact_range_read_back(store: &dyn BlobStore) {
 
 /// Proves an adapter rejects a range larger than its named memory bound.
 pub async fn assert_oversized_range_is_rejected(store: &dyn BlobStore) {
-    let expected = expected();
+    let object_length = MAX_BLOB_RANGE_BYTES + 2;
+    let content = vec![
+        b'x';
+        usize::try_from(object_length)
+            .expect("the conformance object length fits usize")
+    ];
+    let expected = ExpectedBlob::try_new(BlobDigest::digest(&content), object_length)
+        .expect("the oversized-range fixture is nonempty");
     let outcome = store
-        .put(expected, reader(FIRST_CONTENT))
+        .put(expected, reader(&content))
         .await
         .expect("the conformance store publishes valid fixture bytes");
     let oversized = NonZeroU64::new(MAX_BLOB_RANGE_BYTES + 1)
         .expect("one beyond the positive range bound remains nonzero");
 
     let error = store
-        .open_range(expected, outcome.key(), 0, oversized)
+        .open_range(expected, outcome.key(), 1, oversized)
         .await
         .expect_err("an oversized adapter range must be rejected before allocation");
 

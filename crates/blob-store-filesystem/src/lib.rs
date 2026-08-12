@@ -14,7 +14,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
 };
 
-use rustix::fs::{Mode, OFlags, open};
+use rustix::fs::{AtFlags, Mode, OFlags, chmodat, mkdirat, open};
 #[cfg(target_os = "linux")]
 use rustix::fs::{ResolveFlags, openat2};
 #[cfg(unix)]
@@ -118,11 +118,8 @@ impl FilesystemBlobStore {
         let repair_destination = if private_regular_file_exists(self.root.clone(), &key).await? {
             match verify_file(&self.root, &key, expected).await {
                 Ok(()) => {
-                    let parent = destination
-                        .parent()
-                        .ok_or_else(|| BlobStoreError::unavailable("derive destination parent"))?
-                        .to_path_buf();
-                    sync_directory(parent).await?;
+                    let parent = self.ensure_destination_parent(&key).await?;
+                    sync_open_directory(parent).await?;
                     return Ok(BlobPutOutcome::AlreadyPresent { key });
                 }
                 Err(error)
@@ -228,7 +225,7 @@ impl FilesystemBlobStore {
             Ok(persisted) => {
                 drop(persisted);
                 sync_directory(self.publication_directory.clone()).await?;
-                sync_directory(parent).await?;
+                sync_open_directory(parent).await?;
                 verify_file(&self.root, &key, expected).await?;
                 Ok(BlobPutOutcome::Published { key })
             }
@@ -237,7 +234,7 @@ impl FilesystemBlobStore {
                     Ok(()) => {
                         drop(error.file);
                         sync_directory(self.publication_directory.clone()).await?;
-                        sync_directory(parent).await?;
+                        sync_open_directory(parent).await?;
                         Ok(BlobPutOutcome::AlreadyPresent { key })
                     }
                     Err(verification)
@@ -297,31 +294,25 @@ impl FilesystemBlobStore {
     async fn ensure_destination_parent(
         &self,
         key: &BlobObjectKey,
-    ) -> Result<PathBuf, BlobStoreError> {
+    ) -> Result<Arc<fs::File>, BlobStoreError> {
         let relative_parent = std::path::Path::new(key.as_str())
             .parent()
             .ok_or_else(|| BlobStoreError::unavailable("derive destination parent"))?;
-        let mut current = self.root_directory.clone();
-        let mut current_is_root = true;
+        let mut current = self.root.clone();
         for component in relative_parent.components() {
             let std::path::Component::Normal(segment) = component else {
                 return Err(BlobStoreError::unavailable("resolve destination parent"));
             };
-            let next = current.join(segment);
-            let next_for_creation = next.clone();
-            tokio::task::spawn_blocking(move || {
-                create_or_validate_private_directory(&next_for_creation)
+            let segment = segment.to_os_string();
+            let parent = current.clone();
+            let next = tokio::task::spawn_blocking(move || {
+                open_or_create_private_child_directory(&parent, &segment)
             })
             .await
             .map_err(|source| BlobStoreError::io("join destination directory creation", source))?
             .map_err(|source| BlobStoreError::io("create destination directory", source))?;
-            if current_is_root {
-                sync_open_directory(self.root.clone()).await?;
-            } else {
-                sync_directory(current.clone()).await?;
-            }
-            current = next;
-            current_is_root = false;
+            sync_open_directory(current).await?;
+            current = Arc::new(next);
         }
         Ok(current)
     }
@@ -354,7 +345,7 @@ impl BlobStore for FilesystemBlobStore {
 async fn replace_corrupt_destination(
     temporary: NamedTempFile,
     destination: PathBuf,
-    parent: PathBuf,
+    parent: Arc<fs::File>,
     publication_directory: PathBuf,
     root: Arc<fs::File>,
     key: BlobObjectKey,
@@ -367,7 +358,7 @@ async fn replace_corrupt_destination(
         .map_err(|error| BlobStoreError::io("atomically repair object", error.error))?;
     drop(persisted);
     sync_directory(publication_directory).await?;
-    sync_directory(parent).await?;
+    sync_open_directory(parent).await?;
     verify_file(&root, &key, expected).await?;
     Ok(BlobPutOutcome::Repaired { key })
 }
@@ -559,6 +550,54 @@ fn filesystem_key_is_admitted(key: &BlobObjectKey) -> bool {
         .is_some_and(|component| {
             component == std::path::Component::Normal(std::ffi::OsStr::new(PUBLICATION_DIRECTORY))
         })
+}
+
+#[cfg(target_os = "linux")]
+fn open_or_create_private_child_directory(
+    parent: &fs::File,
+    segment: &std::ffi::OsStr,
+) -> io::Result<fs::File> {
+    let created = match mkdirat(parent, segment, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+        Ok(()) => true,
+        Err(source) if source == rustix::io::Errno::EXIST => false,
+        Err(source) => return Err(io::Error::from(source)),
+    };
+    if created {
+        chmodat(
+            parent,
+            segment,
+            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+            AtFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
+    }
+    let directory = openat2(
+        parent,
+        segment,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+    )
+    .map(fs::File::from)
+    .map_err(io::Error::from)?;
+    if !private_directory_metadata(&directory.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "blob directory is not private",
+        ));
+    }
+    Ok(directory)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_or_create_private_child_directory(
+    _parent: &fs::File,
+    _segment: &std::ffi::OsStr,
+) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob storage requires Linux descriptor-relative directories",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -798,5 +837,27 @@ impl std::error::Error for FilesystemBlobStoreConstructionError {
             | Self::NotPrivate { .. }
             | Self::UnclassifiedFilesystem { .. } => None,
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inv059_filesystem_rejects_mounted_child_directories() {
+        let root = fs::File::from(
+            open(
+                "/",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("the Linux root directory opens"),
+        );
+
+        let error = open_or_create_private_child_directory(&root, std::ffi::OsStr::new("proc"))
+            .expect_err("the procfs mount must not be admitted below its parent mount");
+
+        assert_eq!(error.kind(), io::ErrorKind::CrossesDevices);
     }
 }
