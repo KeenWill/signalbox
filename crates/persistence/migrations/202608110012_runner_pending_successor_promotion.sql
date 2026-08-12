@@ -299,6 +299,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     matching_authority bigint;
+    conflicting_authority bigint;
 BEGIN
     IF NEW.result_kind = 'applied' THEN
         SELECT count(*)
@@ -338,6 +339,107 @@ BEGIN
         IF matching_authority <> 1 THEN
             RAISE EXCEPTION
                 'applied runner promotion lacks exact connection authority'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.rejection_kind = 'no_pending_runner_enrollment' THEN
+        SELECT count(*)
+          INTO matching_authority
+          FROM runner_pending_enrollment AS pending
+          JOIN runner_enrollment AS candidate
+            ON candidate.enrollment_id = pending.enrollment_id
+           AND candidate.state_kind = 'pending';
+        IF matching_authority <> 0 THEN
+            RAISE EXCEPTION
+                'no-pending promotion rejection contradicts current authority'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.rejection_kind = 'pending_request_mismatch' THEN
+        SELECT count(*) FILTER (
+                   WHERE pending.request_id = NEW.pending_request_id
+               ),
+               count(*) FILTER (
+                   WHERE pending.request_id <> NEW.pending_request_id
+               )
+          INTO matching_authority, conflicting_authority
+          FROM runner_pending_enrollment AS pending
+          JOIN runner_enrollment AS candidate
+            ON candidate.enrollment_id = pending.enrollment_id
+           AND candidate.state_kind = 'pending';
+        IF matching_authority <> 0 OR conflicting_authority = 0 THEN
+            RAISE EXCEPTION
+                'pending-mismatch promotion rejection lacks current authority'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.rejection_kind = 'pending_request_disconnected' THEN
+        SELECT count(*)
+          INTO matching_authority
+          FROM runner_pending_enrollment AS pending
+          JOIN runner_enrollment AS candidate
+            ON candidate.enrollment_id = pending.enrollment_id
+           AND candidate.state_kind = 'pending'
+          JOIN runner_enrollment AS predecessor
+            ON predecessor.enrollment_id = pending.predecessor_enrollment_id
+           AND predecessor.state_kind = 'active'
+          LEFT JOIN runner_connection_authority_head AS candidate_authority
+            ON candidate_authority.enrollment_id = candidate.enrollment_id
+          LEFT JOIN runner_connection_event AS candidate_connection
+            ON candidate_connection.enrollment_id =
+                   candidate_authority.enrollment_id
+           AND candidate_connection.connection_epoch =
+                   candidate_authority.connection_epoch
+           AND candidate_connection.event_ordinal =
+                   candidate_authority.connection_event_ordinal
+         WHERE pending.request_id = NEW.pending_request_id
+           AND (
+                candidate_authority.enrollment_id IS NULL
+                OR candidate_connection.state_kind <> 'connected'
+           );
+        IF matching_authority <> 1 THEN
+            RAISE EXCEPTION
+                'disconnected promotion rejection contradicts current authority'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.rejection_kind = 'active_runner_not_lost' THEN
+        SELECT count(*)
+          INTO matching_authority
+          FROM runner_pending_enrollment AS pending
+          JOIN runner_enrollment AS candidate
+            ON candidate.enrollment_id = pending.enrollment_id
+           AND candidate.state_kind = 'pending'
+          JOIN runner_connection_authority_head AS candidate_authority
+            ON candidate_authority.enrollment_id = candidate.enrollment_id
+          JOIN runner_connection_event AS candidate_connection
+            ON candidate_connection.enrollment_id =
+                   candidate_authority.enrollment_id
+           AND candidate_connection.connection_epoch =
+                   candidate_authority.connection_epoch
+           AND candidate_connection.event_ordinal =
+                   candidate_authority.connection_event_ordinal
+          JOIN runner_enrollment AS predecessor
+            ON predecessor.enrollment_id = pending.predecessor_enrollment_id
+           AND predecessor.state_kind = 'active'
+          JOIN runner_connection_authority_head AS predecessor_authority
+            ON predecessor_authority.enrollment_id =
+                   predecessor.enrollment_id
+          JOIN runner_connection_event AS predecessor_connection
+            ON predecessor_connection.enrollment_id =
+                   predecessor_authority.enrollment_id
+           AND predecessor_connection.connection_epoch =
+                   predecessor_authority.connection_epoch
+           AND predecessor_connection.event_ordinal =
+                   predecessor_authority.connection_event_ordinal
+         WHERE pending.request_id = NEW.pending_request_id
+           AND candidate_connection.state_kind = 'connected'
+           AND predecessor.enrollment_id = NEW.active_enrollment_id
+           AND predecessor.runner_id = NEW.active_runner_id
+           AND predecessor_connection.state_kind =
+                   NEW.active_connection_state
+           AND predecessor_connection.state_kind IN (
+                'connected', 'suspect', 'shutdown'
+           );
+        IF matching_authority <> 1 THEN
+            RAISE EXCEPTION
+                'active-runner promotion rejection lacks exact authority'
                 USING ERRCODE = '23514';
         END IF;
     END IF;

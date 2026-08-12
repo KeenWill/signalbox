@@ -109,7 +109,11 @@ const COUNTERFEIT_PROMOTION_COMMAND: u128 = 0x9367;
 const DISCONNECTED_PROMOTION_COMMAND: u128 = 0x9368;
 const RECONNECTED_PROMOTION_COMMAND: u128 = 0x9369;
 const CROSS_WIRED_PROMOTION_COMMAND: u128 = 0x936a;
-const ABANDON_LOST_RUNNER_COMMAND: u128 = 0x936b;
+const FORGED_NO_PENDING_PROMOTION_COMMAND: u128 = 0x936b;
+const FORGED_MISMATCH_PROMOTION_COMMAND: u128 = 0x936c;
+const FORGED_DISCONNECTED_PROMOTION_COMMAND: u128 = 0x936d;
+const FORGED_ACTIVE_PROMOTION_COMMAND: u128 = 0x936e;
+const ABANDON_LOST_RUNNER_COMMAND: u128 = 0x936f;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -369,6 +373,49 @@ async fn stage_relational_promotion(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+async fn rejected_promotion_projection(
+    pool: &PgPool,
+    command: u128,
+    pending_request: RunnerEnrollmentRequestId,
+    rejection_kind: &str,
+    active_enrollment: Option<RunnerEnrollmentId>,
+    active_runner: Option<RunnerId>,
+    active_connection_state: Option<&str>,
+) -> sqlx::Error {
+    let mut transaction = pool
+        .begin()
+        .await
+        .expect("the malformed rejection transaction begins");
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'promote_pending_runner', 1, transaction_timestamp())",
+    )
+    .bind(uuid(command))
+    .execute(&mut *transaction)
+    .await
+    .expect("the malformed rejection command claim is staged");
+    sqlx::query(
+        "INSERT INTO promote_pending_runner_command
+            (command_id, pending_request_id, result_kind, rejection_kind,
+             active_enrollment_id, active_runner_id, active_connection_state)
+         VALUES ($1, $2, 'rejected', $3, $4, $5, $6)",
+    )
+    .bind(uuid(command))
+    .bind(pending_request.into_uuid())
+    .bind(rejection_kind)
+    .bind(active_enrollment.map(RunnerEnrollmentId::into_uuid))
+    .bind(active_runner.map(RunnerId::into_uuid))
+    .bind(active_connection_state)
+    .execute(&mut *transaction)
+    .await
+    .expect("the malformed rejection projection is staged");
+    transaction
+        .commit()
+        .await
+        .expect_err("deferred authority rejects the counterfeit result")
 }
 
 const INITIAL_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
@@ -5002,6 +5049,114 @@ async fn inv001_pending_promotion_terminal_rows_require_nonnull_discriminators()
 
     assert_check_violation(missing_revision);
     assert_check_violation(missing_rejection);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: a terminal no-pending rejection cannot be recorded while the
+/// deployment still has a current pending successor.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv042_no_pending_promotion_rejection_requires_empty_pending_slot()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+
+    let rejected = rejected_promotion_projection(
+        &pool,
+        FORGED_NO_PENDING_PROMOTION_COMMAND,
+        fixture.candidate_request,
+        "no_pending_runner_enrollment",
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: a terminal request-mismatch rejection cannot be recorded for the
+/// exact request that owns the current pending successor.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv042_pending_mismatch_rejection_requires_different_current_request()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+
+    let rejected = rejected_promotion_projection(
+        &pool,
+        FORGED_MISMATCH_PROMOTION_COMMAND,
+        fixture.candidate_request,
+        "pending_request_mismatch",
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: a terminal disconnected rejection cannot be recorded while the
+/// exact pending successor owns a current connected event.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv042_disconnected_promotion_rejection_requires_disconnected_candidate()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+
+    let rejected = rejected_promotion_projection(
+        &pool,
+        FORGED_DISCONNECTED_PROMOTION_COMMAND,
+        fixture.candidate_request,
+        "pending_request_disconnected",
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: a terminal active-runner rejection must retain the exact current
+/// non-lost predecessor event rather than labeling a lost predecessor active.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn inv042_active_runner_rejection_requires_exact_non_lost_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = pending_promotion_fixture(pool.clone()).await?;
+    fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+
+    let rejected = rejected_promotion_projection(
+        &pool,
+        FORGED_ACTIVE_PROMOTION_COMMAND,
+        fixture.candidate_request,
+        "active_runner_not_lost",
+        Some(fixture.predecessor_enrollment),
+        Some(fixture.predecessor_runner),
+        Some("connected"),
+    )
+    .await;
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
