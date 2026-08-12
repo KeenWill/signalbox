@@ -9,7 +9,9 @@
 //! measurement harness, never part of daemon or CI execution. Run with
 //! `--help` for the option reference.
 
-use std::{collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode};
+use std::{
+    collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode,
+};
 
 use serde::Deserialize;
 use signalbox_domain::DelegateApprovalRecommendation;
@@ -27,7 +29,8 @@ use signalboxd::{
     usage_limits,
 };
 
-const HELP: &str = "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
+const HELP: &str =
+    "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
 
 Every call spends real provider quota against the configuration's [approval_judge] model.
 

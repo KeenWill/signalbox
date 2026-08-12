@@ -93,7 +93,9 @@ pub fn judge_system_prompt() -> &'static str {
 ///
 /// The request identity derives deterministically from the case name, so a
 /// rerun of the same corpus replays byte-identical payloads.
-pub fn render_eval_case(case: &ApprovalJudgeEvalCase) -> Result<String, ApprovalJudgeEvalCaseError> {
+pub fn render_eval_case(
+    case: &ApprovalJudgeEvalCase,
+) -> Result<String, ApprovalJudgeEvalCaseError> {
     let request = eval_tool_request(case)?;
     let context = eval_session_context(case)?;
     let request_id = request.id().into_uuid().to_string();
@@ -164,7 +166,9 @@ fn eval_tool_request(
         ToolRequestId::from_uuid(uuid::Uuid::from_u128(identity)),
         SessionId::from_uuid(uuid::Uuid::from_u128(fnv1a_128(b"approval-judge-eval"))),
         TurnId::from_uuid(uuid::Uuid::from_u128(identity ^ TURN_IDENTITY_SALT)),
-        ModelCallId::from_uuid(uuid::Uuid::from_u128(identity ^ PRODUCING_CALL_IDENTITY_SALT)),
+        ModelCallId::from_uuid(uuid::Uuid::from_u128(
+            identity ^ PRODUCING_CALL_IDENTITY_SALT,
+        )),
         ToolRequestOrdinal::from_u32(0),
         name,
         arguments,
@@ -195,8 +199,9 @@ fn eval_session_context(
         .system_prompt
         .clone()
         .map(|value| {
-            SessionSystemPrompt::try_new(value)
-                .map_err(|_| ApprovalJudgeEvalCaseError { field: "system_prompt" })
+            SessionSystemPrompt::try_new(value).map_err(|_| ApprovalJudgeEvalCaseError {
+                field: "system_prompt",
+            })
         })
         .transpose()?;
     Ok(SessionAuthorityContext::new(goal, template, system_prompt))
@@ -284,9 +289,9 @@ mod tests {
         let context = payload["session_context"]
             .as_str()
             .expect("session_context renders as text");
-        assert!(context.contains(
-            "-----BEGIN UNTRUSTED SESSION CONTEXT: session_goal-----\n(absent)\n"
-        ));
+        assert!(
+            context.contains("-----BEGIN UNTRUSTED SESSION CONTEXT: session_goal-----\n(absent)\n")
+        );
         assert!(context.contains("| Push only the head branch."));
     }
 
