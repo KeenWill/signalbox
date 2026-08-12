@@ -317,13 +317,14 @@ Structural equality (hand-written `PartialEq` on `CreateSession`,
 `CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, `SubmitInput`,
 `ReplaceSessionMetadata`, `DecideToolRequest`, and `UpdateSessionPlacement` in
 `crates/domain`, plus `ReplaceLostRunner` and `AbandonLostRunner` in
-`crates/domain::runner`) covers every caller-supplied semantic field and excludes
-`DurableCommandId`. Why: the identifier is the lookup key that names the payload,
-not part of the meaning it names. The optional session runner placement is such
-a field in both creation families, so it participates in that equality in both
-creation modes — including template-derived creation, whose daemon-resolved
-defaults are excluded — and a replay carrying a different placement, or a
-placement where the first handling had none, is conflicting reuse.
+`crates/domain::runner`) covers every caller-supplied semantic field and
+excludes `DurableCommandId`. Why: the identifier is the lookup key that names
+the payload, not part of the meaning it names. The optional session runner
+placement is such a field in both creation families, so it participates in that
+equality in both creation modes — including template-derived creation, whose
+daemon-resolved defaults are excluded — and a replay carrying a different
+placement, or a placement where the first handling had none, is conflicting
+reuse.
 
 Every command repository, including
 `crates/persistence/src/context_compaction.rs`, follows one claim protocol, with
