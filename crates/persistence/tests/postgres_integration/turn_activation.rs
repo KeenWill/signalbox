@@ -2469,6 +2469,36 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
     Ok(())
 }
 
+/// Asserts that an occupied-slot rejection naming `source_turn` fails deferred
+/// source-origin validation.
+///
+/// The two cases that exercise this differ only in their identifiers, so the
+/// assertions live here and each case reads as one straight-line call
+/// (`docs/agents/testing-style.md` rule 2).
+async fn assert_rejected_source_origin(
+    pool: &PgPool,
+    command_id: Uuid,
+    source_turn: Uuid,
+    description: &str,
+) {
+    let error = insert_cross_wired_occupied_rejection(
+        pool,
+        command_id,
+        Uuid::from_u128(0x46a),
+        source_turn,
+    )
+    .await
+    .expect_err(description);
+    let database_error = error
+        .as_database_error()
+        .expect("deferred source-origin validation must return a database error");
+    assert_eq!(database_error.code(), Some("23503".into()));
+    assert_eq!(
+        database_error.constraint(),
+        Some("submit_input_command_rejected_source_origin")
+    );
+}
+
 /// INV-002 / INV-005 / INV-008 / INV-012 / INV-016: occupied-slot result
 /// shapes and correlations are database-enforced, pending steering keeps its
 /// source active and cannot become semantic origin, and its immutable receipt
@@ -2682,35 +2712,20 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
         )
         .await?;
 
-    for (command_id, source_turn, description) in [
-        (
-            Uuid::from_u128(0x46d),
-            Uuid::from_u128(0xa6f),
-            "missing source turn",
-        ),
-        (
-            Uuid::from_u128(0x46e),
-            Uuid::from_u128(0xa6b),
-            "cross-session source turn",
-        ),
-    ] {
-        let error = insert_cross_wired_occupied_rejection(
-            &pool,
-            command_id,
-            Uuid::from_u128(0x46a),
-            source_turn,
-        )
-        .await
-        .expect_err(description);
-        let database_error = error
-            .as_database_error()
-            .expect("deferred source-origin validation must return a database error");
-        assert_eq!(database_error.code(), Some("23503".into()));
-        assert_eq!(
-            database_error.constraint(),
-            Some("submit_input_command_rejected_source_origin")
-        );
-    }
+    assert_rejected_source_origin(
+        &pool,
+        Uuid::from_u128(0x46d),
+        Uuid::from_u128(0xa6f),
+        "missing source turn",
+    )
+    .await;
+    assert_rejected_source_origin(
+        &pool,
+        Uuid::from_u128(0x46e),
+        Uuid::from_u128(0xa6b),
+        "cross-session source turn",
+    )
+    .await;
 
     let new_constraints: Vec<String> = sqlx::query_scalar(
         "SELECT conname
@@ -2837,7 +2852,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
              result_last_position)
          VALUES
             ($1, 'submit_input', 1, $2,
-             'owner', NULL, NULL, 'text', 'cross-wired steering',
+             'user', NULL, NULL, 'text', 'cross-wired steering',
              'next_safe_point', $3, NULL, NULL, NULL, NULL, NULL,
              'applied', NULL, $2, $4, NULL, $3,
              NULL, NULL, NULL, NULL, NULL, NULL)",

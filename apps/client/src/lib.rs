@@ -3841,6 +3841,7 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
     match state {
         TurnState::ActiveAwaitingModelCallRecovery { .. }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
+        TurnState::ActiveAwaitingRunnerRecovery { .. } => Err(ClientError::RunnerRecoveryRequired),
         TurnState::Queued { .. }
         | TurnState::QueuedDelegated { .. }
         | TurnState::QueuedDelegationWake { .. }
@@ -3938,6 +3939,9 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
             TurnState::ActiveAwaitingModelCallRecovery { .. }
             | TurnState::ActiveAwaitingToolRecovery { .. },
         ) => Err(ClientError::TurnRecoveryRequired),
+        Some(TurnState::ActiveAwaitingRunnerRecovery { .. }) => {
+            Err(ClientError::RunnerRecoveryRequired)
+        }
         None => Err(ClientError::Protocol(
             "follow snapshot omitted the submitted turn",
         )),
@@ -6169,6 +6173,24 @@ mod tests {
             terminal_snapshot_state(Some(&state)),
             Err(ClientError::TurnRecoveryRequired)
         ));
+    }
+
+    #[test]
+    fn send_fails_explicitly_when_runner_recovery_is_required() {
+        let state = TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            placement_revision: signalbox_process_protocol::PositiveCanonicalU64::try_new(2)
+                .expect("the fixture revision is positive"),
+            tool_attempt_id: None,
+        };
+        let error = terminal_snapshot_state(Some(&state))
+            .expect_err("runner recovery cannot be completed by the terminal");
+
+        assert!(matches!(&error, ClientError::RunnerRecoveryRequired));
+        assert_eq!(
+            error.to_string(),
+            "the submitted turn awaits lost-runner replacement or stop_turn before abandonment"
+        );
     }
 
     #[test]

@@ -15,7 +15,10 @@ use std::{
 
 use serde::Deserialize;
 use signalbox_domain::DelegateApprovalRecommendation;
-use signalbox_model_provider_runtime::{RuntimeApprovalJudgeModel, approval_judge_output_schema};
+use signalbox_domain::ToolApprovalPosture;
+use signalbox_model_provider_runtime::{
+    RuntimeApprovalJudgeModel, approval_judge_output_contract_text,
+};
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
@@ -409,12 +412,38 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let operation_contract = format!(
         "{}\u{0}{}\u{0}max_output_tokens={}\u{0}context_window_tokens={}",
         judge_system_prompt(),
-        approval_judge_output_schema(),
+        approval_judge_output_contract_text(),
         definition_max_output_tokens,
         definition_context_window_tokens,
     );
     let contract_digest = stable_digest(operation_contract.as_bytes());
     let rendered_digest = stable_digest(rendered_payloads.as_bytes());
+    // The judge only ever sees requests the router marks Delegated; a case
+    // whose tool has no configured delegated posture measures the judge on a
+    // shape deployment never routes to it. Those cases still score — the
+    // corpus measures decision quality, not routing — but the scorecard names
+    // them so deployed-path accuracy can be read with them excluded.
+    let configured_postures: std::collections::BTreeMap<String, &'static str> = configuration
+        .tool_approval_postures()
+        .map(|(name, posture)| {
+            (
+                name.as_str().to_owned(),
+                match posture {
+                    ToolApprovalPosture::Auto => "auto",
+                    ToolApprovalPosture::Delegated => "delegated",
+                    ToolApprovalPosture::Human => "human",
+                },
+            )
+        })
+        .collect();
+    let speculative_tools = cases
+        .iter()
+        .map(|case| case.tool.as_str())
+        .filter(|tool| configured_postures.get(*tool).copied() != Some("delegated"))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
     eprintln!(
         "replaying {} cases x{} repeats against judge selection {} (provider model {})",
         cases.len(),
@@ -476,15 +505,17 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 .or_default() += 1;
         }
         // A majority exists only when one verdict holds a strict majority of
-        // the successful repeats; ties and empty runs report no majority.
+        // the REQUESTED repeats, so a lone survivor of a partly failed run
+        // cannot score as a correct majority; ties and empty runs report no
+        // majority.
         let majority = counts
             .iter()
-            .find(|(_, count)| **count * 2 > verdicts.len())
+            .find(|(_, count)| **count * 2 > options.repeats)
             .map(|(label, _)| *label);
         let measured = !verdicts.is_empty();
         let complete = verdicts.len() == options.repeats;
         let stable = complete && counts.len() == 1;
-        let tied = measured && majority.is_none();
+        let tied = measured && majority.is_none() && counts.len() > 1;
         let correct = measured && majority == Some(case.expected.as_str());
         let score = scores.entry(case.category.clone()).or_default();
         score.cases += 1;
@@ -497,6 +528,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "name": case.name,
             "category": case.category,
             "expected": case.expected,
+            "configured_posture": configured_postures.get(case.tool.as_str()).copied(),
             "measured": measured,
             "complete": complete,
             "majority": majority,
@@ -539,6 +571,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
         "contract_digest": contract_digest.as_str(),
         "rendered_digest": rendered_digest.as_str(),
         "repeats": options.repeats,
+        "speculative_tools": speculative_tools,
         "total_cases": total_cases,
         "correct_majorities": total_correct,
         "unstable_cases": total_unstable,
