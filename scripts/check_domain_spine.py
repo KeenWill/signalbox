@@ -20,13 +20,15 @@ item. The spine is parsed per `## crate: module` section, taking column-0
    module has no Inventory row, or a section declares the same name twice, or
 
 5. a listed type's public inherent method surface disagrees with its
-   section. Source truth is every column-0 `impl` block in the crate's
-   source tree (trait impls contribute nothing: Rust rejects `pub` on
-   their items); spine truth is the owning section's impl-block `pub fn`
-   lines plus its `// accessors:` comment lists. A public method with no
-   declaration fails, as does a declared method the source no longer
-   defines. Types whose surface comes from a column-0 macro invocation
-   naming them (`define_identity!`, `goal_text!`, `bounded_text!`,
+   section. Source truth is every item-position `impl` block in the
+   crate's source tree — at column 0 or inside inline modules — except
+   those whose cfg predicate removes them from library builds (trait
+   impls contribute nothing: Rust rejects `pub` on their items); spine
+   truth is the owning section's impl-block `pub fn` lines plus its
+   `// accessors:` comment lists. A public method with no declaration
+   fails, as does a declared method the source no longer defines. Types
+   whose surface comes from a column-0 macro invocation naming them
+   (`define_identity!`, `goal_text!`, `bounded_text!`,
    `positive_position!`) are exempt from the stale direction only — their
    generated methods are invisible to this textual scan — and an impl
    header the scan cannot parse fails loudly.
@@ -81,13 +83,43 @@ METHOD_MINTING_MACROS = frozenset(
 )
 CAPITALIZED_NAME = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
 ANGLE_TOKEN = re.compile(r"->|<|>|\bfor\b")
-# A cfg predicate that names `test` outside not(...) removes the item from
-# library builds (string contents are already blanked, so a feature name
-# containing "test" cannot match). `#[cfg(not(test))]` stays public surface,
-# and `#[cfg_attr(...)]` never gates compilation, so neither matches here.
-CFG_TEST_ATTRIBUTE = re.compile(r"^#\[cfg\(.*\btest\b")
-CFG_NOT_TEST = re.compile(r"\bnot\s*\(\s*test\b")
-ATTRIBUTE_LINE = re.compile(r"^#\[")
+CFG_ATTRIBUTE = re.compile(r"^#\[cfg\((.*)\)\]$")
+MOD_HEADER = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+)
+IMPL_KEYWORD = re.compile(r"^\s*impl\b")
+
+
+def cfg_removes_from_library(predicate: str) -> bool:
+    """True when the predicate cannot hold in any non-test build.
+
+    That is exactly `test` itself or an `all(...)` requiring it, recursively.
+    `any(test, feature = ...)` holds when the feature is enabled, and
+    `not(test)` holds in every library build, so neither removes the item —
+    their methods stay required in the spine like any cfg-conditional
+    public API. `#[cfg_attr(...)]` never gates compilation and never
+    reaches this predicate parser.
+    """
+    predicate = predicate.strip()
+    if predicate == "test":
+        return True
+    conjunction = re.fullmatch(r"all\s*\((.*)\)", predicate, re.DOTALL)
+    if conjunction is None:
+        return False
+    parts: list[str] = []
+    nesting = 0
+    part_start = 0
+    arguments = conjunction.group(1)
+    for position, char in enumerate(arguments):
+        if char == "(":
+            nesting += 1
+        elif char == ")":
+            nesting -= 1
+        elif char == "," and nesting == 0:
+            parts.append(arguments[part_start:position])
+            part_start = position + 1
+    parts.append(arguments[part_start:])
+    return any(cfg_removes_from_library(part) for part in parts)
 
 
 def parse_exports(lib_rs: Path) -> dict[str, set[str]]:
@@ -283,34 +315,41 @@ def body_brace_offset(header: str) -> int | None:
 def parse_source_methods(
     crate: str, path: Path
 ) -> tuple[dict[str, set[str]], list[str]]:
-    """Map self-type name -> public method names from column-0 impl blocks.
+    """Map self-type name -> public method names from item-position impls.
 
-    Only `pub fn` items at impl depth are public method surface; trait
-    impls attribute to their self type but can never contribute (`pub` on
-    a trait-impl item is rejected by the compiler). Impls nested inside
-    inline modules are out of scope by the column-0 rule, which is what
-    keeps `mod tests` fixtures out of the surface, and a column-0 impl
-    under `#[cfg(test)]` is skipped for the same reason. Attribution is by
-    unqualified self-type name: an inherent impl may legally live anywhere
-    in its crate, so a private type sharing a listed type's name would
-    misattribute — loudly, as a spurious missing declaration — and would
-    need this parser extended to path-aware attribution.
+    An impl counts wherever items appear: at column 0, and inside inline
+    modules — a production `mod nested { impl ... }` is public surface too.
+    Exclusion is by configuration, not indentation: an impl or module whose
+    cfg predicate removes it from library builds contributes nothing, which
+    is what keeps `#[cfg(test)] mod tests` fixtures out. Only `pub fn`
+    items at impl depth are public method surface; trait impls attribute to
+    their self type but can never contribute (`pub` on a trait-impl item is
+    rejected by the compiler). Attribution is by unqualified self-type
+    name: an inherent impl may legally live anywhere in its crate, so a
+    private type sharing a listed type's name would misattribute — loudly,
+    as a spurious missing declaration — and would need this parser extended
+    to path-aware attribution.
     """
     lines = blank_comments_and_strings(path.read_text()).splitlines()
     methods: dict[str, set[str]] = {}
     failures: list[str] = []
+    depth = 0
+    module_entry_depths: list[int] = []
+    module_test_gated: list[bool] = []
     test_configured = False
+    attribute_continuation = 0
     index = 0
     while index < len(lines):
         line = lines[index]
-        if IMPL_HEADER.match(line):
+        at_item_position = depth == len(module_entry_depths)
+        if at_item_position and IMPL_KEYWORD.match(line):
             header_start = index
             header = line
             while body_brace_offset(header) is None and index + 1 < len(lines):
                 index += 1
                 header = f"{header} {lines[index]}"
             opener = body_brace_offset(header)
-            was_test_configured = test_configured
+            excluded = test_configured or any(module_test_gated)
             test_configured = False
             if opener is None:
                 index += 1
@@ -325,19 +364,46 @@ def parse_source_methods(
                 index += 1
                 continue
             remainder = header[opener:]
-            depth = remainder.count("{") - remainder.count("}")
-            while depth > 0 and index + 1 < len(lines):
+            block_depth = remainder.count("{") - remainder.count("}")
+            while block_depth > 0 and index + 1 < len(lines):
                 index += 1
                 body_line = lines[index]
-                if depth == 1 and not was_test_configured:
+                if block_depth == 1 and not excluded:
                     method = IMPL_METHOD.match(body_line)
                     if method:
                         methods.setdefault(target, set()).add(method.group(1))
-                depth += body_line.count("{") - body_line.count("}")
-        elif CFG_TEST_ATTRIBUTE.match(line) and not CFG_NOT_TEST.search(line):
-            test_configured = True
-        elif not ATTRIBUTE_LINE.match(line) and line.strip():
+                block_depth += body_line.count("{") - body_line.count("}")
+            index += 1
+            continue
+        if at_item_position and MOD_HEADER.match(line):
+            gated = test_configured or any(module_test_gated)
             test_configured = False
+            entry_depth = depth
+            depth += line.count("{") - line.count("}")
+            if depth > entry_depth:
+                module_entry_depths.append(entry_depth)
+                module_test_gated.append(gated)
+            index += 1
+            continue
+        stripped = line.strip()
+        if attribute_continuation > 0:
+            # Continuation lines of a multi-line attribute — such as an
+            # `#[allow(...)]` spelled across lines between `#[cfg(test)]`
+            # and its item — are part of the attribute, not the item.
+            attribute_continuation += line.count("[") - line.count("]")
+        else:
+            cfg = CFG_ATTRIBUTE.match(stripped)
+            if cfg:
+                if cfg_removes_from_library(cfg.group(1)):
+                    test_configured = True
+            elif stripped.startswith("#["):
+                attribute_continuation = line.count("[") - line.count("]")
+            elif stripped:
+                test_configured = False
+        depth += line.count("{") - line.count("}")
+        while module_entry_depths and depth <= module_entry_depths[-1]:
+            module_entry_depths.pop()
+            module_test_gated.pop()
         index += 1
     return methods, failures
 

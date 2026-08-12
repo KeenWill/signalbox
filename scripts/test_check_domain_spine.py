@@ -87,9 +87,22 @@ impl Widget {
 */
 
 #[cfg(test)]
+#[allow(
+    clippy::unused_self,
+    reason = "fixture mirrors a multi-line attribute between cfg and item"
+)]
 impl Widget {
     pub fn test_only_helper(&self) -> u64 {
         self.value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    impl super::Widget {
+        pub fn tests_module_helper(&self) -> u64 {
+            self.value
+        }
     }
 }
 
@@ -238,10 +251,11 @@ def main() -> int:
 
         # The baseline agrees everywhere: declared methods match source,
         # accessor-comment declarations count, a doc-comment impl example, a
-        # nested-block-comment impl, a `#[cfg(test)]` impl, and public
-        # methods on unlisted types (Hidden, generic Blueprint) are ignored,
-        # and the macro-surfaced Tag keeps its declared methods without a
-        # textual impl.
+        # nested-block-comment impl, test-configured impls and modules
+        # (including a multi-line attribute between the cfg and its item),
+        # and public methods on unlisted types (Hidden, generic Blueprint)
+        # are ignored, and the macro-surfaced Tag keeps its declared methods
+        # without a textual impl.
         write_fixture(root)
         expect_pass(run_checker(root), "baseline")
 
@@ -324,17 +338,59 @@ def main() -> int:
             " no longer defines as a public method",
         )
 
+        # `any(test, feature = ...)` holds when the feature is enabled, so
+        # the impl is library surface and its methods stay required.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE.replace(
+                "#[cfg(test)]\n#[allow(",
+                '#[cfg(any(test, feature = "fixture-support"))]\n'
+                "impl Widget {\n"
+                "    pub fn feature_visible(&self) -> u64 {\n"
+                "        self.value\n"
+                "    }\n"
+                "}\n\n"
+                "#[cfg(test)]\n#[allow(",
+            ),
+        )
+        expect_failure(
+            run_checker(root),
+            "any(test, feature) impl stays public surface",
+            "domain::widget::Widget has public method feature_visible() with"
+            " no declaration in the 'domain: widget' section",
+        )
+
+        # A production inline module's impl is public surface: exclusion is
+        # by configuration, not indentation.
+        write_fixture(
+            root,
+            widget=WIDGET_BASELINE
+            + "\nmod nested {\n"
+            "    impl super::Widget {\n"
+            "        pub fn nested_method(&self) -> u64 {\n"
+            "            self.value\n"
+            "        }\n"
+            "    }\n"
+            "}\n",
+        )
+        expect_failure(
+            run_checker(root),
+            "production inline module is scanned",
+            "domain::widget::Widget has public method nested_method() with no"
+            " declaration in the 'domain: widget' section",
+        )
+
         # `#[cfg(not(test))]` is library surface, not a test fixture.
         write_fixture(
             root,
             widget=WIDGET_BASELINE.replace(
-                "#[cfg(test)]\nimpl Widget {",
+                "#[cfg(test)]\n#[allow(",
                 "#[cfg(not(test))]\nimpl Widget {\n"
                 "    pub fn prod_only(&self) -> u64 {\n"
                 "        self.value\n"
                 "    }\n"
                 "}\n\n"
-                "#[cfg(test)]\nimpl Widget {",
+                "#[cfg(test)]\n#[allow(",
             ),
         )
         expect_failure(
