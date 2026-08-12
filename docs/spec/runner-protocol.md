@@ -28,7 +28,8 @@ remain owned by [tool loop](tool-loop.md). Invariant tags cite
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
 transaction is verified against this PR
-(`agent/runner-pending-successor-activation`).
+(`agent/runner-pending-successor-activation`), and its process request is
+verified against this PR (`agent/runner-pending-successor-process`).
 
 The connection-loss persistence transaction was verified against this PR
 (`agent/runner-loss-session-transaction`). Daemon paging of its durable cursors
@@ -652,9 +653,10 @@ capability-class request, offers no placement for a replacement command to
 target, so without this path its pending candidate would remain
 provisioning-only forever.
 
-The process-protocol request and daemon handler for this transaction remain
-**committed unimplemented functionality**; no current operator surface can
-submit it.
+The process-protocol `promote_pending_runner` request invokes this transaction.
+It returns the exact promoted enrollment receipt, a typed durable rejection, or
+conflicting command reuse; equal request replay returns the original recorded
+result without reinterpreting current runner state.
 
 For a pinned repository-backed loss, `replace_lost_runner` first durably claims
 the user command and its complete request, then creates one single-use
