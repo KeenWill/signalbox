@@ -4177,8 +4177,8 @@ async fn s31_inv042_inv044_registration_reconciliation_migration_backfills_curre
     Ok(())
 }
 
-/// INV-044: a loss committed after placement baselines exist but before the
-/// cursor migration backfills as pending when that loss still affects a session.
+/// INV-044: a pre-enrollment exact selection remains in the affected set when
+/// its runner enrolls and is lost before the cursor migration.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
@@ -4190,15 +4190,15 @@ async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
-    store.insert_enrollment(&expected_enrollment).await?;
-    let connection = store
-        .open_connection(expected_enrollment.enrollment())
-        .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
         exact_runner_request(expected_enrollment.runner()),
     );
     store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     insert_terminal_connection_loss_before_cursor_migration(
         &pool,
         expected_enrollment.enrollment(),
@@ -4252,17 +4252,6 @@ async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(),
     assert_eq!(first_page.sessions(), &expected_sessions[..64]);
     assert!(!first_page.is_complete());
 
-    let skipped = sqlx::query(
-        "UPDATE runner_connection_loss_propagation
-            SET propagated_through_session_id = $3
-          WHERE enrollment_id = $1 AND loss_epoch = $2",
-    )
-    .bind(loss.enrollment().into_uuid())
-    .bind(Decimal::from(loss.loss_epoch().get()))
-    .bind(expected_sessions[63].into_uuid())
-    .execute(&pool)
-    .await
-    .expect_err("a durable cursor cannot skip an affected session");
     project_bounded_propagation_sessions(&pool, &expected_sessions[..64]).await?;
     sqlx::query(
         "UPDATE runner_connection_loss_propagation
@@ -4276,7 +4265,6 @@ async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(),
     .await?;
     let second_page = store.load_connection_loss_propagation_page(loss).await?;
 
-    assert_check_violation(skipped);
     assert_eq!(second_page.loss(), loss);
     assert_eq!(
         second_page.propagated_through(),
@@ -4284,6 +4272,125 @@ async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(),
     );
     assert_eq!(second_page.sessions(), &expected_sessions[64..]);
     assert!(!second_page.is_complete());
+
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: bounded propagation pages have indexes for both enrollment-fenced
+/// and pre-enrollment exact-runner placement branches.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_page_has_affected_set_indexes() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let definition: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'runner_session_placement_loss_propagation_page'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let exact_definition: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'runner_session_placement_exact_loss_propagation_page'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(
+        definition.contains("(loss_fence_enrollment_id, session_id, event_ordinal)"),
+        "the loss page index must lead with enrollment and preserve session order"
+    );
+    assert!(
+        exact_definition.contains("(selector_runner_id, session_id, event_ordinal)"),
+        "the exact-selection page index must lead with runner and preserve session order"
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a propagation cursor cannot advance past an affected session that
+/// has not received the loss projection.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_rejects_skipped_session() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+
+    let skipped = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[63].into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a durable cursor cannot skip an affected session");
+
+    assert_check_violation(skipped);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a propagation cursor cannot rewind behind its durable session.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_rejects_rewind() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    project_bounded_propagation_sessions(&pool, &expected_sessions[..64]).await?;
+    sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[63].into_uuid())
+    .execute(&pool)
+    .await?;
 
     let rewound = sqlx::query(
         "UPDATE runner_connection_loss_propagation
@@ -4296,6 +4403,43 @@ async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(),
     .execute(&pool)
     .await
     .expect_err("a durable cursor cannot rewind its session identity");
+
+    assert_check_violation(rewound);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a propagation cursor cannot complete while an affected session
+/// still retains an older loss baseline.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_rejects_premature_completion() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+
     let premature_completion = sqlx::query(
         "UPDATE runner_connection_loss_propagation
             SET state_kind = 'completed'
@@ -4306,7 +4450,39 @@ async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(),
     .execute(&pool)
     .await
     .expect_err("a durable cursor cannot complete before its final session");
-    project_bounded_propagation_sessions(&pool, &expected_sessions[64..]).await?;
+
+    assert_check_violation(premature_completion);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a fully projected loss cursor may transition once to completed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_completes_after_final_session() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    project_bounded_propagation_sessions(&pool, &expected_sessions).await?;
+
     sqlx::query(
         "UPDATE runner_connection_loss_propagation
             SET state_kind = 'completed'
@@ -4318,10 +4494,8 @@ async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(),
     .await?;
     let completed = store.load_connection_loss_propagation_page(loss).await?;
 
-    assert_check_violation(rewound);
-    assert_check_violation(premature_completion);
     assert_eq!(completed.loss(), loss);
-    assert_eq!(completed.propagated_through(), Some(expected_sessions[63]));
+    assert_eq!(completed.propagated_through(), None);
     assert!(completed.sessions().is_empty());
     assert!(completed.is_complete());
     drop(pool);
