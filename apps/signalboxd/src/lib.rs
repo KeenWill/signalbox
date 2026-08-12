@@ -36,6 +36,7 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 use tracing::Instrument;
+mod blob_read_runtime;
 mod blob_storage_configuration;
 mod blob_storage_runtime;
 mod blob_upload_runtime;

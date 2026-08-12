@@ -4,14 +4,14 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    BoundChildAction, CanonicalDigest, CanonicalU64, CanonicalUuid, CommandId, ConversationCursor,
-    ConversationImportFormat, ConversationOrigin, ConversationOriginFilter, DelegationPolicy,
-    DelegationWaitMode, ImportedSessionRelationship, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-    MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
-    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
-    ReviewFindingInput, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
-    ReviewPassTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
-    SessionPlacement,
+    BoundChildAction, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, CommandId,
+    ConversationCursor, ConversationImportFormat, ConversationOrigin, ConversationOriginFilter,
+    DelegationPolicy, DelegationWaitMode, ImportedSessionRelationship,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+    MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection, ReviewConcernTerminalOutcome,
+    ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput,
+    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewPassTerminalOutcome,
+    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, SessionPlacement,
 };
 use uuid::Uuid;
 
@@ -108,6 +108,14 @@ pub(crate) enum Command {
     },
     BlobUpload {
         source: PathBuf,
+    },
+    BlobMetadata {
+        digest: CanonicalBlobDigest,
+    },
+    BlobRead {
+        digest: CanonicalBlobDigest,
+        offset_bytes: CanonicalU64,
+        length_bytes: CanonicalU64,
     },
     Reconcile {
         session_id: CanonicalUuid,
@@ -450,6 +458,10 @@ struct BlobArguments {
 enum BlobSubcommand {
     /// Stream one nonempty file into the routed user-attachment store.
     Upload(BlobUploadArguments),
+    /// Print bounded catalog facts for one digest.
+    Metadata(BlobMetadataArguments),
+    /// Write one exact verified byte range to standard output.
+    Read(BlobReadArguments),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -457,6 +469,22 @@ struct BlobUploadArguments {
     /// Regular file whose exact bytes are hashed and uploaded.
     #[arg(value_name = "FILE")]
     source: PathBuf,
+}
+
+#[derive(Debug, ClapArgs)]
+struct BlobMetadataArguments {
+    /// Exact tagged lowercase SHA-256 identity.
+    digest: CanonicalBlobDigest,
+}
+
+#[derive(Debug, ClapArgs)]
+struct BlobReadArguments {
+    /// Exact tagged lowercase SHA-256 identity.
+    digest: CanonicalBlobDigest,
+    /// Zero-based byte offset.
+    offset_bytes: u64,
+    /// Positive byte count, at most 4,194,304.
+    length_bytes: u64,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2043,6 +2071,14 @@ pub(crate) fn parse(
         CliCommand::Blob(arguments) => match arguments.command {
             BlobSubcommand::Upload(arguments) => Command::BlobUpload {
                 source: arguments.source,
+            },
+            BlobSubcommand::Metadata(arguments) => Command::BlobMetadata {
+                digest: arguments.digest,
+            },
+            BlobSubcommand::Read(arguments) => Command::BlobRead {
+                digest: arguments.digest,
+                offset_bytes: CanonicalU64::new(arguments.offset_bytes),
+                length_bytes: CanonicalU64::new(arguments.length_bytes),
             },
         },
         CliCommand::Reconcile(arguments) => Command::Reconcile {
@@ -4291,6 +4327,45 @@ mod tests {
         };
 
         assert_eq!(source, Path::new("attachment.bin"));
+    }
+
+    #[test]
+    fn blob_metadata_maps_one_canonical_digest() {
+        let digest = "sha256:abababababababababababababababababababababababababababababababab";
+        let parsed = parse(["blob", "metadata", digest].map(Into::into))
+            .expect("the grouped blob metadata command parses");
+        let ParseOutcome::Run(Arguments {
+            command: Command::BlobMetadata { digest: parsed },
+            ..
+        }) = parsed
+        else {
+            panic!("blob metadata must map to its closed command")
+        };
+
+        assert_eq!(parsed.to_string(), digest);
+    }
+
+    #[test]
+    fn blob_read_maps_exact_decimal_range() {
+        let digest = "sha256:abababababababababababababababababababababababababababababababab";
+        let parsed = parse(["blob", "read", digest, "7", "2"].map(Into::into))
+            .expect("the grouped blob read command parses");
+        let ParseOutcome::Run(Arguments {
+            command:
+                Command::BlobRead {
+                    digest: parsed,
+                    offset_bytes,
+                    length_bytes,
+                },
+            ..
+        }) = parsed
+        else {
+            panic!("blob read must map to its closed command")
+        };
+
+        assert_eq!(parsed.to_string(), digest);
+        assert_eq!(offset_bytes.value(), 7);
+        assert_eq!(length_bytes.value(), 2);
     }
 
     #[test]

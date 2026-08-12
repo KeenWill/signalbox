@@ -5,6 +5,7 @@ use std::{
     fmt,
     future::Future,
     io::{self, SeekFrom},
+    num::NonZeroU64,
     sync::Arc,
     time::Duration,
 };
@@ -139,7 +140,7 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
-    BillingRateVersion, BoundChildAction as WireBoundChildAction, BulkIngestKind,
+    BillingRateVersion, BlobChunk, BoundChildAction as WireBoundChildAction, BulkIngestKind,
     CanonicalBlobDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
     ConversationCursor as WireConversationCursor, ConversationImportFormat,
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
@@ -200,6 +201,7 @@ use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutco
 use crate::{
     BlobStoreRegistry, FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener,
     LocalSocketError, SessionTemplateConfiguration,
+    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_metadata},
     blob_upload_runtime::{
         BeginBlobUploadOutcome, BlobUploadError, PendingBlobUpload, begin_blob_upload,
     },
@@ -223,8 +225,10 @@ const GENERAL_BUFFERED_INBOUND_FRAMES: usize =
     MAX_BUFFERED_INBOUND_FRAMES - RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES;
 const MAX_IMPORT_ADMISSION_WAITERS: usize = GENERAL_BUFFERED_INBOUND_FRAMES;
 const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
+const MAX_CONCURRENT_BLOB_READS: usize = 16;
 const BULK_INGEST_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
@@ -264,6 +268,7 @@ struct ConnectionServices {
     inbound_frame_budgets: InboundFrameBudgets,
     import_budget: Arc<Semaphore>,
     import_waiter_budget: Arc<Semaphore>,
+    blob_read_budget: Arc<Semaphore>,
     review_command_budget: Arc<Semaphore>,
     snapshot_reader_budget: Arc<Semaphore>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
@@ -611,6 +616,7 @@ async fn serve_connections(
         inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
+        blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
         blob_store_registry: dependencies.blob_store_registry,
@@ -1027,6 +1033,8 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::AppendBlobUpload { .. }
         | ClientRequest::CommitBlobUpload {}
         | ClientRequest::AbortBlobUpload {}
+        | ClientRequest::ReadBlobMetadata { .. }
+        | ClientRequest::ReadBlobChunk { .. }
         | ClientRequest::ReadImportedConversation { .. }
         | ClientRequest::CreateSessionFromImportedFrontier { .. }
         | ClientRequest::ReconcileTurn { .. }
@@ -1093,6 +1101,10 @@ async fn acquire_import_waiter_permit(
             .map(Some)
             .map_err(|_| ProcessConnectionError::ImportBudgetClosed),
     }
+}
+
+fn try_acquire_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    budget.try_acquire_owned().ok()
 }
 
 async fn acquire_review_command_permit(
@@ -1212,6 +1224,8 @@ impl SnapshotReaderAdmission {
             | ClientRequest::AppendBlobUpload { .. }
             | ClientRequest::CommitBlobUpload {}
             | ClientRequest::AbortBlobUpload {}
+            | ClientRequest::ReadBlobMetadata { .. }
+            | ClientRequest::ReadBlobChunk { .. }
             | ClientRequest::CreateSessionFromImportedFrontier { .. }
             | ClientRequest::ReconcileTurn { .. }
             | ClientRequest::CreateReviewTarget { .. }
@@ -1985,6 +1999,25 @@ where
         }
         ClientRequest::AbortBlobUpload {} => {
             handle_abort_blob_upload(writer, version, request_id, pending_blob_upload).await
+        }
+        ClientRequest::ReadBlobMetadata { digest } => {
+            handle_read_blob_metadata(writer, version, request_id, digest, services).await
+        }
+        ClientRequest::ReadBlobChunk {
+            digest,
+            offset_bytes,
+            length_bytes,
+        } => {
+            handle_read_blob_chunk(
+                writer,
+                version,
+                request_id,
+                digest,
+                offset_bytes,
+                length_bytes,
+                services,
+            )
+            .await
         }
         ClientRequest::CreateReviewTarget {
             command_id,
@@ -5547,6 +5580,143 @@ where
         ServerMessage::BlobUploadAborted {},
     )
     .await
+}
+
+async fn handle_read_blob_metadata<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    digest: CanonicalBlobDigest,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let repository = BlobCatalogRepository::new(services.pool.clone());
+    let outcome = tokio::time::timeout(
+        BLOB_READ_TIMEOUT,
+        read_blob_metadata(&repository, digest.into_digest()),
+    )
+    .await
+    .unwrap_or(Err(BlobReadError::Unavailable));
+    match outcome {
+        Ok(metadata) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::BlobMetadata {
+                    digest,
+                    byte_length: CanonicalU64::new(metadata.byte_length),
+                    replica_count: CanonicalU64::new(metadata.replica_count),
+                },
+            )
+            .await
+        }
+        Err(error) => write_blob_read_error(writer, version, request_id, digest, None, error).await,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the wire boundary keeps correlation and exact range facts explicit"
+)]
+async fn handle_read_blob_chunk<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    digest: CanonicalBlobDigest,
+    offset_bytes: CanonicalU64,
+    length_bytes: CanonicalU64,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let Some(permit) = try_acquire_blob_read_permit(Arc::clone(&services.blob_read_budget)) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    };
+    let Some(length) = NonZeroU64::new(length_bytes.value()) else {
+        return Err(ProcessConnectionError::EncodeInvariant);
+    };
+    let repository = BlobCatalogRepository::new(services.pool.clone());
+    let outcome = tokio::time::timeout(
+        BLOB_READ_TIMEOUT,
+        read_blob_chunk(
+            services.blob_store_registry.as_deref(),
+            &repository,
+            digest.into_digest(),
+            offset_bytes.value(),
+            length,
+        ),
+    )
+    .await
+    .unwrap_or(Err(BlobReadError::Unavailable));
+    drop(permit);
+    match outcome {
+        Ok(bytes) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::BlobChunkRead {
+                    digest,
+                    offset_bytes,
+                    bytes: BlobChunk::new(bytes),
+                },
+            )
+            .await
+        }
+        Err(error) => {
+            write_blob_read_error(
+                writer,
+                version,
+                request_id,
+                digest,
+                Some((offset_bytes, length_bytes)),
+                error,
+            )
+            .await
+        }
+    }
+}
+
+async fn write_blob_read_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    digest: CanonicalBlobDigest,
+    range: Option<(CanonicalU64, CanonicalU64)>,
+    error: BlobReadError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        BlobReadError::NotFound => ProtocolError::blob_not_found(),
+        BlobReadError::RangeOutOfBounds { blob_length } => {
+            let Some((offset_bytes, length_bytes)) = range else {
+                return Err(ProcessConnectionError::EncodeInvariant);
+            };
+            ProtocolError::invalid_blob_read(RejectionDetail::BlobReadRangeOutOfBounds {
+                digest,
+                offset_bytes,
+                length_bytes,
+                blob_length_bytes: CanonicalU64::new(blob_length),
+            })
+        }
+        BlobReadError::Missing => ProtocolError::without_detail(ErrorCode::BlobMissing),
+        BlobReadError::Corrupt => ProtocolError::without_detail(ErrorCode::BlobCorrupt),
+        BlobReadError::Unavailable => ProtocolError::without_detail(ErrorCode::Unavailable),
+        BlobReadError::Integrity => ProtocolError::without_detail(ErrorCode::Internal),
+    };
+    write_error(writer, version, request_id, protocol_error).await
 }
 
 async fn write_blob_rejection<Writer>(
@@ -13528,6 +13698,14 @@ impl ProtocolError {
         }
     }
 
+    const fn blob_not_found() -> Self {
+        Self {
+            code: ErrorCode::NotFound,
+            message: "the requested blob was not found",
+            detail: ErrorDetail::none(),
+        }
+    }
+
     const fn without_detail(code: ErrorCode) -> Self {
         Self {
             code,
@@ -13538,6 +13716,8 @@ impl ProtocolError {
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
+                ErrorCode::BlobMissing => "all recorded blob replicas are missing",
+                ErrorCode::BlobCorrupt => "all usable blob replicas are corrupt",
                 ErrorCode::ConflictingReuse => {
                     "the command identity already names different intent"
                 }
@@ -13567,6 +13747,14 @@ impl ProtocolError {
         Self {
             code: ErrorCode::InvalidRequest,
             message: "blob upload was rejected",
+            detail: ErrorDetail::invalid_request(detail),
+        }
+    }
+
+    const fn invalid_blob_read(detail: RejectionDetail) -> Self {
+        Self {
+            code: ErrorCode::InvalidRequest,
+            message: "blob read was rejected",
             detail: ErrorDetail::invalid_request(detail),
         }
     }
@@ -14393,21 +14581,21 @@ mod tests {
         CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
         ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
-        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
-        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS,
-        MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, PendingConversationImport,
-        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
-        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
-        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
-        canonical_review_request_digest, claude_conversion_failure_disposition,
-        codex_conversion_failure_disposition, consume_snapshot_queued_update,
-        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
-        handle_append_conversation_import, handle_begin_conversation_import,
-        handle_commit_conversation_import, import_evidence,
+        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
+        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
+        MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError,
+        PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
+        ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
+        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
+        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        admit_snapshot_reader, admitted_user_content, canonical_review_request_digest,
+        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
+        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
+        foreground_peer_activity, handle_append_conversation_import,
+        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -14416,10 +14604,11 @@ mod tests {
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
-        submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
-        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
-        wire_uuid, write_content, write_context_compaction_repository_error,
-        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
+        submit_input_model_execution_diagnostic, try_acquire_blob_read_permit,
+        unavailable_protocol_error, wire_goal_event, wire_metadata_last_writer,
+        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
+        write_context_compaction_repository_error, write_delegation_port_error,
+        write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -15157,6 +15346,20 @@ mod tests {
                 .message
                 .contains("supported version: 1")
         );
+    }
+
+    /// INV-060: direct blob reads never wait for the process-wide bound.
+    #[test]
+    fn inv060_blob_read_admission_is_non_waiting_and_bounded() -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let held = try_acquire_blob_read_permit(Arc::clone(&budget))
+            .ok_or_else(|| io::Error::other("the first direct read is admitted"))?;
+
+        assert_eq!(MAX_CONCURRENT_BLOB_READS, 16);
+        assert!(try_acquire_blob_read_permit(Arc::clone(&budget)).is_none());
+        drop(held);
+        assert!(try_acquire_blob_read_permit(budget).is_some());
+        Ok(())
     }
 
     /// INV-033: a reconciliation decision that lost its race to another

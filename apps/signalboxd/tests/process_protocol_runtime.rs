@@ -938,6 +938,186 @@ async fn inv060_registration_failure_after_publication_leaves_only_an_orphan()
     runtime.stop().await
 }
 
+/// INV-060: metadata and exact ranges are bounded, while missing and corrupt
+/// recorded replicas return their distinct content-silent failures.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_reads_verify_each_recorded_replica() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
+    let bytes = b"verified direct blob range";
+    let digest = BlobDigest::digest(bytes);
+    let wire_digest = CanonicalBlobDigest::from_digest(digest);
+    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request(
+            1,
+            ClientRequest::BeginBlobUpload {
+                expected_digest: wire_digest,
+                expected_length_bytes: expected_length,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        connection.response().await?.message(),
+        ServerMessage::BlobUploadBegun { .. }
+    ));
+    append_blob_upload(&mut connection, 2, bytes).await?;
+    connection
+        .request(3, ClientRequest::CommitBlobUpload {})
+        .await?;
+    assert!(matches!(
+        connection.response().await?.message(),
+        ServerMessage::BlobUploadCommitted { .. }
+    ));
+
+    connection
+        .request(
+            4,
+            ClientRequest::ReadBlobMetadata {
+                digest: wire_digest,
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::BlobMetadata {
+            digest: wire_digest,
+            byte_length: expected_length,
+            replica_count: CanonicalU64::new(1),
+        }
+    );
+    connection
+        .request(
+            5,
+            ClientRequest::ReadBlobChunk {
+                digest: wire_digest,
+                offset_bytes: CanonicalU64::new(9),
+                length_bytes: CanonicalU64::new(6),
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::BlobChunkRead {
+            digest: wire_digest,
+            offset_bytes: CanonicalU64::new(9),
+            bytes: BlobChunk::new(bytes[9..15].to_vec()),
+        }
+    );
+    connection
+        .request(
+            6,
+            ClientRequest::ReadBlobChunk {
+                digest: wire_digest,
+                offset_bytes: CanonicalU64::new(u64::MAX),
+                length_bytes: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("blob read was rejected"),
+            detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
+                digest: wire_digest,
+                offset_bytes: CanonicalU64::new(u64::MAX),
+                length_bytes: CanonicalU64::new(1),
+                blob_length_bytes: expected_length,
+            }),
+        }
+    );
+
+    let object_path = runtime
+        .blob_storage_root
+        .as_ref()
+        .expect("the fixture owns one blob store")
+        .store
+        .join(BlobObjectKey::for_digest(digest).as_str());
+    fs::remove_file(&object_path)?;
+    connection
+        .request(
+            7,
+            ClientRequest::ReadBlobChunk {
+                digest: wire_digest,
+                offset_bytes: CanonicalU64::new(0),
+                length_bytes: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::Error {
+            code: ErrorCode::BlobMissing,
+            message: String::from("all recorded blob replicas are missing"),
+            detail: ErrorDetail::none(),
+        }
+    );
+
+    connection
+        .request(
+            8,
+            ClientRequest::BeginBlobUpload {
+                expected_digest: wire_digest,
+                expected_length_bytes: expected_length,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        connection.response().await?.message(),
+        ServerMessage::BlobUploadBegun { .. }
+    ));
+    append_blob_upload(&mut connection, 9, bytes).await?;
+    connection
+        .request(10, ClientRequest::CommitBlobUpload {})
+        .await?;
+    assert!(matches!(
+        connection.response().await?.message(),
+        ServerMessage::BlobUploadCommitted { .. }
+    ));
+    fs::write(&object_path, b"corrupt")?;
+    connection
+        .request(
+            11,
+            ClientRequest::ReadBlobChunk {
+                digest: wire_digest,
+                offset_bytes: CanonicalU64::new(0),
+                length_bytes: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::Error {
+            code: ErrorCode::BlobCorrupt,
+            message: String::from("all usable blob replicas are corrupt"),
+            detail: ErrorDetail::none(),
+        }
+    );
+    let absent_digest = CanonicalBlobDigest::from_bytes([0xcd; 32]);
+    connection
+        .request(
+            12,
+            ClientRequest::ReadBlobMetadata {
+                digest: absent_digest,
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::Error {
+            code: ErrorCode::NotFound,
+            message: String::from("the requested blob was not found"),
+            detail: ErrorDetail::none(),
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 async fn create_alias_session(
     connection: &mut Connection,
 ) -> Result<CanonicalUuid, Box<dyn Error>> {

@@ -34,9 +34,9 @@ use signalbox_process_protocol::{
     DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
     DelegationWaitMode, DescendantTerminationScope, ErrorCode, ErrorDetail, FrameEncodeError,
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
-    MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES,
-    MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
-    ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
+    MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
+    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
     ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
     ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
     ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -381,7 +381,8 @@ fn delegation_rejection_matches(
         | RejectionDetail::BlobUploadLengthOutOfRange { .. }
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
-        | RejectionDetail::BlobUploadDigestMismatch { .. } => false,
+        | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     }
 }
 
@@ -487,6 +488,8 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::BlobUploadAppended { .. }
         | ServerMessage::BlobUploadCommitted { .. }
         | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::BlobMetadata { .. }
+        | ServerMessage::BlobChunkRead { .. }
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
@@ -586,6 +589,8 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::BlobUploadAppended { .. }
         | ServerMessage::BlobUploadCommitted { .. }
         | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::BlobMetadata { .. }
+        | ServerMessage::BlobChunkRead { .. }
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
@@ -784,6 +789,8 @@ async fn execute(
             ..
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::BlobUpload { .. }
+        | Command::BlobMetadata { .. }
+        | Command::BlobRead { .. }
         | Command::Create { .. }
         | Command::Place { .. }
         | Command::Continue { .. }
@@ -843,7 +850,9 @@ async fn execute(
         | Command::Imported { .. }
         | Command::Review(_)
         | Command::Import { .. }
-        | Command::BlobUpload { .. } => None,
+        | Command::BlobUpload { .. }
+        | Command::BlobMetadata { .. }
+        | Command::BlobRead { .. } => None,
     };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
@@ -1019,6 +1028,14 @@ async fn execute(
             let file = prepared_blob.ok_or(ClientError::Input("blob source was not prepared"))?;
             upload_blob(&mut client, &mut output, file).await
         }
+        Command::BlobMetadata { digest } => {
+            read_blob_metadata(&mut client, &mut output, digest).await
+        }
+        Command::BlobRead {
+            digest,
+            offset_bytes,
+            length_bytes,
+        } => read_blob_chunk(&mut client, &mut output, digest, offset_bytes, length_bytes).await,
         Command::Reconcile {
             session_id,
             turn_id,
@@ -1228,6 +1245,76 @@ async fn upload_blob(
         _ => Err(
             ClientError::Protocol("blob upload commit returned an unexpected response").mutation(),
         ),
+    }
+}
+
+async fn read_blob_metadata(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    digest: CanonicalBlobDigest,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .setup_request(ClientRequest::ReadBlobMetadata { digest })
+        .await?;
+    match connection.message().await? {
+        ServerMessage::BlobMetadata {
+            digest: returned_digest,
+            byte_length,
+            replica_count,
+        } if returned_digest == digest => output
+            .blob_metadata(digest, byte_length.value(), replica_count.value())
+            .map_err(ClientError::from),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol(
+            "blob metadata returned an unexpected response",
+        )),
+    }
+}
+
+async fn read_blob_chunk(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    digest: CanonicalBlobDigest,
+    offset_bytes: CanonicalU64,
+    length_bytes: CanonicalU64,
+) -> Result<(), ClientError> {
+    if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
+        return Err(ClientError::Input(
+            "blob read length must be between 1 and 4194304 bytes",
+        ));
+    }
+    let mut connection = client
+        .setup_request(ClientRequest::ReadBlobChunk {
+            digest,
+            offset_bytes,
+            length_bytes,
+        })
+        .await?;
+    match connection.message().await? {
+        ServerMessage::BlobChunkRead {
+            digest: returned_digest,
+            offset_bytes: returned_offset,
+            bytes,
+        } if returned_digest == digest
+            && returned_offset == offset_bytes
+            && u64::try_from(bytes.as_bytes().len()) == Ok(length_bytes.value()) =>
+        {
+            output
+                .blob_bytes(bytes.as_bytes())
+                .map_err(ClientError::from)
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol(
+            "blob range returned an unexpected response",
+        )),
     }
 }
 
@@ -5581,16 +5668,16 @@ mod tests {
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
         import_conversation_file, imported, model_call_recovery_transition,
         open_scanned_import_source, placement_update_receipt_matches,
-        placement_update_rejection_matches, read_delegation_content_file, read_goal_text_file,
-        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
-        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
-        review_concern_state_is_coherent, review_finding_event_status,
-        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
-        review_pass_completion_is_coherent, review_publication_state_is_coherent,
-        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
-        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
-        upload_blob,
+        placement_update_rejection_matches, read_blob_chunk, read_blob_metadata,
+        read_delegation_content_file, read_goal_text_file, read_import_file, read_input,
+        read_review_json_file, read_system_prompt_file, reconcile_turn, replace_session_model,
+        replacement_receipt_settings_match, review, review_concern_state_is_coherent,
+        review_finding_event_status, review_judgment_effect_state_is_coherent,
+        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
+        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
+        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
+        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition, upload_blob,
     };
     use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
 
@@ -7434,6 +7521,95 @@ mod tests {
                 byte_length.value()
             )
         );
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-060: terminal metadata and read commands validate echoed facts and
+    /// write only the exact requested bytes for a range.
+    #[tokio::test]
+    async fn inv060_blob_reads_preserve_exact_wire_facts() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let bytes = vec![0, 255];
+        let listener = UnixListener::bind(&socket)?;
+        let expected_bytes = bytes.clone();
+        let server = tokio::spawn(async move {
+            let (metadata_stream, _) = listener.accept().await?;
+            let (metadata_reader, mut metadata_writer) = metadata_stream.into_split();
+            let mut metadata_reader = BufReader::new(metadata_reader);
+            let mut metadata_line = Vec::new();
+            metadata_reader
+                .read_until(b'\n', &mut metadata_line)
+                .await?;
+            let metadata = decode_client_line(&metadata_line).map_err(io::Error::other)?;
+            assert_eq!(
+                metadata.request(),
+                &ClientRequest::ReadBlobMetadata { digest }
+            );
+            let metadata_response = ServerFrame::try_new_for_version(
+                metadata.version(),
+                metadata.request_id(),
+                ServerMessage::BlobMetadata {
+                    digest,
+                    byte_length: CanonicalU64::new(9),
+                    replica_count: CanonicalU64::new(1),
+                },
+            )
+            .map_err(io::Error::other)?;
+            metadata_writer
+                .write_all(&encode_server_line(&metadata_response).map_err(io::Error::other)?)
+                .await?;
+
+            let (range_stream, _) = listener.accept().await?;
+            let (range_reader, mut range_writer) = range_stream.into_split();
+            let mut range_reader = BufReader::new(range_reader);
+            let mut range_line = Vec::new();
+            range_reader.read_until(b'\n', &mut range_line).await?;
+            let range = decode_client_line(&range_line).map_err(io::Error::other)?;
+            assert_eq!(
+                range.request(),
+                &ClientRequest::ReadBlobChunk {
+                    digest,
+                    offset_bytes: CanonicalU64::new(7),
+                    length_bytes: CanonicalU64::new(2),
+                }
+            );
+            let range_response = ServerFrame::try_new_for_version(
+                range.version(),
+                range.request_id(),
+                ServerMessage::BlobChunkRead {
+                    digest,
+                    offset_bytes: CanonicalU64::new(7),
+                    bytes: BlobChunk::new(expected_bytes),
+                },
+            )
+            .map_err(io::Error::other)?;
+            range_writer
+                .write_all(&encode_server_line(&range_response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+
+        read_blob_metadata(&mut client, &mut output, digest).await?;
+        read_blob_chunk(
+            &mut client,
+            &mut output,
+            digest,
+            CanonicalU64::new(7),
+            CanonicalU64::new(2),
+        )
+        .await?;
+
+        let mut expected = format!("digest={digest} byte_length=9 replica_count=1\n").into_bytes();
+        expected.extend_from_slice(&bytes);
+        assert_eq!(stdout, expected);
         assert!(stderr.is_empty());
         server.await??;
         Ok(())

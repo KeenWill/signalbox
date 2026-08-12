@@ -300,6 +300,8 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::UnsupportedVersion => "unsupported_version",
         ErrorCode::InvalidRequest => "invalid_request",
         ErrorCode::NotFound => "not_found",
+        ErrorCode::BlobMissing => "blob_missing",
+        ErrorCode::BlobCorrupt => "blob_corrupt",
         ErrorCode::ConflictingReuse => "conflicting_reuse",
         ErrorCode::Rejected => "rejected",
         ErrorCode::ResyncRequired => "resync_required",
@@ -668,6 +670,18 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "blob_upload_digest_mismatch expected_digest={expected_digest} actual_digest={actual_digest}"
+            ),
+            RejectionDetail::BlobReadRangeOutOfBounds {
+                digest,
+                offset_bytes,
+                length_bytes,
+                blob_length_bytes,
+            } => write!(
+                formatter,
+                "blob_read_range_out_of_bounds digest={digest} offset_bytes={} length_bytes={} blob_length_bytes={}",
+                offset_bytes.value(),
+                length_bytes.value(),
+                blob_length_bytes.value()
             ),
         }
     }

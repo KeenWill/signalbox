@@ -16,7 +16,7 @@ use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
-use signalbox_domain::{BlobDigest, ToolDecisionRationale, ToolDenialReason};
+use signalbox_domain::{BlobDigest, BlobDigestParseError, ToolDecisionRationale, ToolDenialReason};
 use uuid::Uuid;
 
 /// The single admitted process-protocol version.
@@ -72,6 +72,12 @@ pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes carried by one immutable-blob append.
 pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
+
+/// Maximum decoded bytes returned by one direct blob-range request.
+pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
+
+/// Maximum replica count representable by the version-one deployment catalog.
+pub const MAX_BLOB_REPLICA_COUNT: u64 = 32;
 
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
@@ -353,6 +359,14 @@ impl CanonicalBlobDigest {
     /// Returns the validated digest for an explicit adapter mapping.
     pub const fn into_digest(self) -> BlobDigest {
         self.0
+    }
+}
+
+impl std::str::FromStr for CanonicalBlobDigest {
+    type Err = BlobDigestParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
     }
 }
 
@@ -3313,6 +3327,14 @@ pub enum ClientRequest {
     CommitBlobUpload {},
     /// Discard the connection's active blob upload.
     AbortBlobUpload {},
+    /// Read bounded catalog metadata for one immutable blob.
+    ReadBlobMetadata { digest: CanonicalBlobDigest },
+    /// Read one exact bounded range after full replica verification.
+    ReadBlobChunk {
+        digest: CanonicalBlobDigest,
+        offset_bytes: CanonicalU64,
+        length_bytes: CanonicalU64,
+    },
     /// Read one immutable imported conversation's complete entry inventory.
     ///
     /// The read exposes the ordinals `create_session_from_imported_frontier`
@@ -3606,6 +3628,8 @@ impl ClientRequest {
             | Self::AppendBlobUpload { .. }
             | Self::CommitBlobUpload {}
             | Self::AbortBlobUpload {}
+            | Self::ReadBlobMetadata { .. }
+            | Self::ReadBlobChunk { .. }
             | Self::ReadImportedConversation { .. }
             | Self::CreateSessionFromImportedFrontier { .. }
             | Self::ReconcileTurn { .. }
@@ -3681,6 +3705,11 @@ impl ClientRequest {
             && (chunk.as_bytes().is_empty() || chunk.as_bytes().len() > MAX_BLOB_CHUNK_BYTES)
         {
             return Err(FrameValidationError::BlobUploadShape);
+        }
+        if let Self::ReadBlobChunk { length_bytes, .. } = self
+            && !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value())
+        {
+            return Err(FrameValidationError::BlobReadShape);
         }
         if let Self::CreateSessionFromImportedFrontier {
             through_position, ..
@@ -4026,6 +4055,10 @@ pub enum ErrorCode {
     InvalidRequest,
     /// A read target does not exist.
     NotFound,
+    /// Every recorded replica was proven absent.
+    BlobMissing,
+    /// Every usable recorded replica failed content verification.
+    BlobCorrupt,
     /// A durable identity already names different intent.
     ConflictingReuse,
     /// Canonical command handling recorded a typed rejection.
@@ -4356,6 +4389,13 @@ pub enum RejectionDetail {
         expected_digest: CanonicalBlobDigest,
         actual_digest: CanonicalBlobDigest,
     },
+    /// The requested exact half-open range is not contained by the blob.
+    BlobReadRangeOutOfBounds {
+        digest: CanonicalBlobDigest,
+        offset_bytes: CanonicalU64,
+        length_bytes: CanonicalU64,
+        blob_length_bytes: CanonicalU64,
+    },
 }
 
 impl RejectionDetail {
@@ -4375,6 +4415,10 @@ impl RejectionDetail {
         )
     }
 
+    const fn is_blob_read(self) -> bool {
+        matches!(self, Self::BlobReadRangeOutOfBounds { .. })
+    }
+
     const fn is_conversation_import(self) -> bool {
         match self {
             Self::ConversationImportAlreadyInProgress {}
@@ -4388,6 +4432,7 @@ impl RejectionDetail {
             | Self::BlobUploadSizeExceeded { .. }
             | Self::BlobUploadLengthMismatch { .. }
             | Self::BlobUploadDigestMismatch { .. }
+            | Self::BlobReadRangeOutOfBounds { .. }
             | Self::BulkIngestAlreadyInProgress { .. }
             | Self::SessionNotFound { .. }
             | Self::UnsupportedReasoningLevel { .. }
@@ -6697,6 +6742,18 @@ pub enum ServerMessage {
     },
     /// One connection-local immutable-blob upload was discarded.
     BlobUploadAborted {},
+    /// Bounded catalog facts for one immutable identity.
+    BlobMetadata {
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+        replica_count: CanonicalU64,
+    },
+    /// One exact verified byte range.
+    BlobChunkRead {
+        digest: CanonicalBlobDigest,
+        offset_bytes: CanonicalU64,
+        bytes: BlobChunk,
+    },
     /// Begins one imported-conversation entry sequence.
     ImportedConversationStart {
         /// Inspected imported conversation.
@@ -7201,6 +7258,20 @@ impl ServerMessage {
             } if expected_length_bytes.value() == 0 => {
                 return Err(FrameValidationError::BlobUploadShape);
             }
+            Self::BlobMetadata {
+                byte_length,
+                replica_count,
+                ..
+            } if byte_length.value() == 0
+                || !(1..=MAX_BLOB_REPLICA_COUNT).contains(&replica_count.value()) =>
+            {
+                return Err(FrameValidationError::BlobReadShape);
+            }
+            Self::BlobChunkRead { bytes, .. }
+                if bytes.as_bytes().is_empty() || bytes.as_bytes().len() > MAX_BLOB_READ_BYTES =>
+            {
+                return Err(FrameValidationError::BlobReadShape);
+            }
             Self::TranscriptModelCallUsage { usage, cost, .. }
                 if cost.is_some()
                     && usage.input_tokens.is_none()
@@ -7339,6 +7410,11 @@ impl ServerFrame {
                             return Err(FrameValidationError::ErrorDetailShape);
                         }
                         validate_blob_upload_detail(detail)?;
+                    } else if detail.is_blob_read() {
+                        if *code != ErrorCode::InvalidRequest {
+                            return Err(FrameValidationError::ErrorDetailShape);
+                        }
+                        validate_blob_read_detail(detail)?;
                     } else if *code != ErrorCode::Rejected {
                         return Err(FrameValidationError::ErrorDetailShape);
                     } else {
@@ -7441,7 +7517,8 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::BlobUploadLengthOutOfRange { .. }
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
-        | RejectionDetail::BlobUploadDigestMismatch { .. } => false,
+        | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     };
     if valid {
         Ok(())
@@ -7539,7 +7616,8 @@ fn validate_conversation_import_detail(
         | RejectionDetail::BlobUploadLengthOutOfRange { .. }
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
-        | RejectionDetail::BlobUploadDigestMismatch { .. } => false,
+        | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     };
     if valid {
         Ok(())
@@ -7583,6 +7661,30 @@ fn validate_blob_upload_detail(detail: RejectionDetail) -> Result<(), FrameValid
     }
 }
 
+fn validate_blob_read_detail(detail: RejectionDetail) -> Result<(), FrameValidationError> {
+    let valid = match detail {
+        RejectionDetail::BlobReadRangeOutOfBounds {
+            offset_bytes,
+            length_bytes,
+            blob_length_bytes,
+            ..
+        } => {
+            (1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value())
+                && blob_length_bytes.value() > 0
+                && (offset_bytes
+                    .value()
+                    .checked_add(length_bytes.value())
+                    .is_none_or(|end| end > blob_length_bytes.value()))
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::BlobReadShape)
+    }
+}
+
 /// A structurally invalid frame value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameValidationError {
@@ -7609,6 +7711,8 @@ pub enum FrameValidationError {
     ConversationImportShape,
     /// A chunked immutable-blob frame carried a contradictory shape.
     BlobUploadShape,
+    /// A blob metadata, range, or range-rejection value contradicted its bounds.
+    BlobReadShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
     /// A context-compaction request carried a nonpositive position.
@@ -7656,6 +7760,7 @@ impl fmt::Display for FrameValidationError {
             Self::SystemPromptShape => "frame omits its required system-prompt member",
             Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
             Self::BlobUploadShape => "blob-upload frame shape is inconsistent",
+            Self::BlobReadShape => "blob-read frame shape is inconsistent",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
             Self::ContextCompactionShape => "compaction through position is not positive",
             Self::ImportedConversationEntryShape => {
@@ -10403,6 +10508,146 @@ mod tests {
             &format!(
                 "{{\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"blob upload was rejected\",\"detail\":{{\"type\":\"blob_upload_digest_mismatch\",\"expected_digest\":\"{expected_digest}\",\"actual_digest\":\"{actual_digest}\"}}}}"
             ),
+        )?;
+        Ok(())
+    }
+
+    /// INV-060: direct metadata and range reads have exact closed request and
+    /// response shapes with canonical decimal bounds.
+    #[test]
+    fn inv060_blob_read_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let metadata = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(1)?,
+            ClientRequest::ReadBlobMetadata { digest },
+        )?;
+        let chunk = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(2)?,
+            ClientRequest::ReadBlobChunk {
+                digest,
+                offset_bytes: CanonicalU64::new(7),
+                length_bytes: CanonicalU64::new(2),
+            },
+        )?;
+        let encoded_metadata = encode_client_line(&metadata)?;
+        let encoded_chunk = encode_client_line(&chunk)?;
+
+        assert_eq!(
+            String::from_utf8(encoded_metadata.clone())?,
+            format!(
+                "{{\"version\":1,\"request_id\":\"1\",\"request\":{{\"type\":\"read_blob_metadata\",\"digest\":\"{digest}\"}}}}\n"
+            )
+        );
+        assert_eq!(
+            String::from_utf8(encoded_chunk.clone())?,
+            format!(
+                "{{\"version\":1,\"request_id\":\"2\",\"request\":{{\"type\":\"read_blob_chunk\",\"digest\":\"{digest}\",\"offset_bytes\":\"7\",\"length_bytes\":\"2\"}}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded_metadata)?, metadata);
+        assert_eq!(decode_client_line(&encoded_chunk)?, chunk);
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::BlobMetadata {
+                digest,
+                byte_length: CanonicalU64::new(9),
+                replica_count: CanonicalU64::new(1),
+            },
+            &format!(
+                "{{\"type\":\"blob_metadata\",\"digest\":\"{digest}\",\"byte_length\":\"9\",\"replica_count\":\"1\"}}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::BlobChunkRead {
+                digest,
+                offset_bytes: CanonicalU64::new(7),
+                bytes: BlobChunk::new(vec![0, 255]),
+            },
+            &format!(
+                "{{\"type\":\"blob_chunk_read\",\"digest\":\"{digest}\",\"offset_bytes\":\"7\",\"bytes\":\"AP8=\"}}"
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// INV-060: direct range length is bounded before transport and an exact
+    /// maximum response remains inside the unchanged frame ceiling.
+    #[test]
+    fn inv060_blob_read_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let zero = ClientRequest::ReadBlobChunk {
+            digest,
+            offset_bytes: CanonicalU64::new(0),
+            length_bytes: CanonicalU64::new(0),
+        };
+        let oversized = ClientRequest::ReadBlobChunk {
+            digest,
+            offset_bytes: CanonicalU64::new(0),
+            length_bytes: CanonicalU64::new(super::MAX_BLOB_READ_BYTES as u64 + 1),
+        };
+        let maximum = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            RequestId::try_new(u64::MAX)?,
+            ServerMessage::BlobChunkRead {
+                digest,
+                offset_bytes: CanonicalU64::new(0),
+                bytes: BlobChunk::new(vec![b'x'; super::MAX_BLOB_READ_BYTES]),
+            },
+        )?;
+
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, zero),
+            Err(FrameValidationError::BlobReadShape)
+        );
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(2)?, oversized),
+            Err(FrameValidationError::BlobReadShape)
+        );
+        assert!(encode_server_line(&maximum)?.len() <= super::MAX_FRAME_BYTES);
+        Ok(())
+    }
+
+    /// INV-060: an out-of-bounds read is a typed invalid request and closed
+    /// replica exhaustion has distinct content-silent codes.
+    #[test]
+    fn inv060_blob_read_failures_are_typed() -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob read was rejected"),
+                detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
+                    digest,
+                    offset_bytes: CanonicalU64::new(u64::MAX),
+                    length_bytes: CanonicalU64::new(1),
+                    blob_length_bytes: CanonicalU64::new(9),
+                }),
+            },
+            &format!(
+                "{{\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"blob read was rejected\",\"detail\":{{\"type\":\"blob_read_range_out_of_bounds\",\"digest\":\"{digest}\",\"offset_bytes\":\"18446744073709551615\",\"length_bytes\":\"1\",\"blob_length_bytes\":\"9\"}}}}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::BlobMissing,
+                message: String::from("all recorded blob replicas are missing"),
+                detail: ErrorDetail::none(),
+            },
+            r#"{"type":"error","code":"blob_missing","message":"all recorded blob replicas are missing"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::BlobCorrupt,
+                message: String::from("all usable blob replicas are corrupt"),
+                detail: ErrorDetail::none(),
+            },
+            r#"{"type":"error","code":"blob_corrupt","message":"all usable blob replicas are corrupt"}"#,
         )?;
         Ok(())
     }

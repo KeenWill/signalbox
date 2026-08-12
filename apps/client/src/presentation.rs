@@ -540,6 +540,22 @@ impl<'a> Output<'a> {
         self.stdout.flush()
     }
 
+    pub(crate) fn blob_metadata(
+        &mut self,
+        digest: CanonicalBlobDigest,
+        byte_length: u64,
+        replica_count: u64,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "digest={digest} byte_length={byte_length} replica_count={replica_count}"
+        )
+    }
+
+    pub(crate) fn blob_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.stdout.write_all(bytes)
+    }
+
     pub(crate) fn chat_started(
         &mut self,
         session_id: CanonicalUuid,
