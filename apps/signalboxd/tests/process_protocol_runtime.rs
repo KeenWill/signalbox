@@ -423,6 +423,16 @@ struct PendingRunnerPromotionFixture {
     registration_revision: u64,
 }
 
+const ACTIVE_RUNNER_REQUEST_SEED: u128 = 0x9101;
+const ACTIVE_RUNNER_ENROLLMENT_SEED: u128 = 0x9102;
+const ACTIVE_RUNNER_IDENTITY_SEED: u128 = 0x9103;
+const ACTIVE_RUNNER_AUTHENTICATION_SEED: u128 = 0x9104;
+const PENDING_RUNNER_REQUEST_SEED: u128 = 0x9201;
+const PENDING_RUNNER_ENROLLMENT_SEED: u128 = 0x9202;
+const PENDING_RUNNER_IDENTITY_SEED: u128 = 0x9203;
+const PENDING_RUNNER_AUTHENTICATION_SEED: u128 = 0x9204;
+const ABSENT_PENDING_RUNNER_REQUEST_SEED: u128 = 0x9301;
+
 impl PendingRunnerPromotionFixture {
     fn request(self, command_id: CommandId) -> ClientRequest {
         ClientRequest::PromotePendingRunner {
@@ -447,11 +457,13 @@ async fn seed_pending_runner_promotion(
     let store = RunnerProtocolStore::new(pool.clone(), empty_runner_catalog());
     let active = store
         .enroll_pristine(PristineRunnerEnrollmentRequest::new(
-            RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(0x9101)),
+            RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(ACTIVE_RUNNER_REQUEST_SEED)),
             IssuedRunnerEnrollmentIdentities::new(
-                RunnerEnrollmentId::from_uuid(Uuid::from_u128(0x9102)),
-                RunnerId::from_uuid(Uuid::from_u128(0x9103)),
-                RunnerAuthenticationId::from_uuid(Uuid::from_u128(0x9104)),
+                RunnerEnrollmentId::from_uuid(Uuid::from_u128(ACTIVE_RUNNER_ENROLLMENT_SEED)),
+                RunnerId::from_uuid(Uuid::from_u128(ACTIVE_RUNNER_IDENTITY_SEED)),
+                RunnerAuthenticationId::from_uuid(Uuid::from_u128(
+                    ACTIVE_RUNNER_AUTHENTICATION_SEED,
+                )),
             ),
             Vec::<RunnerCapabilityClass>::new(),
             empty_runner_advertisement(),
@@ -469,11 +481,13 @@ async fn seed_pending_runner_promotion(
         .await?;
     let pending = store
         .enroll_pristine(PristineRunnerEnrollmentRequest::new(
-            RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(0x9201)),
+            RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(PENDING_RUNNER_REQUEST_SEED)),
             IssuedRunnerEnrollmentIdentities::new(
-                RunnerEnrollmentId::from_uuid(Uuid::from_u128(0x9202)),
-                RunnerId::from_uuid(Uuid::from_u128(0x9203)),
-                RunnerAuthenticationId::from_uuid(Uuid::from_u128(0x9204)),
+                RunnerEnrollmentId::from_uuid(Uuid::from_u128(PENDING_RUNNER_ENROLLMENT_SEED)),
+                RunnerId::from_uuid(Uuid::from_u128(PENDING_RUNNER_IDENTITY_SEED)),
+                RunnerAuthenticationId::from_uuid(Uuid::from_u128(
+                    PENDING_RUNNER_AUTHENTICATION_SEED,
+                )),
             ),
             Vec::<RunnerCapabilityClass>::new(),
             empty_runner_advertisement(),
@@ -2863,7 +2877,8 @@ async fn inv042_process_request_replays_no_pending_runner_rejection() -> Result<
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let promotion_command = command()?;
-    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0x9301));
+    let pending_request_id =
+        CanonicalUuid::from_uuid(Uuid::from_u128(ABSENT_PENDING_RUNNER_REQUEST_SEED));
     let request = ClientRequest::PromotePendingRunner {
         command_id: promotion_command,
         pending_request_id,
