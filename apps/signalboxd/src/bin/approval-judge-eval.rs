@@ -302,6 +302,15 @@ async fn run(options: RunOptions) -> Result<(), String> {
             let repeats = u32::try_from(options.repeats).map_err(|_| {
                 String::from("--repeats exceeds the range --database-url recording stores")
             })?;
+            // Both strings are persisted as text and inside the scorecard
+            // jsonb, neither of which admits U+0000, and configuration
+            // admission does not reject it there.
+            if provider_model.contains('\u{0}') || binding.credential_reference.contains('\u{0}') {
+                return Err(String::from(
+                    "the resolved provider model or credential reference contains U+0000, \
+                     which --database-url recording cannot store",
+                ));
+            }
             let pool = signalbox_persistence::connect_production(database_url)
                 .await
                 .map_err(|error| format!("database connection failed: {error}"))?;
@@ -603,6 +612,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
             selection,
             target: binding.target,
             provider_model,
+            credential_reference: binding.credential_reference.clone(),
             usage_input_includes_cache_tokens: recording.usage_input_includes_cache_tokens,
             corpus_digest: digest,
             contract_digest,

@@ -17,6 +17,15 @@ CREATE TABLE approval_judge_eval_run (
     -- tool_approval_judge_model_call.
     resolved_provider_model_identity_id uuid NOT NULL,
     provider_model text NOT NULL,
+    -- The frozen non-secret credential reference every call was sent with:
+    -- one selection and target can be re-routed to another credential
+    -- profile by configuration alone, so without it rows from before and
+    -- after such a change are indistinguishable; mirrors the column of the
+    -- same name on tool_approval_judge_model_call.
+    credential_reference text NOT NULL,
+    -- The transaction that recorded the run, anchoring the sealing trigger
+    -- below: call rows admit insertion only inside this exact transaction.
+    recording_transaction_id xid8 NOT NULL DEFAULT pg_current_xact_id(),
     -- Whether the resolved adapter's reported input total includes the cache
     -- axes, resolved once for the run's single frozen binding. Without it the
     -- stored token columns cannot be aggregated across adapter families, and
@@ -32,6 +41,8 @@ CREATE TABLE approval_judge_eval_run (
 
     CONSTRAINT approval_judge_eval_run_provider_model_nonempty
         CHECK (char_length(provider_model) > 0),
+    CONSTRAINT approval_judge_eval_run_credential_nonempty
+        CHECK (char_length(credential_reference) > 0),
     CONSTRAINT approval_judge_eval_run_digests_nonempty
         CHECK (
             char_length(corpus_digest) > 0
@@ -72,7 +83,11 @@ CREATE TABLE approval_judge_eval_call (
         CHECK (repeat_ordinal BETWEEN 1 AND 4294967295),
     CONSTRAINT approval_judge_eval_call_recommendation_closed
         CHECK (recommendation_kind IN ('approve', 'deny', 'escalate_to_human')),
-    -- The same rationale bound the completed live judge call enforces.
+    -- The same rationale bound the completed live judge call enforces. The
+    -- authoritative spelling of the 4096 is
+    -- ToolDecisionRationale::MAX_UTF8_BYTES in the domain crate; a
+    -- feature-gated test writes at that exported bound through this
+    -- constraint so the two cannot drift silently.
     CONSTRAINT approval_judge_eval_call_rationale_bounded
         CHECK (octet_length(rationale) BETWEEN 1 AND 4096),
     CONSTRAINT approval_judge_eval_call_usage_u64_range
@@ -110,6 +125,38 @@ CREATE TABLE approval_judge_eval_call (
             )
         )
 );
+
+-- A run's call rows are sealed with the run: the recording role necessarily
+-- keeps INSERT after the commit, so without this gate it could append another
+-- valid-looking call row later and make the normalized evidence disagree
+-- with the already-frozen scorecard.
+CREATE FUNCTION reject_eval_call_outside_run_recording()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    run_transaction xid8;
+BEGIN
+    SELECT recording_transaction_id INTO run_transaction
+      FROM approval_judge_eval_run
+     WHERE eval_run_id = NEW.eval_run_id;
+    IF run_transaction IS NULL THEN
+        RAISE EXCEPTION 'approval_judge_eval_call requires its run row first'
+            USING ERRCODE = '23514';
+    END IF;
+    IF run_transaction <> pg_current_xact_id() THEN
+        RAISE EXCEPTION 'approval_judge_eval_call is sealed with its run; '
+            'rows admit insertion only in the recording transaction'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER approval_judge_eval_call_is_sealed_with_its_run
+BEFORE INSERT ON approval_judge_eval_call
+FOR EACH ROW
+EXECUTE FUNCTION reject_eval_call_outside_run_recording();
 
 -- Recorded runs are measurement evidence: a rewrite or removal after commit
 -- would let a stored run stop carrying the complete verdict evidence the

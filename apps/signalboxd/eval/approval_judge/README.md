@@ -31,10 +31,10 @@ PostgreSQL tables after the scorecard prints; without the flag nothing is
 written and the stdout scorecard stays the only artifact either way.
 
 - `approval_judge_eval_run` — one row per run: the minted run identity, the
-  judge selection, the resolved provider target identity and model, whether that
-  adapter's reported input total includes the cache axes, the scorecard's
-  corpus, contract, and rendered digests, the configured repeats, and the full
-  scorecard as `jsonb`.
+  judge selection, the resolved provider target identity and model, the frozen
+  non-secret credential reference, whether that adapter's reported input total
+  includes the cache axes, the scorecard's corpus, contract, and rendered
+  digests, the configured repeats, and the full scorecard as `jsonb`.
 - `approval_judge_eval_call` — one row per successful judge call: the run it
   belongs to, the case name, the one-based attempt ordinal (a failed attempt
   records no row and leaves a gap), the recommendation and rationale, and the
@@ -51,8 +51,10 @@ it; a database missing them, a role that cannot insert into them, and any corpus
 case recording cannot store (an empty name, or U+0000 in a name or notes) are
 all refused before the first paid call, and the minted run identity is announced
 before the commit is attempted so even an ambiguous commit leaves an exact key
-to query for. Recorded evidence is append-only: both tables refuse updates,
-deletions, and truncation after the commit.
+to query for. Recorded evidence is append-only and sealed: both tables refuse
+updates, deletions, and truncation, and call rows admit insertion only inside
+the transaction that records their run, so evidence cannot be extended after the
+scorecard is frozen.
 
 ## Case schema
 

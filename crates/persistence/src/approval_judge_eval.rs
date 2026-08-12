@@ -7,7 +7,7 @@
 //! scorecard prints — the scorecard stays the primary artifact — without
 //! claiming daemon provenance.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -53,6 +53,10 @@ pub struct ApprovalJudgeEvalRunRecord {
     pub target: ResolvedProviderTarget,
     /// Provider model the selection resolved to.
     pub provider_model: String,
+    /// Frozen non-secret credential reference every call was sent with. One
+    /// selection and target can be re-routed to another credential profile
+    /// by configuration alone, so rows are indistinguishable without it.
+    pub credential_reference: String,
     /// Whether the resolved adapter's reported input total includes the cache
     /// axes; resolved once because a run holds a single frozen binding.
     pub usage_input_includes_cache_tokens: bool,
@@ -160,21 +164,109 @@ const fn header_mismatch(field: &'static str) -> ApprovalJudgeEvalRecordingError
     ApprovalJudgeEvalRecordingError::ScorecardHeaderMismatch { field }
 }
 
+/// Requires the scorecard's per-case verdicts to agree with the call records.
+///
+/// The scorecard's `cases[].repeats` entries and the normalized call rows
+/// state the same verdicts twice; a caller supplying a scorecard whose
+/// verdicts differ from `calls` — or a scorecard reporting verdicts with no
+/// matching calls at all — would let the two representations report different
+/// experiment results, so recording requires them to agree before anything
+/// commits. Comparison covers each case's verdict sequence in attempt order:
+/// recommendation spelling and rationale, with the sequence lengths equal.
+fn require_scorecard_verdict_agreement(
+    run: &ApprovalJudgeEvalRunRecord,
+    calls: &[ApprovalJudgeEvalCallRecord],
+) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let mut recorded: BTreeMap<&str, Vec<&ApprovalJudgeEvalCallRecord>> = BTreeMap::new();
+    for call in calls {
+        recorded
+            .entry(call.case_name.as_str())
+            .or_default()
+            .push(call);
+    }
+    for sequence in recorded.values_mut() {
+        sequence.sort_by_key(|call| call.repeat_ordinal);
+    }
+    let Some(cases) = run
+        .scorecard
+        .get("cases")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return if calls.is_empty() {
+            Ok(())
+        } else {
+            Err(verdict_mismatch("cases"))
+        };
+    };
+    let mut stated: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for case in cases {
+        let Some(name) = case.get("name").and_then(serde_json::Value::as_str) else {
+            return Err(verdict_mismatch("cases"));
+        };
+        let Some(repeats) = case.get("repeats").and_then(serde_json::Value::as_array) else {
+            return Err(verdict_mismatch(name));
+        };
+        let mut verdicts = Vec::new();
+        for repeat in repeats {
+            let recommendation = repeat
+                .get("recommendation")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| verdict_mismatch(name))?;
+            let rationale = repeat
+                .get("rationale")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| verdict_mismatch(name))?;
+            verdicts.push((recommendation, rationale));
+        }
+        if stated.insert(name, verdicts).is_some() {
+            return Err(verdict_mismatch(name));
+        }
+    }
+    for (name, sequence) in &recorded {
+        let stated_verdicts = stated.get(name).ok_or_else(|| verdict_mismatch(name))?;
+        let recorded_verdicts: Vec<(&str, &str)> = sequence
+            .iter()
+            .map(|call| {
+                (
+                    approval_judge_recommendation_to_str(call.recommendation),
+                    call.rationale.as_str(),
+                )
+            })
+            .collect();
+        if *stated_verdicts != recorded_verdicts {
+            return Err(verdict_mismatch(name));
+        }
+    }
+    for (name, verdicts) in &stated {
+        if !verdicts.is_empty() && !recorded.contains_key(name) {
+            return Err(verdict_mismatch(name));
+        }
+    }
+    Ok(())
+}
+
+fn verdict_mismatch(case: &str) -> ApprovalJudgeEvalRecordingError {
+    ApprovalJudgeEvalRecordingError::ScorecardVerdictMismatch {
+        case: String::from(case),
+    }
+}
+
 /// Records one run and its per-call verdicts in one transaction.
 ///
 /// Either the run row and every call row commit together or nothing is
 /// recorded, so a stored run always carries its complete verdict evidence.
 /// Every call ordinal must fall inside the run's configured repeats — a call
 /// outside that range would be durable evidence for an attempt the run
-/// claims was never configured — and the scorecard's header fields must
-/// agree with the typed columns they duplicate; either violation is rejected
-/// before anything commits.
+/// claims was never configured — and the scorecard must agree with the typed
+/// representations it duplicates, header fields and per-case verdicts alike;
+/// every violation is rejected before anything commits.
 pub async fn record_eval_run(
     pool: &PgPool,
     run: &ApprovalJudgeEvalRunRecord,
     calls: &[ApprovalJudgeEvalCallRecord],
 ) -> Result<(), ApprovalJudgeEvalRecordingError> {
     require_scorecard_header_agreement(run)?;
+    require_scorecard_verdict_agreement(run, calls)?;
     for call in calls {
         if call.repeat_ordinal < 1 || call.repeat_ordinal > run.repeats {
             return Err(ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats);
@@ -185,14 +277,16 @@ pub async fn record_eval_run(
         "INSERT INTO approval_judge_eval_run
             (eval_run_id, direct_model_selection_id,
              resolved_provider_model_identity_id, provider_model,
-             usage_input_includes_cache_tokens, corpus_digest,
-             contract_digest, rendered_digest, repeats, scorecard)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             credential_reference, usage_input_includes_cache_tokens,
+             corpus_digest, contract_digest, rendered_digest, repeats,
+             scorecard)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(run.run.into_uuid())
     .bind(run.selection.into_uuid())
     .bind(run.target.identity().into_uuid())
     .bind(run.provider_model.as_str())
+    .bind(run.credential_reference.as_str())
     .bind(run.usage_input_includes_cache_tokens)
     .bind(run.corpus_digest.as_str())
     .bind(run.contract_digest.as_str())
@@ -248,6 +342,11 @@ pub enum ApprovalJudgeEvalRecordingError {
         /// The scorecard field that diverged or was absent.
         field: &'static str,
     },
+    /// The scorecard's per-case verdicts disagree with the call records.
+    ScorecardVerdictMismatch {
+        /// The case whose verdicts diverged, or the structural key at fault.
+        case: String,
+    },
 }
 
 impl ApprovalJudgeEvalRecordingError {
@@ -282,6 +381,10 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
                 formatter,
                 "eval scorecard header disagrees with the typed run record: {field}"
             ),
+            Self::ScorecardVerdictMismatch { case } => write!(
+                formatter,
+                "eval scorecard verdicts disagree with the call records: {case}"
+            ),
         }
     }
 }
@@ -293,7 +396,8 @@ impl Error for ApprovalJudgeEvalRecordingError {
             Self::TablesAbsent
             | Self::TablesUnwritable
             | Self::CallOutsideConfiguredRepeats
-            | Self::ScorecardHeaderMismatch { .. } => None,
+            | Self::ScorecardHeaderMismatch { .. }
+            | Self::ScorecardVerdictMismatch { .. } => None,
         }
     }
 }
@@ -339,6 +443,12 @@ mod tests {
         expect!["eval scorecard header disagrees with the typed run record: repeats"].assert_eq(
             &ApprovalJudgeEvalRecordingError::ScorecardHeaderMismatch { field: "repeats" }
                 .to_string(),
+        );
+        expect!["eval scorecard verdicts disagree with the call records: fixture-case"].assert_eq(
+            &ApprovalJudgeEvalRecordingError::ScorecardVerdictMismatch {
+                case: String::from("fixture-case"),
+            }
+            .to_string(),
         );
     }
 }

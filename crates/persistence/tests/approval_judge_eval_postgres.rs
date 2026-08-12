@@ -11,7 +11,7 @@ use std::error::Error;
 use rust_decimal::Decimal;
 use signalbox_domain::{
     DelegateApprovalRecommendation, DirectModelSelection, ProviderModelIdentity,
-    ProviderReportedTokenUsage, ResolvedProviderTarget,
+    ProviderReportedTokenUsage, ResolvedProviderTarget, ToolDecisionRationale,
 };
 use signalbox_persistence::{
     approval_judge_eval::{
@@ -36,10 +36,15 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 const RUN_IDENTITY: u128 = 0xae10;
+const SECOND_RUN_IDENTITY: u128 = 0xae11;
 const SELECTION_IDENTITY: u128 = 0xae20;
 const TARGET_IDENTITY: u128 = 0xae21;
 const ABSENT_RUN_IDENTITY: u128 = 0xae30;
 const PROVIDER_MODEL: &str = "fixture-judge-model";
+const CREDENTIAL_REFERENCE: &str = "fixture-credential";
+// The ordinal a post-commit append would claim: still inside the configured
+// repeats and unoccupied, so only the sealing trigger can reject it.
+const LATE_CALL_ORDINAL: u32 = 2;
 // A spelling the recorded run never carries, for contradiction fixtures.
 const FOREIGN_PROVIDER_MODEL: &str = "some-other-model";
 // The login role granted SELECT but not INSERT on the eval tables.
@@ -97,10 +102,19 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
     Ok((container, pool))
 }
 
-// The scorecard restates the run headers exactly as the binary prints them;
-// record_eval_run rejects a scorecard whose headers disagree with the typed
-// fields, so the fixture derives both from the same constants.
-fn scorecard() -> serde_json::Value {
+fn verdict_entry(recommendation: &str, rationale: &str) -> serde_json::Value {
+    serde_json::json!({"recommendation": recommendation, "rationale": rationale})
+}
+
+fn scorecard_case(name: &str, repeats: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::json!({"name": name, "repeats": repeats})
+}
+
+// The scorecard restates the run headers and per-case verdicts exactly as
+// the binary prints them; record_eval_run rejects a scorecard that disagrees
+// with the typed representations, so fixtures derive both from the same
+// constants.
+fn scorecard_with_cases(cases: &[serde_json::Value]) -> serde_json::Value {
     serde_json::json!({
         "judge_selection": Uuid::from_u128(SELECTION_IDENTITY).to_string(),
         "provider_model": PROVIDER_MODEL,
@@ -110,23 +124,38 @@ fn scorecard() -> serde_json::Value {
         "repeats": REPEATS,
         "total_cases": 2,
         "correct_majorities": 1,
+        "cases": cases,
     })
 }
 
-fn run_record() -> ApprovalJudgeEvalRunRecord {
+fn both_call_scorecard_cases() -> Vec<serde_json::Value> {
+    vec![
+        scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+        ),
+        scorecard_case(
+            SECOND_CASE,
+            &[verdict_entry(DENY_SPELLING, SECOND_RATIONALE)],
+        ),
+    ]
+}
+
+fn run_record_with(id: u128, cases: &[serde_json::Value]) -> ApprovalJudgeEvalRunRecord {
     ApprovalJudgeEvalRunRecord {
-        run: ApprovalJudgeEvalRunId::from_uuid(Uuid::from_u128(RUN_IDENTITY)),
+        run: ApprovalJudgeEvalRunId::from_uuid(Uuid::from_u128(id)),
         selection: DirectModelSelection::from_uuid(Uuid::from_u128(SELECTION_IDENTITY)),
         target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
             TARGET_IDENTITY,
         ))),
         provider_model: String::from(PROVIDER_MODEL),
+        credential_reference: String::from(CREDENTIAL_REFERENCE),
         usage_input_includes_cache_tokens: CACHE_INCLUSIVE_INPUT,
         corpus_digest: String::from(CORPUS_DIGEST),
         contract_digest: String::from(CONTRACT_DIGEST),
         rendered_digest: String::from(RENDERED_DIGEST),
         repeats: REPEATS,
-        scorecard: scorecard(),
+        scorecard: scorecard_with_cases(cases),
     }
 }
 
@@ -199,6 +228,16 @@ fn expect_scorecard_header_mismatch(error: &ApprovalJudgeEvalRecordingError, fie
     }
 }
 
+#[track_caller]
+fn expect_scorecard_verdict_mismatch(error: &ApprovalJudgeEvalRecordingError, case: &str) {
+    match error {
+        ApprovalJudgeEvalRecordingError::ScorecardVerdictMismatch { case: diverged } => {
+            assert_eq!(diverged, case);
+        }
+        other => panic!("expected a scorecard verdict mismatch, found {other:?}"),
+    }
+}
+
 fn raw_constraint_name(error: &sqlx::Error) -> Option<&str> {
     error
         .as_database_error()
@@ -216,14 +255,14 @@ fn raw_error_code(error: &sqlx::Error) -> Option<String> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let run = run_record();
+    let run = run_record_with(RUN_IDENTITY, &both_call_scorecard_cases());
     record_eval_run(&pool, &run, &[first_call(), second_call()]).await?;
 
     let stored_run = sqlx::query(
         "SELECT direct_model_selection_id, resolved_provider_model_identity_id,
-                provider_model, usage_input_includes_cache_tokens,
-                corpus_digest, contract_digest, rendered_digest, repeats,
-                scorecard
+                provider_model, credential_reference,
+                usage_input_includes_cache_tokens, corpus_digest,
+                contract_digest, rendered_digest, repeats, scorecard
            FROM approval_judge_eval_run WHERE eval_run_id = $1",
     )
     .bind(run.run.into_uuid())
@@ -240,6 +279,10 @@ async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         stored_run.try_get::<String, _>("provider_model")?,
         run.provider_model
+    );
+    assert_eq!(
+        stored_run.try_get::<String, _>("credential_reference")?,
+        run.credential_reference
     );
     assert_eq!(
         stored_run.try_get::<bool, _>("usage_input_includes_cache_tokens")?,
@@ -351,7 +394,13 @@ async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn an_inadmissible_call_row_leaves_no_run_row() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let run = run_record();
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, "")],
+        )],
+    );
     let mut broken = first_call();
     broken.rationale = String::new();
     let error = record_eval_run(&pool, &run, &[broken])
@@ -389,9 +438,11 @@ async fn call_rows_require_their_recorded_run() -> Result<(), Box<dyn Error>> {
     .execute(&pool)
     .await
     .expect_err("a call row without its run row is rejected");
+    // The sealing trigger fires before the foreign key can, so the missing
+    // run surfaces as its check violation rather than the FK constraint.
     assert_eq!(
-        raw_constraint_name(&error),
-        Some("approval_judge_eval_call_run_fk")
+        raw_error_code(&error).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
     );
     Ok(())
 }
@@ -413,7 +464,13 @@ async fn recording_requires_the_daemon_applied_schema() -> Result<(), Box<dyn Er
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let run = run_record();
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+        )],
+    );
     let mut overflowing = first_call();
     overflowing.repeat_ordinal = OVERFLOWING_ORDINAL;
     let error = record_eval_run(&pool, &run, &[overflowing])
@@ -465,7 +522,7 @@ async fn recording_requires_insert_privileges() -> Result<(), Box<dyn Error>> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn contradictory_scorecard_headers_are_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let mut run = run_record();
+    let mut run = run_record_with(RUN_IDENTITY, &[]);
     run.scorecard["provider_model"] = serde_json::json!(FOREIGN_PROVIDER_MODEL);
     let error = record_eval_run(&pool, &run, &[])
         .await
@@ -484,7 +541,13 @@ async fn contradictory_scorecard_headers_are_rejected() -> Result<(), Box<dyn Er
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recorded_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let run = run_record();
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+        )],
+    );
     record_eval_run(&pool, &run, &[first_call()]).await?;
 
     let updated_run = sqlx::query("UPDATE approval_judge_eval_run SET provider_model = $1")
@@ -557,8 +620,33 @@ async fn recorded_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn foreign_recommendation_spellings_are_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let run = run_record();
-    record_eval_run(&pool, &run, &[]).await?;
+    // The sealing trigger admits call rows only in the run's own recording
+    // transaction, so reaching the recommendation constraint requires
+    // inserting the run row and the bad call in one raw transaction.
+    let run = run_record_with(RUN_IDENTITY, &[]);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO approval_judge_eval_run
+            (eval_run_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, provider_model,
+             credential_reference, usage_input_includes_cache_tokens,
+             corpus_digest, contract_digest, rendered_digest, repeats,
+             scorecard)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(run.run.into_uuid())
+    .bind(run.selection.into_uuid())
+    .bind(run.target.identity().into_uuid())
+    .bind(run.provider_model.as_str())
+    .bind(run.credential_reference.as_str())
+    .bind(run.usage_input_includes_cache_tokens)
+    .bind(run.corpus_digest.as_str())
+    .bind(run.contract_digest.as_str())
+    .bind(run.rendered_digest.as_str())
+    .bind(Decimal::from(run.repeats))
+    .bind(Json(&run.scorecard))
+    .execute(&mut *transaction)
+    .await?;
     let call = first_call();
     let error = sqlx::query(
         "INSERT INTO approval_judge_eval_call
@@ -571,12 +659,113 @@ async fn foreign_recommendation_spellings_are_rejected() -> Result<(), Box<dyn E
     .bind(Decimal::from(call.repeat_ordinal))
     .bind(FOREIGN_RECOMMENDATION_SPELLING)
     .bind(call.rationale.as_str())
-    .execute(&pool)
+    .execute(&mut *transaction)
     .await
     .expect_err("a recommendation outside the closed set is rejected");
     assert_eq!(
         raw_constraint_name(&error),
         Some("approval_judge_eval_call_recommendation_closed")
+    );
+    transaction.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn late_call_rows_are_rejected_after_the_run_commits() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+        )],
+    );
+    record_eval_run(&pool, &run, &[first_call()]).await?;
+    let late = first_call();
+    let error = sqlx::query(
+        "INSERT INTO approval_judge_eval_call
+            (eval_run_id, case_name, repeat_ordinal, recommendation_kind,
+             rationale)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(run.run.into_uuid())
+    .bind(late.case_name.as_str())
+    .bind(Decimal::from(LATE_CALL_ORDINAL))
+    .bind(APPROVE_SPELLING)
+    .bind(late.rationale.as_str())
+    .execute(&pool)
+    .await
+    .expect_err("a call row appended after the run commits is rejected");
+    assert_eq!(
+        raw_error_code(&error).as_deref(),
+        Some(CHECK_VIOLATION_CODE)
+    );
+    let surviving_calls: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_call WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(surviving_calls, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn contradictory_scorecard_verdicts_are_rejected() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+        )],
+    );
+    let error = record_eval_run(&pool, &run, &[])
+        .await
+        .expect_err("a scorecard stating verdicts with no matching calls is rejected");
+    expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
+    let stored_runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_run WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored_runs, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let widest = "a".repeat(ToolDecisionRationale::MAX_UTF8_BYTES);
+    let mut at_bound = first_call();
+    at_bound.rationale = widest.clone();
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(APPROVE_SPELLING, &widest)],
+        )],
+    );
+    record_eval_run(&pool, &run, &[at_bound]).await?;
+
+    let overlong = "a".repeat(ToolDecisionRationale::MAX_UTF8_BYTES + 1);
+    let mut past_bound = second_call();
+    past_bound.rationale = overlong.clone();
+    let second_run = run_record_with(
+        SECOND_RUN_IDENTITY,
+        &[scorecard_case(
+            SECOND_CASE,
+            &[verdict_entry(DENY_SPELLING, &overlong)],
+        )],
+    );
+    let error = record_eval_run(&pool, &second_run, &[past_bound])
+        .await
+        .expect_err("one byte past the domain bound is rejected");
+    assert_eq!(
+        constraint_name(&error).as_deref(),
+        Some("approval_judge_eval_call_rationale_bounded")
     );
     Ok(())
 }
