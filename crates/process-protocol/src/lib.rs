@@ -3203,6 +3203,13 @@ pub enum ClientRequest {
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
+    /// Activate the exact provisioning-only pending runner enrollment.
+    PromotePendingRunner {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Exact pending enrollment request to consume.
+        pending_request_id: CanonicalUuid,
+    },
     /// Read one session's complete current or named immutable defaults epoch.
     ReadSessionDefaults {
         /// Target session.
@@ -3517,6 +3524,7 @@ impl ClientRequest {
             | Self::ReadSessionMetadata { .. }
             | Self::ReplaceSessionMetadata { .. }
             | Self::ReplaceSessionDefaults { .. }
+            | Self::PromotePendingRunner { .. }
             | Self::ReadSessionDefaults { .. }
             | Self::ImportConversation { .. }
             | Self::BeginConversationImport { .. }
@@ -3973,6 +3981,25 @@ pub enum RejectionDetail {
         /// Absent target.
         session_id: CanonicalUuid,
     },
+    /// No provisioning-only pending enrollment currently exists.
+    NoPendingRunnerEnrollment {},
+    /// A different request owns the pending-successor slot.
+    PendingRequestMismatch {
+        /// Request identity supplied by the promotion command.
+        pending_request_id: CanonicalUuid,
+    },
+    /// The exact pending successor has no live current connection.
+    PendingRequestDisconnected {
+        /// Request identity supplied by the promotion command.
+        pending_request_id: CanonicalUuid,
+    },
+    /// The deployment's active runner has not reached durable loss.
+    ActiveRunnerNotLost {
+        /// Logical active runner identity.
+        runner_id: CanonicalUuid,
+        /// Exact authoritative non-lost connection state.
+        connection_state: RunnerNonLostConnectionState,
+    },
     /// The placement head advanced beyond the caller-observed version.
     SessionPlacementCurrentVersionMismatch {
         session_id: CanonicalUuid,
@@ -4234,6 +4261,10 @@ impl RejectionDetail {
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::SessionNotFound { .. }
+            | Self::NoPendingRunnerEnrollment {}
+            | Self::PendingRequestMismatch { .. }
+            | Self::PendingRequestDisconnected { .. }
+            | Self::ActiveRunnerNotLost { .. }
             | Self::UnsupportedReasoningLevel { .. }
             | Self::UnsupportedFastMode { .. }
             | Self::UnsupportedServiceTier { .. }
@@ -5444,6 +5475,18 @@ pub enum RunnerConnectionHealth {
     Shutdown,
     /// The connection reached a terminal loss transition.
     Lost,
+}
+
+/// Closed non-lost connection state carried by a rejected runner promotion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerNonLostConnectionState {
+    /// The runner connection is currently usable.
+    Connected,
+    /// The connection remains within its heartbeat grace window.
+    Suspect,
+    /// The connection ended through an orderly shutdown.
+    Shutdown,
 }
 
 /// Closed current state carried by an authoritative runner projection.
@@ -6894,6 +6937,17 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
     },
+    /// One provisioning-only pending enrollment became active.
+    RunnerPromoted {
+        /// Pending request consumed by this promotion.
+        pending_request_id: CanonicalUuid,
+        /// Promoted logical runner identity.
+        runner_id: CanonicalUuid,
+        /// Promoted enrollment identity.
+        enrollment_id: CanonicalUuid,
+        /// Exact retained registration revision.
+        registration_revision: CanonicalU64,
+    },
     /// One complete current or named immutable session-defaults epoch.
     SessionDefaults {
         /// Selected session.
@@ -7248,6 +7302,12 @@ impl ServerMessage {
             | Self::ChildResult { .. }
             | Self::SessionMessageSent { .. } => {}
             Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
+            Self::RunnerPromoted {
+                registration_revision,
+                ..
+            } if registration_revision.value() == 0 => {
+                return Err(FrameValidationError::RunnerShape);
+            }
             Self::SessionDefaultsReplaced {
                 model_selection,
                 model_settings,
@@ -7638,6 +7698,10 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             last.value() == u64::MAX
         }
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::NoPendingRunnerEnrollment {}
+        | RejectionDetail::PendingRequestMismatch { .. }
+        | RejectionDetail::PendingRequestDisconnected { .. }
+        | RejectionDetail::ActiveRunnerNotLost { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -7730,6 +7794,10 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::NoPendingRunnerEnrollment {}
+        | RejectionDetail::PendingRequestMismatch { .. }
+        | RejectionDetail::PendingRequestDisconnected { .. }
+        | RejectionDetail::ActiveRunnerNotLost { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -7823,6 +7891,8 @@ pub enum FrameValidationError {
     ModelSettingsShape,
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
+    /// A runner request, receipt, or rejection carried an invalid shape.
+    RunnerShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -7856,6 +7926,7 @@ impl fmt::Display for FrameValidationError {
             Self::DelegationShape => "session-delegation frame shape is inconsistent",
             Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
             Self::PlacementShape => "session-placement frame shape is inconsistent",
+            Self::RunnerShape => "runner frame shape is inconsistent",
         })
     }
 }
@@ -8292,14 +8363,14 @@ mod tests {
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject,
         RunnerCapabilityClass, RunnerConnectionHealth, RunnerCredentialProfileName,
-        RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
-        RunnerRepositoryKey, RunnerSandboxProfile, RunnerStateTransitionState,
-        RunnerWorkingDirectory, ServerFrame, ServerMessage, ServiceTier, SessionEvent,
-        SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
-        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line, validate_adjustments,
+        RunnerNonLostConnectionState, RunnerPlacementRevision, RunnerProjection,
+        RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
+        RunnerStateTransitionState, RunnerWorkingDirectory, ServerFrame, ServerMessage,
+        ServiceTier, SessionEvent, SessionMetadata, SettingOverlay, SystemPromptMember,
+        SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
+        ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
+        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -15480,6 +15551,119 @@ mod tests {
             r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"runner_state_transition","runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","sandbox_profile":"workspace-restricted","working_directory":"workspace/project","state":"working_directory_changed"}}"#,
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn inv033_pending_runner_promotion_request_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::PromotePendingRunner {
+                command_id: command(2)?,
+                pending_request_id: uuid(3),
+            },
+            r#"{"type":"promote_pending_runner","command_id":"00000000-0000-0000-0000-000000000002","pending_request_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_pending_runner_promotion_receipt_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::RunnerPromoted {
+                pending_request_id: uuid(3),
+                runner_id: uuid(4),
+                enrollment_id: uuid(5),
+                registration_revision: CanonicalU64::new(6),
+            },
+            r#"{"type":"runner_promoted","pending_request_id":"00000000-0000-0000-0000-000000000003","runner_id":"00000000-0000-0000-0000-000000000004","enrollment_id":"00000000-0000-0000-0000-000000000005","registration_revision":"6"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_no_pending_runner_enrollment_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::NoPendingRunnerEnrollment {}),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"no_pending_runner_enrollment"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_pending_request_mismatch_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::PendingRequestMismatch {
+                    pending_request_id: uuid(2),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"pending_request_mismatch","pending_request_id":"00000000-0000-0000-0000-000000000002"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_pending_request_disconnected_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::PendingRequestDisconnected {
+                    pending_request_id: uuid(2),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"pending_request_disconnected","pending_request_id":"00000000-0000-0000-0000-000000000002"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_active_runner_not_lost_rejection_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("request rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::ActiveRunnerNotLost {
+                    runner_id: uuid(2),
+                    connection_state: RunnerNonLostConnectionState::Shutdown,
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"request rejected","detail":{"type":"active_runner_not_lost","runner_id":"00000000-0000-0000-0000-000000000002","connection_state":"shutdown"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_pending_runner_promotion_receipt_rejects_zero_registration_revision() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::RunnerPromoted {
+                pending_request_id: uuid(2),
+                runner_id: uuid(3),
+                enrollment_id: uuid(4),
+                registration_revision: CanonicalU64::new(0),
+            },
+        )
+        .expect_err("promotion receipts require a positive registration revision");
+
+        assert_eq!(error, FrameValidationError::RunnerShape);
     }
 
     #[test]

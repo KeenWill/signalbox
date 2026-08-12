@@ -32,15 +32,19 @@ use signalbox_application::{
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
-    ReplaceSessionMetadataResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
+    ContextCompactionTokenUsage, ContextFrontierId, CredentialProfileName, CredentialProfilePolicy,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
+    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
+    ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
+    ReplaceSessionMetadataResult, ResolvedProviderTarget, RunnerAdvertisement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerEnrollmentId,
+    RunnerEnrollmentRequestId, RunnerId, RunnerRepositoryEntry, RunnerSandboxProfile,
+    RunnerToolDeclaration, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent, ToolCallProposal,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TurnId, WorkspaceCapability,
 };
 use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
@@ -60,6 +64,10 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::ImportedSessionRepository,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    runner_protocol::{
+        IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest,
+        RunnerConnectionTransition, RunnerProtocolStore,
+    },
     scheduler::PostgresEligibilitySweep,
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
@@ -383,6 +391,117 @@ impl Connection {
 
 fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
+}
+
+fn empty_runner_catalog() -> RunnerCatalog {
+    RunnerCatalog::try_new(
+        Vec::<RunnerCapabilityClass>::new(),
+        Vec::<RunnerToolDeclaration>::new(),
+        Vec::<CredentialProfilePolicy>::new(),
+        Vec::<WorkspaceCapability>::new(),
+        Vec::<RunnerSandboxProfile>::new(),
+    )
+    .expect("the empty runner catalog is internally consistent")
+}
+
+fn empty_runner_advertisement() -> RunnerAdvertisement {
+    RunnerAdvertisement::new(
+        Vec::<RunnerCapabilityClass>::new(),
+        Vec::<ToolName>::new(),
+        Vec::<CredentialProfileName>::new(),
+        Vec::<WorkspaceCapability>::new(),
+        Vec::<RunnerSandboxProfile>::new(),
+        Vec::<RunnerRepositoryEntry>::new(),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct PendingRunnerPromotionFixture {
+    pending_request: RunnerEnrollmentRequestId,
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    registration_revision: u64,
+}
+
+const ACTIVE_RUNNER_REQUEST_SEED: u128 = 0x9101;
+const ACTIVE_RUNNER_ENROLLMENT_SEED: u128 = 0x9102;
+const ACTIVE_RUNNER_IDENTITY_SEED: u128 = 0x9103;
+const ACTIVE_RUNNER_AUTHENTICATION_SEED: u128 = 0x9104;
+const PENDING_RUNNER_REQUEST_SEED: u128 = 0x9201;
+const PENDING_RUNNER_ENROLLMENT_SEED: u128 = 0x9202;
+const PENDING_RUNNER_IDENTITY_SEED: u128 = 0x9203;
+const PENDING_RUNNER_AUTHENTICATION_SEED: u128 = 0x9204;
+const ABSENT_PENDING_RUNNER_REQUEST_SEED: u128 = 0x9301;
+
+impl PendingRunnerPromotionFixture {
+    fn request(self, command_id: CommandId) -> ClientRequest {
+        ClientRequest::PromotePendingRunner {
+            command_id,
+            pending_request_id: CanonicalUuid::from_uuid(self.pending_request.into_uuid()),
+        }
+    }
+
+    fn receipt(self) -> ServerMessage {
+        ServerMessage::RunnerPromoted {
+            pending_request_id: CanonicalUuid::from_uuid(self.pending_request.into_uuid()),
+            runner_id: CanonicalUuid::from_uuid(self.runner.into_uuid()),
+            enrollment_id: CanonicalUuid::from_uuid(self.enrollment.into_uuid()),
+            registration_revision: CanonicalU64::new(self.registration_revision),
+        }
+    }
+}
+
+async fn seed_pending_runner_promotion(
+    pool: &PgPool,
+) -> Result<PendingRunnerPromotionFixture, Box<dyn Error>> {
+    let store = RunnerProtocolStore::new(pool.clone(), empty_runner_catalog());
+    let active = store
+        .enroll_pristine(PristineRunnerEnrollmentRequest::new(
+            RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(ACTIVE_RUNNER_REQUEST_SEED)),
+            IssuedRunnerEnrollmentIdentities::new(
+                RunnerEnrollmentId::from_uuid(Uuid::from_u128(ACTIVE_RUNNER_ENROLLMENT_SEED)),
+                RunnerId::from_uuid(Uuid::from_u128(ACTIVE_RUNNER_IDENTITY_SEED)),
+                RunnerAuthenticationId::from_uuid(Uuid::from_u128(
+                    ACTIVE_RUNNER_AUTHENTICATION_SEED,
+                )),
+            ),
+            Vec::<RunnerCapabilityClass>::new(),
+            empty_runner_advertisement(),
+        ))
+        .await?;
+    let active_connection = store
+        .open_connection(active.receipt().enrollment().enrollment())
+        .await?;
+    store
+        .transition_connection(
+            active.receipt().enrollment().enrollment(),
+            active_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let pending = store
+        .enroll_pristine(PristineRunnerEnrollmentRequest::new(
+            RunnerEnrollmentRequestId::from_uuid(Uuid::from_u128(PENDING_RUNNER_REQUEST_SEED)),
+            IssuedRunnerEnrollmentIdentities::new(
+                RunnerEnrollmentId::from_uuid(Uuid::from_u128(PENDING_RUNNER_ENROLLMENT_SEED)),
+                RunnerId::from_uuid(Uuid::from_u128(PENDING_RUNNER_IDENTITY_SEED)),
+                RunnerAuthenticationId::from_uuid(Uuid::from_u128(
+                    PENDING_RUNNER_AUTHENTICATION_SEED,
+                )),
+            ),
+            Vec::<RunnerCapabilityClass>::new(),
+            empty_runner_advertisement(),
+        ))
+        .await?;
+    store
+        .open_connection(pending.receipt().enrollment().enrollment())
+        .await?;
+    Ok(PendingRunnerPromotionFixture {
+        pending_request: pending.receipt().request(),
+        enrollment: pending.receipt().enrollment().enrollment(),
+        runner: pending.receipt().enrollment().runner(),
+        registration_revision: pending.receipt().registration().revision().get(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2718,6 +2837,67 @@ async fn inv012_enforces_metadata_command_identity() -> Result<(), Box<dyn Error
         }
     ));
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-042: the process request activates the exact pending successor and
+/// equal replay returns the original deployment-scoped receipt.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv042_process_request_promotes_pending_runner_and_replays() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    let fixture = seed_pending_runner_promotion(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let promotion_command = command()?;
+    let expected = fixture.receipt();
+
+    connection
+        .request(21, fixture.request(promotion_command))
+        .await?;
+    let applied = response_within(&mut connection).await?;
+    connection
+        .request(22, fixture.request(promotion_command))
+        .await?;
+    let replayed = response_within(&mut connection).await?;
+
+    assert_eq!(applied.message(), &expected);
+    assert_eq!(replayed.message(), &expected);
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-042: a promotion request with no pending successor records and
+/// exactly replays its closed deployment-scoped rejection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv042_process_request_replays_no_pending_runner_rejection() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let promotion_command = command()?;
+    let pending_request_id =
+        CanonicalUuid::from_uuid(Uuid::from_u128(ABSENT_PENDING_RUNNER_REQUEST_SEED));
+    let request = ClientRequest::PromotePendingRunner {
+        command_id: promotion_command,
+        pending_request_id,
+    };
+    let expected = ServerMessage::Error {
+        code: ErrorCode::Rejected,
+        message: String::from("the command was rejected by current durable state"),
+        detail: signalbox_process_protocol::ErrorDetail::rejected(
+            RejectionDetail::NoPendingRunnerEnrollment {},
+        ),
+    };
+
+    connection.request(23, request.clone()).await?;
+    let rejected = response_within(&mut connection).await?;
+    connection.request(24, request).await?;
+    let replayed = response_within(&mut connection).await?;
+
+    assert_eq!(rejected.message(), &expected);
+    assert_eq!(replayed.message(), &expected);
     drop(connection);
     runtime.stop().await
 }

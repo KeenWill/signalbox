@@ -12,8 +12,9 @@ against this PR (`agent/runner-awaiting-recovery-persistence`).
 The `runner_placement_changed` transcript entry and daemon/client projection
 were verified against this PR (`agent/runner-placement-semantic-persistence`).
 
-The deployment-scoped pending-successor promotion rejection vocabulary was
-verified against this PR (`agent/runner-pending-successor-activation`).
+The deployment-scoped pending-runner promotion request, receipt, and rejection
+vocabulary was verified against this PR
+(`agent/runner-pending-successor-process`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -289,7 +290,7 @@ that variant.
 | `read_runner_status` (proposed)         | `page_size` (canonical decimal string) and `after` (runner-evidence cursor object or null)                                                                                                                                                                                                                    | Read the active and optional pending runner registrations, connection/loss state, advertised availability, retained operation failures, and startup workspace-leak reports, with one bounded evidence page.                                                                                                                                                                     |
 | `replace_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                                  | Replace the exact current lost placement with a different live runner, atomically activate one pending replacement enrollment, or — for a registration-triggered loss, where it is the only version-one recovery — re-enroll the same runner against its current connection; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection. |
 | `abandon_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                                     | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                                                                                                                                                     |
-| `promote_pending_runner` (proposed)     | `command_id` and `pending_request_id` (canonical UUID strings)                                                                                                                                                                                                                                                | Activate the one provisioning-only pending enrollment on the deployment-scoped fact that this daemon's active runner is durably gone; it names and mutates no session placement.                                                                                                                                                                                                |
+| `promote_pending_runner`                | `command_id` and `pending_request_id` (canonical UUID strings)                                                                                                                                                                                                                                                | Activate the one provisioning-only pending enrollment on the deployment-scoped fact that this daemon's active runner is durably gone; it names and mutates no session placement.                                                                                                                                                                                                |
 
 | Type                                 | Additional required members                                                                                                | Meaning                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
@@ -846,8 +847,9 @@ vocabulary. The closed-enum decoder rejects any unknown request, response,
 event, or nested tagged member rather than interpreting it as an older shape.
 Because every durable representation implemented in this tree is expressible at
 version `1`, selecting a session never requires a feature-specific version gate.
-The proposed runner requests remain outside the implemented vocabulary until
-their implementing stack lands. The runner-bearing projections named above are
+The proposed session-scoped runner replacement, abandonment, and status requests
+remain outside the implemented vocabulary until their implementing stack lands.
+`promote_pending_runner` and the runner-bearing projections named above are
 implemented at version `1`.
 
 Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
@@ -1409,14 +1411,14 @@ daemon never interprets. The proposed `abandon_lost_runner` rejection admits
 `session_not_found`, `runner_placement_not_found`,
 `placement_revision_mismatch`, `placement_not_lost`, and
 `active_turn_requires_existing_control { session_id, active_turn_id }` with
-those same shapes. The proposed `promote_pending_runner` rejection names no
-session and admits `no_pending_runner_enrollment {}`,
+those same shapes. The `promote_pending_runner` rejection names no session and
+admits `no_pending_runner_enrollment {}`,
 `pending_request_mismatch { pending_request_id }`,
 `pending_request_disconnected { pending_request_id }`, and
 `active_runner_not_lost { runner_id, connection_state }` for a daemon whose
-active runner is still connected, suspect, or shut down. Every admitted runner
-rejection is a recorded durable result; equal replay returns it even after
-runner state changes.
+active runner is connected, suspect, or orderly shut down but not durably lost.
+Every admitted runner rejection is a recorded durable result; equal replay
+returns it even after runner state changes.
 
 The `turn_not_awaiting_reconciliation`, `tool_request_not_in_session`,
 `imported_conversation_not_found`, and `imported_frontier_position_out_of_range`
