@@ -719,6 +719,7 @@ async fn serve_connection(
         };
         let inbound_frame_budget = services.inbound_frame_budgets.for_connection(import_state);
         let frame_buffer_permit = tokio::select! {
+            biased;
             () = wait_for_deadline(awaiting_bulk_ingest_deadline) => return Ok(()),
             permit = acquire_inbound_frame_permit_after_input(
                 &mut reader,
@@ -730,6 +731,7 @@ async fn serve_connection(
             return Ok(());
         };
         let line = tokio::select! {
+            biased;
             () = wait_for_shutdown(&mut shutdown) => return Ok(()),
             () = wait_for_deadline(awaiting_bulk_ingest_deadline) => return Ok(()),
             line = read_frame_line(&mut reader) => line?,
@@ -867,6 +869,7 @@ async fn serve_connection(
             shutdown.clone(),
         );
         tokio::select! {
+            biased;
             () = wait_for_deadline(operation_deadline) => return Ok(()),
             result = request_result => result?,
         }
