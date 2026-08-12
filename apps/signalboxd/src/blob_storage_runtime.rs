@@ -11,7 +11,7 @@ use std::{
 use signalbox_blob_store::{BlobStore, BlobStoreName};
 use signalbox_blob_store_filesystem::{
     FilesystemBlobStaging, FilesystemBlobStore, FilesystemBlobStoreConstructionError,
-    FilesystemNamespaceIdentity, NamespaceBindingState,
+    FilesystemNamespaceIdentity, NamespaceBindingState, OpenedFilesystemBlobRoot,
 };
 use signalbox_persistence::blob::{
     BlobCatalogRepository, BlobCatalogRepositoryError, BlobStoreBindingRecord,
@@ -81,21 +81,11 @@ impl BlobStoreRegistry {
             return Err(BlobStoreRegistryError::UnsupportedStoreKind);
         }
 
-        let staging = if require_local_backing {
-            FilesystemBlobStaging::try_new(configuration.staging_directory().to_path_buf())?
-        } else {
-            #[cfg(feature = "test-support")]
-            {
-                FilesystemBlobStaging::try_new_without_locality_check_for_test(
-                    configuration.staging_directory().to_path_buf(),
-                )?
-            }
-            #[cfg(not(feature = "test-support"))]
-            unreachable!("production initialization always requires local backing")
-        };
-        let mut identities = Vec::new();
-        let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
-        let mut namespace_ids = BTreeMap::new();
+        let staging_root = open_blob_root(
+            configuration.staging_directory().to_path_buf(),
+            require_local_backing,
+        )?;
+        let mut opened_stores = Vec::new();
         for (name, configured) in configuration.stores() {
             let root = configured
                 .filesystem_root()
@@ -105,33 +95,24 @@ impl BlobStoreRegistry {
             } else {
                 NamespaceBindingState::New
             };
-            let (store, identity) = if require_local_backing {
-                FilesystemBlobStore::try_new_bound(
-                    root.to_path_buf(),
-                    configured.namespace_id(),
-                    state,
-                )?
-            } else {
-                #[cfg(feature = "test-support")]
-                {
-                    FilesystemBlobStore::try_new_bound_for_conformance(
-                        root.to_path_buf(),
-                        configured.namespace_id(),
-                        state,
-                    )?
-                }
-                #[cfg(not(feature = "test-support"))]
-                unreachable!("production initialization always requires local backing")
-            };
-            identities.push(OpenedNamespace {
-                canonical_path: identity.canonical_path().to_path_buf(),
-                device_inode: identity.device_inode(),
-            });
-            stores.insert(name.clone(), Arc::new(store));
-            namespace_ids.insert(name.clone(), configured.namespace_id());
+            let opened = open_blob_root(root.to_path_buf(), require_local_backing)?;
+            opened_stores.push((name.clone(), configured.namespace_id(), state, opened));
         }
-        let staging_identity = OpenedNamespace::from(staging.identity());
+        let staging_identity = OpenedNamespace::from(staging_root.identity());
+        let identities = opened_stores
+            .iter()
+            .map(|(_, _, _, opened)| OpenedNamespace::from(opened.identity()))
+            .collect::<Vec<_>>();
         validate_physical_namespaces(&staging_identity, &identities)?;
+
+        let staging = FilesystemBlobStaging::from_opened(staging_root)?;
+        let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
+        let mut namespace_ids = BTreeMap::new();
+        for (name, namespace_id, state, opened) in opened_stores {
+            let (store, _) = FilesystemBlobStore::from_opened_bound(opened, namespace_id, state)?;
+            namespace_ids.insert(name.clone(), namespace_id);
+            stores.insert(name, Arc::new(store));
+        }
 
         for (name, configured) in configuration.stores() {
             repository
@@ -185,12 +166,33 @@ impl BlobStoreRegistry {
     pub const fn staging(&self) -> &FilesystemBlobStaging {
         &self.staging
     }
+
+    /// Prevents staging cleanup after the database singleton guard is lost.
+    pub fn disarm_staging_sweep(&self) {
+        self.staging.disarm_sweep_on_drop();
+    }
+}
+
+fn open_blob_root(
+    root: PathBuf,
+    require_local_backing: bool,
+) -> Result<OpenedFilesystemBlobRoot, FilesystemBlobStoreConstructionError> {
+    if require_local_backing {
+        return OpenedFilesystemBlobRoot::open(root);
+    }
+    #[cfg(feature = "test-support")]
+    {
+        OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)
+    }
+    #[cfg(not(feature = "test-support"))]
+    unreachable!("production initialization always requires local backing")
 }
 
 #[derive(Clone, Debug)]
 struct OpenedNamespace {
     canonical_path: PathBuf,
     device_inode: (u64, u64),
+    physical_path: PathBuf,
 }
 
 impl From<&FilesystemNamespaceIdentity> for OpenedNamespace {
@@ -198,6 +200,7 @@ impl From<&FilesystemNamespaceIdentity> for OpenedNamespace {
         Self {
             canonical_path: identity.canonical_path().to_path_buf(),
             device_inode: identity.device_inode(),
+            physical_path: identity.physical_path().to_path_buf(),
         }
     }
 }
@@ -223,6 +226,7 @@ fn validate_physical_namespaces(
     for (index, left) in stores.iter().enumerate() {
         if paths_overlap(&staging.canonical_path, &left.canonical_path)
             || staging.device_inode == left.device_inode
+            || physical_paths_overlap(staging, left)
         {
             return Err(BlobStoreRegistryError::StagingStoreOverlap);
         }
@@ -235,9 +239,17 @@ fn validate_physical_namespaces(
             if paths_overlap(&left.canonical_path, &right.canonical_path) {
                 return Err(BlobStoreRegistryError::NestedStoreRoots);
             }
+            if physical_paths_overlap(left, right) {
+                return Err(BlobStoreRegistryError::NestedStoreRoots);
+            }
         }
     }
     Ok(())
+}
+
+fn physical_paths_overlap(left: &OpenedNamespace, right: &OpenedNamespace) -> bool {
+    left.device_inode.0 == right.device_inode.0
+        && paths_overlap(&left.physical_path, &right.physical_path)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -364,6 +376,20 @@ generated_artifact = "primary"
         OpenedNamespace {
             canonical_path: path.into(),
             device_inode: (device, inode),
+            physical_path: path.into(),
+        }
+    }
+
+    fn mounted_namespace(
+        path: &str,
+        device: u64,
+        inode: u64,
+        physical_path: &str,
+    ) -> OpenedNamespace {
+        OpenedNamespace {
+            canonical_path: path.into(),
+            device_inode: (device, inode),
+            physical_path: physical_path.into(),
         }
     }
 
@@ -405,6 +431,17 @@ generated_artifact = "primary"
             error,
             BlobStoreRegistryError::PhysicalNamespaceAlias
         ));
+    }
+
+    #[test]
+    fn bind_mounted_descendant_fails_before_namespace_preparation() {
+        let staging = mounted_namespace("/staging", 1, 8, "/store/.publish-v1");
+        let store = mounted_namespace("/store", 1, 4, "/store");
+
+        let error = validate_physical_namespaces(&staging, &[store])
+            .expect_err("a bind-mounted descendant overlaps the store namespace");
+
+        assert!(matches!(error, BlobStoreRegistryError::StagingStoreOverlap));
     }
 
     #[test]
