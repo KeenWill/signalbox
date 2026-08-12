@@ -3,7 +3,8 @@
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner
 request/projection implementation boundary were verified against this PR
-(`agent/runner-event-outbox-persistence`).
+(`agent/runner-event-outbox-persistence`). Fresh-epoch connected recovery is
+re-verified through this PR (`agent/daemon-runner-health-events`).
 
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
