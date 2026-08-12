@@ -916,7 +916,14 @@ async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result
 async fn approval_event_migration_backfills_a_prior_explicit_decision() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = postgres_before_approval_event_migration().await?;
-    insert_outbox_session_fixture(&pool, APPROVAL_FIXTURE_SEED + 1).await?;
+    // This pool stands before the storage-vocabulary rename, so the fixture
+    // must write the spelling its CHECK constraints still admit.
+    insert_outbox_session_fixture_with_creation_cause(
+        &pool,
+        APPROVAL_FIXTURE_SEED + 1,
+        "owner_initiated",
+    )
+    .await?;
     let request = insert_pre_approval_tool_request(&pool, APPROVAL_FIXTURE_SEED).await?;
     let session = Uuid::from_u128(APPROVAL_FIXTURE_SEED + 1);
     let turn = Uuid::from_u128(APPROVAL_FIXTURE_SEED + 2);
@@ -1236,8 +1243,8 @@ async fn approval_guard_user_decision_requires_event_and_lifecycle_effect()
     .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
-            (request_id, decision_kind, decision_source, owner_command_id)
-         VALUES ($1, 'approve', 'owner_command', $2)",
+            (request_id, decision_kind, decision_source, user_command_id)
+         VALUES ($1, 'approve', 'user_command', $2)",
     )
     .bind(request.into_uuid())
     .bind(command)
@@ -1312,8 +1319,8 @@ async fn s10_inv019_approval_guard_rejects_decision_for_later_request() -> Resul
     .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
-            (request_id, decision_kind, decision_source, owner_command_id)
-         VALUES ($1, 'approve', 'owner_command', $2)",
+            (request_id, decision_kind, decision_source, user_command_id)
+         VALUES ($1, 'approve', 'user_command', $2)",
     )
     .bind(later_request.into_uuid())
     .bind(command)
@@ -1559,8 +1566,8 @@ async fn s10_inv019_approval_guard_rejects_decision_during_recovery() -> Result<
     .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
-            (request_id, decision_kind, decision_source, owner_command_id)
-         VALUES ($1, 'approve', 'owner_command', $2)",
+            (request_id, decision_kind, decision_source, user_command_id)
+         VALUES ($1, 'approve', 'user_command', $2)",
     )
     .bind(later_request.into_uuid())
     .bind(command)
@@ -1868,7 +1875,7 @@ async fn explicit_tool_decision_rejects_sentinel_user_provenance() -> Result<(),
         .await?;
     sqlx::query(
         "UPDATE tool_approval_decision
-            SET owner_command_id = $1
+            SET user_command_id = $1
           WHERE request_id = $2",
     )
     .bind(Uuid::nil())
