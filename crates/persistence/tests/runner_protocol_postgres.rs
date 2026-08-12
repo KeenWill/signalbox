@@ -1515,7 +1515,7 @@ async fn insert_bounded_propagation_session_fixture(
         .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
-         SELECT session_id, 'owner_initiated', 'none'
+         SELECT session_id, 'user_initiated', 'none'
            FROM unnest($1::uuid[]) AS fixture(session_id)",
     )
     .bind(&session_uuids)
@@ -2645,7 +2645,7 @@ async fn attach_continuing_tool_round_projection(
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
-             owner_command_id)
+             user_command_id)
          VALUES ($1, 'approve', 'policy_auto', NULL, NULL)",
     )
     .bind(request.into_uuid())
@@ -2766,8 +2766,8 @@ async fn append_denied_request_to_continuing_tool_round_projection(
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, denial_reason,
-             owner_command_id)
-         VALUES ($1, 'deny', 'owner_command', NULL, $2)",
+             user_command_id)
+         VALUES ($1, 'deny', 'user_command', NULL, $2)",
     )
     .bind(request.into_uuid())
     .bind(command)
