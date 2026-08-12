@@ -710,7 +710,7 @@ appear as a semantic origin. Migration
 reference-only placement-change payload, binds it to one exact same-session
 successor placement record, and requires its exact semantic entry to be the only
 suffix member after the prior frontier, or the sole root member when no semantic
-history exists.
+history — including inherited imported history — exists.
 
 ### Context compaction
 
