@@ -212,7 +212,7 @@ projection (INV-048). Durable rules bind append, correlation, and provenance:
   and bind every scheduler failure event to the current unsuccessfully terminal
   goal turn.
 
-**Implemented behavior.** Migration `202608110002` supersedes the two rule
+**Implemented behavior.** Migration `202608110013` supersedes the two rule
 functions `202608020013` installed for a goal turn's accepted input. A
 generation's turn is either scheduled by the goal machinery or bound to a turn a
 command already accepted. The machinery mints an accepted input with no
