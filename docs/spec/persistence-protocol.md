@@ -548,10 +548,12 @@ Representation rules, all enforced in the schema:
   placement-frontier pointer names the exact entry and revision, and a deferred
   check requires the entry to be the final member of the frontier that installed
   it. That frontier is exactly a one-entry extension of its physical semantic
-  prefix, or a one-entry root only while no earlier semantic entry exists.
-  Reconstitution resolves the referenced placement record and rejects a missing,
-  cross-session, non-successor, or duplicated reference rather than rendering
-  the entry from its own payload.
+  prefix, or a one-entry root only while the owning session has no earlier
+  nonempty frontier; inherited entries retain their ancestor source session and
+  are protected by that frontier-level check. Reconstitution resolves the
+  referenced placement record and rejects a missing, cross-session,
+  non-successor, or duplicated reference rather than rendering the entry from
+  its own payload.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed

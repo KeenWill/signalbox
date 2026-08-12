@@ -15930,21 +15930,75 @@ async fn s32_inv044_runner_placement_boundary_round_trips_exact_successor_facts(
     Ok(())
 }
 
-/// S32 / INV-015 / INV-044: an existing semantic frontier cannot be discarded
-/// by installing a placement boundary as a fresh one-entry root.
+/// S28 / S32 / INV-015 / INV-044: inherited semantic history cannot be
+/// discarded by installing a placement boundary as a fresh one-entry root.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv015_inv044_runner_placement_boundary_rejects_non_prefix_root()
+async fn s28_s32_inv015_inv044_runner_placement_boundary_rejects_inherited_non_prefix_root()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, _, registration, pin, _) = stored_active_pin_fixture_with_authorization(
-        &pool,
-        authorized,
-        catalog(),
-        no_permission_overrides(),
-        "effect_free",
+    let conversation = imported_conversation(0xb100, 0xb101);
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
     )
     .await?;
+    let session = SessionId::from_uuid(uuid(0xb102));
+    let placement_request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: Some(profile()),
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
+    };
+    let command = CreateSessionFromImportedFrontier::new(
+        DurableCommandId::from_uuid(uuid(0xb103)),
+        conversation
+            .frontiers()
+            .last()
+            .expect("the imported fixture has one addressable frontier"),
+        ImportedSessionRelationship::Fork,
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(uuid(0xb104)),
+        )),
+    )
+    .with_runner_placement(Some(placement_request));
+    ImportedSessionRepository::new(pool.clone(), session_credential_pin())
+        .handle(
+            command,
+            session,
+            ContextFrontierId::from_uuid(uuid(0xb105)),
+            || SemanticTranscriptEntryId::from_uuid(uuid(0xb106)),
+        )
+        .await?;
+    insert_physical_attempt_for(&pool, session, SECOND_SESSION_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = store
+        .load_placement(session)
+        .await?
+        .expect("the imported session retains its requested runner placement")
+        .placement()
+        .clone();
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized_for_session(session, SECOND_SESSION_PHYSICAL_ATTEMPT),
+            offer_request_for(LEASE + RELATED_IDENTITY_OFFSET),
+        )
+        .expect("the imported session placement pins on its live runner");
+    store.store_pin(&pin, &registration).await?;
     let original_grant = pin
         .grant
         .as_ref()
@@ -15964,7 +16018,6 @@ async fn s32_inv015_inv044_runner_placement_boundary_rejects_non_prefix_root()
             Some(&replacement.grant.grant),
         )
         .await?;
-    let session = replacement.placement.session();
     let revision = replacement.placement.revision();
     let event_ordinal: Decimal = sqlx::query_scalar(
         "SELECT event_ordinal
