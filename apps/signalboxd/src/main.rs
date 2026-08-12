@@ -1304,7 +1304,7 @@ async fn run_hub(
         return Err(error);
     }
 
-    let _blob_store_registry =
+    let blob_store_registry =
         match BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()).await
         {
             Ok(registry) => registry,
@@ -1325,6 +1325,7 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1338,6 +1339,7 @@ async fn run_hub(
             RuntimePhase::StartupScan,
             SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
         );
+        drop(blob_store_registry);
         let _ = database.close().await;
         return Err(failure);
     }
@@ -1348,6 +1350,7 @@ async fn run_hub(
                 RuntimePhase::SocketBinding,
                 SanitizedStartupCause::Socket(&error),
             );
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1360,6 +1363,7 @@ async fn run_hub(
                 SanitizedStartupCause::Socket(&error),
             );
             let _ = runner_listener.cleanup();
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1393,6 +1397,7 @@ async fn run_hub(
         );
         let _ = listener.cleanup();
         let _ = runner_listener.cleanup();
+        drop(blob_store_registry);
         let _ = database.close().await;
         return Err(failure);
     }
@@ -1417,6 +1422,7 @@ async fn run_hub(
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
+                drop(blob_store_registry);
                 let _ = database.close().await;
                 return Err(failure);
             }
@@ -1601,6 +1607,7 @@ async fn run_hub(
     // extend the shutdown window. Guard loss is different: tasks are cancelled
     // immediately and the old fenced sessions must be terminated before
     // returning control to process exit.
+    drop(blob_store_registry);
     if outcome == ShutdownOutcome::GuardLost {
         let _ = database.close().await;
     } else if should_close_pool(&Ok(outcome))

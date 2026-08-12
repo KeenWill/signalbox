@@ -1730,7 +1730,8 @@ mod tests {
         fs::set_permissions(&publication, fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture publication directory is private");
         let sentinel = publication.join("pre-validation-sentinel");
-        fs::write(&sentinel, b"must remain before validation").expect("the sentinel is written");
+        let sentinel_content = b"must remain before validation";
+        fs::write(&sentinel, sentinel_content).expect("the sentinel is written");
         fs::set_permissions(&sentinel, fs::Permissions::from_mode(FILE_MODE))
             .expect("the sentinel is private");
 
@@ -1741,7 +1742,7 @@ mod tests {
         assert_eq!(opened.identity().canonical_path(), root.path());
         assert_eq!(
             fs::read(&sentinel).expect("inspection leaves the sentinel intact"),
-            b"must remain before validation"
+            sentinel_content
         );
         assert!(!root.path().join(NAMESPACE_MARKER).exists());
     }
