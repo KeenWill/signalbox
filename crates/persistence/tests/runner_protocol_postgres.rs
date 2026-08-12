@@ -5606,6 +5606,40 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     .await?;
     transaction.commit().await?;
     store.store_lease(&pin.lease).await?;
+    let mut lease_completion = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 1, 2, 'claimed')",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 2
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 1, 3, 'completed')",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 3
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .execute(&mut *lease_completion)
+    .await?;
+    lease_completion.commit().await?;
     sqlx::query(
         "ALTER TABLE runner_session_placement_record
          ENABLE TRIGGER runner_initial_pin_requires_lease",
