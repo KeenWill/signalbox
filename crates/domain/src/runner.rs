@@ -4663,7 +4663,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_replace_lost_runner_semantic_equality_excludes_command_identity() {
+    fn replace_lost_runner_semantic_equality_excludes_command_identity() {
         let expected_revision =
             RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
         let replacement = RunnerReplacementTarget::Runner(runner_id(REPLACEMENT_RUNNER));
@@ -4688,7 +4688,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_replace_lost_runner_semantic_equality_includes_complete_payload() {
+    fn replace_lost_runner_semantic_equality_includes_complete_payload() {
         let expected_revision =
             RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
         let next_revision =
@@ -4714,7 +4714,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_runner_replacement_target_retains_each_closed_selector() {
+    fn runner_replacement_target_retains_each_closed_selector() {
         let runner = runner_id(REPLACEMENT_RUNNER);
         let direct = RunnerReplacementTarget::Runner(runner);
         let pending =
@@ -4727,7 +4727,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_abandon_lost_runner_semantic_equality_excludes_command_identity() {
+    fn abandon_lost_runner_semantic_equality_excludes_command_identity() {
         let expected_revision =
             RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
         let first = AbandonLostRunner::new(
@@ -4748,7 +4748,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_abandon_lost_runner_semantic_equality_includes_complete_payload() {
+    fn abandon_lost_runner_semantic_equality_includes_complete_payload() {
         let expected_revision =
             RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
         let next_revision =
