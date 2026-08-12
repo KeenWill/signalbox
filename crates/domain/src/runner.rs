@@ -17,7 +17,7 @@ use crate::{
     NormalizedToolArguments, RunnerAuthenticationId, RunnerEnrollmentId, RunnerEnrollmentRequestId,
     RunnerId, RunnerLeaseId, SessionId, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
     ToolAttemptId, ToolBatch, ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass,
-    ToolName, ToolPermissionDefault, WorkspaceManifestId,
+    ToolName, ToolPermissionDefault, TurnId, WorkspaceManifestId,
 };
 
 /// Exact user-selected successor for one lost session placement.
@@ -149,6 +149,79 @@ impl AbandonLostRunner {
     pub const fn expected_placement_revision(&self) -> RunnerGeneration {
         self.expected_placement_revision
     }
+}
+
+/// Closed current placement state retained by a refused recovery command.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerPlacementRecoveryState {
+    /// The session has not pinned a runner.
+    Unpinned,
+    /// The session remains pinned to a usable runner.
+    Pinned,
+    /// A prior command already terminalized the runner placement.
+    RunnerAbandoned,
+}
+
+/// Exact placement installed by successful lost-runner abandonment.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AbandonedLostRunner {
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+}
+
+impl AbandonedLostRunner {
+    /// Constructs the complete terminal command receipt.
+    pub const fn new(session: SessionId, placement_revision: RunnerGeneration) -> Self {
+        Self {
+            session,
+            placement_revision,
+        }
+    }
+
+    /// Returns the session whose placement became terminal.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact terminal placement revision.
+    pub const fn placement_revision(self) -> RunnerGeneration {
+        self.placement_revision
+    }
+}
+
+/// Closed authoritative rejection for one lost-runner abandonment.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AbandonLostRunnerRejection {
+    /// The selected session does not exist.
+    SessionNotFound { session: SessionId },
+    /// The selected session has no runner placement.
+    RunnerPlacementNotFound { session: SessionId },
+    /// The current placement revision differs from the caller's observation.
+    PlacementRevisionMismatch {
+        session: SessionId,
+        expected: RunnerGeneration,
+        current: RunnerGeneration,
+    },
+    /// The exact current placement is not a lost placement.
+    PlacementNotLost {
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        state: RunnerPlacementRecoveryState,
+    },
+    /// The existing turn-control algebra must clear the active slot first.
+    ActiveTurnRequiresExistingControl {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+}
+
+/// Terminal durable result of one lost-runner abandonment command.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AbandonLostRunnerResult {
+    /// The exact lost placement became terminal.
+    Applied(AbandonedLostRunner),
+    /// Current typed state refused the command.
+    Rejected(AbandonLostRunnerRejection),
 }
 
 /// Complete deployment-scoped request to activate one pending runner.
@@ -4781,6 +4854,27 @@ mod tests {
 
         assert_ne!(canonical, different_session);
         assert_ne!(canonical, different_revision);
+    }
+
+    #[test]
+    fn abandoned_lost_runner_retains_complete_terminal_receipt() {
+        let revision =
+            RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
+        let receipt = AbandonedLostRunner::new(session_id(SESSION), revision);
+
+        assert_eq!(receipt.session(), session_id(SESSION));
+        assert_eq!(receipt.placement_revision(), revision);
+    }
+
+    #[test]
+    fn abandonment_rejections_retain_each_closed_state_kind() {
+        let unpinned = RunnerPlacementRecoveryState::Unpinned;
+        let pinned = RunnerPlacementRecoveryState::Pinned;
+        let abandoned = RunnerPlacementRecoveryState::RunnerAbandoned;
+
+        assert_ne!(unpinned, pinned);
+        assert_ne!(unpinned, abandoned);
+        assert_ne!(pinned, abandoned);
     }
 
     #[test]

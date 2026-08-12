@@ -565,6 +565,8 @@ pub(crate) enum DurableCommandKind {
     WithdrawGitRemote,
     /// Deployment-scoped pending-runner promotion.
     PromotePendingRunner,
+    /// Session-scoped lost-runner abandonment.
+    AbandonLostRunner,
 }
 
 /// Encodes a durable-command kind as its closed PostgreSQL spelling.
@@ -587,6 +589,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::MintGitRemote => "mint_git_remote",
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
         DurableCommandKind::PromotePendingRunner => "promote_pending_runner",
+        DurableCommandKind::AbandonLostRunner => "abandon_lost_runner",
     }
 }
 
@@ -610,6 +613,80 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "mint_git_remote" => Some(DurableCommandKind::MintGitRemote),
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
         "promote_pending_runner" => Some(DurableCommandKind::PromotePendingRunner),
+        "abandon_lost_runner" => Some(DurableCommandKind::AbandonLostRunner),
+        _ => None,
+    }
+}
+
+/// Closed stored result kinds for lost-runner abandonment commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AbandonLostRunnerResultStorageKind {
+    Applied,
+    Rejected,
+}
+
+pub(crate) const fn abandon_lost_runner_result_to_str(
+    value: AbandonLostRunnerResultStorageKind,
+) -> &'static str {
+    match value {
+        AbandonLostRunnerResultStorageKind::Applied => "applied",
+        AbandonLostRunnerResultStorageKind::Rejected => "rejected",
+    }
+}
+
+pub(crate) fn abandon_lost_runner_result_from_str(
+    value: &str,
+) -> Option<AbandonLostRunnerResultStorageKind> {
+    match value {
+        "applied" => Some(AbandonLostRunnerResultStorageKind::Applied),
+        "rejected" => Some(AbandonLostRunnerResultStorageKind::Rejected),
+        _ => None,
+    }
+}
+
+/// Closed stored rejection kinds for lost-runner abandonment commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AbandonLostRunnerRejectionStorageKind {
+    SessionNotFound,
+    RunnerPlacementNotFound,
+    PlacementRevisionMismatch,
+    PlacementNotLost,
+    ActiveTurnRequiresExistingControl,
+}
+
+pub(crate) const fn abandon_lost_runner_rejection_to_str(
+    value: AbandonLostRunnerRejectionStorageKind,
+) -> &'static str {
+    match value {
+        AbandonLostRunnerRejectionStorageKind::SessionNotFound => "session_not_found",
+        AbandonLostRunnerRejectionStorageKind::RunnerPlacementNotFound => {
+            "runner_placement_not_found"
+        }
+        AbandonLostRunnerRejectionStorageKind::PlacementRevisionMismatch => {
+            "placement_revision_mismatch"
+        }
+        AbandonLostRunnerRejectionStorageKind::PlacementNotLost => "placement_not_lost",
+        AbandonLostRunnerRejectionStorageKind::ActiveTurnRequiresExistingControl => {
+            "active_turn_requires_existing_control"
+        }
+    }
+}
+
+pub(crate) fn abandon_lost_runner_rejection_from_str(
+    value: &str,
+) -> Option<AbandonLostRunnerRejectionStorageKind> {
+    match value {
+        "session_not_found" => Some(AbandonLostRunnerRejectionStorageKind::SessionNotFound),
+        "runner_placement_not_found" => {
+            Some(AbandonLostRunnerRejectionStorageKind::RunnerPlacementNotFound)
+        }
+        "placement_revision_mismatch" => {
+            Some(AbandonLostRunnerRejectionStorageKind::PlacementRevisionMismatch)
+        }
+        "placement_not_lost" => Some(AbandonLostRunnerRejectionStorageKind::PlacementNotLost),
+        "active_turn_requires_existing_control" => {
+            Some(AbandonLostRunnerRejectionStorageKind::ActiveTurnRequiresExistingControl)
+        }
         _ => None,
     }
 }
