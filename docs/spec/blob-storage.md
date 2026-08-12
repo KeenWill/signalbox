@@ -138,8 +138,10 @@ current path and device identity are locally unique.
 Each S3 bucket likewise owns the reserved object key
 `.signalbox-blob-namespace-v1`, whose complete body is the configured canonical
 `namespace_id` plus one LF. Startup reads recorded bindings before accessing the
-bucket. For a new binding in a currently routed store, it conditionally creates
-the marker with `If-None-Match: *`, then performs a bounded exact read;
+bucket. These authenticated checks run after the database connects and the
+configuration-independent recovery scan completes, but before socket admission
+or scheduling. For a new binding in a currently routed store, it conditionally
+creates the marker with `If-None-Match: *`, then performs a bounded exact read;
 precondition loss reads and verifies the winner. A currently routed existing
 binding requires that exact read and never creates a missing marker. Absence,
 disagreement, a body larger than 128 bytes, or an unavailable read or
@@ -235,16 +237,26 @@ Expiry cancels the active adapter operation, releases traversal resources, and
 uses the ordinary unavailable outcome rather than delaying a later candidate or
 caller beyond the aggregate bound.
 
+Direct blob reads have a separate non-waiting process-wide admission bound of 16
+active traversals. A request that cannot acquire one of those permits
+immediately returns the ordinary unavailable outcome; it never occupies a
+connection task while queued. Thus even 16 reads that retain their complete
+24-hour allowance leave 112 of the process protocol's 128 connection tasks
+available to control traffic.
+
 Attachment-preparation store traversal is bounded independently from scheduler
 passes: at most eight such traversals are active process-wide. A model-call pass
-releases its scheduler-pass slot before waiting for this permit or performing
-store I/O, while remaining in flight for per-session deduplication. A waiter
-holds neither scheduler capacity nor a store operation. Successful preparation
+tries to acquire this permit without waiting. If none is immediately available,
+the pass releases its scheduler-pass slot, ends its in-flight work, and leaves
+only the durable `Prepared` call for a later sweep. A pass that acquires the
+permit releases its scheduler-pass slot before performing store I/O while
+remaining in flight for per-session deduplication. Successful preparation
 reacquires scheduler capacity before send authorization, whose guarded
 transaction revalidates the call; unavailable preparation releases all capacity
 and leaves the call `Prepared`. The zero-attachment path acquires no blob permit
 and never relinquishes its ordinary pass slot. Thus slow 24-hour traversals
-cannot occupy the scheduler's bounded pass inventory.
+cannot occupy the scheduler's bounded pass inventory, and attachment preparation
+creates no unbounded waiter inventory.
 
 An S3 store currently named by at least one route is admitted for publication
 only when its bucket lifecycle configuration contains an enabled rule covering
@@ -355,19 +367,23 @@ digests in one input must not exceed `blob_storage.max_blob_bytes`; this names
 the aggregate full-verification work bound even when that input contains 256
 parts. Before recording any accepted-input effect, the same checked sum is
 applied to the distinct attachment digests in the complete prospective rendered
-frontier after the new content and its delivery transition. Either oversized sum
-uses the same typed terminal rejection, so acknowledged content cannot make the
-next prepared call exceed its attachment bound. Catalog existence and both sums
-are current-state validation, so an unseen command identifier is claimed first
-under the registry-first protocol; an unknown digest or oversized aggregate then
-commits the typed payload and terminal rejection with no accepted-input effect.
-Equal replay returns that rejection and corrected content uses a new command
-identity. Command and accepted-input rows carry mirrored ordered content-part
-satellites under the existing command/effect correlation discipline, and the
-wire `submit_input`, `reconcile_turn`, and `stop_turn` content fields all become
-the same ordered parts array. The process protocol's version-one in-place
-editing window is why this lands as the canonical shape rather than a
-compatibility variant beside the string form.
+frontier after the new content and its delivery transition. The same acceptance
+transaction also recomputes the eventual prospective rendered frontier of every
+already-queued accepted input whose predecessor can change under that
+transition, in canonical queue order, and applies the bound to each result. Any
+oversized sum uses the same typed terminal rejection, so acknowledged content
+cannot make the new or an already-queued input's future prepared call exceed its
+attachment bound. Catalog existence and all sums are current-state validation,
+so an unseen command identifier is claimed first under the registry-first
+protocol; an unknown digest or oversized aggregate then commits the typed
+payload and terminal rejection with no accepted-input effect. Equal replay
+returns that rejection and corrected content uses a new command identity.
+Command and accepted-input rows carry mirrored ordered content-part satellites
+under the existing command/effect correlation discipline, and the wire
+`submit_input`, `reconcile_turn`, and `stop_turn` content fields all become the
+same ordered parts array. The process protocol's version-one in-place editing
+window is why this lands as the canonical shape rather than a compatibility
+variant beside the string form.
 
 An input and prospective rendered frontier containing no attachment digest have
 both attachment sums equal to zero and bypass blob configuration, catalog, and

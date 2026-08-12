@@ -627,17 +627,19 @@ header.
 
 Raw source bytes live in the blob store under their existing SHA-256 content
 hash; the relational record stores that ordinary blob digest and never a second
-copy. New ingestion verifies and registers every raw blob before the aggregate
-transaction may reference it. Loading first reads the complete append-only
-relational projection and releases its transaction, then reads and verifies the
-referenced blobs, so no database transaction spans store I/O. The current
-converter and reconstitution surfaces retain their configured bounded
-whole-source behavior; future streaming conversion remains the committed
-unimplemented seam above. Each checked aggregate load — including ordinary read,
-replay comparison, and imported-frontier reconstitution — has one non-resetting
-24-hour monotonic deadline shared across every referenced digest and replica
-candidate. It performs at most one referenced-blob store operation at a time;
-digest or candidate changes never restart the deadline.
+copy. New ingestion publishes and verifies every raw blob before the aggregate
+transaction, then registers all blob and replica rows in the same transaction
+that first references them. A failed import can therefore leave deterministic
+unregistered store orphans but no unreachable catalog rows. Loading first reads
+the complete append-only relational projection and releases its transaction,
+then reads and verifies the referenced blobs, so no database transaction spans
+store I/O. The current converter and reconstitution surfaces retain their
+configured bounded whole-source behavior; future streaming conversion remains
+the committed unimplemented seam above. Each checked aggregate load — including
+ordinary read, replay comparison, and imported-frontier reconstitution — has one
+non-resetting 24-hour monotonic deadline shared across every referenced digest
+and replica candidate. It performs at most one referenced-blob store operation
+at a time; digest or candidate changes never restart the deadline.
 
 One transaction resolves or inserts a complete aggregate:
 
@@ -649,13 +651,14 @@ One transaction resolves or inserts a complete aggregate:
   identities are excluded. A semantic mismatch is typed
   `ExistingSnapshotMismatch`, never accepted as replay;
 - a new digest enters this transaction only after every content-addressed raw
-  blob has been published, verified, and registered without an open database
-  transaction, then atomically inserts one header, every raw occurrence, and
-  every normalized entry; a concurrent header-insert loser re-inspects and
-  completely reconstitutes the winner, returning `AlreadyImported` only after
-  the same conversion-equivalence check; writers acquire both shared raw hashes
-  and globally unique imported-entry identities in their respective sorted key
-  order while storing physical positions explicitly; and
+  blob has been published and verified without an open database transaction,
+  then atomically registers their blob and replica rows and inserts one header,
+  every raw occurrence, and every normalized entry; a concurrent header-insert
+  loser re-inspects and completely reconstitutes the winner, returning
+  `AlreadyImported` only after the same conversion-equivalence check; writers
+  acquire both shared raw hashes and globally unique imported-entry identities
+  in their respective sorted key order while storing physical positions
+  explicitly; and
 - every raw occurrence stores and rechecks its conversion digest before its
   normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
