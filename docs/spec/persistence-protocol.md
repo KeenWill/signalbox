@@ -1096,21 +1096,22 @@ identifiers.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
-holding a `Prepared` call follows the same logical closure after ending the call
-known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
-wait. A persisted `stop_requested` attempt and `cancellation_requested` call
-reconstruct through their exact applied interrupt, end the abandoned attempt
-`after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
-ambiguous call without erasing stop intent. The schema guard
-(`turn_lifecycle_pending_steering_closed`) independently requires every pending
-row to be consumed or reclassified before terminalization. The same finite
-startup inventory includes every nonterminal dedicated compaction call. Under
-the session scheduler lock it requires exactly one matching pending command,
-terminalizes Prepared as `known_failed` or InFlight as `ambiguous`, and marks
-the command failed in the same transaction; disagreement fails closed and no
-summary or result frontier is synthesized. Why: a pending steering row is an
-accepted delivery obligation, so every recovery branch must account for it
-rather than block startup or strand it.
+holding a `Prepared` call proves that no send authorization existed, so startup
+validates its exact stored frontier and leaves the call, attempt, and turn
+unchanged for scheduler retry; an in-flight call recovers into the
+`awaiting_model_call_recovery` wait. A persisted `stop_requested` attempt and
+`cancellation_requested` call reconstruct through their exact applied interrupt,
+end the abandoned attempt `after_cancellation/lost`, and terminalize
+proof-bearing reconciliation for the ambiguous call without erasing stop intent.
+The schema guard (`turn_lifecycle_pending_steering_closed`) independently
+requires every pending row to be consumed or reclassified before
+terminalization. The same finite startup inventory includes every nonterminal
+dedicated compaction call. Under the session scheduler lock it requires exactly
+one matching pending command, terminalizes Prepared as `known_failed` or
+InFlight as `ambiguous`, and marks the command failed in the same transaction;
+disagreement fails closed and no summary or result frontier is synthesized. Why:
+a pending steering row is an accepted delivery obligation, so every recovery
+branch must account for it rather than block startup or strand it.
 
 An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
 does not rewrite its terminal ambiguous call. In the accepting transaction, the
