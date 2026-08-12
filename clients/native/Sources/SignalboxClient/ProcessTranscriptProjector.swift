@@ -208,7 +208,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
       .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused,
-      .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired:
+      .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired,
+      .runnerStateTransition:
       content = nil
     }
     guard let content else {
@@ -1204,7 +1205,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
         .inputAccepted, .turnActivated, .turnFailed, .turnRefused, .turnCancelled,
         .toolApprovalDecided, .turnReconciliationRequired,
-        .turnToolReconciliationRequired, .unknown:
+        .turnToolReconciliationRequired, .runnerStateTransition, .unknown:
         return false
       }
     }
@@ -1336,7 +1337,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return entryTurnID == turnID && requestID.rawValue == awaitingToolDecisionRequestID
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition,
-      .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
+      .contextCompacted, .turnRefused, .turnReconciliationRequired,
+      .runnerStateTransition, .unknown:
       return false
     }
   }
@@ -1398,7 +1400,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
       .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnRefused,
-      .turnReconciliationRequired, .unknown:
+      .turnReconciliationRequired, .runnerStateTransition, .unknown:
       return []
     }
     guard let markerIndex = snapshot.records.firstIndex(where: { record in
@@ -1643,7 +1645,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
       .toolApprovalDecided, .contextCompacted, .turnRefused, .turnReconciliationRequired,
-      .turnToolReconciliationRequired, .unknown:
+      .turnToolReconciliationRequired, .runnerStateTransition, .unknown:
       return false
     }
   }
@@ -1790,7 +1792,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .turnToolReconciliationRequired:
       return !terminalResultEntryIDs.isEmpty
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
-      .inputAccepted, .turnActivated, .modelCallTransition, .toolApprovalDecided, .unknown:
+      .inputAccepted, .turnActivated, .modelCallTransition, .toolApprovalDecided,
+      .runnerStateTransition, .unknown:
       return true
     }
   }
