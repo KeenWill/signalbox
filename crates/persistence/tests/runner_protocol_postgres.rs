@@ -1411,7 +1411,7 @@ async fn insert_bounded_propagation_session_fixture(
         .await?;
     sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
-         SELECT session_id, 'owner_initiated', 'none'
+         SELECT session_id, 'user_initiated', 'none'
            FROM unnest($1::uuid[]) AS fixture(session_id)",
     )
     .bind(&session_uuids)
