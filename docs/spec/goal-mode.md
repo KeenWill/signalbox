@@ -280,6 +280,20 @@ an input carrying a command and force a goal turn's input to equal its statement
 verbatim. Until then the exposure is bounded by the statement being prompt
 context feeding an escalation instruction rather than a commit gate.
 
+**Committed unimplemented functionality.** No present judge record carries both
+what the provider recommended and what the repository committed. Escalating a
+completion whose authority was withdrawn overwrites the provider's answer with
+the escalation, so the record retains only the second. A replay can therefore
+prove that a substitution was legitimate — the authority is still withdrawn, and
+a closed generation cannot reopen — but not which recommendation was
+substituted, so a retry offering a different recommendation from the one first
+offered is admitted as an exact replay. The structural answer is for the record
+to carry both, after which a replay compares the offered value against the
+stored offered value and needs no such proof. Until then the exposure is latent
+rather than live: no caller retries a completion with a recommendation other
+than the one it first offered, because the only uncertain-commit path fails an
+in-flight judge as ambiguous instead of re-entering completion.
+
 ## Open edges
 
 **Deferred or undecided work.** No goal-mode open question is recorded by this
