@@ -54,6 +54,7 @@ owned by a sibling page is linked, never restated.
 - [Runner protocol and placement](runner-protocol.md)
 - [Review workflows](review-workflows.md)
 - [Persistence protocol](persistence-protocol.md)
+- [Blob storage](blob-storage.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Model-runtime substrate](runtime-substrate.md)
 - [Model and session settings](model-session-settings.md)

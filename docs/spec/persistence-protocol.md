@@ -1,14 +1,25 @@
 # Persistence protocol
 
+The runner connection authority head, durable loss epoch, and lease offer/claim
+fences were verified against the parent slice (`agent/runner-loss-epoch`).
+Placement-relative lease-offer fencing was verified against this PR
+(`agent/runner-loss-propagation`).
+
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
-(`agent/runner-event-outbox-persistence`).
+(`agent/runner-event-outbox-persistence`). The established-successor outbox
+source check was re-verified against this PR
+(`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
+
+The multipart accepted-input persistence paragraph below is the foundation
+proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
+with its implementing child stack.
 
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
@@ -126,8 +137,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty-four files, `202607180001` through
-`202608100001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — seventy-one files, `202607180001` through
+`202608110005` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -319,6 +330,18 @@ Representation rules, all enforced in the schema:
   unimplemented functionality.** No present adapter installs those transitions;
   their dedicated orchestration transactions will install these same checked
   records, and direct snapshot storage cannot stand in for those transactions.
+- Migration `202608110005` records the connection-loss epoch observed when each
+  placement selects a known enrollment and carries that baseline through later
+  loss or abandonment records. The value is derived while holding scheduler,
+  enrollment, and connection/loss authority in the runner total order; callers
+  cannot supply it. Initial pin carries forward an exact-identity selection's
+  baseline, while a capability-class request records its first selected runner
+  at pin. A loss that wins after exact selection cannot be hidden by
+  reconnecting. Lease insertion compares its pinned placement with the
+  enrollment's latest loss and remains fenced across successor physical
+  connections until a checked replacement installs a fresh baseline. This is the
+  implemented not-yet-projected placement fence; bounded session propagation
+  remains the committed unimplemented transaction described below.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -510,9 +533,11 @@ Representation rules, all enforced in the schema:
   rejection directly against its named turn's recorded `awaiting_tool_approval`
   wait, so a receipt naming a running or terminal turn cannot commit and
   therefore never replays as authoritative.
-- Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
-  `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
-  application admission bound.
+- Accepted user content is stored only in the mirrored ordered command and
+  `accepted_input` part satellites. Their parent completeness, ordinal,
+  structural, text-byte, attachment-metadata, and blob-correlation constraints
+  are owned by [blob storage](blob-storage.md#multipart-user-content); neither
+  parent retains a `content_text` column.
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
@@ -543,7 +568,7 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `update_session_placement`) and a kind-scoped `storage_version`. The gates above
 fix the current numbers: create-session records write version 7, imported-create
 records write version 5, replace-defaults records write version 4, and
-submit-input records write version 2; every other closed kind writes version 1.
+submit-input records write version 3; every other closed kind writes version 1.
 The four settings-bearing families require the migration's provider-default full
 settings or inherit-all overlay on every earlier supported version.
 Create-session records reconstitute version 1 with the disabled dangerous-tool
@@ -599,8 +624,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Fourteen explicit lock statements
-live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-three explicit lock
+statements live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -635,7 +660,17 @@ live in the schema instead:
   placement, and execution-loss relationship; and
 - the turn-attempt and tool-round before-insert guards in that migration share
   one `FOR UPDATE` helper that serializes new continuation evidence against the
-  same session scheduler before either immutable row becomes visible.
+  same session scheduler before either immutable row becomes visible; and
+- the lease-offer connection-loss fence in migration `202608110004` takes
+  `FOR SHARE` on the selected enrollment and connection authority head, then on
+  the optional current loss head when the connection is terminal; and
+- the lease-claim connection-loss fence in migration `202608110004` takes
+  `FOR SHARE` on the selected enrollment and connection authority head before
+  admitting the claim event; and
+- the placement-loss baseline trigger in migration `202608110005` takes
+  `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
+  enrollment, connection authority head, and optional current loss head before
+  deriving the immutable baseline and before the placement row becomes visible.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -1101,21 +1136,22 @@ identifiers.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
-holding a `Prepared` call follows the same logical closure after ending the call
-known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
-wait. A persisted `stop_requested` attempt and `cancellation_requested` call
-reconstruct through their exact applied interrupt, end the abandoned attempt
-`after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
-ambiguous call without erasing stop intent. The schema guard
-(`turn_lifecycle_pending_steering_closed`) independently requires every pending
-row to be consumed or reclassified before terminalization. The same finite
-startup inventory includes every nonterminal dedicated compaction call. Under
-the session scheduler lock it requires exactly one matching pending command,
-terminalizes Prepared as `known_failed` or InFlight as `ambiguous`, and marks
-the command failed in the same transaction; disagreement fails closed and no
-summary or result frontier is synthesized. Why: a pending steering row is an
-accepted delivery obligation, so every recovery branch must account for it
-rather than block startup or strand it.
+holding a `Prepared` call proves that no send authorization existed, so startup
+validates its exact stored frontier and leaves the call, attempt, and turn
+unchanged for scheduler retry; an in-flight call recovers into the
+`awaiting_model_call_recovery` wait. A persisted `stop_requested` attempt and
+`cancellation_requested` call reconstruct through their exact applied interrupt,
+end the abandoned attempt `after_cancellation/lost`, and terminalize
+proof-bearing reconciliation for the ambiguous call without erasing stop intent.
+The schema guard (`turn_lifecycle_pending_steering_closed`) independently
+requires every pending row to be consumed or reclassified before
+terminalization. The same finite startup inventory includes every nonterminal
+dedicated compaction call. Under the session scheduler lock it requires exactly
+one matching pending command, terminalizes Prepared as `known_failed` or
+InFlight as `ambiguous`, and marks the command failed in the same transaction;
+disagreement fails closed and no summary or result frontier is synthesized. Why:
+a pending steering row is an accepted delivery obligation, so every recovery
+branch must account for it rather than block startup or strand it.
 
 An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
 does not rewrite its terminal ambiguous call. In the accepting transaction, the

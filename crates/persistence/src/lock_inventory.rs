@@ -321,6 +321,11 @@ pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
               WHERE enrollment_id = $1
               FOR SHARE";
 
+pub(crate) const RUNNER_CONNECTION_LOSS_HEAD: &str = "SELECT loss_epoch
+               FROM runner_current_connection_loss
+              WHERE enrollment_id = $1
+              FOR UPDATE";
+
 pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT grant_record.credential_profile_name
                FROM runner_current_credential_grant_audit AS current_audit
                JOIN runner_credential_grant AS grant_record
@@ -347,6 +352,21 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
                 AND record.event_ordinal = current_placement.event_ordinal
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
+
+pub(crate) const RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER: &str = "SELECT enrollment_id
+               FROM runner_enrollment
+              WHERE runner_id = $1
+              FOR UPDATE";
+
+pub(crate) const RUNNER_PLACEMENT_CONNECTION_AUTHORITY: &str = "SELECT connection_epoch
+               FROM runner_connection_authority_head
+              WHERE enrollment_id = $1
+              FOR SHARE";
+
+pub(crate) const RUNNER_PLACEMENT_CURRENT_LOSS: &str = "SELECT loss_epoch
+               FROM runner_current_connection_loss
+              WHERE enrollment_id = $1
+              FOR SHARE";
 
 pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "SELECT session_id
                FROM session_scheduler
