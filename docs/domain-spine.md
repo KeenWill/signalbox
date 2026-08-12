@@ -8314,7 +8314,7 @@ pub enum ToolAttemptAuthorizationStatus {
 }
 
 pub enum ToolAttemptAuthorizationOutcome {
-    Authorized(ToolDispatchAuthority),
+    Authorized(Box<ToolDispatchAuthority>),
     PreauthorizationRejected,
 }
 

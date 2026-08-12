@@ -1451,7 +1451,7 @@ where
             )
             .await
         {
-            Ok(ToolAttemptAuthorizationOutcome::Authorized(authorized)) => authorized,
+            Ok(ToolAttemptAuthorizationOutcome::Authorized(authorized)) => *authorized,
             Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected) => {
                 let ended = self
                     .transaction
@@ -2331,6 +2331,7 @@ mod tests {
             }
             self.batch
                 .authorize_dispatch(attempt)
+                .map(Box::new)
                 .map(ToolAttemptAuthorizationOutcome::Authorized)
                 .map_err(|_| FakeError::Ordinary)
         }
