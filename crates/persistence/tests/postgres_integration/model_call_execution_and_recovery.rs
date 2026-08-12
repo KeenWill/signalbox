@@ -162,7 +162,8 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         prepared
             .origin_content(accepted_input)
             .expect("the frontier origin must carry its checked receipt content")
-            .text()
+            .single_text()
+            .expect("the fixture has exactly one text part")
             .as_str(),
         "exact user request"
     );
@@ -771,7 +772,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             content,
             ..
         } if *message_input == accepted_input
-            && content.text().as_str() == "service user request"
+            && content.single_text().is_some_and(|text| text.as_str() == "service user request")
     ));
     assert!(matches!(
         &messages[1],
@@ -780,7 +781,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             content,
             ..
         } if *message_input == steering_inputs[0]
-            && content.text().as_str() == "first steering"
+            && content.single_text().is_some_and(|text| text.as_str() == "first steering")
     ));
     assert!(matches!(
         &messages[2],
@@ -789,7 +790,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             content,
             ..
         } if *message_input == steering_inputs[1]
-            && content.text().as_str() == "second steering"
+            && content.single_text().is_some_and(|text| text.as_str() == "second steering")
     ));
 
     let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(

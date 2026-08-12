@@ -20,7 +20,7 @@ use signalbox_process_protocol::{
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolApprovalEventDecider,
     ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, UsageProvenance,
+    TurnState, UsageProvenance, UserInputContent, UserInputPart,
 };
 
 use crate::{
@@ -1628,7 +1628,7 @@ impl<'a> Output<'a> {
                      accepted_input={accepted_input_id} turn={turn_id} position={}",
                     acceptance_position.value()
                 )?;
-                self.text(content.as_str())
+                self.user_content(content)
             }
             SessionEvent::GoalTurnRetired { turn_id } => writeln!(
                 self.stdout,
@@ -1905,6 +1905,16 @@ impl<'a> Output<'a> {
         self.text_fragment(text, true, text.ends_with('\n'))
     }
 
+    fn user_content(&mut self, content: &UserInputContent) -> io::Result<()> {
+        match content.parts() {
+            [UserInputPart::Text { text }] => self.text(text),
+            parts => {
+                serde_json::to_writer(&mut self.stdout, parts)?;
+                writeln!(self.stdout)
+            }
+        }
+    }
+
     fn text_fragment(
         &mut self,
         fragment: &str,
@@ -1938,7 +1948,7 @@ impl<'a> Output<'a> {
                     "turn={turn_id} position={position} state=queued \
                      accepted_input={accepted_input_id}"
                 )?;
-                self.text(content.as_str())
+                self.user_content(content)
             }
             TurnState::QueuedDelegated {
                 spawning_request_id,
@@ -3020,7 +3030,7 @@ mod tests {
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
         ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
         ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
-        TurnState, UsageProvenance,
+        TurnState, UsageProvenance, UserInputContent,
     };
     use uuid::Uuid;
 
@@ -3541,7 +3551,7 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id,
-                    content: InputContent::new("queued user text".to_owned()),
+                    content: UserInputContent::text("queued user text".to_owned()),
                 },
             }],
         )
@@ -4362,7 +4372,7 @@ mod tests {
                     model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: wire_uuid(10),
-                        content: InputContent::new("transcript content".to_owned()),
+                        content: UserInputContent::text("transcript content".to_owned()),
                     },
                 },
                 ServerMessage::TranscriptModelCallUsage {

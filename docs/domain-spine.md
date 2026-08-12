@@ -2112,6 +2112,7 @@ impl NonEmptyUnicodeText {
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
     ContainsNull,
+    TooLong,
 }
 
 pub struct NonEmptyUnicodeTextError { /* private */ }
@@ -2120,12 +2121,66 @@ impl NonEmptyUnicodeTextError {
     // accessors: failure(), value()
 }
 
-pub enum UserContent {
-    Text { value: NonEmptyUnicodeText },
+pub enum AttachmentKind {
+    Image,
+    Document,
+    File,
 }
+
+pub struct DeclaredMediaType(/* private String */);
+impl DeclaredMediaType {
+    pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
+    // accessor: as_str()
+}
+pub enum DeclaredMediaTypeFailure {
+    Empty,
+    TooLong,
+    NotVisibleAscii,
+}
+pub struct DeclaredMediaTypeError { /* private */ }
+impl DeclaredMediaTypeError {
+    // accessors: failure(), value()
+}
+
+pub struct AttachmentDisplayFilename(/* private String */);
+impl AttachmentDisplayFilename {
+    pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError>;
+    // accessor: as_str()
+}
+pub enum AttachmentDisplayFilenameFailure {
+    Empty,
+    TooLong,
+    ReservedBasename,
+    ContainsPathSeparator,
+    ContainsNull,
+}
+pub struct AttachmentDisplayFilenameError { /* private */ }
+impl AttachmentDisplayFilenameError {
+    // accessors: failure(), value()
+}
+
+pub enum UserContentPart {
+    Text { value: NonEmptyUnicodeText },
+    Attachment {
+        digest: BlobDigest,
+        kind: AttachmentKind,
+        media_type: DeclaredMediaType,
+        display_filename: Option<AttachmentDisplayFilename>,
+    },
+}
+pub struct UserContent { /* private Vec<UserContentPart> */ }
 impl UserContent {
+    pub const MAX_TEXT_BYTES: usize; // 1_048_576
     pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
-    // accessors: text()
+    pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError>;
+    pub fn into_parts(self) -> Vec<UserContentPart>;
+    // accessors: parts(), single_text()
+}
+pub enum UserContentError {
+    Empty,
+    TooManyParts,
+    AdjacentTextParts,
+    TextTooLarge,
 }
 ```
 
@@ -7956,12 +8011,10 @@ impl<
 ```rust
 pub enum SubmitInputRequestError {
     InvalidCommandId(InvalidDurableCommandId),
-    OversizedContent { utf8_byte_length: usize },
 }
 
 pub struct SubmitInputRequest { /* private */ }
 impl SubmitInputRequest {
-    pub const MAX_CONTENT_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
@@ -10303,7 +10356,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_settings                             | 25                    |
 | domain: accepted_input                             | 5                     |
 | domain: delivery_request                           | 2                     |
-| domain: user_content                               | 4                     |
+| domain: user_content                               | 13                    |
 | domain: submit_input                               | 33                    |
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
@@ -10328,7 +10381,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **774 (+12 free fn)** |
+| **signalbox-domain total**                         | **783 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

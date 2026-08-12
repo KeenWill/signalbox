@@ -3636,7 +3636,13 @@ mod tests {
         };
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
-        assert_eq!(content.text().as_str(), "exact user request");
+        assert_eq!(
+            content
+                .single_text()
+                .expect("the fixture has exactly one text part")
+                .as_str(),
+            "exact user request"
+        );
     }
 
     /// S34 / INV-046: rendering binds the exact optional frozen-epoch system
@@ -4191,10 +4197,14 @@ mod tests {
                     accepted_input: AcceptedInputId(
                         00000000-0000-0000-0000-00000000005b,
                     ),
-                    content: Text {
-                        value: NonEmptyUnicodeText(
-                            "inherited user request",
-                        ),
+                    content: UserContent {
+                        parts: [
+                            Text {
+                                value: NonEmptyUnicodeText(
+                                    "inherited user request",
+                                ),
+                            },
+                        ],
                     },
                 },
                 Assistant {
@@ -4227,10 +4237,14 @@ mod tests {
                     accepted_input: AcceptedInputId(
                         00000000-0000-0000-0000-000000000063,
                     ),
-                    content: Text {
-                        value: NonEmptyUnicodeText(
-                            "failed user request",
-                        ),
+                    content: UserContent {
+                        parts: [
+                            Text {
+                                value: NonEmptyUnicodeText(
+                                    "failed user request",
+                                ),
+                            },
+                        ],
                     },
                 },
                 User {
@@ -4245,10 +4259,14 @@ mod tests {
                     accepted_input: AcceptedInputId(
                         00000000-0000-0000-0000-00000000005c,
                     ),
-                    content: Text {
-                        value: NonEmptyUnicodeText(
-                            "current user request",
-                        ),
+                    content: UserContent {
+                        parts: [
+                            Text {
+                                value: NonEmptyUnicodeText(
+                                    "current user request",
+                                ),
+                            },
+                        ],
                     },
                 },
             ]

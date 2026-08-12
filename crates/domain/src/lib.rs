@@ -376,7 +376,10 @@ pub use turn_lifecycle::{
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 pub use user_content::{
+    AttachmentDisplayFilename, AttachmentDisplayFilenameError, AttachmentDisplayFilenameFailure,
+    AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError, DeclaredMediaTypeFailure,
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
+    UserContentError, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
 

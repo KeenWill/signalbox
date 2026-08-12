@@ -3917,7 +3917,7 @@ async fn submit_input(
         .mutation_request(ClientRequest::SubmitInput {
             command_id,
             session_id,
-            content,
+            content: signalbox_process_protocol::UserInputContent::text(content.into_string()),
             expected_defaults_version,
             model_settings: ModelSettingsOverlay::inherit_all(),
             delivery,
@@ -3961,7 +3961,7 @@ async fn reconcile_turn(
             command_id,
             session_id,
             expected_active_turn_id,
-            content,
+            content: signalbox_process_protocol::UserInputContent::text(content.into_string()),
             expected_defaults_version: defaults_version,
             model_settings: ModelSettingsOverlay::inherit_all(),
         })
@@ -4003,7 +4003,7 @@ async fn stop_turn(
             command_id,
             session_id,
             expected_active_turn_id,
-            content,
+            content: signalbox_process_protocol::UserInputContent::text(content.into_string()),
             expected_defaults_version: defaults_version,
             descendant_scope,
             model_settings: ModelSettingsOverlay::inherit_all(),
@@ -5605,7 +5605,7 @@ mod tests {
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
         ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
         SessionEvent, SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState,
-        ToolDecision, TurnState, decode_client_line, encode_server_line,
+        ToolDecision, TurnState, UserInputContent, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -6587,7 +6587,7 @@ mod tests {
                         model_settings: None,
                         state: TurnState::Queued {
                             accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(10)),
-                            content: InputContent::new(String::from("wait behind recovery")),
+                            content: UserInputContent::text(String::from("wait behind recovery")),
                         },
                     })?)
                     .map_err(io::Error::other)?,
@@ -6722,7 +6722,7 @@ mod tests {
                     model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-                        content: InputContent::new(String::from("stream the reply")),
+                        content: UserInputContent::text(String::from("stream the reply")),
                     },
                 })?)
                 .map_err(io::Error::other)?,
@@ -6815,7 +6815,7 @@ mod tests {
                     model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-                        content: InputContent::new(String::from("stream the reply")),
+                        content: UserInputContent::text(String::from("stream the reply")),
                     },
                 })?)
                 .map_err(io::Error::other)?,
@@ -8696,7 +8696,7 @@ mod tests {
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
         let content = InputContent::new(String::from("queued content"));
-        let expected_content = content.clone();
+        let expected_content = UserInputContent::text(content.clone().into_string());
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
             let (reader, mut writer) = stream.into_split();
@@ -8777,7 +8777,7 @@ mod tests {
                     command_id: CommandId::try_from_uuid(Uuid::from_u128(4))
                         .map_err(io::Error::other)?,
                     session_id,
-                    content: InputContent::new(String::from("steering content")),
+                    content: UserInputContent::text(String::from("steering content")),
                     expected_defaults_version: None,
                     model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: Some(InputDelivery::Steer {
@@ -8840,7 +8840,7 @@ mod tests {
         let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
         let defaults_version = CanonicalU64::new(1);
         let content = InputContent::new(String::from("continue after reconciliation"));
-        let expected_content = content.clone();
+        let expected_content = UserInputContent::text(content.clone().into_string());
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
@@ -8910,7 +8910,7 @@ mod tests {
             command_id,
             session_id,
             expected_active_turn_id: active_turn_id,
-            content: content.clone(),
+            content: UserInputContent::text(content.clone().into_string()),
             expected_defaults_version: defaults_version,
             descendant_scope: selected_scope,
             model_settings: ModelSettingsOverlay::inherit_all(),

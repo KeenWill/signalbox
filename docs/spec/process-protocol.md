@@ -1,5 +1,8 @@
 # Process protocol
 
+The ordered user-content part-array vocabulary is verified against this PR
+(`agent/blob-storage-multipart-algebra`).
+
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 
@@ -372,7 +375,7 @@ where `D` is a canonical blob digest, `K` is `image`, `document`, or `file`, and
 text bytes and attachment member bounds are owned by
 [blob storage](blob-storage.md#multipart-user-content); the wire applies them
 before application construction. A one-part text array is the sole spelling of
-legacy text content.
+text-only content.
 
 The `content` member on transcript `queued` states and `input_accepted` session
 events is that same closed ordered parts array. Together with

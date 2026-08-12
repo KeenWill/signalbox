@@ -2742,34 +2742,19 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     Ok(())
 }
 
-/// The persistence contract mirrors the one-mebibyte accepted-input
-/// content bound is one contract enforced at correlated layers — oversized
-/// text fails application admission before the typed command and never reaches SQL,
-/// exact-bound text commits through the real adapter, and a direct SQL
-/// insert of oversized content is refused by the schema checks.
+/// The persistence contract mirrors the one-mebibyte accepted-input content
+/// bound at correlated layers: oversized text fails domain construction and
+/// never reaches SQL, exact-bound text commits through the real adapter, and a
+/// direct SQL insert of oversized content is refused by the schema checks.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
+async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
-    let oversized = UserContent::try_text("a".repeat(1_048_577))
-        .expect("domain text is intentionally unbounded");
-    let error = SubmitInputRequest::try_new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x320)),
-        SessionId::from_uuid(Uuid::from_u128(0x720)),
-        oversized,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    )
-    .expect_err("text over the provisional bound fails application admission");
-    assert_eq!(
-        error,
-        SubmitInputRequestError::OversizedContent {
-            utf8_byte_length: 1_048_577,
-        }
-    );
+    let error = UserContent::try_text("a".repeat(1_048_577))
+        .expect_err("text over the aggregate bound fails domain construction");
+    assert_eq!(error.failure(), NonEmptyUnicodeTextFailure::TooLong);
     let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
         .fetch_one(&pool)
         .await?;
