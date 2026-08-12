@@ -155,9 +155,11 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box
     let port = container.get_host_port_ipv4(5432).await?;
     let database_url =
         format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let connection_options =
+        local_test_connection_options(&database_url)?.statement_cache_capacity(0);
     let pool = PgPoolOptions::new()
         .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
+        .connect_with(connection_options)
         .await?;
     Ok((container, pool))
 }
@@ -1180,6 +1182,7 @@ async fn migrated_unconnected_later_lease_fixture(
     MIGRATOR
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
+    install_pre_loss_fence_compatibility_tables(pool).await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -1246,6 +1249,7 @@ async fn migrated_unconnected_later_lease_fixture(
     sqlx::query("ALTER TABLE runner_connection_event ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    drop_pre_loss_fence_compatibility_tables(pool).await?;
     migrate(pool).await?;
     terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
@@ -1263,6 +1267,36 @@ async fn migrated_unconnected_later_lease_fixture(
         )
         .expect("the legacy placement prepares a later lease");
     Ok((store, expected_enrollment, registration, lease))
+}
+
+async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE runner_connection_authority_head (
+            enrollment_id uuid PRIMARY KEY,
+            connection_epoch numeric(20, 0) NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE runner_current_connection_loss (
+            enrollment_id uuid PRIMARY KEY,
+            loss_epoch numeric(20, 0) NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn drop_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("DROP TABLE runner_current_connection_loss")
+        .execute(pool)
+        .await?;
+    sqlx::query("DROP TABLE runner_connection_authority_head")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Error> {
@@ -3294,22 +3328,7 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     MIGRATOR
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
-    sqlx::query(
-        "CREATE TABLE runner_connection_authority_head (
-            enrollment_id uuid PRIMARY KEY,
-            connection_epoch numeric(20, 0) NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "CREATE TABLE runner_current_connection_loss (
-            enrollment_id uuid PRIMARY KEY,
-            loss_epoch numeric(20, 0) NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await?;
+    install_pre_loss_fence_compatibility_tables(&pool).await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3471,6 +3490,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     MIGRATOR
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
+    install_pre_loss_fence_compatibility_tables(&pool).await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -3489,6 +3509,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     .execute(&pool)
     .await?;
     store.store_pin(&pin, &registration).await?;
+    drop_pre_loss_fence_compatibility_tables(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
@@ -5380,6 +5401,98 @@ async fn s32_inv045_profile_replacement_survives_equivalent_reregistration()
             Decimal::from(registration.revision().get())
         )
     );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: later lease admission takes enrollment authority before
+/// the placement head, matching profile replacement's durable lock order.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_lease_offer_locks_enrollment_before_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, lease) =
+        stored_later_lease_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    let replacement_grant = duplicate_grant(&replacement.grant.grant, registration.registration());
+    let enrollment = expected_enrollment.enrollment();
+    let mut enrollment_blocker = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_one(&mut *enrollment_blocker)
+    .await?;
+    let lease_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let lease_task = tokio::spawn(async move {
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, lease_store.store_lease(&lease)).await
+    });
+    let lease_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
+    let mut placement_probe = pool.begin().await?;
+    sqlx::query(
+        "SELECT session_id
+           FROM runner_current_session_placement
+          WHERE session_id = $1
+          FOR UPDATE NOWAIT",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .fetch_one(&mut *placement_probe)
+    .await?;
+    placement_probe.rollback().await?;
+    let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let replacement_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            replacement_store.store_placement(
+                &replacement.placement,
+                Some(&registration),
+                Some(&replacement_grant),
+            ),
+        )
+        .await
+    });
+    let replacement_observation =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
+    let blocker_commit =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, enrollment_blocker.commit()).await;
+    let lease_result = lease_task.await;
+    let replacement_result = replacement_task.await;
+    let lease_blocked = lease_observation.expect("lease lock observation must remain bounded")?;
+    let replacement_blocked =
+        replacement_observation.expect("replacement lock observation must remain bounded")?;
+    blocker_commit.expect("enrollment blocker commit must remain bounded")?;
+    lease_result
+        .expect("lease task must remain joinable")
+        .expect("lease admission must finish within its task-owned timeout")?;
+    replacement_result
+        .expect("replacement task must remain joinable")
+        .expect("profile replacement must finish within its task-owned timeout")?;
+
+    assert!(
+        lease_blocked,
+        "lease admission must reach enrollment authority"
+    );
+    assert!(
+        replacement_blocked,
+        "profile replacement must queue behind the lease's scheduler authority"
+    );
+    drop(store);
     drop(pool);
     Ok(())
 }
@@ -15779,7 +15892,7 @@ async fn s31_inv009_inv043_inv044_connection_loss_serializes_exact_selection_pin
         .expect("the terminal connection remains the durable head");
 
     assert_eq!(lost_connection.state(), RunnerConnectionState::Lost);
-    assert_store_check_violation(rejected);
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
     assert_eq!(loaded.placement().state(), &expected_unpinned_state);
     drop(pool);
     Ok(())

@@ -653,12 +653,12 @@ statements live in the schema instead:
 - the turn-attempt and tool-round before-insert guards in that migration share
   one `FOR UPDATE` helper that serializes new continuation evidence against the
   same session scheduler before either immutable row becomes visible; and
-- the lease-offer connection-loss fence in migration `202608100002` takes
+- the lease-offer connection-loss fence in migration `202608100003` takes
   `FOR SHARE` on the selected enrollment and connection authority head, then on
   the optional current loss head when the connection is terminal; and
-- the lease-claim connection-loss fence in that migration takes `FOR SHARE` on
-  the selected enrollment and connection authority head before admitting the
-  claim event; and
+- the lease-claim connection-loss fence in migration `202608100003` takes
+  `FOR SHARE` on the selected enrollment and connection authority head before
+  admitting the claim event; and
 - the placement-loss baseline trigger in migration `202608100004` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
