@@ -1423,7 +1423,9 @@ async fn migrated_unconnected_later_lease_fixture(
         .execute(pool)
         .await?;
     drop_pre_loss_fence_compatibility_tables(pool).await?;
-    migrate(pool).await?;
+    MIGRATOR
+        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, pool)
+        .await?;
     terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     let lease = pin
@@ -4164,7 +4166,9 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     .bind(expected_enrollment.enrollment().into_uuid())
     .execute(&pool)
     .await?;
-    migrate(&pool).await?;
+    MIGRATOR
+        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
+        .await?;
     let loaded = store
         .load_current_connection_loss(expected_enrollment.enrollment())
         .await?
@@ -5488,7 +5492,9 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    migrate(&pool).await?;
+    MIGRATOR
+        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
+        .await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(expected.session())
         .await?
@@ -5645,7 +5651,9 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     )
     .execute(&pool)
     .await?;
-    migrate(&pool).await?;
+    MIGRATOR
+        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
+        .await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(pin.placement.session())
         .await?
