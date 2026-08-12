@@ -2310,8 +2310,12 @@ impl SubmitInputTurnOriginReconstitutionInput {
     pub fn reclassified(input: SubmitInputReclassifiedTurnOriginConstructionInput) -> Self;
 }
 
+pub struct NonAcceptedTurnPredecessorReconstitutionInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+}
 pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
-    /* public named command, result, accepted-input, queue, and configuration facts */
+    /* public named command, result, accepted-input, accepted/non-accepted predecessor, queue, and configuration facts */
 }
 pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
     /* public named command, result, source-turn, and accepted-input facts */
@@ -2346,7 +2350,6 @@ pub struct SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
 pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput {
     /* public named command, active-turn, and canonical origin facts */
 }
-
 pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
     pub fn applied_turn_origin(
@@ -2594,6 +2597,11 @@ pub enum ActiveTurnPhase {
         ambiguous_operations: NonEmptyIssuedOperationRefs,
         applied_interrupt: Option<AppliedInterruptProof>,
     },
+    AwaitingRunnerRecovery {
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        optional_tool_attempt: Option<ToolAttemptId>,
+    },
 }
 impl ActiveTurnPhase {
     pub const fn retains_progressing_slot(&self) -> bool;  // always true
@@ -2711,6 +2719,9 @@ impl TerminalAttemptEndReconstitutionInput {
         disposition: CancellationStopDisposition,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
+    pub const fn yielded_to_runner_recovery(
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
     // accessors: end(), interrupt()
 }
 
@@ -2802,6 +2813,12 @@ impl ActiveTurnSchedulingReconstitutionInput {
         ended_attempt: TurnAttemptId,
         ambiguous_call: ModelCallId,
         interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn awaiting_runner_recovery(
+        owning_turn: TurnId,
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        interrupted_tool_attempt: Option<ToolAttemptId>,
     ) -> Self;
     // accessor: owning_turn()
 }
@@ -2986,7 +3003,8 @@ impl AcceptedInputSchedulingReconstitutionInput {
     pub fn with_preceding_non_accepted_terminal(
         self,
         session: SessionId,
-        turn: TurnId,
+        predecessor: TurnId,
+        successor: TurnId,
         terminal_frontier: ContextFrontierId,
         selected: DirectModelSelection,
     ) -> Self;
@@ -3154,6 +3172,29 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_tool_batch(
         self,
         batch: ToolBatch,
@@ -3235,6 +3276,31 @@ impl ActivatedTurn {
         &self,
         entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     ) -> Option<Vec<SemanticTranscriptEntry>>;
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     // accessors: session(), turn(), configuration(), configuration_provenance(),
     // start(), phase(), pending_steering(), consumed_steering()
 }
@@ -10078,7 +10144,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                     |
 | domain: delivery_request                           | 2                     |
 | domain: user_content                               | 4                     |
-| domain: submit_input                               | 32                    |
+| domain: submit_input                               | 33                    |
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
 | domain: turn_lifecycle                             | 10                    |
@@ -10102,7 +10168,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **770 (+12 free fn)** |
+| **signalbox-domain total**                         | **771 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

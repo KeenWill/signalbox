@@ -410,7 +410,8 @@ impl SubmitInput {
                 CurrentTurnAttemptState::Prepared | CurrentTurnAttemptState::Running => None,
             },
             crate::ActiveTurnPhase::AwaitingApproval { .. }
-            | crate::ActiveTurnPhase::AwaitingChild { .. } => None,
+            | crate::ActiveTurnPhase::AwaitingChild { .. }
+            | crate::ActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
             crate::ActiveTurnPhase::AwaitingRecoveryDecision {
                 applied_interrupt, ..
             } => *applied_interrupt,
@@ -1762,6 +1763,7 @@ struct SubmitInputTurnOriginAppliedReconstitutionFacts {
     result_accepted_input: AcceptedInputId,
     result_turn: TurnId,
     predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    non_accepted_predecessor: Option<NonAcceptedTurnPredecessorReconstitutionInput>,
     accepted_command: DurableCommandId,
     accepted_input: AcceptedInputId,
     accepted_session: SessionId,
@@ -1779,6 +1781,16 @@ struct SubmitInputTurnOriginAppliedReconstitutionFacts {
     stored_frozen_model: FrozenModelSelection,
     stored_model_settings: Option<ValidatedModelSettings>,
     stored_model_settings_adjustments: Box<[ModelChangeAdjustment]>,
+}
+
+/// Exact terminal predecessor facts for an origin that did not come from an
+/// accepted input, such as a delegated turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NonAcceptedTurnPredecessorReconstitutionInput {
+    /// The session owning the predecessor.
+    pub session: SessionId,
+    /// The terminal predecessor turn.
+    pub turn: TurnId,
 }
 
 #[derive(Clone, Debug)]
@@ -1871,6 +1883,9 @@ pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
     pub result_turn: TurnId,
     /// The canonical predecessor origin required by after-current delivery.
     pub predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    /// The exact non-accepted terminal predecessor, admitted only for an
+    /// interrupt origin when no accepted-input predecessor exists.
+    pub non_accepted_predecessor: Option<NonAcceptedTurnPredecessorReconstitutionInput>,
     /// The command identity stored with the accepted input.
     pub accepted_command: DurableCommandId,
     /// The accepted-input identity stored with accepted content.
@@ -2120,6 +2135,7 @@ impl SubmitInputReconstitutionInput {
             result_accepted_input,
             result_turn,
             predecessor_origin,
+            non_accepted_predecessor,
             accepted_command,
             accepted_input,
             accepted_session,
@@ -2147,6 +2163,7 @@ impl SubmitInputReconstitutionInput {
                     result_accepted_input,
                     result_turn,
                     predecessor_origin,
+                    non_accepted_predecessor,
                     accepted_command,
                     accepted_input,
                     accepted_session,
@@ -2471,6 +2488,7 @@ impl SubmitInputReconstitutionInput {
                     result_accepted_input,
                     result_turn,
                     predecessor_origin,
+                    non_accepted_predecessor,
                     accepted_command,
                     accepted_input,
                     accepted_session,
@@ -2581,9 +2599,14 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::QueuePriorityMismatch,
                     ));
                 }
-                match (expected_predecessor, predecessor_origin) {
-                    (None, None) => {}
-                    (Some(expected_predecessor), Some(predecessor_origin)) => {
+                match (
+                    expected_predecessor,
+                    predecessor_origin,
+                    non_accepted_predecessor,
+                    interrupt_predecessor,
+                ) {
+                    (None, None, None, None) => {}
+                    (Some(expected_predecessor), Some(predecessor_origin), None, _) => {
                         let Some(predecessor) =
                             validate_turn_origin_reconstitution_input(&predecessor_origin)
                         else {
@@ -2617,7 +2640,15 @@ impl SubmitInputReconstitutionInput {
                             ));
                         }
                     }
-                    (None, Some(_)) | (Some(_), None) => {
+                    (
+                        Some(expected_predecessor),
+                        None,
+                        Some(non_accepted_predecessor),
+                        Some(interrupt_predecessor),
+                    ) if non_accepted_predecessor.session == self.command.session
+                        && non_accepted_predecessor.turn == expected_predecessor
+                        && non_accepted_predecessor.turn == interrupt_predecessor => {}
+                    _ => {
                         return Err(fail(
                             SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch,
                         ));
@@ -3630,7 +3661,8 @@ mod tests {
     use std::hash::{Hash, Hasher};
 
     use super::{
-        ReconstitutedSubmitInput, StoredOriginConfigurationReconstitutionFacts, SubmitInput,
+        NonAcceptedTurnPredecessorReconstitutionInput, ReconstitutedSubmitInput,
+        StoredOriginConfigurationReconstitutionFacts, SubmitInput,
         SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
         SubmitInputAppliedTurnOriginReconstitutionInput,
         SubmitInputDirectTurnOriginConstructionInput, SubmitInputPreparationFailure,
@@ -3813,6 +3845,18 @@ mod tests {
         current: &Session,
         position: SessionInputPosition,
     ) -> AcceptedInputSchedulingProjection {
+        active_turn_at_position_in_phase(
+            current,
+            position,
+            ActiveTurnSchedulingReconstitutionInput::prepared(turn_id(7), turn_attempt_id(0x51)),
+        )
+    }
+
+    fn active_turn_at_position_in_phase(
+        current: &Session,
+        position: SessionInputPosition,
+        phase: ActiveTurnSchedulingReconstitutionInput,
+    ) -> AcceptedInputSchedulingProjection {
         let origin_entry = semantic_transcript_entry_id(0x31);
         let accepted_input = AcceptedInputLifecycle::new(
             accepted_input_id(0x21),
@@ -3838,10 +3882,7 @@ mod tests {
                 AcceptedInputTurnSchedulingRecordState::Active {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                     starting_frontier: context_frontier_id(0x41),
-                    phase: ActiveTurnSchedulingReconstitutionInput::prepared(
-                        turn_id(7),
-                        turn_attempt_id(0x51),
-                    ),
+                    phase,
                 },
             )],
             vec![SemanticTranscriptEntryReconstitutionInput::new(
@@ -3878,6 +3919,20 @@ mod tests {
         )
         .reconstitute()
         .expect("test active scheduling facts are complete")
+    }
+
+    fn runner_recovery_turn(current: &Session) -> AcceptedInputSchedulingProjection {
+        active_turn_at_position_in_phase(
+            current,
+            SessionInputPosition::first(),
+            ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
+                turn_id(7),
+                crate::RunnerId::from_uuid(uuid::Uuid::from_u128(0x81)),
+                crate::RunnerGeneration::try_from_u64(2)
+                    .expect("the fixture placement revision is positive"),
+                None,
+            ),
+        )
     }
 
     fn queued_turn(current: &Session) -> AcceptedInputSchedulingProjection {
@@ -3940,6 +3995,7 @@ mod tests {
                 result_accepted_input: accepted_input_id(3),
                 result_turn: turn_id(4),
                 predecessor_origin: None,
+                non_accepted_predecessor: None,
                 accepted_command: command_id(1),
                 accepted_input: accepted_input_id(3),
                 accepted_session: session_id(1),
@@ -4080,6 +4136,7 @@ mod tests {
                 result_accepted_input: accepted_input_id(source_accepted_input),
                 result_turn: turn_id(7),
                 predecessor_origin: None,
+                non_accepted_predecessor: None,
                 accepted_command: command_id(source_command),
                 accepted_input: accepted_input_id(source_accepted_input),
                 accepted_session: session_id(1),
@@ -4204,6 +4261,7 @@ mod tests {
                 result_accepted_input: accepted_input_id(3),
                 result_turn: turn_id(8),
                 predecessor_origin: Some(source_turn_origin()),
+                non_accepted_predecessor: None,
                 accepted_command: command_id(1),
                 accepted_input: accepted_input_id(3),
                 accepted_session: session_id(1),
@@ -4223,6 +4281,36 @@ mod tests {
                 stored_model_settings_adjustments: Vec::new(),
             },
         )
+    }
+
+    fn interrupt_applied_input_with_non_accepted_predecessor(
+        predecessor_session: crate::SessionId,
+        predecessor_turn: crate::TurnId,
+    ) -> SubmitInputReconstitutionInput {
+        let mut input = after_applied_input();
+        let command = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(7),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        );
+        input.command = command.clone();
+        let facts = applied_facts(&mut input);
+        facts.predecessor_origin = None;
+        facts.non_accepted_predecessor = Some(NonAcceptedTurnPredecessorReconstitutionInput {
+            session: predecessor_session,
+            turn: predecessor_turn,
+        });
+        facts.accepted_delivery = command.delivery();
+        facts.queue_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            facts.accepted_position,
+            turn_id(7),
+        );
+        input
     }
 
     fn after_applied_input_with_chained_predecessor(
@@ -4246,6 +4334,7 @@ mod tests {
                     0x102,
                     0x202,
                 )),
+                non_accepted_predecessor: None,
                 accepted_command: command_id(command_value),
                 accepted_input: accepted_input_id(accepted_input_value),
                 accepted_session: session_id(1),
@@ -5166,6 +5255,35 @@ mod tests {
         );
     }
 
+    /// S07 / INV-029 / INV-044: runner recovery does not invent a new
+    /// non-consuming rejection that would foreclose stop-before-abandonment.
+    #[test]
+    fn s07_inv029_inv044_runner_recovery_preserves_interrupt_authority() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let active = runner_recovery_turn(&current);
+        let interrupted_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let successor = turn_id(8);
+        let prepared = interrupt_command(6, interrupted_turn)
+            .prepare_with_active_turn(&active, accepted_input_id(3), Some(successor), |_| None)
+            .expect("runner recovery preserves the existing interrupt algebra");
+        let origin = applied_result(prepared.result())
+            .turn_origin()
+            .expect("the interrupt creates an immediate successor");
+
+        assert_eq!(origin.turn(), successor);
+        assert_eq!(
+            origin
+                .applied_interrupt()
+                .expect("the interrupt carries cancellation authority")
+                .proof()
+                .predecessor(),
+            interrupted_turn
+        );
+    }
+
     /// The canonical active-slot projection parked on one confirm request:
     /// fixture turn 7 completed its producing call, the yielded tool round
     /// proposes one request, and no decision has resolved the approval wait.
@@ -5827,6 +5945,7 @@ mod tests {
                 result_accepted_input: accepted_input_id(0x81),
                 result_turn: turn_id(9),
                 predecessor_origin: Some(reclassified_turn_origin()),
+                non_accepted_predecessor: None,
                 accepted_command: after_command.command_id(),
                 accepted_input: accepted_input_id(0x81),
                 accepted_session: session_id(1),
@@ -6350,6 +6469,71 @@ mod tests {
             unexpected_predecessor
                 .reconstitute()
                 .expect_err("vacant-slot start replay has no active predecessor")
+                .failure(),
+            SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch
+        );
+    }
+
+    /// S32 / INV-044: an interrupt origin may follow the exact terminal
+    /// delegated predecessor even though that turn has no accepted input.
+    #[test]
+    fn s32_inv044_interrupt_reconstitution_admits_exact_non_accepted_predecessor() {
+        let input =
+            interrupt_applied_input_with_non_accepted_predecessor(session_id(1), turn_id(7));
+
+        input
+            .reconstitute()
+            .expect("the exact non-accepted interrupt predecessor is admitted");
+    }
+
+    /// S32 / INV-044: non-accepted predecessor evidence remains scoped to the
+    /// command's exact session.
+    #[test]
+    fn s32_inv044_interrupt_reconstitution_rejects_cross_session_non_accepted_predecessor() {
+        let input =
+            interrupt_applied_input_with_non_accepted_predecessor(session_id(2), turn_id(7));
+
+        assert_eq!(
+            input
+                .reconstitute()
+                .expect_err("a non-accepted predecessor from another session is unrelated")
+                .failure(),
+            SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch
+        );
+    }
+
+    /// S32 / INV-044: non-accepted predecessor evidence must name the exact
+    /// turn targeted by the interrupt command.
+    #[test]
+    fn s32_inv044_interrupt_reconstitution_rejects_cross_wired_non_accepted_predecessor() {
+        let input =
+            interrupt_applied_input_with_non_accepted_predecessor(session_id(1), turn_id(6));
+
+        assert_eq!(
+            input
+                .reconstitute()
+                .expect_err("a different non-accepted predecessor cannot authorize the interrupt")
+                .failure(),
+            SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch
+        );
+    }
+
+    /// S32 / INV-044: non-accepted predecessor evidence cannot weaken the
+    /// accepted-origin chronology required by after-current delivery.
+    #[test]
+    fn s32_inv044_after_current_rejects_non_accepted_predecessor() {
+        let mut input = after_applied_input();
+        let facts = applied_facts(&mut input);
+        facts.predecessor_origin = None;
+        facts.non_accepted_predecessor = Some(NonAcceptedTurnPredecessorReconstitutionInput {
+            session: session_id(1),
+            turn: turn_id(7),
+        });
+
+        assert_eq!(
+            input
+                .reconstitute()
+                .expect_err("after-current replay requires an accepted-input predecessor")
                 .failure(),
             SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch
         );
