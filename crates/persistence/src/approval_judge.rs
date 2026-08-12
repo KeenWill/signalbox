@@ -1096,11 +1096,27 @@ async fn exact_completed(
     // round-trip stored an escalation in place of the provider's
     // recommendation. A retry after an uncertain response still carries the
     // original value, so the replay is judged against the stored decision.
+    //
+    // A stored escalation is admitted for a different offered value only while
+    // the authority is still withdrawn, which is the condition that produced it
+    // and one a closed generation cannot leave. With the authority intact the
+    // escalation was the provider's own, so an offered approval or denial is a
+    // structurally different call and must be reported rather than replayed.
     let stored = approval_judge_recommendation_from_str(&stored_recommendation);
+    let substituted = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
+        && !read_authority_still_stands(JudgedTurnAuthority {
+            read: prepared.session_context.goal(),
+            in_force: load_judged_turn_authority_in_force(
+                connection,
+                prepared.request.session(),
+                prepared.request.turn(),
+            )
+            .await?
+            .as_ref(),
+        });
     let exact = approval_judge_terminal_disposition_from_str(&terminal_disposition)
         == Some(ApprovalJudgeTerminalDispositionStorageKind::Completed)
-        && (stored == Some(recommendation)
-            || stored == Some(DelegateApprovalRecommendation::EscalateToHuman))
+        && (stored == Some(recommendation) || substituted)
         && required::<String>(&row, "rationale")? == rationale.as_str()
         && row.try_get::<Option<Decimal>, _>("input_tokens")? == encoded.input
         && row.try_get::<Option<Decimal>, _>("output_tokens")? == encoded.output

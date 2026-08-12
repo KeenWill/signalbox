@@ -3433,10 +3433,7 @@ async fn commission_fixture_session_goal(
             |_| None,
         )
         .await?;
-    assert!(matches!(
-        outcome,
-        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
-    ));
+    assert_goal_command_applied(outcome);
     Ok(statement)
 }
 
@@ -3459,11 +3456,24 @@ async fn stop_fixture_session_goal(
             |_| None,
         )
         .await?;
-    assert!(matches!(
-        outcome,
-        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
-    ));
+    assert_goal_command_applied(outcome);
     Ok(())
+}
+
+/// Fails naming the outcome a fixture goal command produced instead of an
+/// appended event, so a rejection or a reused identity is not mistaken for a
+/// fixture that set the goal up.
+#[track_caller]
+fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
+    match outcome {
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) => {}
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(rejection)) => {
+            panic!("the fixture goal command was rejected: {rejection:?}")
+        }
+        GoalCommandHandlingOutcome::ConflictingReuse { command_id } => {
+            panic!("the fixture goal command identity is already used: {command_id:?}")
+        }
+    }
 }
 
 async fn insert_completed_judge(
