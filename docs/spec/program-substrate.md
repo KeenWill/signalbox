@@ -19,19 +19,21 @@ ingress by [repository watch](repo-watch.md), evaluation semantics by the
 ## Programs and registration
 
 **Committed unimplemented functionality.** No present surface registers or
-executes programs. A program is TypeScript whose imports resolve only to the
-versioned in-repo SDK package and to files inside its own registration set; any
-other import is a registration error. Registration stores the exact TypeScript
-source, the stripped JavaScript artifact, a digest of each, the SDK version, the
-frame-contract version, and an explicit capability grant list, as immutable rows
-keyed by unique program name and revision. Each digest is SHA-256 in lowercase
+executes programs. A program is one TypeScript module whose imports resolve only
+to the versioned in-repo SDK package; any other import — including relative
+files — is a registration error, so the stripped artifact is complete and
+executable with no bundler, no module graph, and no filesystem in the isolate.
+Why: a single-module contract keeps artifact identity one digest over one file's
+bytes; multi-module programs are a future registration-format decision, not a
+present admission. Registration stores the exact TypeScript source, the stripped
+JavaScript artifact, a digest of each, the SDK version, the frame-contract
+version, and an explicit capability grant list, as immutable rows keyed by
+unique program name and revision. Each digest is SHA-256 in lowercase
 hexadecimal over an exact preimage: for the artifact, the stripped JavaScript
-bytes; for the source, the registration set's files in byte-lexicographic path
-order, each framed as its UTF-8 path, one zero byte, its content length in
-decimal ASCII, one zero byte, then its content bytes. Both registration paths
-and every later verifier compute identity from these preimages alone, so two
-correct implementations cannot disagree about what a program is. Execution uses
-only the stripped artifact; the TypeScript source is retained for reading and
+bytes; for the source, the module's UTF-8 bytes. Both registration paths and
+every later verifier compute identity from these preimages alone, so two correct
+implementations cannot disagree about what a program is. Execution uses only the
+stripped artifact; the TypeScript source is retained for reading and
 re-verification. This constrains present schema planning: program identity is
 `(name, revision)` plus content digests, and nothing may treat a mutable
 location — a repository path, a branch, a file — as what a program *is*. Why:
@@ -39,17 +41,23 @@ digest identity is what lets an in-flight run keep meaning the code it started
 with.
 
 **Committed unimplemented functionality.** No present surface pins program
-revisions to runs. Every run records the compiled digest and frame-contract
-version it started under and finishes on that exact artifact; re-registration of
-a name creates a new revision and never rebinds an in-flight run. Upgrading a
-long-lived program is a deliberate act: cancel the old run, start the new
-revision. A frame-contract change is handled the same way, per the pre-alpha
-rule in `AGENTS.md`: no retired contract version is decoded by a newer host —
-that would be compatibility machinery for deployments that do not exist — so a
-run whose pinned contract version the current host no longer speaks is faulted
-terminally at its next wake with a deterministic, journaled `contract_retired`
-fault, and closing or continuing outstanding runs before a contract-changing
-upgrade is an operational courtesy, not a spec obligation.
+revisions to runs. Every run records the exact program registration it executes
+— the immutable `(name, revision)` row reference — together with the compiled
+digest and frame-contract version it started under, and finishes on that exact
+artifact under that exact registration's grant list and SDK version; a digest
+alone is not identity, because identical bytes registered under different names
+or grants are different programs, and a run's authority resolves only from its
+recorded registration. Continuations record the same registration reference
+alongside the predecessor. Re-registration of a name creates a new revision and
+never rebinds an in-flight run. Upgrading a long-lived program is a deliberate
+act: cancel the old run, start the new revision. A frame-contract change is
+handled the same way, per the pre-alpha rule in `AGENTS.md`: no retired contract
+version is decoded by a newer host — that would be compatibility machinery for
+deployments that do not exist — so a run whose pinned contract version the
+current host no longer speaks is faulted terminally at its next wake with a
+deterministic, journaled `contract_retired` fault, and closing or continuing
+outstanding runs before a contract-changing upgrade is an operational courtesy,
+not a spec obligation.
 
 **Committed unimplemented functionality.** No present surface performs
 registration-time type-checking. Two registration paths exist with one trust
@@ -116,7 +124,14 @@ concurrency: delivery order fixes the interleaving, and the named ordinal fixes
 which promise each delivery resolves — the same association during live
 execution and replay. The frame vocabulary is: `now`, `random`, `sleep`,
 `await_event`, `effect`, `scope`, and `terminal` requests; `answer`, `wake`,
-`cancel`, and `fault` deliveries. Capability calls are `effect` frames named by
+`cancel`, and `fault` deliveries. A `scope` request is a journaled declaration,
+never answered: it carries an operation (`open` or `close`), its own per-run
+scope ordinal, and its parent scope ordinal, recording the structured-
+concurrency tree so that cancellation of a scope deterministically cancels
+exactly the outstanding requests opened under it (each such cancellation is a
+`cancel` delivery naming the affected request ordinal), and replay reproduces
+the same tree from the same frames. Requests made outside any opened scope
+belong to the root scope. Capability calls are `effect` frames named by
 capability and method, so capability growth never changes the frame contract.
 Effect failures are ordinary answer values a program branches on; only `fault`
 terminates a run from outside, from its own closed cause set: `timeout`,
@@ -164,22 +179,26 @@ growth. A long-lived program does not accumulate one unbounded journal:
 run row — same pinned artifact, explicit continuation arguments, predecessor
 identity recorded — with a fresh journal, and the built-in dispatch program
 described below continues after each handled event. Continuation is voluntary,
-so the bound is enforced by the host, not assumed of the program: a configured
-per-run frame bound terminates any run that reaches it with a deterministic,
-journaled `journal_bound` fault, making the per-run replay bound a property of
-every program, cooperative or not. No checkpointing or journal truncation
-exists, because a journal that can be rewritten is not a journal. Why:
-continuation keeps replay linear in one run's work while every historical run
-remains a complete, immutable record, and the fault keeps that claim true for
-programs that never continue.
+so the bound is enforced by the host, not assumed of the program: each run
+records at creation the frame bound selected from configuration, that recorded
+bound governs the run for its whole life regardless of later configuration
+changes — a run's terminal outcome is determined by its own durable facts, never
+by which configuration was live at its final wake — and a run reaching its
+recorded bound terminates with a deterministic, journaled `journal_bound` fault,
+making the per-run replay bound a property of every program, cooperative or not.
+No checkpointing or journal truncation exists, because a journal that can be
+rewritten is not a journal. Why: continuation keeps replay linear in one run's
+work while every historical run remains a complete, immutable record, and the
+fault keeps that claim true for programs that never continue.
 
 **Committed unimplemented functionality.** No present surface parks program
 runs. A run sleeping on a timer or subscription holds no isolate and no memory
 beyond its rows; wake builds a fresh isolate and replays. Sleeping runs survive
 daemon restarts by construction. Frame payloads inline below a fixed threshold;
 a larger payload is stored as an immutable SHA-256-addressed blob under the
-contract [blob storage](blob-storage.md) owns, journaled by digest, with the
-storage class it travels under owned by that page's class-routing vocabulary. No
+contract [blob storage](blob-storage.md) owns, journaled by digest, traveling
+under the daemon-derived `program_journal` storage class that page's routing
+vocabulary commits for this use — never an operation-selected class. No
 named-artifact aggregate is required or committed for payload offload: the
 journal references immutable bytes by digest only. A session outcome journals as
 the session identity, the exact turn and accepted-input identity that produced
@@ -218,18 +237,18 @@ mechanism — the dispatch action becomes a built-in program, cut over after one
 shadowed live event — after which rules are subscriptions.
 
 **Committed unimplemented functionality.** No present surface cancels program
-runs. Cancellation is a user command pair on the
-[process protocol](process-protocol.md) from the substrate's first protocol
-release: a cancel command naming the run, answered from a closed outcome set —
-applied (the run is now `cancelled`), `not_found` (no such run), or
-`already_terminal` naming the standing terminal state and result the command
-found — with the same durable-command identity mechanics as every user command
-in [identity and commands](identity-and-commands.md). A cancel never overwrites
-a terminal outcome: the race against a run's own `terminal` is resolved by
-whichever committed first, and the receipt reports the truth it found. Cancel
-authority is user authority; an applied cancel is journaled as a `cancel` frame,
-so a cancelled run replays to its cancellation. Programs receive no notice
-beyond the journal: cancellation is terminal, not advisory.
+runs. The cancel command, its receipt, and their closed reply algebra are
+committed in the wire-owning contract, [process protocol](process-protocol.md),
+from the substrate's first protocol release, with the same durable-command
+identity mechanics as every user command in
+[identity and commands](identity-and-commands.md); this page owns only the
+run-state semantics. Those semantics: a cancel never overwrites a terminal
+outcome — the race against a run's own `terminal` is resolved by whichever
+committed first, and the receipt reports the truth it found (`not_found` and
+`already_terminal` are outcomes, not errors). Cancel authority is user
+authority; an applied cancel is journaled as a `cancel` frame, so a cancelled
+run replays to its cancellation. Programs receive no notice beyond the journal:
+cancellation is terminal, not advisory.
 
 ## Driving sessions
 
@@ -241,24 +260,23 @@ pages that own them. First, attribution: the committed program-issuance
 extension to the closed actor algebra is recorded in its owning contract,
 [identity and commands](identity-and-commands.md); this page adds only the
 program-specific constraint that program-issued input names the issuing run
-identity and is never recorded as user-issued. Second, provenance:
-program-created sessions carry new creation-cause variants (`workflow`, and
-`eval` per the [evaluation system](eval-system.md)) in the stored vocabulary of
-[sessions and the transcript](sessions-and-transcript.md). Programs drive
-sessions turn by turn: submit input, await that turn's outcome as a typed
-payload, then branch. The [model-runtime substrate](runtime-substrate.md)
-already carries an optional per-call structured-output contract, but the session
-path from accepted input through turn preparation to the prepared model
-operation does not; that carriage — a declared output schema recorded on the
-program-issued input, flowing to the prepared call, enforced at the runtime
-boundary — is committed here and updates
-[model-call execution](model-call-execution.md) when implemented. Structure
-inside one turn is deliberately out of contract: a turn is the model's autonomy
-zone, governed by the same approval judge as every session, and a program that
-needs intra-turn evidence reads the durable transcript through a read capability
-after the fact. Credentials never enter the isolate; sessions, model calls,
-clones, and stage executions all happen host-side under existing credential
-machinery.
+identity and is never recorded as user-issued. Second, provenance: the committed
+`workflow` and `eval` creation-cause extensions are recorded in their owning
+contract, [sessions and the transcript](sessions-and-transcript.md); this page
+adds only the constraint that every program-created session carries one and
+joins back to its creating run. Programs drive sessions turn by turn: submit
+input, await that turn's outcome as a typed payload, then branch. The
+declared-output-schema carriage that typed turn outcomes require — recorded on
+the program-issued input, flowing to the prepared model operation, enforced at
+the runtime boundary — is committed in its owning contract,
+[model-call execution](model-call-execution.md); this page adds only the
+constraint that a program's turn awaits that validated payload or the turn's
+failure, nothing looser. Structure inside one turn is deliberately out of
+contract: a turn is the model's autonomy zone, governed by the same approval
+judge as every session, and a program that needs intra-turn evidence reads the
+durable transcript through a read capability after the fact. Credentials never
+enter the isolate; sessions, model calls, clones, and stage executions all
+happen host-side under existing credential machinery.
 
 ## Open edges
 

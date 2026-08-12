@@ -46,11 +46,19 @@ decision this page does not commit.
 corpora. A corpus is identified by suite name, version, and content digest; runs
 record the digest they read, and corpus content lives with its project — a
 repository of the user's, an artifact by digest, or rows — never as bulk data
-committed to this repository. The judge-evaluation corpus presently in-tree
-stays only until its evaluation runs on the substrate, and nothing may become
-load-bearing about its in-tree location. Per the pre-alpha rule in `AGENTS.md`,
-no compatibility machinery attends any of this: corpus formats and storage may
-change freely until first durable deployment.
+committed to this repository. The digest is storage-form-independent: SHA-256 in
+lowercase hexadecimal over the corpus's logical cases, each serialized to
+canonical JSON (object keys sorted bytewise, no insignificant whitespace,
+numbers in their shortest round-trip form), ordered by case identifier bytewise,
+and framed exactly as the [program substrate](program-substrate.md) frames
+digest preimages — so the same logical corpus computes the same identity whether
+loaded from repository files, an artifact, or rows, and a run verifies its
+corpus after the content moves between admitted storage forms. The
+judge-evaluation corpus presently in-tree stays only until its evaluation runs
+on the substrate, and nothing may become load-bearing about its in-tree
+location. Per the pre-alpha rule in `AGENTS.md`, no compatibility machinery
+attends any of this: corpus formats and storage may change freely until first
+durable deployment.
 
 **Committed unimplemented functionality.** No present surface checks
 expectations. Expectations are one typed grammar over three check kinds —
@@ -97,10 +105,17 @@ project, running generated code, comparing artifacts — happens in stage
 executors: sandboxed processes provisioned from a source pinned at registration
 (repository and commit, or artifact digest) under the same supervised execution
 boundary as session exec tools, exchanging one typed JSONL request and response
-per stage. Executor output is validated against the stage's declared schema
-host-side; executor failure is a recorded stage status, never a run fault. The
-isolate never runs subject code, and executors never touch the database or hold
-credentials.
+per stage. The registration additionally records an executor environment
+identity — the command line and a declared environment digest naming the
+toolchain or image the executor expects — and every stage row carries the
+environment identity that actually ran it, so a comparison view can distinguish
+sampled trial instability from an environment change between runs rather than
+attributing recompiled-toolchain drift to the subject. The recorded identity is
+measurement provenance, not hermeticity: this page commits no
+environment-reproduction machinery. Executor output is validated against the
+stage's declared schema host-side; executor failure is a recorded stage status,
+never a run fault. The isolate never runs subject code, and executors never
+touch the database or hold credentials.
 
 **Committed unimplemented functionality.** No present surface records
 judge-evaluation runs in the database; the standalone judge-evaluation harness
