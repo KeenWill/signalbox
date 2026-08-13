@@ -24,7 +24,10 @@ pending-successor activation transaction was verified against this PR
 replacement command and result transaction were verified against this PR
 (`agent/runner-pre-pin-replacement`). Pending-enrollment activation inside that
 transaction was verified against this PR
-(`agent/runner-pending-pre-pin-replacement`).
+(`agent/runner-pending-pre-pin-replacement`). The append-only staged
+workspace-provisioning authorization representation and checked readback were
+verified against this PR
+(`agent/runner-workspace-provisioning-authorization-persistence`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -576,6 +579,24 @@ Representation rules, all enforced in the schema:
   referenced placement record and rejects a missing, cross-session,
   non-successor, or duplicated reference rather than rendering the entry from
   its own payload.
+- Migration `202608110016` adds one append-only
+  `runner_workspace_provisioning_authorization` row for a repository-backed
+  pinned replacement command. It retains the command and session, exact lost
+  placement event and revision, successor revision, selected enrollment, runner,
+  current registration, connected event, repository, sandbox, and optional
+  credential profile as typed columns. Composite foreign keys bind the command,
+  historical placement, registration, connection, sandbox, and optional profile.
+  A deferred relational check additionally requires the command target, current
+  lost placement, current selected registration and connection, registered
+  repository entry and workspace capability to agree at insertion. The
+  same-runner arm requires registration-loss lineage; every other arm requires a
+  distinct successor. The row rejects update, delete, and truncate, and its
+  adapter readback rechecks the immutable joins before returning the stored
+  facts. **Committed unimplemented functionality.** No present production
+  transaction inserts this row. The future command-claim transaction must take
+  the session scheduler before the recorded runner lock order and insert it
+  atomically with the command request; this representation neither authorizes
+  raw caller-prepared inserts nor performs runner I/O.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed
