@@ -18160,6 +18160,56 @@ async fn s31_inv043_initial_dispatch_atomically_pins_attempt_and_lease()
     Ok(())
 }
 
+/// INV-043: durable offer reconciliation resolves the latest lease generation
+/// through the exact physical-attempt binding.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_current_offer_round_trips_by_physical_attempt() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, placement) = stored_initial_dispatch_fixture(
+        &pool,
+        WorkingDirectorySelection::Exact(exact_runner_directory()),
+        None,
+    )
+    .await?;
+    let attempt = ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt));
+    let request = InitialRunnerDispatchRequest::new(
+        placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        attempt,
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+    );
+    let offered = store
+        .authorize_initial_dispatch(request, RunnerLeaseId::from_uuid(uuid(LEASE + 16)))
+        .await?;
+    let loaded = store
+        .load_current_lease_for_attempt(attempt)
+        .await?
+        .expect("the physical attempt retains its current lease generation");
+
+    assert_eq!(&loaded, offered.lease());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043: a physical attempt with no durable runner authorization has no
+/// lease to reconcile.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_unoffered_attempt_has_no_current_runner_lease() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+
+    let loaded = store
+        .load_current_lease_for_attempt(ToolAttemptId::from_uuid(uuid(ATTEMPT + 20)))
+        .await?;
+
+    assert_eq!(loaded, None);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-043 / INV-045: the initial transaction stores a selected credential
 /// grant and binds the first lease to that exact authorization.
 #[tokio::test]

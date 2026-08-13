@@ -5403,6 +5403,39 @@ impl RunnerProtocolStore {
         commit_mutation(transaction).await
     }
 
+    /// Loads the latest durable lease generation bound to one physical attempt.
+    pub async fn load_current_lease_for_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<Option<RunnerLease>, RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let correlation = sqlx::query_as::<_, (Uuid, Decimal)>(
+            "SELECT binding.lease_id, max(generation.generation)
+               FROM runner_physical_attempt_lease_binding AS binding
+               JOIN runner_lease_generation AS generation
+                 ON generation.lease_id = binding.lease_id
+                AND generation.attempt_id = binding.attempt_id
+              WHERE binding.attempt_id = $1
+              GROUP BY binding.lease_id",
+        )
+        .bind(attempt.into_uuid())
+        .fetch_optional(transaction.as_mut())
+        .await?;
+        let loaded = match correlation {
+            Some((lease, generation)) => {
+                self.load_lease_in(
+                    &mut transaction,
+                    runner_lease_id(lease),
+                    decode_generation(generation)?,
+                )
+                .await?
+            }
+            None => None,
+        };
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
     /// Loads one exact lease generation and independently joined fence.
     pub async fn load_lease(
         &self,
