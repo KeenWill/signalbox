@@ -2828,7 +2828,7 @@ async fn content_size_bound_commits_at_exact_maximum() -> Result<(), Box<dyn Err
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    persist_at_bound_content(&pool).await?;
+    let above_bound = "a".repeat(persist_at_bound_content(&pool).await? + 1);
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -2877,7 +2877,7 @@ async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box
          VALUES ($1, 0, 'text', $2)",
     )
     .bind(Uuid::from_u128(0x323))
-    .bind(format!("{at_bound}a"))
+    .bind(above_bound)
     .execute(&mut *transaction)
     .await?;
     let command_error =
@@ -2906,7 +2906,7 @@ async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn accepted_input_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    persist_at_bound_content(&pool).await?;
+    let above_bound = "a".repeat(persist_at_bound_content(&pool).await? + 1);
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -2939,7 +2939,7 @@ async fn accepted_input_schema_rejects_content_above_maximum() -> Result<(), Box
          VALUES ($1, 0, 'text', $2)",
     )
     .bind(Uuid::from_u128(0x922))
-    .bind(format!("{at_bound}a"))
+    .bind(above_bound)
     .execute(&mut *transaction)
     .await?;
     let accepted_error =
