@@ -558,10 +558,6 @@ impl<'a> Output<'a> {
         )
     }
 
-    pub(crate) fn blob_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stdout.write_all(bytes)
-    }
-
     pub(crate) fn chat_started(
         &mut self,
         session_id: CanonicalUuid,

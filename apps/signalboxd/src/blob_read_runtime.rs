@@ -85,18 +85,23 @@ pub(crate) async fn read_blob_chunk(
                 }
                 let capacity =
                     usize::try_from(length.get()).map_err(|_| BlobReadError::Integrity)?;
-                let retained_bound = length
-                    .get()
-                    .checked_add(1)
-                    .ok_or(BlobReadError::Integrity)?;
                 let mut bytes = Vec::with_capacity(capacity);
-                opened
-                    .into_reader()
-                    .take(retained_bound)
+                let mut reader = opened.into_reader();
+                (&mut reader)
+                    .take(length.get())
                     .read_to_end(&mut bytes)
                     .await
                     .map_err(|_| BlobReadError::Unavailable)?;
                 if bytes.len() != capacity {
+                    return Err(BlobReadError::Integrity);
+                }
+                let mut trailing = [0_u8; 1];
+                if reader
+                    .read(&mut trailing)
+                    .await
+                    .map_err(|_| BlobReadError::Unavailable)?
+                    != 0
+                {
                     return Err(BlobReadError::Integrity);
                 }
                 return Ok(bytes);
