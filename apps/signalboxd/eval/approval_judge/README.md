@@ -63,16 +63,3 @@ prompt:
 
 Change a label only alongside the matching prompt-rubric change, so the corpus
 and the deployed prompt never encode two different standards.
-
-## External corpora (candidates, not vendored)
-
-Public agent-safety sets that can be adapted into this schema by a mapping
-script at eval time (pin a revision; do not commit their content here):
-
-- **R-Judge** (CC-BY 4.0) — 569 multi-turn agent records with safety labels and
-  risk descriptions; the unsafe records adapt to `deny`/`escalate` cases.
-- **AgentHarm** (Hugging Face `ai-safety-institute/AgentHarm`) — explicitly
-  malicious agent tasks; adapts to `deny` cases. Check the license terms before
-  any redistribution.
-- **ToolEmu** — 144 risky tool-execution scenarios; heavier adaptation (emulated
-  trajectories rather than single requests).
