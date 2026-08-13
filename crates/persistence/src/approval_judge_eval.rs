@@ -196,11 +196,7 @@ fn require_scorecard_verdict_agreement(
         .get("cases")
         .and_then(serde_json::Value::as_array)
     else {
-        return if calls.is_empty() {
-            Ok(())
-        } else {
-            Err(verdict_mismatch("cases"))
-        };
+        return Err(verdict_mismatch("cases"));
     };
     let mut stated: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
     for case in cases {
