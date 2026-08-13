@@ -5181,9 +5181,9 @@ mod tests {
     }
 
     /// S02 / INV-015 / INV-062: model preparation admits immutable catalog
-    /// facts only when they exactly cover every referenced attachment digest.
+    /// facts when they exactly cover every referenced attachment digest.
     #[test]
-    fn s02_inv015_inv062_attachment_catalog_facts_require_exact_coverage() {
+    fn s02_inv015_inv062_exact_attachment_catalog_facts_reach_preparation() {
         let digest = BlobDigest::digest(b"attachment fixture bytes");
         let length = NonZeroU64::new(24).expect("the fixture length is positive");
 
@@ -5193,11 +5193,18 @@ mod tests {
         let request = execution
             .preview_initial_call(model_call_id(9))
             .expect("the covered attachment can reach call preparation");
+
+        assert_eq!(request.attachment_byte_length(digest), Some(length));
+    }
+
+    /// INV-062: model preparation fails closed when the catalog projection
+    /// omits a referenced attachment digest.
+    #[test]
+    fn inv062_missing_attachment_catalog_fact_fails_preparation() {
         let missing = attachment_execution_input(Vec::new())
             .reconstitute()
             .expect_err("a missing attachment catalog fact fails closed");
 
-        assert_eq!(request.attachment_byte_length(digest), Some(length));
         assert_eq!(
             missing.failure(),
             ModelCallExecutionReconstitutionFailure::AttachmentBlobFactMismatch
