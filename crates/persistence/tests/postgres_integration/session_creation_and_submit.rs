@@ -3349,13 +3349,24 @@ async fn inv061_attachment_admission_sums_distinct_catalogued_digests() -> Resul
     Ok(())
 }
 
-/// INV-061: a newly queued input is rejected when the complete prospective
-/// rendered frontier, rather than either input alone, exceeds the attachment
-/// verification bound.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier()
--> Result<(), Box<dyn Error>> {
+struct QueuedFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    command: SubmitInput,
+    first_outcome: SubmitInputHandlingOutcome,
+    expected: SubmitInputHandlingOutcome,
+    session: SessionId,
+}
+
+impl QueuedFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_digest = BlobDigest::digest(b"first prospective attachment");
     let second_digest = BlobDigest::digest(b"second prospective attachment");
@@ -3423,46 +3434,96 @@ async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier
             maximum_bytes: maximum,
         },
     ));
+    let first_outcome = repository
+        .handle(
+            second.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+        )
+        .await?;
+    Ok(QueuedFrontierFixture {
+        container,
+        pool,
+        repository,
+        command: second,
+        first_outcome,
+        expected,
+        session,
+    })
+}
+
+/// INV-061: a newly queued input is rejected when the complete prospective
+/// rendered frontier, rather than either input alone, exceeds the attachment
+/// verification bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier()
+-> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    assert_eq!(fixture.first_outcome, fixture.expected);
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective queued-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
-                second.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
-            )
-            .await?,
-        expected
-    );
-    assert_eq!(
-        repository
-            .handle(
-                second,
+                fixture.command.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb33a)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb33b))),
             )
             .await?,
-        expected
+        fixture.expected
     );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-061: a rejected queued frontier rolls back every provisional accepted
+/// input and queue-origin effect.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_queued_frontier_rejection_rolls_back_provisional_effects()
+-> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
     let effects: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
                 (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)",
     )
-    .bind(session.into_uuid())
-    .fetch_one(&pool)
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(effects, (1, 1));
 
-    pool.close().await;
-    drop(container);
+    fixture.finish().await;
     Ok(())
 }
 
-/// INV-061: pending steering is rejected when it would make a queued
-/// successor's eventual rendered frontier exceed the attachment bound.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
--> Result<(), Box<dyn Error>> {
+struct SteeringFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    command: SubmitInput,
+    first_outcome: SubmitInputHandlingOutcome,
+    expected: SubmitInputHandlingOutcome,
+    session: SessionId,
+    active_turn: TurnId,
+}
+
+impl SteeringFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let queued_digest = BlobDigest::digest(b"queued prospective attachment");
     let steering_digest = BlobDigest::digest(b"steering prospective attachment");
@@ -3556,26 +3617,64 @@ async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
             maximum_bytes: maximum,
         },
     ));
+    let first_outcome = repository
+        .handle(
+            steering.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+            None,
+        )
+        .await?;
+    Ok(SteeringFrontierFixture {
+        container,
+        pool,
+        repository,
+        command: steering,
+        first_outcome,
+        expected,
+        session,
+        active_turn,
+    })
+}
+
+/// INV-061: pending steering is rejected when it would make a queued
+/// successor's eventual rendered frontier exceed the attachment bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    assert_eq!(fixture.first_outcome, fixture.expected);
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective steering-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
-                steering.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
-                None,
-            )
-            .await?,
-        expected
-    );
-    assert_eq!(
-        repository
-            .handle(
-                steering,
+                fixture.command.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb34f)),
                 None,
             )
             .await?,
-        expected
+        fixture.expected
     );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-061: a rejected steering frontier rolls back the provisional pending
+/// steering while preserving the active and queued origins.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_steering_frontier_rejection_rolls_back_provisional_effects()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
     let effects: (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
                 (SELECT count(*) FROM queued_input_origin WHERE session_id = $1
@@ -3583,14 +3682,13 @@ async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
                 (SELECT count(*) FROM accepted_input WHERE session_id = $1
                     AND disposition_kind = 'pending_steering')",
     )
-    .bind(session.into_uuid())
-    .bind(active_turn.into_uuid())
-    .fetch_one(&pool)
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.active_turn.into_uuid())
+    .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(effects, (2, 1, 0));
 
-    pool.close().await;
-    drop(container);
+    fixture.finish().await;
     Ok(())
 }
 
