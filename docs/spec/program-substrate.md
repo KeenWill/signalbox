@@ -121,9 +121,14 @@ expiry is an ordinary journaled answer. No engine runtime is retained across
 upgrades — per the pre-alpha rule in `AGENTS.md`, keeping superseded
 engines resident would be compatibility machinery for deployments that do not
 exist — so a run that wakes under a newer engine replays under it, protected by
-the fault-not-diverge rule below: an engine-semantics change surfaces as a
-nondeterminism fault whose payload names both engine versions, never as silent
-divergence. A native engine failure is accepted as a daemon failure while every
+the fault-not-diverge rule below. Replay under a different engine may compare
+requests only while journaled twins remain; if it reaches the journal tail
+without an earlier mismatch, the host journals a `nondeterminism` fault whose
+payload names both engine versions and does not permit that run to emit a new
+live request or terminal result. Thus an engine-semantics change surfaces as a
+fault even when its first observable difference would occur after the prior
+journal tail, never as silent divergence. A native engine failure is accepted as
+a daemon failure while every
 registered program is the operator's own. Why: the isolate's closure is what
 makes deterministic replay a structural property instead of an authoring
 discipline.
@@ -138,7 +143,11 @@ concurrency: delivery order fixes the interleaving, and the named ordinal fixes
 which promise each delivery resolves — the same association during live
 execution and replay. The frame vocabulary is: `now`, `random`, `sleep`,
 `await_event`, `effect`, `scope`, and `terminal` requests; `answer`, `wake`,
-`cancel`, `run_cancel`, and `fault` deliveries. A request-scoped `cancel` always
+`reject`, `cancel`, `run_cancel`, and `fault` deliveries. A `reject` names the
+request ordinal whose frame the host refused, carries a reason from that request
+kind's closed rejection vocabulary, and leaves the run live; it records a
+protocol-level refusal before the requested transition, not an answer to an
+effect. A request-scoped `cancel` always
 names the one affected request ordinal and cannot terminalize a run;
 `run_cancel` has no request ordinal and terminalizes the whole run. A `scope`
 request is a journaled declaration, never answered: it carries an operation
@@ -153,8 +162,8 @@ Effect failures are ordinary answer values a program branches on; only `fault`
 terminates a run from outside, from its own closed cause set: `timeout`,
 `memory`, `nondeterminism`, `program_error` (an uncaught exception or unhandled
 promise rejection before `terminal`, carrying bounded, replay-stable evidence of
-the error), `contract_retired`, and `journal_bound`. Faults are themselves
-journaled so even a kill replays.
+the error), `contract_retired`, `journal_bound`, and `payload_too_large`. Faults
+are themselves journaled so even a kill replays.
 
 **Committed unimplemented functionality.** No present surface synchronizes
 journal rows with effects, and the synchronization guarantee differs by effect
@@ -196,8 +205,12 @@ run row — same pinned artifact, explicit continuation arguments, predecessor
 identity recorded — with a fresh journal. A terminal request is admissible only
 when every earlier answerable request ordinal has an `answer`, `wake`, or
 request-scoped `cancel` delivery; otherwise the host rejects it with a
-deterministic `program_error` without committing terminal state, so no external
-effect can complete after the journal closes. For `continue`, one database
+deterministic `reject` delivery naming that terminal request and reason
+`outstanding_requests`, without committing terminal state. The program may then
+await or cancel the outstanding requests and submit another terminal request;
+`program_error` remains exclusively the terminal fault defined above. Thus no
+external effect can complete after the journal closes. For `continue`, one
+database
 transaction commits the terminal frame, the predecessor's terminal state, and
 exactly one successor row. The successor has a unique predecessor reference, so
 retry after an ambiguous commit returns the already-created row rather than
@@ -224,7 +237,14 @@ contract [blob storage](blob-storage.md) owns, journaled by digest, traveling
 under the daemon-derived `program_journal` storage class that page's routing
 vocabulary commits for this use — never an operation-selected class. No
 named-artifact aggregate is required or committed for payload offload: the
-journal references immutable bytes by digest only. A session outcome journals as
+journal references immutable bytes by digest only. Run admission requires that
+class to have a configured route and records `blob_storage.max_blob_bytes` as
+the run's payload ceiling. The inline threshold is no greater than that ceiling,
+and any request or delivery whose canonical payload encoding exceeds the
+recorded ceiling is replaced before journal insertion or blob ingest by a
+bounded, journaled `payload_too_large` fault carrying the recorded maximum and
+observed byte length. The recorded ceiling governs replay despite later
+configuration changes. A session outcome journals as
 the session identity, the exact turn and accepted-input identity that produced
 it, and an outcome digest — never transcript content — because sessions are
 already durable and the journal is thin coordination state only; the recorded
@@ -244,9 +264,10 @@ resumes.
 programs to events. `await_event` records a durable subscription row naming an
 event kind and filter over the vocabulary that [repository watch](repo-watch.md)
 already stores durably, together with an activation frontier fixed at
-registration strictly after the current durable event tail — the same watermark
-discipline the structured-rule contract already uses — so a subscription can
-never match an event at or before its activation. After a poll's events commit,
+registration strictly after the current durable event tail, except for the
+built-in dispatch continuation handoff defined below. An ordinary subscription
+therefore can never match an event at or before its activation. After a poll's
+events commit,
 matching subscriptions produce wake rows keyed by the unique
 subscription-and-event identity. An `await_event` subscription is one-shot: the
 transaction inserting its first wake also atomically marks the subscription
@@ -263,20 +284,17 @@ constrains repository-watch storage now: its cursor and event rows are the
 substrate's event source and must remain readable by subscription matching. The
 present structured-rule dispatch surface is committed to converge onto this
 mechanism — the dispatch action becomes a built-in program. Shadowing is only a
-validation step and never owns delivery. Cutover uses one durable transaction at
-an event frontier: it first requires every old-rule event through that frontier
-to have a terminal evaluation outcome, deactivates the old rule after that
-frontier, activates the replacement subscription strictly after it, and records
-the mapping between rule version and program registration. The same transaction
-transfers each occupied singleton batch, its responsible sessions, and any
-recorded cooldown boundary to substrate-owned dispatch state without recreating
-sessions or changing append-only audit identities. Events at or before the
-frontier remain owned only by the rule evaluator; later events are owned only by
-the subscription matcher. Repository reconciliation, rule evaluation, and
-subscription matching serialize against this transaction, so a crash or
-concurrent poll can retry the cutover but cannot miss or dispatch a boundary
-event twice or release an occupied singleton. After that transaction, rules are
-subscriptions.
+validation step and never owns delivery. The authoritative rule-to-program
+cutover and frontier-ownership contract is owned by
+[repository watch](repo-watch.md#deduplication-concurrency-and-audit); this page
+only consumes the resulting subscription and transferred dispatch state. For
+each handled event, the built-in program's `continue` transaction records the
+consumed event as the successor's inherited exclusive event frontier. When that
+successor issues `await_event`, activation uses this inherited frontier rather
+than the then-current event tail and immediately matches the first eligible
+durable event after it before waiting for future events. Events committed while
+the predecessor handles its wake are therefore included in durable order, while
+the consumed event itself cannot be delivered twice.
 
 **Committed unimplemented functionality.** No present surface cancels program
 runs. The cancel command, its receipt, and their closed reply algebra are
