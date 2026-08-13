@@ -4,8 +4,8 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, PinnedRunnerDispatchRequest,
-    PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction, RunnerLeaseIdGenerator,
-    UuidV7RunnerLeaseIdGenerator,
+    PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer,
+    RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
 };
 use signalbox_domain::RunnerLease;
 use signalbox_persistence::runner_protocol::{
@@ -22,7 +22,7 @@ use crate::{
 
 /// Boxed future returned by one injected runner-offer authority.
 pub type RunnerLeaseOfferAuthorizationFuture<'a, Error> =
-    Pin<Box<dyn Future<Output = Result<RunnerLease, Error>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<PinnedRunnerLeaseOffer, Error>> + Send + 'a>>;
 
 /// Atomic authority that turns one prepared attempt into an offered runner lease.
 pub trait RunnerLeaseOfferAuthority {
@@ -63,8 +63,7 @@ pub trait RunnerLeaseOfferRouteSource {
     /// Returns the current connected address, or absence when delivery must wait.
     fn resolve<'a>(
         &'a self,
-        request: PinnedRunnerDispatchRequest,
-        lease: &'a RunnerLease,
+        offer: &'a PinnedRunnerLeaseOffer,
     ) -> RunnerLeaseOfferRouteFuture<'a, Self::Error>;
 }
 
@@ -73,19 +72,18 @@ impl RunnerLeaseOfferRouteSource for RunnerProtocolStore {
 
     fn resolve<'a>(
         &'a self,
-        request: PinnedRunnerDispatchRequest,
-        lease: &'a RunnerLease,
+        offer: &'a PinnedRunnerLeaseOffer,
     ) -> RunnerLeaseOfferRouteFuture<'a, Self::Error> {
         Box::pin(async move {
-            let Some(connection) = self.load_connection(request.enrollment()).await? else {
+            let Some(connection) = self.load_connection(offer.enrollment()).await? else {
                 return Ok(None);
             };
             if connection.state() != RunnerConnectionState::Connected {
                 return Ok(None);
             }
             Ok(Some(RunnerConnectionAddress::new(
-                request.enrollment(),
-                lease.runner(),
+                offer.enrollment(),
+                offer.lease().runner(),
                 connection.epoch(),
             )))
         })
@@ -282,28 +280,31 @@ where
         &mut self,
         request: PinnedRunnerDispatchRequest,
     ) -> Result<RunnerLeaseOfferOutcome, RunnerLeaseOfferDispatchError<Authority::Error>> {
-        let lease = self
+        let offer = self
             .authority
             .authorize(request)
             .await
             .map_err(|source| RunnerLeaseOfferDispatchError { source })?;
-        if !lease_matches_request(&lease, request) {
+        if !lease_matches_request(offer.lease(), request) {
             tracing::error!("durable runner offer authority returned cross-wired lease facts");
+            let (_, lease) = offer.into_parts();
             return Ok(retained(
                 lease,
                 RunnerLeaseOfferRetention::AuthorityMismatch,
             ));
         }
-        let message = match RunnerDispatchWireAdapter::lease_offer(&lease) {
+        let message = match RunnerDispatchWireAdapter::lease_offer(offer.lease()) {
             Ok(message) => message,
             Err(error) => {
                 tracing::error!(error = %error, "durable runner offer wire projection failed");
+                let (_, lease) = offer.into_parts();
                 return Ok(retained(lease, RunnerLeaseOfferRetention::ProjectionFailed));
             }
         };
-        let address = match self.routes.resolve(request, &lease).await {
+        let address = match self.routes.resolve(&offer).await {
             Ok(Some(address)) => address,
             Ok(None) => {
+                let (_, lease) = offer.into_parts();
                 return Ok(retained(
                     lease,
                     RunnerLeaseOfferRetention::ConnectionUnavailable,
@@ -311,12 +312,23 @@ where
             }
             Err(error) => {
                 tracing::error!(error = %error, "durable runner offer route lookup failed");
+                let (_, lease) = offer.into_parts();
                 return Ok(retained(
                     lease,
                     RunnerLeaseOfferRetention::ConnectionLookupFailed,
                 ));
             }
         };
+        if address.enrollment() != offer.enrollment() || address.runner() != offer.lease().runner()
+        {
+            tracing::error!("runner offer route source returned a cross-wired connection address");
+            let (_, lease) = offer.into_parts();
+            return Ok(retained(
+                lease,
+                RunnerLeaseOfferRetention::AuthorityMismatch,
+            ));
+        }
+        let (_, lease) = offer.into_parts();
         if let Err(error) = self.transport.send(address, message) {
             let retention = match Transport::classify_failure(&error) {
                 RunnerLeaseOfferTransportFailure::Unavailable => {
@@ -342,6 +354,7 @@ fn lease_matches_request(lease: &RunnerLease, request: PinnedRunnerDispatchReque
     correlation.dispatch.session() == request.session()
         && correlation.dispatch.turn() == request.turn()
         && correlation.dispatch.attempt() == request.attempt()
+        && correlation.runner == request.runner()
         && correlation.registration_revision == request.registration_revision()
 }
 
@@ -356,7 +369,7 @@ fn retained(lease: RunnerLease, reason: RunnerLeaseOfferRetention) -> RunnerLeas
 mod tests {
     use std::{collections::VecDeque, future::ready};
 
-    use signalbox_application::PinnedRunnerDispatchRequest;
+    use signalbox_application::{PinnedRunnerDispatchRequest, PinnedRunnerLeaseOffer};
     use signalbox_domain::{
         NormalizedToolArguments, RunnerAdvertisement, RunnerAuthenticationId,
         RunnerCapabilityClass, RunnerCatalog, RunnerEnrollment, RunnerEnrollmentId,
@@ -393,6 +406,8 @@ mod tests {
     const TURN_ATTEMPT: u128 = 8;
     const LEASE: u128 = 9;
     const FOREIGN_ATTEMPT: u128 = 10;
+    const FOREIGN_RUNNER: u128 = 11;
+    const FOREIGN_ENROLLMENT: u128 = 12;
 
     fn id(value: u128) -> Uuid {
         Uuid::from_u128(value)
@@ -519,7 +534,7 @@ mod tests {
             SessionId::from_uuid(id(SESSION)),
             TurnId::from_uuid(id(TURN)),
             ToolAttemptId::from_uuid(id(ATTEMPT)),
-            RunnerEnrollmentId::from_uuid(id(ENROLLMENT)),
+            RunnerId::from_uuid(id(RUNNER)),
             RunnerGeneration::one(),
         )
     }
@@ -568,10 +583,12 @@ mod tests {
             &mut self,
             _request: PinnedRunnerDispatchRequest,
         ) -> RunnerLeaseOfferAuthorizationFuture<'_, Self::Error> {
-            Box::pin(ready(Ok(self
-                .leases
-                .pop_front()
-                .expect("the fixture supplies one lease"))))
+            Box::pin(ready(Ok(PinnedRunnerLeaseOffer::new(
+                RunnerEnrollmentId::from_uuid(id(ENROLLMENT)),
+                self.leases
+                    .pop_front()
+                    .expect("the fixture supplies one lease"),
+            ))))
         }
     }
 
@@ -597,8 +614,7 @@ mod tests {
 
         fn resolve<'a>(
             &'a self,
-            _request: PinnedRunnerDispatchRequest,
-            _lease: &'a RunnerLease,
+            _offer: &'a PinnedRunnerLeaseOffer,
         ) -> RunnerLeaseOfferRouteFuture<'a, Self::Error> {
             Box::pin(ready(self.0))
         }
@@ -770,12 +786,72 @@ mod tests {
             SessionId::from_uuid(id(SESSION)),
             TurnId::from_uuid(id(TURN)),
             ToolAttemptId::from_uuid(id(FOREIGN_ATTEMPT)),
-            RunnerEnrollmentId::from_uuid(id(ENROLLMENT)),
+            RunnerId::from_uuid(id(RUNNER)),
             RunnerGeneration::one(),
         );
 
         let outcome = dispatcher
             .dispatch(foreign_request)
+            .await
+            .expect("the injected authority returned a durable lease");
+
+        assert_eq!(
+            outcome.delivery(),
+            RunnerLeaseOfferDelivery::Retained(RunnerLeaseOfferRetention::AuthorityMismatch)
+        );
+        assert!(
+            dispatcher
+                .transport
+                .sent
+                .lock()
+                .expect("the fixture transport recorder is available")
+                .is_empty()
+        );
+    }
+
+    /// INV-043: the frozen runner identity is part of offer authority.
+    #[tokio::test]
+    async fn s16_inv043_cross_wired_runner_locus_retains_without_emitting_an_offer() {
+        let mut dispatcher = dispatcher(Ok(Some(address())), Ok(()));
+        let foreign_request = PinnedRunnerDispatchRequest::new(
+            SessionId::from_uuid(id(SESSION)),
+            TurnId::from_uuid(id(TURN)),
+            ToolAttemptId::from_uuid(id(ATTEMPT)),
+            RunnerId::from_uuid(id(FOREIGN_RUNNER)),
+            RunnerGeneration::one(),
+        );
+
+        let outcome = dispatcher
+            .dispatch(foreign_request)
+            .await
+            .expect("the injected authority returned a durable lease");
+
+        assert_eq!(
+            outcome.delivery(),
+            RunnerLeaseOfferDelivery::Retained(RunnerLeaseOfferRetention::AuthorityMismatch)
+        );
+        assert!(
+            dispatcher
+                .transport
+                .sent
+                .lock()
+                .expect("the fixture transport recorder is available")
+                .is_empty()
+        );
+    }
+
+    /// INV-043: routing may not substitute another enrollment after commit.
+    #[tokio::test]
+    async fn s16_inv043_cross_wired_route_retains_without_emitting_an_offer() {
+        let cross_wired_route = RunnerConnectionAddress::new(
+            RunnerEnrollmentId::from_uuid(id(FOREIGN_ENROLLMENT)),
+            RunnerId::from_uuid(id(RUNNER)),
+            RunnerConnectionEpoch::try_from_u64(1).expect("the fixture epoch is positive"),
+        );
+        let mut dispatcher = dispatcher(Ok(Some(cross_wired_route)), Ok(()));
+
+        let outcome = dispatcher
+            .dispatch(request())
             .await
             .expect("the injected authority returned a durable lease");
 

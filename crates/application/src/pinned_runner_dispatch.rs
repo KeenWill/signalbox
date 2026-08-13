@@ -3,8 +3,8 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    RunnerEnrollmentId, RunnerGeneration, RunnerLease, RunnerLeaseId, SessionId, ToolAttemptId,
-    TurnId,
+    RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseId, SessionId,
+    ToolAttemptId, TurnId,
 };
 
 /// Exact prepared attempt and frozen runner locus selected for dispatch.
@@ -13,7 +13,7 @@ pub struct PinnedRunnerDispatchRequest {
     session: SessionId,
     turn: TurnId,
     attempt: ToolAttemptId,
-    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
     registration_revision: RunnerGeneration,
 }
 
@@ -24,14 +24,14 @@ impl PinnedRunnerDispatchRequest {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
         registration_revision: RunnerGeneration,
     ) -> Self {
         Self {
             session,
             turn,
             attempt,
-            enrollment,
+            runner,
             registration_revision,
         }
     }
@@ -51,14 +51,43 @@ impl PinnedRunnerDispatchRequest {
         self.attempt
     }
 
-    /// Returns the exact selected enrollment.
-    pub const fn enrollment(&self) -> RunnerEnrollmentId {
-        self.enrollment
+    /// Returns the exact selected runner.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
     }
 
     /// Returns the frozen registration revision.
     pub const fn registration_revision(&self) -> RunnerGeneration {
         self.registration_revision
+    }
+}
+
+/// Durable offer authority plus the enrollment needed for socket routing.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PinnedRunnerLeaseOffer {
+    enrollment: RunnerEnrollmentId,
+    lease: RunnerLease,
+}
+
+impl PinnedRunnerLeaseOffer {
+    /// Binds one committed lease to the enrollment that authorized it.
+    pub const fn new(enrollment: RunnerEnrollmentId, lease: RunnerLease) -> Self {
+        Self { enrollment, lease }
+    }
+
+    /// Returns the enrollment whose current connection may receive the offer.
+    pub const fn enrollment(&self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Borrows the canonical committed lease.
+    pub const fn lease(&self) -> &RunnerLease {
+        &self.lease
+    }
+
+    /// Returns the routing identity and canonical committed lease.
+    pub fn into_parts(self) -> (RunnerEnrollmentId, RunnerLease) {
+        (self.enrollment, self.lease)
     }
 }
 
@@ -88,7 +117,7 @@ pub trait PinnedRunnerDispatchTransaction {
         &mut self,
         request: PinnedRunnerDispatchRequest,
         lease: RunnerLeaseId,
-    ) -> impl Future<Output = Result<RunnerLease, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<PinnedRunnerLeaseOffer, Self::Error>> + Send;
 }
 
 /// Allocates a lease identity and delegates the complete durable transition.
@@ -114,7 +143,7 @@ where
     pub async fn execute(
         &mut self,
         request: PinnedRunnerDispatchRequest,
-    ) -> Result<RunnerLease, Transaction::Error> {
+    ) -> Result<PinnedRunnerLeaseOffer, Transaction::Error> {
         let lease = self.ids.next_lease_id();
         self.transaction.authorize(request, lease).await
     }
@@ -125,20 +154,19 @@ mod tests {
     use std::{collections::VecDeque, future::ready};
 
     use signalbox_domain::{
-        RunnerEnrollmentId, RunnerGeneration, RunnerLease, RunnerLeaseId, SessionId, ToolAttemptId,
-        TurnId,
+        RunnerGeneration, RunnerId, RunnerLeaseId, SessionId, ToolAttemptId, TurnId,
     };
     use uuid::{Uuid, Variant, Version};
 
     use super::{
         PinnedRunnerDispatchRequest, PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction,
-        RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
+        PinnedRunnerLeaseOffer, RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
     };
 
     const SESSION: u128 = 1;
     const TURN: u128 = 2;
     const ATTEMPT: u128 = 3;
-    const ENROLLMENT: u128 = 4;
+    const RUNNER: u128 = 4;
     const LEASE: u128 = 5;
 
     #[derive(Debug)]
@@ -164,7 +192,7 @@ mod tests {
             &mut self,
             _request: PinnedRunnerDispatchRequest,
             _lease: RunnerLeaseId,
-        ) -> impl Future<Output = Result<RunnerLease, Self::Error>> + Send {
+        ) -> impl Future<Output = Result<PinnedRunnerLeaseOffer, Self::Error>> + Send {
             ready(Err("rejected"))
         }
     }
@@ -174,7 +202,7 @@ mod tests {
             SessionId::from_uuid(Uuid::from_u128(SESSION)),
             TurnId::from_uuid(Uuid::from_u128(TURN)),
             ToolAttemptId::from_uuid(Uuid::from_u128(ATTEMPT)),
-            RunnerEnrollmentId::from_uuid(Uuid::from_u128(ENROLLMENT)),
+            RunnerId::from_uuid(Uuid::from_u128(RUNNER)),
             RunnerGeneration::one(),
         )
     }

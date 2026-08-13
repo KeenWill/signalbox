@@ -33,9 +33,12 @@ against this PR (`agent/runner-replacement-provisioning-transaction`). The exact
 lease-offer registration and execution-placement reconstitution facts are
 verified against this PR (`agent/runner-lease-domain-correlation`). Existing-pin
 attempt-and-offer atomicity is verified against this PR
-(`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
-verified against this PR (`agent/runner-lease-claim-transaction`). Atomic
-claimed-lease and physical-attempt result admission is verified against this PR
+(`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
+exact runner/registration lookup and returned enrollment routing identity are
+verified against this PR (`agent/runner-offer-locus-binding`). Durable
+lease-claim admission is verified against this PR
+(`agent/runner-lease-claim-transaction`). Atomic claimed-lease and
+physical-attempt result admission is verified against this PR
 (`agent/runner-lease-result-transaction`). Canonical normalized arguments joined
 through every lease's exact tool request are verified against this PR
 (`agent/runner-lease-argument-binding`). The closed selected executable locus on
