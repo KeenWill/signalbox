@@ -1129,10 +1129,6 @@ fn try_acquire_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemaphore
     budget.try_acquire_owned().ok()
 }
 
-fn blob_read_budget() -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS))
-}
-
 async fn acquire_review_command_permit(
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
@@ -14866,17 +14862,17 @@ mod tests {
         CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
         ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
-        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
-        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError, PendingConversationImport,
-        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
+        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS,
+        OperationalImportError, PendingConversationImport, ProcessConnectionError,
+        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
         RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
         SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
         acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
-        blob_read_budget, blob_upload_begin_preflight, canonical_review_request_digest,
+        blob_upload_begin_preflight, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         foreground_peer_activity, handle_append_conversation_import,
@@ -14889,11 +14885,10 @@ mod tests {
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
-        submit_input_model_execution_diagnostic, try_acquire_blob_read_permit,
-        unavailable_protocol_error, wire_goal_event, wire_metadata_last_writer,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_delegation_port_error,
-        write_snapshot_spool_error, write_transcript_entry,
+        submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
+        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -15634,22 +15629,6 @@ mod tests {
                 .message
                 .contains("supported version: 1")
         );
-    }
-
-    /// INV-060: direct blob-read admission exposes one fixed non-waiting
-    /// process-wide capacity.
-    #[test]
-    fn inv060_blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
-        let budget = blob_read_budget();
-        let held = Arc::clone(&budget)
-            .try_acquire_many_owned(u32::try_from(MAX_CONCURRENT_BLOB_READS)?)
-            .map_err(io::Error::other)?;
-
-        assert_eq!(MAX_CONCURRENT_BLOB_READS, 16);
-        assert!(try_acquire_blob_read_permit(Arc::clone(&budget)).is_none());
-        drop(held);
-        assert_eq!(budget.available_permits(), MAX_CONCURRENT_BLOB_READS);
-        Ok(())
     }
 
     /// INV-033: a reconciliation decision that lost its race to another
