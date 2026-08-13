@@ -59,6 +59,12 @@ let
   daemonRuntimeConfigFile = "${daemonSocketDirectory}/signalboxd.toml";
   daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
   daemonBraveApiKeyFile = "${stateRoot}/brave-api-key";
+  runnerConfigFile = "${stateRoot}/signalbox-runner.toml";
+  runnerRoot = "${stateRoot}/runner";
+  runnerGithubTokenFile = "${stateRoot}/runner-github-token";
+  runnerBubblewrapPath =
+    if pkgs.stdenv.isLinux then "${pkgs.bubblewrap}/bin/bwrap" else "/usr/bin/false";
+  daemonWorkspaceRoot = "${stateRoot}/workspace";
 
   # The daemon validates the socket's parent directory before binding: it must
   # be owned by the effective user and be mode exactly 0700, and no ancestor
@@ -72,6 +78,7 @@ let
   # rule accepts for a directory the developer owns.
   daemonSocketDirectory = "${config.env.DEVENV_RUNTIME}/signalbox";
   daemonSocketPath = "${daemonSocketDirectory}/signalboxd.sock";
+  daemonRunnerSocketPath = "${daemonSocketDirectory}/signalbox-runner.sock";
 
   # The certificate path below is derived from the checkout, so it can carry
   # characters a URL query reserves. SQLx parses the URL and percent-decodes
@@ -221,10 +228,10 @@ in
   };
 
   scripts.signalbox-materialize-config = {
-    description = "Resolve the daemon exec-supervisor placeholder in a config copy.";
+    description = "Resolve daemon deployment placeholders in a runtime config copy.";
     exec = ''
-      if [ "$#" -ne 3 ]; then
-        echo "usage: signalbox-materialize-config <source> <destination> <exec-supervisor>" >&2
+      if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
+        echo "usage: signalbox-materialize-config <source> <destination> <exec-supervisor> [workspace-root]" >&2
         exit 2
       fi
       ${tomlPython}/bin/python3 -c ${shellArg ''
@@ -236,23 +243,41 @@ in
         source_path = Path(sys.argv[1])
         destination_path = Path(sys.argv[2])
         supervisor = sys.argv[3]
+        workspace_root = sys.argv[4] if len(sys.argv) == 5 else None
         content = source_path.read_text()
         document = tomlkit.parse(content)
-        placeholder = "/usr/local/bin/signalbox-exec-supervisor"
+        changed = False
+        supervisor_placeholder = "/usr/local/bin/signalbox-exec-supervisor"
         daemon_tools = document.get("daemon_tools")
         if daemon_tools is None:
             daemon_tools = tomlkit.table()
             daemon_tools["exec_supervisor_executable"] = supervisor
             document["daemon_tools"] = daemon_tools
-            content = tomlkit.dumps(document)
+            changed = True
         elif (
             isinstance(daemon_tools, dict)
-            and daemon_tools.get("exec_supervisor_executable") == placeholder
+            and daemon_tools.get("exec_supervisor_executable")
+            == supervisor_placeholder
         ):
             daemon_tools["exec_supervisor_executable"] = supervisor
+            changed = True
+
+        if workspace_root is not None:
+            workspace_placeholder = "/srv/signalbox/workspace"
+            for mapping in document.get("tool_mappings", []):
+                if (
+                    isinstance(mapping, dict)
+                    and mapping.get("family") == "workspace"
+                    and mapping.get("adapter") == "local"
+                    and mapping.get("workspace_root") == workspace_placeholder
+                ):
+                    mapping["workspace_root"] = workspace_root
+                    changed = True
+
+        if changed:
             content = tomlkit.dumps(document)
         destination_path.write_text(content)
-      ''} "$1" "$2" "$3"
+      ''} "$1" "$2" "$3" "$4"
     '';
   };
 
@@ -264,11 +289,11 @@ in
     };
   };
 
-  # The dev instance: one PostgreSQL cluster and one signalboxd, started
-  # together by `devenv up` under devenv's native process manager. This is a
-  # development convenience only. The integration and end-to-end suites keep
-  # provisioning their own disposable databases through testcontainers and
-  # are not affected by anything below.
+  # The dev instance: one PostgreSQL cluster, one signalboxd, and (on Linux)
+  # one registration runner, started together by `devenv up` under devenv's
+  # native process manager. This is a development convenience only. The
+  # integration and end-to-end suites keep provisioning their own disposable
+  # databases through testcontainers and are not affected by anything below.
   services.postgres = {
     enable = true;
 
@@ -304,18 +329,28 @@ in
     '';
   };
 
-  # Materialises everything the cluster and the daemon need before either
-  # starts: the dev certificate authority and server certificate, the
-  # process-scoped home, and the dev catalog copied from the checked-in
-  # example. Every step is idempotent, so re-running `devenv up` reuses the
-  # existing state and local edits to the copied catalog survive.
+  # Materialises everything the cluster, daemon, and registration runner need
+  # before they start: the dev certificate authority and server certificate,
+  # the process-scoped home, and dev configuration copied from the checked-in
+  # examples. Every step is idempotent, so re-running `devenv up` reuses the
+  # existing state and local edits to the copied configurations survive.
   tasks."signalbox:dev-instance" = {
-    description = "Provision dev-instance TLS material, home, and catalog.";
+    description = "Provision dev-instance TLS material, home, and configuration.";
     exec = ''
       set -euo pipefail
 
       mkdir -p ${shellArg tlsRoot} ${shellArg daemonHome}
       chmod 700 ${shellArg tlsRoot}
+      mkdir -p ${shellArg daemonSocketDirectory}
+      chmod 700 ${shellArg daemonSocketDirectory}
+
+      # Local Git tools intentionally refuse repository discovery and linked
+      # worktrees. Give the dev instance one direct, persistent, initially
+      # unborn repository rather than binding tools to the source checkout.
+      if [ ! -e ${shellArg "${daemonWorkspaceRoot}/.git"} ]; then
+        mkdir -p ${shellArg daemonWorkspaceRoot}
+        git -C ${shellArg daemonWorkspaceRoot} init --quiet --initial-branch=main
+      fi
 
       # The pgpass refusal is a presence check against the process home. Fail
       # loudly rather than deleting a file the developer put here on purpose.
@@ -486,6 +521,34 @@ in
            ${shellArg daemonTemplateConfigFile}
         chmod 644 ${shellArg daemonTemplateConfigFile}
       fi
+
+      if [ ! -f ${shellArg runnerConfigFile} ]; then
+        echo "dev instance: seeding" ${shellArg runnerConfigFile} \
+             "from config/signalbox-runner.example.toml"
+        seeded_runner_config=${shellArg runnerConfigFile}.seed-staging
+        cp "$DEVENV_ROOT/config/signalbox-runner.example.toml" \
+           "$seeded_runner_config"
+        ${tomlPython}/bin/python3 -c ${shellArg ''
+          import sys
+          from pathlib import Path
+
+          import tomlkit
+
+          config_path = Path(sys.argv[1])
+          document = tomlkit.parse(config_path.read_text())
+          document["daemon_socket_path"] = sys.argv[2]
+          document["runner_root"] = sys.argv[3]
+          document["bubblewrap_path"] = sys.argv[4]
+          document["credentials"]["github-runner"]["file"] = sys.argv[5]
+          config_path.write_text(tomlkit.dumps(document))
+        ''} "$seeded_runner_config" \
+          ${shellArg daemonRunnerSocketPath} \
+          ${shellArg runnerRoot} \
+          ${shellArg runnerBubblewrapPath} \
+          ${shellArg runnerGithubTokenFile}
+        chmod 600 "$seeded_runner_config"
+        mv -f "$seeded_runner_config" ${shellArg runnerConfigFile}
+      fi
     '';
   };
 
@@ -548,10 +611,10 @@ in
       ln -sfn "$bridge_executable" \
         ${shellArg "${daemonBinDirectory}/signalbox-claude-mcp-bridge"}
 
-      # Recreated here rather than in the provisioning task because the
-      # runtime directory does not survive between runs. Mode 0700 is exact:
-      # the daemon rejects anything else, including the 0755 devenv gives its
-      # own runtime directory.
+      # Rechecked here after the provisioning task so a manual restart cannot
+      # inherit changed permissions. Mode 0700 is exact: the daemon rejects
+      # anything else, including the 0755 devenv gives its own runtime
+      # directory.
       mkdir -p ${shellArg daemonSocketDirectory}
       chmod 700 ${shellArg daemonSocketDirectory}
 
@@ -562,7 +625,7 @@ in
       # preserved and remains subject to the ordinary fail-closed parser.
       signalbox-materialize-config \
         ${shellArg daemonConfigFile} ${shellArg daemonRuntimeConfigFile} \
-        "$supervisor_executable"
+        "$supervisor_executable" ${shellArg daemonWorkspaceRoot}
       chmod 600 ${shellArg daemonRuntimeConfigFile}
 
       # Deployment-owned credential channels: one file per secret. The launcher
@@ -589,7 +652,38 @@ in
         BRAVE_API_KEY_FILE="$search_key_file" \
         GITHUB_TOKEN_FILE="$token_file" \
         SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \
+        SIGNALBOX_RUNNER_SOCKET_PATH=${shellArg daemonRunnerSocketPath} \
         "$daemon_executable"
+    '';
+  };
+
+  # Version one deliberately has no macOS runner. On Linux this process
+  # enrolls the checked-in registration-only advertisement and stays connected
+  # to the daemon's dedicated runner listener; it does not advertise or execute
+  # a workstation tool inventory.
+  processes.signalbox-runner = pkgs.lib.mkIf pkgs.stdenv.isLinux {
+    # The runner's own reconnect loop waits for the daemon socket. Depending on
+    # signalboxd here would require a false readiness probe: the daemon has no
+    # process-manager ready signal, and process start is not listener readiness.
+    after = [ "devenv:processes:postgres" ];
+    restart.on = "never";
+
+    exec = ''
+      set -euo pipefail
+
+      target_directory="$(
+        cargo metadata --no-deps --format-version 1 |
+          python3 -c "import json, sys; print(json.load(sys.stdin)['target_directory'])"
+      )"
+      runner_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalbox-runner signalbox-runner
+      )"
+
+      exec env \
+        SIGNALBOX_RUNNER_CONFIG_FILE=${shellArg runnerConfigFile} \
+        "$runner_executable"
     '';
   };
 }

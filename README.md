@@ -72,23 +72,31 @@ repository root.
 
 ### Dev instance
 
-`devenv up` starts a dev instance: a PostgreSQL cluster on loopback and one
-`signalboxd` built from the working tree. The cluster asks for port 54341 and
-devenv allocates upward from there if it is taken, so the port is resolved
-rather than fixed — `echo $PGPORT` inside `devenv shell` names the one in use,
-and the daemon is given the same resolved value. The devenv configuration owns
-what `devenv up` launches, in what order, and why test databases stay
-deliberately outside its scope; everything below is operational usage.
+`devenv up` starts a dev instance: a PostgreSQL cluster on loopback, one
+`signalboxd` built from the working tree, and on Linux one registration-only
+`signalbox-runner`. The cluster asks for port 54341 and devenv allocates upward
+from there if it is taken, so the port is resolved rather than fixed —
+`echo $PGPORT` inside `devenv shell` names the one in use, and the daemon is
+given the same resolved value. The devenv configuration owns what `devenv up`
+launches, in what order, and why test databases stay deliberately outside its
+scope; everything below is operational usage.
 
 State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
 and everything the daemon needs in `dev-instance/` — a locally generated
 certificate authority and server certificate under `tls/`, a process-scoped home
-under `home/`, `signalboxd.toml` and `session-templates.toml`, seeded on first
-run from [`config/signalboxd.example.toml`](config/signalboxd.example.toml) and
-[`config/session-templates.example.toml`](config/session-templates.example.toml).
-Both are left alone afterwards so local edits survive. Wipe the whole instance
-with `rm -rf .devenv/state`, or reseed one catalog by deleting its file under
-`.devenv/state/dev-instance/`.
+under `home/`, and `signalboxd.toml`, `session-templates.toml`, and
+`signalbox-runner.toml`, seeded on first run from the corresponding files under
+[`config/`](config/). The runner copy receives only deployment-specific paths
+for its socket, state root, bubblewrap executable, and absent placeholder
+credential file. All three copies are left alone afterwards so local edits
+survive. Wipe the whole instance with `rm -rf .devenv/state`, or reseed one
+configuration by deleting its file under `.devenv/state/dev-instance/`. The
+daemon's runtime-only copy resolves the example workspace placeholder to a
+persistent, initially unborn repository under `dev-instance/workspace/` and the
+exec-supervisor placeholder to Cargo's built artifact; the user-editable seeded
+file retains both installation examples. This separate repository is deliberate:
+the local Git tools reject repository discovery and linked worktrees, while a
+source checkout may use either.
 
 Two things are worth knowing before editing the seeded model catalog or reaching
 for the socket. Its seed is a copy of the checked-in example, so it carries that
@@ -105,7 +113,10 @@ socket parent meeting the ownership and permission rules the
 states. The devenv dev-instance launcher creates that directory and sets mode
 `0700` before executing the daemon; the daemon then binds the socket there. The
 devenv shell exports that path as `SIGNALBOX_SOCKET_PATH` and provides a
-`signalbox <verb>` convenience. That convenience execs Cargo's resolved binary
+`signalbox <verb>` convenience. The dedicated runner listener is the sibling
+`$DEVENV_RUNTIME/signalbox/signalbox-runner.sock`; the seeded runner copy names
+that path directly, while `SIGNALBOX_RUNNER_SOCKET_PATH` is set only on the
+daemon that owns the listener. That convenience execs Cargo's resolved binary
 directly rather than through `cargo run`, so a shell carrying an ambient
 `-C prefer-dynamic` (in `RUSTFLAGS` or inherited Cargo configuration) produces
 an executable that needs Cargo's runtime library search path, which the direct
