@@ -44,11 +44,13 @@ the durable transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). The placement loss-source, pre-pin replacement
-and abandonment state shapes, and append-only reconstitution-history contract
-are re-verified through this PR (`agent/runner-placement-loss-domain`). It owns
-logical runner enrollment, daemon-authoritative catalog validation, runner
-leases, the independent session-composition axes, session placement and
+pinned-loss request mismatches). Owner-private storage of the one retained lease
+and its monotonic fsynced phases is re-verified through this PR
+(`agent/runner-operation-journal`). The placement loss-source, pre-pin
+replacement and abandonment state shapes, and append-only reconstitution-history
+contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
+It owns logical runner enrollment, daemon-authoritative catalog validation,
+runner leases, the independent session-composition axes, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
 session transcript and frontier mechanics remain owned by
@@ -656,6 +658,11 @@ a local termination signal, the runner finishes any outbound frame already in
 progress, then gives its epoch-qualified shutdown write five seconds from the
 next clean frame boundary; expiry exits with typed failure and leaves the hub to
 record transport or heartbeat loss rather than presenting the runner as healthy.
+
+The runner's owner-private state root stores at most one retained lease and
+advances it monotonically through the three fsynced phases below. It rejects
+unsupported inventory slots and journals belonging to another enrolled runner.
+No live protocol path populates or sends this stored inventory.
 
 **Committed unimplemented functionality.** No present runner sends a nonempty
 reconnect inventory. Future execution support repeats resume and advertisement,

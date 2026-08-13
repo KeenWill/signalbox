@@ -472,7 +472,8 @@ pub struct ReconnectInventory {
 }
 
 impl ReconnectInventory {
-    fn validate(&self) -> Result<(), ValueError> {
+    /// Validates every bounded retained item before durable journaling or send.
+    pub fn validate(&self) -> Result<(), ValueError> {
         if let Some(result) = &self.result {
             result.result.validate()?;
         }
