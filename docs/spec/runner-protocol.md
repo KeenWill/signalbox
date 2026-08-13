@@ -61,6 +61,10 @@ daemon paging, was verified against this PR
 exact durable predecessor loss was verified against this PR
 (`agent/runner-pending-successor-promotion`).
 
+Exact-address routing from a daemon operation producer to the established
+socket-owning connection task is verified against this PR
+(`agent/runner-connection-broker`).
+
 The registration-only executable slice is verified through PR #376
 (`agent/runner-daemon`). It adds the dedicated local listener, durable
 idempotent enrollment receipts, exact resume and replacement-advertisement
@@ -185,17 +189,30 @@ enrollment, runner, and authentication-reference identities. The daemon
 validates and commits enrollment and registration before returning their exact
 identities and registration revision.
 
-The registration-only connection implements `enroll`/`enrolled`, empty-inventory
+The executable connection implements `enroll`/`enrolled`, empty-inventory
 `resume`/`resumed`, `advertise`/`registered`, heartbeat challenge and
-acknowledgement with no operation phase, and typed `rejected` closure. The
-daemon commits enrollment or registration before acknowledging it. The runner
-fsyncs its request identity and exact returned receipt before treating either as
-current, reconnects after transient transport loss, and never infers an
-unadvertised capability.
+acknowledgement, and typed `rejected` closure. The daemon commits enrollment or
+registration before acknowledging it. The runner fsyncs its request identity and
+exact returned receipt before treating either as current, reconnects after
+transient transport loss, and never infers an unadvertised capability.
 
-**Committed unimplemented functionality.** No present daemon or runner surface
-serves the following lease/dispatch state machine; the structural wire remains
-compatible with it:
+After durable handshake admission, the daemon connection task registers its
+exact enrollment, runner, and physical connection epoch with a process-local
+outbound broker before writing the handshake receipt. The task writes that
+receipt before consuming the broker queue, so an operation cannot precede the
+runner's durable identity receipt. The broker admits only the closed
+daemon-to-runner operation-frame family, rejects a mismatched runner
+correlation, and uses a one-frame handoff queue; durable journals, not this
+queue, own retry. Before writing a dequeued frame, the task rechecks that the
+exact durable connection epoch is current. Heartbeat deadlines take priority
+over outbound queue work. Dropping the socket task retires only that exact
+route. No production operation producer currently calls the broker, and inbound
+runner operation frames remain unimplemented and fail closed.
+
+**Committed unimplemented functionality.** No present durable producer or runner
+surface serves the following lease/dispatch state machine; the outbound broker
+above transports caller-constructed closed frames but supplies no authority to
+construct one. The structural wire remains compatible with the state machine:
 
 1. The daemon sends `lease_offer` with the complete lease correlation and
    immutable dispatch payload. The runner admits the exact tool, sandbox
@@ -1518,12 +1535,13 @@ lease-row insert (INV-035, INV-045).
 ## Workspace provisioning and recovery
 
 **Committed unimplemented functionality.** No present runner provisions,
-recovers, releases, or reconciles a workspace, and no present daemon dispatches
-any workspace operation. Every behavior in this section constrains that future
-implementation. The executable runner leaves a typed `RecoveryUnavailable` seam
-whose exact `RecoveryGap` is `UnbornHeadNotRepresentable`; it constructs no wire
-recovery fact because the current recovery union cannot represent an empty
-clone's unborn `HEAD`.
+recovers, releases, or reconciles a workspace, and no present durable daemon
+producer constructs a workspace operation. The outbound broker can transport a
+caller-constructed closed frame but does not authorize or journal it. Every
+behavior in this section constrains that future implementation. The executable
+runner leaves a typed `RecoveryUnavailable` seam whose exact `RecoveryGap` is
+`UnbornHeadNotRepresentable`; it constructs no wire recovery fact because the
+current recovery union cannot represent an empty clone's unborn `HEAD`.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
