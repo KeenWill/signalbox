@@ -1490,16 +1490,23 @@ async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError>
     )
     .map_err(std::io::Error::from)
     .map_err(|source| ClientError::blob_output_file(path, source))?;
-    fchmod(&descriptor, Mode::RUSR | Mode::WUSR)
-        .map_err(std::io::Error::from)
-        .map_err(|source| ClientError::blob_output_file(path, source))?;
-    let mut file = tokio::fs::File::from_std(File::from(descriptor));
-    file.write_all(bytes)
-        .await
-        .map_err(|source| ClientError::blob_output_file(path, source))?;
-    file.sync_all()
-        .await
-        .map_err(|source| ClientError::blob_output_file(path, source))
+    let result = async {
+        fchmod(&descriptor, Mode::RUSR | Mode::WUSR)
+            .map_err(std::io::Error::from)
+            .map_err(|source| ClientError::blob_output_file(path, source))?;
+        let mut file = tokio::fs::File::from_std(File::from(descriptor));
+        file.write_all(bytes)
+            .await
+            .map_err(|source| ClientError::blob_output_file(path, source))?;
+        file.sync_all()
+            .await
+            .map_err(|source| ClientError::blob_output_file(path, source))
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    result
 }
 
 async fn hash_blob_source(

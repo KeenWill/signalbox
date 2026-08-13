@@ -2039,6 +2039,7 @@ where
             length_bytes,
         } => {
             handle_read_blob_chunk(
+                reader,
                 writer,
                 version,
                 request_id,
@@ -2046,6 +2047,7 @@ where
                 offset_bytes,
                 length_bytes,
                 services,
+                shutdown,
             )
             .await
         }
@@ -5655,7 +5657,8 @@ where
     clippy::too_many_arguments,
     reason = "the wire boundary keeps correlation and exact range facts explicit"
 )]
-async fn handle_read_blob_chunk<Writer>(
+async fn handle_read_blob_chunk<Reader, Writer>(
+    reader: &mut Reader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -5663,8 +5666,10 @@ async fn handle_read_blob_chunk<Writer>(
     offset_bytes: CanonicalU64,
     length_bytes: CanonicalU64,
     services: &ConnectionServices,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
+    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
@@ -5693,7 +5698,7 @@ where
         return Err(ProcessConnectionError::EncodeInvariant);
     };
     let repository = BlobCatalogRepository::new(services.pool.clone());
-    let outcome = tokio::time::timeout(
+    let traversal = tokio::time::timeout(
         BLOB_READ_TIMEOUT,
         read_blob_chunk(
             services.blob_store_registry.as_deref(),
@@ -5702,9 +5707,13 @@ where
             offset_bytes.value(),
             length,
         ),
-    )
-    .await
-    .unwrap_or(Err(BlobReadError::Unavailable));
+    );
+    let outcome = tokio::select! {
+        biased;
+        () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        () = wait_for_connection_loss(reader) => return Ok(()),
+        outcome = traversal => outcome.unwrap_or(Err(BlobReadError::Unavailable)),
+    };
     drop(permit);
     match outcome {
         Ok(bytes) => {
@@ -5730,6 +5739,17 @@ where
             )
             .await
         }
+    }
+}
+
+async fn wait_for_connection_loss<Reader>(reader: &mut Reader)
+where
+    Reader: AsyncBufRead + Unpin,
+{
+    match reader.fill_buf().await {
+        Ok(available) if available.is_empty() => {}
+        Err(_) => {}
+        Ok(_) => std::future::pending().await,
     }
 }
 
