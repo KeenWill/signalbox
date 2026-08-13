@@ -15,6 +15,7 @@ use signalbox_process_protocol::{
 pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
+    BlobSourceFile(io::Error),
     SystemPromptFile(io::Error),
     GoalTextFile {
         path: PathBuf,
@@ -67,6 +68,10 @@ impl ClientError {
         Self::SourceFile(error)
     }
 
+    pub(crate) fn blob_source_file(error: io::Error) -> Self {
+        Self::BlobSourceFile(error)
+    }
+
     pub(crate) fn system_prompt_file(error: io::Error) -> Self {
         Self::SystemPromptFile(error)
     }
@@ -112,6 +117,7 @@ impl ClientError {
             } => Self::AmbiguousMutation,
             Self::Remote { .. }
             | Self::SourceFile(_)
+            | Self::BlobSourceFile(_)
             | Self::SystemPromptFile(_)
             | Self::GoalTextFile { .. }
             | Self::DelegationContentFile { .. }
@@ -148,6 +154,9 @@ impl fmt::Display for ClientError {
             Self::Io(_) => formatter.write_str("local process communication failed"),
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
+            }
+            Self::BlobSourceFile(_) => {
+                formatter.write_str("the blob upload source file could not be read")
             }
             Self::SystemPromptFile(_) => {
                 formatter.write_str("the system prompt file could not be read")
@@ -235,6 +244,7 @@ impl Error for ClientError {
         match self {
             Self::Io(error)
             | Self::SourceFile(error)
+            | Self::BlobSourceFile(error)
             | Self::SystemPromptFile(error)
             | Self::GoalTextFile { source: error, .. }
             | Self::DelegationContentFile { source: error, .. }

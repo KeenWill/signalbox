@@ -64,6 +64,11 @@ pub(crate) struct SessionMessageSentPresentation {
     pub(crate) delivery_sequence: u64,
 }
 
+pub(crate) enum BlobUploadPresentation {
+    AlreadyPresent,
+    Committed,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PresentTokenTotal {
     tokens: u128,
@@ -975,12 +980,11 @@ impl<'a> Output<'a> {
         &mut self,
         digest: CanonicalBlobDigest,
         byte_length: u64,
-        already_present: bool,
+        outcome: BlobUploadPresentation,
     ) -> io::Result<()> {
-        let status = if already_present {
-            "already_present"
-        } else {
-            "committed"
+        let status = match outcome {
+            BlobUploadPresentation::AlreadyPresent => "already_present",
+            BlobUploadPresentation::Committed => "committed",
         };
         writeln!(
             self.stdout,
