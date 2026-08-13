@@ -1137,42 +1137,13 @@ async fn upload_blob(
     source: PreparedBlobSource,
 ) -> Result<(), ClientError> {
     let PreparedBlobSource { path, mut file } = source;
-    let byte_length = file
-        .metadata()
-        .await
-        .map_err(|source| ClientError::blob_source_file(&path, source))?
-        .len();
-    if byte_length == 0 {
+    let (expected_digest, expected_length_bytes) = hash_blob_source(&mut file, &path).await?;
+    if expected_length_bytes.value() == 0 {
         return Err(ClientError::Input("blob source must be nonempty"));
-    }
-    let mut digest = Sha256::new();
-    let mut observed_length = 0_u64;
-    let mut buffer = vec![0_u8; BLOB_HASH_BUFFER_BYTES];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|source| ClientError::blob_source_file(&path, source))?;
-        if read == 0 {
-            break;
-        }
-        observed_length = observed_length
-            .checked_add(u64::try_from(read).map_err(|_| {
-                ClientError::Protocol("blob source read length is not representable")
-            })?)
-            .ok_or(ClientError::Protocol("blob source length overflowed"))?;
-        digest.update(&buffer[..read]);
-    }
-    if observed_length != byte_length {
-        return Err(ClientError::Input(
-            "blob source length changed while it was hashed",
-        ));
     }
     file.seek(std::io::SeekFrom::Start(0))
         .await
         .map_err(|source| ClientError::blob_source_file(&path, source))?;
-    let expected_digest = CanonicalBlobDigest::from_bytes(digest.finalize().into());
-    let expected_length_bytes = CanonicalU64::new(byte_length);
     let mut connection = client
         .setup_request(ClientRequest::BeginBlobUpload {
             expected_digest,
@@ -1184,6 +1155,8 @@ async fn upload_blob(
             digest,
             byte_length,
         } if digest == expected_digest && byte_length == expected_length_bytes => {
+            verify_blob_source_unchanged(&mut file, &path, expected_digest, expected_length_bytes)
+                .await?;
             output.blob_uploaded(
                 digest,
                 byte_length.value(),
@@ -1271,6 +1244,49 @@ async fn upload_blob(
             ClientError::Protocol("blob upload commit returned an unexpected response").mutation(),
         ),
     }
+}
+
+async fn hash_blob_source(
+    file: &mut tokio::fs::File,
+    path: &Path,
+) -> Result<(CanonicalBlobDigest, CanonicalU64), ClientError> {
+    let mut digest = Sha256::new();
+    let mut observed_length = 0_u64;
+    let mut buffer = vec![0_u8; BLOB_HASH_BUFFER_BYTES];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|source| ClientError::blob_source_file(path, source))?;
+        if read == 0 {
+            break;
+        }
+        observed_length = observed_length
+            .checked_add(u64::try_from(read).map_err(|_| {
+                ClientError::Protocol("blob source read length is not representable")
+            })?)
+            .ok_or(ClientError::Protocol("blob source length overflowed"))?;
+        digest.update(&buffer[..read]);
+    }
+    Ok((
+        CanonicalBlobDigest::from_bytes(digest.finalize().into()),
+        CanonicalU64::new(observed_length),
+    ))
+}
+
+async fn verify_blob_source_unchanged(
+    file: &mut tokio::fs::File,
+    path: &Path,
+    expected_digest: CanonicalBlobDigest,
+    expected_length: CanonicalU64,
+) -> Result<(), ClientError> {
+    let (actual_digest, actual_length) = hash_blob_source(file, path).await?;
+    if actual_digest != expected_digest || actual_length != expected_length {
+        return Err(ClientError::Input(
+            "blob source changed after it was hashed",
+        ));
+    }
+    Ok(())
 }
 
 async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
@@ -5634,8 +5650,8 @@ mod tests {
         TurnTerminal, await_turn_terminal, blocker_recovery_snapshot_state, collect_import_paths,
         continue_imported, conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
-        import_conversation_file, imported, model_call_recovery_transition, open_blob_source,
-        open_scanned_import_source, placement_update_receipt_matches,
+        hash_blob_source, import_conversation_file, imported, model_call_recovery_transition,
+        open_blob_source, open_scanned_import_source, placement_update_receipt_matches,
         placement_update_rejection_matches, queued_turn_recovery, queued_turn_runner_recovery,
         read_delegation_content_file, read_goal_text_file, read_import_file, read_input,
         read_review_json_file, read_system_prompt_file, reconcile_turn, replace_session_model,
@@ -7717,6 +7733,87 @@ mod tests {
             panic!("a FIFO source must retain its rejected path")
         };
         assert_eq!(path, source);
+        Ok(())
+    }
+
+    /// INV-060: a regular seekable source is nonempty when its hash pass reads
+    /// bytes even if its advisory metadata length is zero.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn inv060_blob_upload_counts_bytes_from_the_hash_pass() -> Result<(), Box<dyn Error>> {
+        let path = Path::new("/proc/version");
+        let mut source = open_blob_source(path)?;
+        let metadata_length = source.file.metadata().await?.len();
+
+        let (_digest, observed_length) = hash_blob_source(&mut source.file, path).await?;
+
+        assert_eq!(metadata_length, 0);
+        assert!(observed_length.value() > 0);
+        Ok(())
+    }
+
+    /// INV-060: an already-present receipt succeeds only after re-reading the
+    /// same descriptor and proving its identity is unchanged.
+    #[tokio::test]
+    async fn inv060_blob_upload_revalidates_source_before_deduplication()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let source_path = directory.path().join("blob.bin");
+        let original = b"catalogued source bytes";
+        let replacement = b"rewritten source bytes";
+        fs::write(&source_path, original)?;
+        let digest =
+            CanonicalBlobDigest::from_digest(signalbox_domain::BlobDigest::digest(original));
+        let byte_length = CanonicalU64::new(u64::try_from(original.len())?);
+        let listener = UnixListener::bind(&socket)?;
+        let rewritten_path = source_path.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let begin = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                begin.request(),
+                &ClientRequest::BeginBlobUpload {
+                    expected_digest: digest,
+                    expected_length_bytes: byte_length,
+                }
+            );
+            fs::write(rewritten_path, replacement)?;
+            let present = ServerFrame::try_new_for_version(
+                begin.version(),
+                begin.request_id(),
+                ServerMessage::BlobUploadAlreadyPresent {
+                    digest,
+                    byte_length,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&present).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+        let source = open_blob_source(&source_path)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+
+        let failure = upload_blob(&mut client, &mut output, source)
+            .await
+            .expect_err("a rewritten source must not accept deduplication");
+
+        assert!(matches!(
+            failure,
+            ClientError::Input("blob source changed after it was hashed")
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
         Ok(())
     }
 
