@@ -13,7 +13,7 @@ use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, DetailName,
     Digest, DirectiveAction, Enroll, FailureCategory, FailureDetail, Frame, FrameError, Heartbeat,
-    HeartbeatAck, LeaseCorrelation, MAX_FRAME_BYTES, Message, OperationCorrelation,
+    HeartbeatAck, LeaseCorrelation, LeasePhaseKind, MAX_FRAME_BYTES, Message, OperationCorrelation,
     OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives, ReconnectInventory,
     Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason, ValueError,
     advertisement_digest, decode_line, encode_line,
@@ -1136,6 +1136,49 @@ fn apply_resume_directives(
     if inventory == &ReconnectInventory::default() {
         return Ok(None);
     }
+    if let (Some(lease), Some(directive)) = (inventory.lease.as_ref(), directives.lease.as_ref())
+        && inventory.result.is_none()
+        && inventory.workspace_operation.is_none()
+        && inventory.operation_failure.is_none()
+        && inventory.leak_page.is_none()
+        && directives.result.is_none()
+        && directives.workspace_operation.is_none()
+        && directives.operation_failure.is_none()
+        && directives.leak_page.is_none()
+    {
+        return match (lease.phase, directive.action) {
+            (
+                LeasePhaseKind::WaitingDispatch | LeasePhaseKind::DispatchReceived,
+                DirectiveAction::Await,
+            ) => Ok(None),
+            (
+                LeasePhaseKind::WaitingDispatch | LeasePhaseKind::DispatchReceived,
+                DirectiveAction::FailStale,
+            ) => {
+                state
+                    .fail_stale_unstarted_lease(&lease.correlation)
+                    .map_err(|error| match error {
+                        RunnerStateError::InvalidTransition
+                        | RunnerStateError::OperationCorrelationMismatch => {
+                            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+                        }
+                        other => RunnerConnectionError::State(other),
+                    })?;
+                Ok(None)
+            }
+            (
+                LeasePhaseKind::WaitingDispatch
+                | LeasePhaseKind::DispatchReceived
+                | LeasePhaseKind::ExecutionMayHaveStarted,
+                DirectiveAction::Resend
+                | DirectiveAction::DiscardAsRecorded
+                | DirectiveAction::Await
+                | DirectiveAction::FailStale,
+            ) => Err(RunnerConnectionError::Violation(
+                ProtocolViolation::ResumeDirectives,
+            )),
+        };
+    }
     if let (Some(failure), Some(directive)) = (
         inventory.operation_failure.as_ref(),
         directives.operation_failure.as_ref(),
@@ -1388,6 +1431,33 @@ mod tests {
             }),
             ..ReconnectDirectives::default()
         }
+    }
+
+    fn retained_lease_directives(action: DirectiveAction) -> ReconnectDirectives {
+        ReconnectDirectives {
+            lease: Some(signalbox_runner_wire::Directive {
+                correlation: retained_lease_correlation(),
+                action,
+            }),
+            ..ReconnectDirectives::default()
+        }
+    }
+
+    fn expected_resume_message(
+        receipt: &EnrollmentReceipt,
+        advertisement: &Advertisement,
+        inventory: ReconnectInventory,
+    ) -> Message {
+        Message::Resume(Box::new(Resume {
+            request_id: receipt.request_id(),
+            digest_version: DIGEST_VERSION,
+            enrollment_id: receipt.enrollment_id(),
+            runner_id: receipt.runner_id(),
+            authentication_id: receipt.authentication_id(),
+            advertisement: advertisement.clone(),
+            prior_registration_revision: receipt.registration_revision(),
+            inventory,
+        }))
     }
 
     fn retained_lease_offer_failure() -> OperationFailure {
@@ -1701,6 +1771,255 @@ mod tests {
             })
         ));
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: an exact await directive preserves the durable
+    /// waiting-dispatch phase while resume establishes the successor epoch.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resume_awaits_waiting_dispatch_lease() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture is enrolled")
+            .clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let observed = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            observed
+        };
+        let (connection, observed) = tokio::join!(runner, hub);
+        let expected = expected_resume_message(&receipt, &advertisement, retained.clone());
+
+        assert_eq!(
+            connection
+                .expect("the exact await directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(observed, expected);
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024: dispatch-received remains execution-impossible and
+    /// is retained exactly while the daemon prepares canonical replay.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resume_awaits_dispatch_received_lease() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::DispatchReceived,
+            })
+            .expect("the dispatch-received phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture is enrolled")
+            .clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let observed = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            observed
+        };
+        let (connection, observed) = tokio::join!(runner, hub);
+        let expected = expected_resume_message(&receipt, &advertisement, retained.clone());
+
+        assert_eq!(
+            connection
+                .expect("the exact await directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(observed, expected);
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024: fail-stale consumes only the exact retained lease
+    /// whose journal proves execution never became possible.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resume_clears_stale_unstarted_lease() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture is enrolled")
+            .clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let observed = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::FailStale),
+                })),
+            )
+            .await;
+            observed
+        };
+        let (connection, observed) = tokio::join!(runner, hub);
+        let expected = expected_resume_message(&receipt, &advertisement, retained);
+
+        assert_eq!(
+            connection
+                .expect("the exact stale directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(observed, expected);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: no recorded-result directive can be repurposed to
+    /// discard a lease-only journal slot.
+    #[tokio::test]
+    async fn s31_inv011_inv024_resume_rejects_recorded_action_for_unstarted_lease() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::DiscardAsRecorded),
+                })),
+            )
+            .await;
+        };
+        let (rejected, ()) = tokio::join!(runner, hub);
+        let rejected = rejected
+            .err()
+            .expect("the result-only directive meaning fails closed");
+
+        assert!(matches!(
+            rejected,
+            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024 / INV-043: a lease that may have executed cannot be
+    /// cleared through the execution-impossible resume path.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_resume_rejects_unpaired_execution_possible_lease() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::DispatchReceived,
+            })
+            .expect("the dispatch-received phase is durable");
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::ExecutionMayHaveStarted,
+            })
+            .expect("the execution-possible phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::FailStale),
+                })),
+            )
+            .await;
+        };
+        let (rejected, ()) = tokio::join!(runner, hub);
+        let rejected = rejected
+            .err()
+            .expect("an unpaired execution-possible lease fails closed");
+
+        assert!(matches!(
+            rejected,
+            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
     }
 
     /// INV-011 / INV-024 / INV-043: resume sends the exact retained terminal
