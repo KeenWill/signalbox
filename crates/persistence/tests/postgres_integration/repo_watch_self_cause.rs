@@ -214,9 +214,14 @@ async fn complete_thread_reply(pool: &PgPool, seed: u128) -> Result<(), Box<dyn 
     Ok(())
 }
 
-async fn complete_published_review(pool: &PgPool, seed: u128) -> Result<(), Box<dyn Error>> {
+async fn complete_published_review_for_repository(
+    pool: &PgPool,
+    seed: u128,
+    repository_argument: &str,
+    comments: &str,
+) -> Result<(), Box<dyn Error>> {
     let arguments = format!(
-        r#"{{"commit_id":"{HEAD}","comments":[],"event":"comment","number":41,"repository":"{REPOSITORY}"}}"#
+        r#"{{"commit_id":"{HEAD}","comments":{comments},"event":"comment","number":41,"repository":"{repository_argument}"}}"#
     );
     let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
         pool,
@@ -260,6 +265,64 @@ async fn complete_published_review(pool: &PgPool, seed: u128) -> Result<(), Box<
                         .expect("fixture tool result is bounded"),
                     ),
                 }),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn complete_published_review(pool: &PgPool, seed: u128) -> Result<(), Box<dyn Error>> {
+    complete_published_review_for_repository(
+        pool,
+        seed,
+        REPOSITORY,
+        r#"[{"body":"synthetic inline comment","line":1,"path":"src/lib.rs","side":"RIGHT"}]"#,
+    )
+    .await
+}
+
+async fn ambiguous_published_review(
+    pool: &PgPool,
+    seed: u128,
+    attempt: ToolAttemptId,
+    comments: &str,
+) -> Result<(), Box<dyn Error>> {
+    let arguments = format!(
+        r#"{{"commit_id":"{HEAD}","comments":{comments},"event":"comment","number":41,"repository":"{REPOSITORY}"}}"#
+    );
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        pool,
+        seed,
+        "github_pull_request_publish_review",
+        &arguments,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    let authorized = repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Ambiguous),
         )
         .await?;
     Ok(())
@@ -603,6 +666,173 @@ async fn published_review_inline_thread_is_self_caused() -> Result<(), Box<dyn E
         .await?;
     assert_eq!(observation_count, 1);
     assert_eq!(sessions, 0);
+    Ok(())
+}
+
+/// Repository arguments accepted with mixed case are projected into the
+/// canonical watch key instead of aborting completed tool persistence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn completed_review_receipt_canonicalizes_repository() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    complete_published_review_for_repository(&pool, 0x90_050, "SignalBox/Repository", "[]").await?;
+
+    let stored_repository: String = sqlx::query_scalar(
+        "SELECT repository
+           FROM repo_watch_github_write_receipt
+          WHERE operation_kind = 'publish_review'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_repository, REPOSITORY);
+    Ok(())
+}
+
+/// A commentless review attempt cannot cause a thread, so even an ambiguous
+/// attempt does not park a later user-created thread event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn commentless_ambiguous_review_does_not_block_user_thread() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    ambiguous_published_review(
+        &pool,
+        0x90_060,
+        ToolAttemptId::from_uuid(Uuid::from_u128(0x90_083)),
+        "[]",
+    )
+    .await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let rule = rule()?;
+    let before = observation_without_threads()?;
+    let opening_events = derive_repo_watch_events(
+        &repository,
+        None,
+        &before,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    let first_generation = committed_generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(before.clone()),
+                    opening_events,
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let user_thread = thread_observation(RepoWatchThreadState::Open)?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(&before),
+        &user_thread,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(user_thread.clone()),
+                events,
+            ),
+        )
+        .await?;
+    let event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the user thread event is pending");
+    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+        .evaluate(
+            event,
+            &rule,
+            &user_thread,
+            &TemplateResolver,
+            dispatch_context(),
+        )
+        .await?;
+
+    assert_dispatched(outcome);
+    Ok(())
+}
+
+/// A mutation attempt created after an older provider event cannot be its
+/// cause, even when the later attempt remains commit-ambiguous.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn later_ambiguous_review_does_not_block_older_user_thread() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let rule = rule()?;
+    let before = observation_without_threads()?;
+    let opening_events = derive_repo_watch_events(
+        &repository,
+        None,
+        &before,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    let first_generation = committed_generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(before.clone()),
+                    opening_events,
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let user_thread = thread_observation(RepoWatchThreadState::Open)?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(&before),
+        &user_thread,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(user_thread.clone()),
+                events,
+            ),
+        )
+        .await?;
+    ambiguous_published_review(
+        &pool,
+        0x90_070,
+        ToolAttemptId::from_uuid(Uuid::from_u128(u128::MAX - 1)),
+        r#"[{"body":"synthetic inline comment","line":1,"path":"src/lib.rs","side":"RIGHT"}]"#,
+    )
+    .await?;
+    let event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the older user thread event is pending");
+    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+        .evaluate(
+            event,
+            &rule,
+            &user_thread,
+            &TemplateResolver,
+            dispatch_context(),
+        )
+        .await?;
+
+    assert_dispatched(outcome);
     Ok(())
 }
 

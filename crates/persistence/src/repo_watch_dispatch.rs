@@ -514,7 +514,17 @@ impl PostgresRepoWatchDispatchStore {
                     commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::TargetClosed);
                 }
-                if event_is_self_caused(&mut transaction, event.id()).await? {
+                let self_caused = event_is_self_caused(&mut transaction, event.id()).await?;
+                if !self_caused
+                    && event_has_pending_github_write(&mut transaction, event.id()).await?
+                {
+                    transaction.rollback().await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::PendingSelfCause);
+                }
+                // A tool attempt may complete between the first receipt lookup
+                // and the pending-attempt statement. Reconcile once more after
+                // the latter reports no possible in-flight cause.
+                if self_caused || event_is_self_caused(&mut transaction, event.id()).await? {
                     insert_evaluation(
                         &mut transaction,
                         &event,
@@ -526,10 +536,6 @@ impl PostgresRepoWatchDispatchStore {
                     .await?;
                     commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::SelfCaused);
-                }
-                if event_has_pending_github_write(&mut transaction, event.id()).await? {
-                    transaction.rollback().await?;
-                    return Ok(RepoWatchRuleEvaluationOutcome::PendingSelfCause);
                 }
                 if singleton_is_occupied(&mut transaction, &rule_id, rule_version, &singleton)
                     .await?
@@ -1069,6 +1075,7 @@ async fn event_has_pending_github_write(
                )
                JOIN tool_attempt AS attempt ON attempt.request_id = request.request_id
               WHERE event.event_id = $1
+                AND attempt.attempt_id < event.event_id
                 AND (
                     attempt.state_kind <> 'terminal'
                     OR attempt.terminal_disposition_kind = 'ambiguous'
@@ -1076,8 +1083,17 @@ async fn event_has_pending_github_write(
                 AND (
                     (
                         request.tool_name = 'github_pull_request_publish_review'
-                        AND event.event_kind IN ('review_submitted', 'thread_opened')
-                        AND request.arguments_text::jsonb ->> 'repository'
+                        AND (
+                            event.event_kind = 'review_submitted'
+                            OR (
+                                event.event_kind = 'thread_opened'
+                                AND jsonb_array_length(COALESCE(
+                                    request.arguments_text::jsonb -> 'comments',
+                                    '[]'::jsonb
+                                )) > 0
+                            )
+                        )
+                        AND lower(request.arguments_text::jsonb ->> 'repository')
                             = event.repository
                         AND (request.arguments_text::jsonb ->> 'number')::numeric
                             = event.pull_request_number
