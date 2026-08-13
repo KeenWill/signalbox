@@ -8975,7 +8975,8 @@ impl RunnerGeneration {
     pub const fn checked_next(self) -> Option<Self>;
 }
 pub struct RunnerLeaseCorrelation {
-    /* public exact fence fields */
+    /* public lease, runner, registration revision, placement revision,
+     * working directory, sandbox, tool, dispatch, and generation fields */
 }
 pub struct RunnerLeaseOfferRequest {
     /* public exact initial-offer fields */
@@ -9033,7 +9034,8 @@ pub enum RunnerLeaseRetryPreparation {
     Prepared,
 }
 pub struct RunnerLeaseReconstitutionInput {
-    /* public raw lease projection, independent fence, and retry preparation */
+    /* public raw lease and execution-placement projection, independent fence,
+     * and retry preparation */
 }
 pub struct RunnerLeaseLoss { /* private, produced only by checked RunnerLease transitions */ }
 impl RunnerLeaseLoss {

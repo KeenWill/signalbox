@@ -1925,6 +1925,14 @@ pub struct RunnerLeaseCorrelation {
     pub lease: RunnerLeaseId,
     /// The runner assigned this lease.
     pub runner: RunnerId,
+    /// The exact registration revision that authorized the offer.
+    pub registration_revision: RunnerGeneration,
+    /// The exact pinned placement revision executed by this lease.
+    pub placement_revision: RunnerGeneration,
+    /// The concrete runner-interpreted directory selected for execution.
+    pub working_directory: RunnerWorkingDirectory,
+    /// The exact pinned sandbox profile selected for execution.
+    pub sandbox: RunnerSandboxProfile,
     /// The exact tool name.
     pub tool: ToolName,
     /// The exact tool-attempt dispatch correlation.
@@ -2059,6 +2067,10 @@ pub struct RunnerLease {
     lease: RunnerLeaseId,
     dispatch: ToolAttemptDispatchCorrelation,
     runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    placement_revision: RunnerGeneration,
+    working_directory: RunnerWorkingDirectory,
+    sandbox: RunnerSandboxProfile,
     tool: ToolName,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
@@ -2072,6 +2084,10 @@ impl RunnerLease {
             lease: input.lease,
             dispatch: input.dispatch,
             runner: input.runner,
+            registration_revision: input.registration_revision,
+            placement_revision: input.placement_revision,
+            working_directory: input.working_directory,
+            sandbox: input.sandbox,
             tool: input.tool,
             effect: input.effect,
             credential_authorization: input.credential_authorization,
@@ -2085,6 +2101,10 @@ impl RunnerLease {
         RunnerLeaseCorrelation {
             lease: self.lease,
             runner: self.runner,
+            registration_revision: self.registration_revision,
+            placement_revision: self.placement_revision,
+            working_directory: self.working_directory.clone(),
+            sandbox: self.sandbox,
             tool: self.tool.clone(),
             dispatch: self.dispatch,
             generation: self.generation,
@@ -2221,7 +2241,7 @@ impl RunnerLease {
                     claimed_attempt,
                     preparation: RunnerRetryPreparationGuard::new(retry_preparation),
                 }),
-                no_execution,
+                no_execution: no_execution.map(Box::new),
             },
         })
     }
@@ -2235,6 +2255,10 @@ impl RunnerLease {
             lease: input.lease,
             dispatch: input.dispatch,
             runner: input.runner,
+            registration_revision: input.registration_revision,
+            placement_revision: input.placement_revision,
+            working_directory: input.working_directory,
+            sandbox: input.sandbox,
             tool: input.tool,
             effect: input.effect,
             credential_authorization: input.credential_authorization,
@@ -2251,6 +2275,7 @@ impl RunnerLease {
                         && authorization.tool == lease.tool
                 });
         let declaration_matches = registration.runner == lease.runner
+            && registration.revision == lease.registration_revision
             && registration
                 .tool(&lease.tool)
                 .is_some_and(|declaration| declaration.effect == lease.effect);
@@ -2306,6 +2331,10 @@ struct ValidatedRunnerLeaseOffer {
     lease: RunnerLeaseId,
     dispatch: ToolAttemptDispatchCorrelation,
     runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    placement_revision: RunnerGeneration,
+    working_directory: RunnerWorkingDirectory,
+    sandbox: RunnerSandboxProfile,
     tool: ToolName,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
@@ -2321,6 +2350,14 @@ pub struct RunnerLeaseReconstitutionInput {
     pub dispatch: ToolAttemptDispatchCorrelation,
     /// The runner recorded as the lease owner.
     pub runner: RunnerId,
+    /// The exact registration revision that authorized the offer.
+    pub registration_revision: RunnerGeneration,
+    /// The exact pinned placement revision executed by this lease.
+    pub placement_revision: RunnerGeneration,
+    /// The concrete runner-interpreted directory selected for execution.
+    pub working_directory: RunnerWorkingDirectory,
+    /// The exact pinned sandbox profile selected for execution.
+    pub sandbox: RunnerSandboxProfile,
     /// The exact tool name.
     pub tool: ToolName,
     /// The runner tool effect class checked against the registration.
@@ -2373,7 +2410,7 @@ enum RunnerLeaseLossKind {
     RetryPermitted {
         lost: RunnerLease,
         retry: Box<RunnerLeaseRetryAuthority>,
-        no_execution: Option<RunnerLeaseNoExecutionProof>,
+        no_execution: Option<Box<RunnerLeaseNoExecutionProof>>,
     },
     CrashClassificationRequired {
         lost: RunnerLease,
@@ -2410,7 +2447,10 @@ impl RunnerLeaseLoss {
     /// Returns proof that the unclaimed lease never issued execution authority.
     pub const fn no_execution_proof(&self) -> Option<&RunnerLeaseNoExecutionProof> {
         match &self.kind {
-            RunnerLeaseLossKind::RetryPermitted { no_execution, .. } => no_execution.as_ref(),
+            RunnerLeaseLossKind::RetryPermitted { no_execution, .. } => match no_execution {
+                Some(proof) => Some(&**proof),
+                None => None,
+            },
             RunnerLeaseLossKind::CrashClassificationRequired { .. } => None,
         }
     }
@@ -3095,6 +3135,10 @@ impl SessionRunnerPlacement {
             lease: offer.lease,
             dispatch: attempt,
             runner: dispatch.runner,
+            registration_revision: dispatch.registration_revision,
+            placement_revision: dispatch.placement_revision,
+            working_directory: dispatch.working_directory,
+            sandbox: dispatch.sandbox,
             tool: offer.tool,
             effect: dispatch.effect,
             credential_authorization: dispatch.credential_authorization,
@@ -3120,6 +3164,10 @@ impl SessionRunnerPlacement {
         let dispatch = validate_dispatch(self, enrollment, registration, grant, &lost.tool)?;
         if lost.dispatch.session() != self.session
             || lost.runner != dispatch.runner
+            || lost.registration_revision != dispatch.registration_revision
+            || lost.placement_revision != dispatch.placement_revision
+            || lost.working_directory != dispatch.working_directory
+            || lost.sandbox != dispatch.sandbox
             || lost.effect != dispatch.effect
             || lost.credential_authorization != dispatch.credential_authorization
         {
@@ -3149,6 +3197,10 @@ impl SessionRunnerPlacement {
             lease: lost.lease,
             dispatch: attempt,
             runner: lost.runner,
+            registration_revision: lost.registration_revision,
+            placement_revision: lost.placement_revision,
+            working_directory: lost.working_directory,
+            sandbox: lost.sandbox,
             tool: lost.tool,
             effect: lost.effect,
             credential_authorization: lost.credential_authorization,
@@ -3769,6 +3821,10 @@ pub struct SessionRunnerPlacementReconstitutionInput {
 
 struct ValidatedRunnerDispatch {
     runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    placement_revision: RunnerGeneration,
+    working_directory: RunnerWorkingDirectory,
+    sandbox: RunnerSandboxProfile,
     approval: CredentialToolApproval,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
@@ -3815,6 +3871,10 @@ fn validate_dispatch(
     }
     Ok(ValidatedRunnerDispatch {
         runner: pinned.runner,
+        registration_revision: registration.revision,
+        placement_revision: placement.revision,
+        working_directory: pinned.working_directory.clone(),
+        sandbox: pinned.sandbox,
         approval,
         effect: declaration.effect,
         credential_authorization,
@@ -5234,6 +5294,10 @@ mod tests {
             lease: lease.lease,
             dispatch: lease.dispatch,
             runner: lease.runner,
+            registration_revision: lease.registration_revision,
+            placement_revision: lease.placement_revision,
+            working_directory: lease.working_directory.clone(),
+            sandbox: lease.sandbox,
             tool: lease.tool.clone(),
             effect: lease.effect,
             credential_authorization: lease.credential_authorization.clone(),
@@ -5253,6 +5317,10 @@ mod tests {
             lease: lease.lease,
             dispatch: lease.dispatch,
             runner: lease.runner,
+            registration_revision: lease.registration_revision,
+            placement_revision: lease.placement_revision,
+            working_directory: lease.working_directory.clone(),
+            sandbox: lease.sandbox,
             tool: lease.tool.clone(),
             effect: lease.effect,
             credential_authorization: lease.credential_authorization.clone(),
@@ -6577,6 +6645,64 @@ mod tests {
     }
 
     #[test]
+    fn s31_inv043_cross_wired_registration_revision_cannot_claim() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let stale = RunnerLeaseCorrelation {
+            registration_revision: RunnerGeneration::try_from_u64(2)
+                .expect("the cross-wired registration revision is positive"),
+            ..offered.correlation()
+        };
+
+        assert_eq!(
+            offered.claim(stale),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_cross_wired_placement_revision_cannot_claim() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let stale = RunnerLeaseCorrelation {
+            placement_revision: RunnerGeneration::try_from_u64(2)
+                .expect("the cross-wired placement revision is positive"),
+            ..offered.correlation()
+        };
+
+        assert_eq!(
+            offered.claim(stale),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_cross_wired_working_directory_cannot_claim() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let stale = RunnerLeaseCorrelation {
+            working_directory: directory("/workspace/other-session"),
+            ..offered.correlation()
+        };
+
+        assert_eq!(
+            offered.claim(stale),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_cross_wired_sandbox_cannot_claim() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let stale = RunnerLeaseCorrelation {
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            ..offered.correlation()
+        };
+
+        assert_eq!(
+            offered.claim(stale),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
     fn s12_inv021_inv043_cross_wired_attempt_dispatch_cannot_claim() {
         let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
         let stale = RunnerLeaseCorrelation {
@@ -6663,6 +6789,21 @@ mod tests {
             runner: runner_id(REPLACEMENT_RUNNER),
             ..input.recorded_correlation
         };
+
+        assert_eq!(
+            RunnerLease::reconstitute(input, &registration),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_lease_reconstitution_binds_authorizing_registration_revision() {
+        let (registration, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(lease);
+        let other_revision = RunnerGeneration::try_from_u64(2)
+            .expect("the cross-wired registration revision is positive");
+        input.registration_revision = other_revision;
+        input.recorded_correlation.registration_revision = other_revision;
 
         assert_eq!(
             RunnerLease::reconstitute(input, &registration),
