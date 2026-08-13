@@ -856,12 +856,15 @@ async fn stored_pin_fixture(
     .await
 }
 
+enum ActivePinEffectCase {
+    EffectFree,
+    IdempotentExternalEffect,
+    SideEffectingExternalEffect,
+}
+
 async fn stored_active_pin_fixture_with_authorization(
     pool: &PgPool,
-    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
-    fixture_catalog: RunnerCatalog,
-    fixture_overrides: RunnerToolPermissionOverrides,
-    fixture_effect_kind: &'static str,
+    effect_case: ActivePinEffectCase,
 ) -> Result<
     (
         RunnerProtocolStore,
@@ -872,6 +875,31 @@ async fn stored_active_pin_fixture_with_authorization(
     ),
     Box<dyn Error>,
 > {
+    let (authorize, fixture_catalog, fixture_overrides, fixture_effect_kind): (
+        fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+        RunnerCatalog,
+        RunnerToolPermissionOverrides,
+        &'static str,
+    ) = match effect_case {
+        ActivePinEffectCase::EffectFree => (
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        ),
+        ActivePinEffectCase::IdempotentExternalEffect => (
+            idempotent_authorized,
+            idempotent_catalog(),
+            permission_overrides(RunnerToolPermissionOverride::Auto),
+            "external_effect",
+        ),
+        ActivePinEffectCase::SideEffectingExternalEffect => (
+            external_authorized,
+            side_effecting_catalog(),
+            permission_overrides(RunnerToolPermissionOverride::Auto),
+            "external_effect",
+        ),
+    };
     let (session, turn, turn_attempt) = insert_running_turn(pool).await?;
     let producing_call = ModelCallId::from_uuid(uuid(
         INITIAL_PHYSICAL_ATTEMPT.turn + (RELATED_IDENTITY_OFFSET * 2),
@@ -4390,15 +4418,17 @@ async fn s32_inv032_inv044_runner_loss_transaction_projects_pre_enrollment_sessi
             interrupted_tool_attempt: None,
         }
     );
-    assert!(matches!(
+    assert_eq!(
         store
             .load_placement(session)
             .await?
             .expect("the loss projection remains readable")
             .placement()
             .state(),
-        SessionRunnerPlacementState::RunnerLostBeforePin(_)
-    ));
+        &SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(
+            expected_enrollment.runner(),
+        ))
+    );
     drop(pool);
     Ok(())
 }
@@ -4505,13 +4535,7 @@ async fn s31_inv009_inv043_inv044_runner_loss_transaction_retires_offered_lease(
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
-        stored_active_pin_fixture_with_authorization(
-            &pool,
-            authorized,
-            catalog(),
-            no_permission_overrides(),
-            "effect_free",
-        )
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
         .await?;
     let session = pin.placement.session();
     let attempt = pin.lease.attempt();
@@ -4576,13 +4600,7 @@ async fn s31_inv009_inv043_inv044_runner_loss_finds_lease_before_profile_replace
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin, connection_epoch) =
-        stored_active_pin_fixture_with_authorization(
-            &pool,
-            authorized,
-            catalog(),
-            no_permission_overrides(),
-            "effect_free",
-        )
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
         .await?;
     let original_grant = pin
         .grant
@@ -4655,13 +4673,7 @@ async fn s31_inv009_inv032_inv043_inv044_runner_loss_transaction_rolls_back_as_o
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
-        stored_active_pin_fixture_with_authorization(
-            &pool,
-            authorized,
-            catalog(),
-            no_permission_overrides(),
-            "effect_free",
-        )
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
         .await?;
     let session = pin.placement.session();
     let expected_placement_state = pin.placement.state().clone();
@@ -4731,13 +4743,7 @@ async fn s31_inv009_inv043_inv044_runner_loss_transaction_retains_claimed_pure_a
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, connection_epoch) =
-        stored_active_pin_fixture_with_authorization(
-            &pool,
-            authorized,
-            catalog(),
-            no_permission_overrides(),
-            "effect_free",
-        )
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
         .await?;
     let session = pin.placement.session();
     let correlation = pin.lease.correlation();
@@ -4792,10 +4798,7 @@ async fn s31_inv009_inv026_inv043_inv044_runner_loss_transaction_retains_idempot
     let (store, expected_enrollment, _, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(
             &pool,
-            idempotent_authorized,
-            idempotent_catalog(),
-            permission_overrides(RunnerToolPermissionOverride::Auto),
-            "external_effect",
+            ActivePinEffectCase::IdempotentExternalEffect,
         )
         .await?;
     let session = pin.placement.session();
@@ -4851,10 +4854,7 @@ async fn s31_inv009_inv026_inv043_inv044_runner_loss_transaction_preserves_side_
     let (store, expected_enrollment, _, pin, connection_epoch) =
         stored_active_pin_fixture_with_authorization(
             &pool,
-            external_authorized,
-            side_effecting_catalog(),
-            permission_overrides(RunnerToolPermissionOverride::Auto),
-            "external_effect",
+            ActivePinEffectCase::SideEffectingExternalEffect,
         )
         .await?;
     let session = pin.placement.session();
