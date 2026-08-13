@@ -8023,13 +8023,9 @@ mod tests {
 
         upload_blob(&mut client, &mut output, source).await?;
 
-        assert_eq!(
-            String::from_utf8(stdout)?,
-            format!(
-                "already_present digest={digest} byte_length={}\n",
-                byte_length.value()
-            )
-        );
+        expect_test::expect![[r#"
+            already_present digest=sha256:0e6161e59e9ca2ce9118def8a479a2a9696dc6352eca107b5a580069df4db7e2 byte_length=27
+        "#]].assert_eq(&String::from_utf8(stdout)?);
         assert!(stderr.is_empty());
         server.await??;
         Ok(())
@@ -8228,13 +8224,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(
-            String::from_utf8(stdout)?,
-            format!(
-                "committed digest={digest} byte_length={}\n",
-                byte_length.value()
-            )
-        );
+        expect_test::expect![[r#"
+            committed digest=sha256:dc8dba98d0eeeb8521413d99301f4b1efe3a2eab5e514460aabbd3e9b9d5684e byte_length=4194322
+        "#]].assert_eq(&String::from_utf8(stdout)?);
         assert!(stderr.is_empty());
         server.await??;
         Ok(())
