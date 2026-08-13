@@ -3720,11 +3720,6 @@ impl ClientRequest {
         {
             return Err(FrameValidationError::BlobUploadShape);
         }
-        if let Self::ReadBlobChunk { length_bytes, .. } = self
-            && !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value())
-        {
-            return Err(FrameValidationError::BlobReadShape);
-        }
         if let Self::CreateSessionFromImportedFrontier {
             through_position, ..
         } = self
@@ -4405,6 +4400,12 @@ pub enum RejectionDetail {
         expected_digest: CanonicalBlobDigest,
         actual_digest: CanonicalBlobDigest,
     },
+    /// The requested direct-read length fell outside the inclusive wire bound.
+    BlobReadLengthOutOfRange {
+        min_length_bytes: CanonicalU64,
+        max_length_bytes: CanonicalU64,
+        requested_length_bytes: CanonicalU64,
+    },
     /// The requested exact half-open range is not contained by the blob.
     BlobReadRangeOutOfBounds {
         digest: CanonicalBlobDigest,
@@ -4432,7 +4433,10 @@ impl RejectionDetail {
     }
 
     const fn is_blob_read(self) -> bool {
-        matches!(self, Self::BlobReadRangeOutOfBounds { .. })
+        matches!(
+            self,
+            Self::BlobReadLengthOutOfRange { .. } | Self::BlobReadRangeOutOfBounds { .. }
+        )
     }
 
     const fn is_conversation_import(self) -> bool {
@@ -4448,6 +4452,7 @@ impl RejectionDetail {
             | Self::BlobUploadSizeExceeded { .. }
             | Self::BlobUploadLengthMismatch { .. }
             | Self::BlobUploadDigestMismatch { .. }
+            | Self::BlobReadLengthOutOfRange { .. }
             | Self::BlobReadRangeOutOfBounds { .. }
             | Self::BulkIngestAlreadyInProgress { .. }
             | Self::SessionNotFound { .. }
@@ -7963,6 +7968,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
         | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadLengthOutOfRange { .. }
         | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     };
     if valid {
@@ -8062,6 +8068,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
         | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadLengthOutOfRange { .. }
         | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     };
     if valid {
@@ -8111,6 +8118,16 @@ fn validate_blob_upload_detail(detail: RejectionDetail) -> Result<(), FrameValid
 
 fn validate_blob_read_detail(detail: RejectionDetail) -> Result<(), FrameValidationError> {
     let valid = match detail {
+        RejectionDetail::BlobReadLengthOutOfRange {
+            min_length_bytes,
+            max_length_bytes,
+            requested_length_bytes,
+        } => {
+            min_length_bytes.value() == 1
+                && max_length_bytes.value() == MAX_BLOB_READ_BYTES as u64
+                && (requested_length_bytes.value() < min_length_bytes.value()
+                    || requested_length_bytes.value() > max_length_bytes.value())
+        }
         RejectionDetail::BlobReadRangeOutOfBounds {
             offset_bytes,
             length_bytes,
@@ -11059,10 +11076,11 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: zero and oversized direct range lengths are rejected before
-    /// transport.
+    /// INV-060: invalid direct range lengths remain decodable so the daemon
+    /// can return the contracted typed invalid-request response.
     #[test]
-    fn inv060_blob_read_length_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv060_blob_read_length_bound_reaches_request_handling()
+    -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let zero = ClientRequest::ReadBlobChunk {
             digest,
@@ -11074,14 +11092,27 @@ mod tests {
             offset_bytes: CanonicalU64::new(0),
             length_bytes: CanonicalU64::new(super::MAX_BLOB_READ_BYTES as u64 + 1),
         };
-        assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, zero),
-            Err(FrameValidationError::BlobReadShape)
+        assert!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, zero).is_ok()
         );
-        assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::One, request(2)?, oversized),
-            Err(FrameValidationError::BlobReadShape)
+        assert!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(2)?, oversized).is_ok()
         );
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob read was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::BlobReadLengthOutOfRange {
+                        min_length_bytes: CanonicalU64::new(1),
+                        max_length_bytes: CanonicalU64::new(super::MAX_BLOB_READ_BYTES as u64),
+                        requested_length_bytes: CanonicalU64::new(0),
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"blob read was rejected","detail":{"type":"blob_read_length_out_of_range","min_length_bytes":"1","max_length_bytes":"4194304","requested_length_bytes":"0"}}"#,
+        )?;
         Ok(())
     }
 

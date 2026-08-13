@@ -161,7 +161,8 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
-    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
+    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_BLOB_READ_BYTES,
+    MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
     ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
     ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
@@ -5666,6 +5667,19 @@ async fn handle_read_blob_chunk<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::invalid_blob_read(RejectionDetail::BlobReadLengthOutOfRange {
+                min_length_bytes: CanonicalU64::new(1),
+                max_length_bytes: CanonicalU64::new(MAX_BLOB_READ_BYTES as u64),
+                requested_length_bytes: length_bytes,
+            }),
+        )
+        .await;
+    }
     let Some(permit) = try_acquire_blob_read_permit(Arc::clone(&services.blob_read_budget)) else {
         return write_error(
             writer,
