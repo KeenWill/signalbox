@@ -3,9 +3,9 @@
 use std::{error::Error, fmt, future::Future, pin::Pin};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, PinnedRunnerDispatchRequest,
-    PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer,
-    RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
+    ClassifyOperatorFailure, InitialRunnerDispatchTransaction, OperatorFailureClass,
+    PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer, RunnerDispatchRequest,
+    RunnerDispatchService, RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
 };
 use signalbox_domain::RunnerLease;
 use signalbox_persistence::runner_protocol::{
@@ -32,20 +32,23 @@ pub trait RunnerLeaseOfferAuthority {
     /// Commits one exact prepared-attempt and lease-offer pair.
     fn authorize(
         &mut self,
-        request: PinnedRunnerDispatchRequest,
+        request: RunnerDispatchRequest,
     ) -> RunnerLeaseOfferAuthorizationFuture<'_, Self::Error>;
 }
 
-impl<Transaction, Ids> RunnerLeaseOfferAuthority for PinnedRunnerDispatchService<Transaction, Ids>
+impl<Transaction, Ids> RunnerLeaseOfferAuthority for RunnerDispatchService<Transaction, Ids>
 where
-    Transaction: PinnedRunnerDispatchTransaction + Send,
+    Transaction: InitialRunnerDispatchTransaction
+        + PinnedRunnerDispatchTransaction<
+            Error = <Transaction as InitialRunnerDispatchTransaction>::Error,
+        > + Send,
     Ids: RunnerLeaseIdGenerator + Send,
 {
-    type Error = Transaction::Error;
+    type Error = <Transaction as InitialRunnerDispatchTransaction>::Error;
 
     fn authorize(
         &mut self,
-        request: PinnedRunnerDispatchRequest,
+        request: RunnerDispatchRequest,
     ) -> RunnerLeaseOfferAuthorizationFuture<'_, Self::Error> {
         Box::pin(self.execute(request))
     }
@@ -252,7 +255,7 @@ impl<Authority, Routes, Transport> RunnerLeaseOfferDispatcher<Authority, Routes,
 
 impl
     RunnerLeaseOfferDispatcher<
-        PinnedRunnerDispatchService<RunnerProtocolStore, UuidV7RunnerLeaseIdGenerator>,
+        RunnerDispatchService<RunnerProtocolStore, UuidV7RunnerLeaseIdGenerator>,
         RunnerProtocolStore,
         RunnerConnectionBroker,
     >
@@ -260,7 +263,7 @@ impl
     /// Composes the production PostgreSQL authority with its shared socket broker.
     pub fn postgres(store: RunnerProtocolStore, broker: RunnerConnectionBroker) -> Self {
         Self::new(
-            PinnedRunnerDispatchService::new(store.clone(), UuidV7RunnerLeaseIdGenerator),
+            RunnerDispatchService::new(store.clone(), UuidV7RunnerLeaseIdGenerator),
             store,
             broker,
         )
@@ -278,7 +281,7 @@ where
     /// Authorizes exactly once; every later failure retains the committed offer.
     pub async fn dispatch(
         &mut self,
-        request: PinnedRunnerDispatchRequest,
+        request: RunnerDispatchRequest,
     ) -> Result<RunnerLeaseOfferOutcome, RunnerLeaseOfferDispatchError<Authority::Error>> {
         let offer = self
             .authority
@@ -349,7 +352,7 @@ where
     }
 }
 
-fn lease_matches_request(lease: &RunnerLease, request: PinnedRunnerDispatchRequest) -> bool {
+fn lease_matches_request(lease: &RunnerLease, request: RunnerDispatchRequest) -> bool {
     let correlation = lease.correlation();
     correlation.dispatch.session() == request.session()
         && correlation.dispatch.turn() == request.turn()
@@ -369,7 +372,10 @@ fn retained(lease: RunnerLease, reason: RunnerLeaseOfferRetention) -> RunnerLeas
 mod tests {
     use std::{collections::VecDeque, future::ready};
 
-    use signalbox_application::{PinnedRunnerDispatchRequest, PinnedRunnerLeaseOffer};
+    use signalbox_application::{
+        InitialRunnerDispatchRequest, PinnedRunnerDispatchRequest, PinnedRunnerLeaseOffer,
+        RunnerDispatchRequest,
+    };
     use signalbox_domain::{
         NormalizedToolArguments, RunnerAdvertisement, RunnerAuthenticationId,
         RunnerCapabilityClass, RunnerCatalog, RunnerEnrollment, RunnerEnrollmentId,
@@ -529,7 +535,7 @@ mod tests {
         .expect("the fixture lease is consistent")
     }
 
-    fn request() -> PinnedRunnerDispatchRequest {
+    fn request() -> RunnerDispatchRequest {
         PinnedRunnerDispatchRequest::new(
             SessionId::from_uuid(id(SESSION)),
             TurnId::from_uuid(id(TURN)),
@@ -537,6 +543,18 @@ mod tests {
             RunnerId::from_uuid(id(RUNNER)),
             RunnerGeneration::one(),
         )
+        .into()
+    }
+
+    fn initial_request() -> RunnerDispatchRequest {
+        InitialRunnerDispatchRequest::new(
+            SessionId::from_uuid(id(SESSION)),
+            TurnId::from_uuid(id(TURN)),
+            ToolAttemptId::from_uuid(id(ATTEMPT)),
+            RunnerId::from_uuid(id(RUNNER)),
+            RunnerGeneration::one(),
+        )
+        .into()
     }
 
     fn address() -> RunnerConnectionAddress {
@@ -571,6 +589,17 @@ mod tests {
         }
     }
 
+    fn wire_offer() -> Message {
+        Message::LeaseOffer(LeaseOffer {
+            correlation: wire_correlation(),
+            effect_class: signalbox_runner_wire::EffectClass::Pure,
+            credential_profile: None,
+            grant_revision: None,
+            normalized_arguments: arguments_value(),
+            result_bounds: ResultBounds::version_one(),
+        })
+    }
+
     #[derive(Debug)]
     struct FixedAuthority {
         leases: VecDeque<RunnerLease>,
@@ -581,7 +610,7 @@ mod tests {
 
         fn authorize(
             &mut self,
-            _request: PinnedRunnerDispatchRequest,
+            _request: RunnerDispatchRequest,
         ) -> RunnerLeaseOfferAuthorizationFuture<'_, Self::Error> {
             Box::pin(ready(Ok(PinnedRunnerLeaseOffer::new(
                 RunnerEnrollmentId::from_uuid(id(ENROLLMENT)),
@@ -600,7 +629,7 @@ mod tests {
 
         fn authorize(
             &mut self,
-            _request: PinnedRunnerDispatchRequest,
+            _request: RunnerDispatchRequest,
         ) -> RunnerLeaseOfferAuthorizationFuture<'_, Self::Error> {
             Box::pin(ready(Err("authorization refused")))
         }
@@ -682,17 +711,30 @@ mod tests {
         assert_eq!(outcome.delivery(), RunnerLeaseOfferDelivery::Delivered);
         assert_eq!(outcome.lease().correlation(), correlation());
         assert_eq!(sent.0, address());
-        assert_eq!(
-            sent.1,
-            Message::LeaseOffer(LeaseOffer {
-                correlation: wire_correlation(),
-                effect_class: signalbox_runner_wire::EffectClass::Pure,
-                credential_profile: None,
-                grant_revision: None,
-                normalized_arguments: arguments_value(),
-                result_bounds: ResultBounds::version_one(),
-            })
-        );
+        assert_eq!(sent.1, wire_offer());
+    }
+
+    /// INV-043: first-pin authorization uses the same post-commit offer route.
+    #[tokio::test]
+    async fn s16_inv043_initial_offer_is_projected_and_handed_to_the_exact_route() {
+        let mut dispatcher = dispatcher(Ok(Some(address())), Ok(()));
+
+        let outcome = dispatcher
+            .dispatch(initial_request())
+            .await
+            .expect("the fixture initial authorization commits");
+        let sent = dispatcher
+            .transport
+            .sent
+            .lock()
+            .expect("the fixture transport recorder is available")
+            .pop()
+            .expect("one initial offer was handed to transport");
+
+        assert_eq!(outcome.delivery(), RunnerLeaseOfferDelivery::Delivered);
+        assert_eq!(outcome.lease().correlation(), correlation());
+        assert_eq!(sent.0, address());
+        assert_eq!(sent.1, wire_offer());
     }
 
     #[tokio::test]
@@ -782,13 +824,13 @@ mod tests {
     #[tokio::test]
     async fn s16_inv043_cross_wired_authority_retains_without_emitting_an_offer() {
         let mut dispatcher = dispatcher(Ok(Some(address())), Ok(()));
-        let foreign_request = PinnedRunnerDispatchRequest::new(
+        let foreign_request = RunnerDispatchRequest::from(PinnedRunnerDispatchRequest::new(
             SessionId::from_uuid(id(SESSION)),
             TurnId::from_uuid(id(TURN)),
             ToolAttemptId::from_uuid(id(FOREIGN_ATTEMPT)),
             RunnerId::from_uuid(id(RUNNER)),
             RunnerGeneration::one(),
-        );
+        ));
 
         let outcome = dispatcher
             .dispatch(foreign_request)
@@ -813,13 +855,13 @@ mod tests {
     #[tokio::test]
     async fn s16_inv043_cross_wired_runner_locus_retains_without_emitting_an_offer() {
         let mut dispatcher = dispatcher(Ok(Some(address())), Ok(()));
-        let foreign_request = PinnedRunnerDispatchRequest::new(
+        let foreign_request = RunnerDispatchRequest::from(PinnedRunnerDispatchRequest::new(
             SessionId::from_uuid(id(SESSION)),
             TurnId::from_uuid(id(TURN)),
             ToolAttemptId::from_uuid(id(ATTEMPT)),
             RunnerId::from_uuid(id(FOREIGN_RUNNER)),
             RunnerGeneration::one(),
-        );
+        ));
 
         let outcome = dispatcher
             .dispatch(foreign_request)

@@ -79,6 +79,69 @@ pub struct InitialRunnerDispatchRequest {
     registration_revision: RunnerGeneration,
 }
 
+/// Closed durable authorization request for one runner lease offer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerDispatchRequest {
+    /// The first offer also installs the session placement pin.
+    Initial(InitialRunnerDispatchRequest),
+    /// The session already carries the exact pinned runner placement.
+    Pinned(PinnedRunnerDispatchRequest),
+}
+
+impl RunnerDispatchRequest {
+    /// Returns the owning session.
+    pub const fn session(self) -> SessionId {
+        match self {
+            Self::Initial(request) => request.session(),
+            Self::Pinned(request) => request.session(),
+        }
+    }
+
+    /// Returns the active logical turn.
+    pub const fn turn(self) -> TurnId {
+        match self {
+            Self::Initial(request) => request.turn(),
+            Self::Pinned(request) => request.turn(),
+        }
+    }
+
+    /// Returns the prepared physical attempt.
+    pub const fn attempt(self) -> ToolAttemptId {
+        match self {
+            Self::Initial(request) => request.attempt(),
+            Self::Pinned(request) => request.attempt(),
+        }
+    }
+
+    /// Returns the exact selected runner.
+    pub const fn runner(self) -> RunnerId {
+        match self {
+            Self::Initial(request) => request.runner(),
+            Self::Pinned(request) => request.runner(),
+        }
+    }
+
+    /// Returns the frozen registration revision.
+    pub const fn registration_revision(self) -> RunnerGeneration {
+        match self {
+            Self::Initial(request) => request.registration_revision(),
+            Self::Pinned(request) => request.registration_revision(),
+        }
+    }
+}
+
+impl From<InitialRunnerDispatchRequest> for RunnerDispatchRequest {
+    fn from(request: InitialRunnerDispatchRequest) -> Self {
+        Self::Initial(request)
+    }
+}
+
+impl From<PinnedRunnerDispatchRequest> for RunnerDispatchRequest {
+    fn from(request: PinnedRunnerDispatchRequest) -> Self {
+        Self::Pinned(request)
+    }
+}
+
 impl InitialRunnerDispatchRequest {
     /// Binds one prepared attempt to an exact pre-pin runner registration.
     pub const fn new(
@@ -201,6 +264,46 @@ pub struct InitialRunnerDispatchService<Transaction, Ids> {
     ids: Ids,
 }
 
+/// Selects the exact initial-pin or existing-pin durable offer transaction.
+#[derive(Debug)]
+pub struct RunnerDispatchService<Transaction, Ids> {
+    transaction: Transaction,
+    ids: Ids,
+}
+
+impl<Transaction, Ids> RunnerDispatchService<Transaction, Ids> {
+    /// Uses one shared durable adapter and lease-identity source for both paths.
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self {
+        Self { transaction, ids }
+    }
+}
+
+impl<Transaction, Ids> RunnerDispatchService<Transaction, Ids>
+where
+    Transaction: InitialRunnerDispatchTransaction
+        + PinnedRunnerDispatchTransaction<
+            Error = <Transaction as InitialRunnerDispatchTransaction>::Error,
+        >,
+    Ids: RunnerLeaseIdGenerator,
+{
+    /// Authorizes one first-pin or existing-pin runner dispatch.
+    pub async fn execute(
+        &mut self,
+        request: RunnerDispatchRequest,
+    ) -> Result<PinnedRunnerLeaseOffer, <Transaction as InitialRunnerDispatchTransaction>::Error>
+    {
+        let lease = self.ids.next_lease_id();
+        match request {
+            RunnerDispatchRequest::Initial(request) => {
+                self.transaction.authorize_initial(request, lease).await
+            }
+            RunnerDispatchRequest::Pinned(request) => {
+                self.transaction.authorize(request, lease).await
+            }
+        }
+    }
+}
+
 impl<Transaction, Ids> InitialRunnerDispatchService<Transaction, Ids> {
     /// Uses the supplied durable boundary and lease-identity source.
     pub const fn new(transaction: Transaction, ids: Ids) -> Self {
@@ -257,8 +360,8 @@ mod tests {
     use super::{
         InitialRunnerDispatchRequest, InitialRunnerDispatchService,
         InitialRunnerDispatchTransaction, PinnedRunnerDispatchRequest, PinnedRunnerDispatchService,
-        PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer, RunnerLeaseIdGenerator,
-        UuidV7RunnerLeaseIdGenerator,
+        PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer, RunnerDispatchRequest,
+        RunnerDispatchService, RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
     };
 
     const SESSION: u128 = 1;
@@ -310,6 +413,33 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RejectingCombinedTransaction;
+
+    impl InitialRunnerDispatchTransaction for RejectingCombinedTransaction {
+        type Error = &'static str;
+
+        fn authorize_initial(
+            &mut self,
+            _request: InitialRunnerDispatchRequest,
+            _lease: RunnerLeaseId,
+        ) -> impl Future<Output = Result<PinnedRunnerLeaseOffer, Self::Error>> + Send {
+            ready(Err("initial selected"))
+        }
+    }
+
+    impl PinnedRunnerDispatchTransaction for RejectingCombinedTransaction {
+        type Error = &'static str;
+
+        fn authorize(
+            &mut self,
+            _request: PinnedRunnerDispatchRequest,
+            _lease: RunnerLeaseId,
+        ) -> impl Future<Output = Result<PinnedRunnerLeaseOffer, Self::Error>> + Send {
+            ready(Err("pinned selected"))
+        }
+    }
+
     fn request() -> PinnedRunnerDispatchRequest {
         PinnedRunnerDispatchRequest::new(
             SessionId::from_uuid(Uuid::from_u128(SESSION)),
@@ -354,6 +484,40 @@ mod tests {
         assert_eq!(
             service.execute(initial_request()).await,
             Err("initial rejected")
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_service_selects_the_initial_transaction() {
+        let mut service = RunnerDispatchService::new(
+            RejectingCombinedTransaction,
+            ScriptedIds {
+                leases: VecDeque::from([RunnerLeaseId::from_uuid(Uuid::from_u128(LEASE))]),
+            },
+        );
+
+        assert_eq!(
+            service
+                .execute(RunnerDispatchRequest::Initial(initial_request()))
+                .await,
+            Err("initial selected")
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_service_selects_the_pinned_transaction() {
+        let mut service = RunnerDispatchService::new(
+            RejectingCombinedTransaction,
+            ScriptedIds {
+                leases: VecDeque::from([RunnerLeaseId::from_uuid(Uuid::from_u128(LEASE))]),
+            },
+        );
+
+        assert_eq!(
+            service
+                .execute(RunnerDispatchRequest::Pinned(request()))
+                .await,
+            Err("pinned selected")
         );
     }
 
