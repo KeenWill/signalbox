@@ -79,6 +79,8 @@ const CACHE_READ_TOKENS: u64 = 7;
 const APPROVE_SPELLING: &str = "approve";
 const DENY_SPELLING: &str = "deny";
 const FOREIGN_RECOMMENDATION_SPELLING: &str = "maybe";
+const FAILURE_CAUSES: [&str; 2] = ["fixture timeout", "fixture transport failure"];
+const CONFIGURED_SCHEMA: &str = "configured_approval_judge_eval";
 
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -107,9 +109,66 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
     Ok((container, pool))
 }
 
+async fn migrated_postgres_in_configured_schema()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let (container, bootstrap) = unmigrated_postgres().await?;
+    sqlx::query("CREATE SCHEMA configured_approval_judge_eval AUTHORIZATION signalbox")
+        .execute(&bootstrap)
+        .await?;
+    sqlx::query(
+        "ALTER ROLE signalbox
+         SET search_path TO configured_approval_judge_eval",
+    )
+    .execute(&bootstrap)
+    .await?;
+    let connection_options = bootstrap.connect_options().clone();
+    bootstrap.close().await;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(connection_options)
+        .await?;
+    migrate(&pool).await?;
+    Ok((container, pool))
+}
+
 struct VerdictFixture<'a> {
     recommendation: &'a str,
     rationale: &'a str,
+}
+
+struct CaseSummaryExpectations {
+    verdict_counts: serde_json::Value,
+    majority: Option<&'static str>,
+    measured: bool,
+    complete: bool,
+    stable: Option<bool>,
+    tied: bool,
+    correct: bool,
+}
+
+fn first_partial_case_summary() -> CaseSummaryExpectations {
+    CaseSummaryExpectations {
+        verdict_counts: serde_json::json!({"approve": 1}),
+        majority: None,
+        measured: true,
+        complete: false,
+        stable: None,
+        tied: false,
+        correct: false,
+    }
+}
+
+fn second_partial_case_summary() -> CaseSummaryExpectations {
+    CaseSummaryExpectations {
+        verdict_counts: serde_json::json!({"deny": 1}),
+        majority: None,
+        measured: true,
+        complete: false,
+        stable: None,
+        tied: false,
+        correct: false,
+    }
 }
 
 fn verdict_entry(fixture: VerdictFixture<'_>) -> serde_json::Value {
@@ -123,47 +182,28 @@ fn scorecard_case(
     name: &str,
     repeats: &[serde_json::Value],
     failed_calls: u32,
+    failure_causes: &[&str],
+    summary: CaseSummaryExpectations,
 ) -> serde_json::Value {
     let (category, expected) = match name {
         FIRST_CASE => ("git_push", APPROVE_SPELLING),
         SECOND_CASE => ("credential_access", DENY_SPELLING),
         other => panic!("unknown scorecard case fixture: {other}"),
     };
-    let mut verdict_counts = std::collections::BTreeMap::new();
-    for repeat in repeats {
-        let recommendation = repeat["recommendation"]
-            .as_str()
-            .expect("fixture recommendation is text");
-        *verdict_counts.entry(recommendation).or_insert(0_u64) += 1;
-    }
-    let majority = verdict_counts
-        .iter()
-        .find(|(_, count)| **count * 2 > u64::from(REPEATS))
-        .map(|(recommendation, _)| *recommendation);
-    let measured = !repeats.is_empty();
-    let complete = repeats.len()
-        == usize::try_from(REPEATS).expect("configured repeats fit in usize");
-    let stable = (REPEATS >= 2 && complete).then_some(verdict_counts.len() == 1);
-    let leading = verdict_counts.values().max().copied().unwrap_or(0);
-    let tied = measured
-        && verdict_counts
-            .values()
-            .filter(|count| **count == leading)
-            .count()
-            > 1;
     serde_json::json!({
         "name": name,
         "category": category,
         "expected": expected,
         "repeats": repeats,
         "failed_calls": failed_calls,
-        "verdict_counts": verdict_counts,
-        "majority": majority,
-        "measured": measured,
-        "complete": complete,
-        "stable": stable,
-        "tied": tied,
-        "correct": measured && majority == Some(expected),
+        "failure_causes": failure_causes,
+        "verdict_counts": summary.verdict_counts,
+        "majority": summary.majority,
+        "measured": summary.measured,
+        "complete": summary.complete,
+        "stable": summary.stable,
+        "tied": summary.tied,
+        "correct": summary.correct,
     })
 }
 
@@ -303,6 +343,8 @@ fn both_call_scorecard_cases() -> Vec<serde_json::Value> {
                 rationale: FIRST_RATIONALE,
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         ),
         scorecard_case(
             SECOND_CASE,
@@ -311,6 +353,8 @@ fn both_call_scorecard_cases() -> Vec<serde_json::Value> {
                 rationale: SECOND_RATIONALE,
             })],
             2,
+            &FAILURE_CAUSES,
+            second_partial_case_summary(),
         ),
     ]
 }
@@ -585,6 +629,8 @@ async fn an_inadmissible_call_row_leaves_no_run_row() -> Result<(), Box<dyn Erro
                 rationale: "",
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         )],
         first_partial_case_aggregates(),
     );
@@ -649,6 +695,34 @@ async fn recording_requires_the_daemon_applied_schema() -> Result<(), Box<dyn Er
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn recording_uses_the_configured_migration_schema() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres_in_configured_schema().await?;
+    verify_recording_schema(&pool).await?;
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &both_call_scorecard_cases(),
+        both_partial_case_aggregates(),
+    );
+    record_eval_run(&pool, &run, &[first_call(), second_call()]).await?;
+
+    let current_schema: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(&pool)
+        .await?;
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM configured_approval_judge_eval.approval_judge_eval_run
+          WHERE eval_run_id = $1",
+    )
+    .bind(run.run.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(current_schema, CONFIGURED_SCHEMA);
+    assert_eq!(stored, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let run = run_record_with(
@@ -660,6 +734,8 @@ async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<
                 rationale: FIRST_RATIONALE,
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         )],
         first_partial_case_aggregates(),
     );
@@ -764,6 +840,8 @@ async fn recorded_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
                 rationale: FIRST_RATIONALE,
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         )],
         first_partial_case_aggregates(),
     );
@@ -947,6 +1025,8 @@ async fn unaccounted_attempts_are_rejected() -> Result<(), Box<dyn Error>> {
                 rationale: FIRST_RATIONALE,
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         )],
         first_partial_case_aggregates(),
     );
@@ -968,6 +1048,62 @@ async fn unaccounted_attempts_are_rejected() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn failed_calls_require_one_failure_cause_each() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let malformed_causes = [
+        serde_json::json!([]),
+        serde_json::json!(["only one cause"]),
+        serde_json::json!(["first", "second", "third"]),
+    ];
+    let mut missing = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
+            2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
+        )],
+        first_partial_case_aggregates(),
+    );
+    missing.scorecard["cases"][0]
+        .as_object_mut()
+        .expect("fixture case is an object")
+        .remove("failure_causes");
+    let error = record_eval_run(&pool, &missing, &[first_call()])
+        .await
+        .expect_err("failed calls require failure causes");
+    expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
+
+    for malformed in malformed_causes {
+        let mut run = run_record_with(
+            RUN_IDENTITY,
+            &[scorecard_case(
+                FIRST_CASE,
+                &[verdict_entry(VerdictFixture {
+                    recommendation: APPROVE_SPELLING,
+                    rationale: FIRST_RATIONALE,
+                })],
+                2,
+                &FAILURE_CAUSES,
+                first_partial_case_summary(),
+            )],
+            first_partial_case_aggregates(),
+        );
+        run.scorecard["cases"][0]["failure_causes"] = malformed;
+        let error = record_eval_run(&pool, &run, &[first_call()])
+            .await
+            .expect_err("failure causes must account for every failed call");
+        expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn late_call_rows_are_rejected_after_the_run_commits() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let run = run_record_with(
@@ -979,6 +1115,8 @@ async fn late_call_rows_are_rejected_after_the_run_commits() -> Result<(), Box<d
                 rationale: FIRST_RATIONALE,
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         )],
         first_partial_case_aggregates(),
     );
@@ -1024,6 +1162,8 @@ async fn contradictory_scorecard_verdicts_are_rejected() -> Result<(), Box<dyn E
                 rationale: FIRST_RATIONALE,
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         )],
         first_partial_case_aggregates(),
     );
@@ -1056,6 +1196,8 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
                 rationale: &widest,
             })],
             2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
         )],
         first_partial_case_aggregates(),
     );
@@ -1073,6 +1215,8 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
                 rationale: &overlong,
             })],
             2,
+            &FAILURE_CAUSES,
+            second_partial_case_summary(),
         )],
         second_partial_case_aggregates(),
     );

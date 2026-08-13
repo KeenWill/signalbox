@@ -99,21 +99,40 @@ pub struct ApprovalJudgeEvalCallRecord {
 /// table because the sealing trigger reads the run's recording transaction
 /// while admitting each call row.
 pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let mut connection = pool.acquire().await?;
+    let schema: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(&mut *connection)
+        .await?;
     let present: bool = sqlx::query_scalar(
-        "SELECT to_regclass('public.approval_judge_eval_run') IS NOT NULL
-            AND to_regclass('public.approval_judge_eval_call') IS NOT NULL",
+        "SELECT to_regclass(
+                    format('%I.%I', $1, 'approval_judge_eval_run')
+                ) IS NOT NULL
+            AND to_regclass(
+                    format('%I.%I', $1, 'approval_judge_eval_call')
+                ) IS NOT NULL",
     )
-    .fetch_one(pool)
+    .bind(schema.as_str())
+    .fetch_one(&mut *connection)
     .await?;
     if !present {
         return Err(ApprovalJudgeEvalRecordingError::TablesAbsent);
     }
     let privileged: bool = sqlx::query_scalar(
-        "SELECT has_table_privilege('public.approval_judge_eval_run', 'INSERT')
-            AND has_table_privilege('public.approval_judge_eval_run', 'SELECT')
-            AND has_table_privilege('public.approval_judge_eval_call', 'INSERT')",
+        "SELECT has_table_privilege(
+                    format('%I.%I', $1, 'approval_judge_eval_run'),
+                    'INSERT'
+                )
+            AND has_table_privilege(
+                    format('%I.%I', $1, 'approval_judge_eval_run'),
+                    'SELECT'
+                )
+            AND has_table_privilege(
+                    format('%I.%I', $1, 'approval_judge_eval_call'),
+                    'INSERT'
+                )",
     )
-    .fetch_one(pool)
+    .bind(schema.as_str())
+    .fetch_one(&mut *connection)
     .await?;
     if privileged {
         Ok(())
@@ -226,6 +245,15 @@ fn require_scorecard_verdict_agreement(
             .get("failed_calls")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| verdict_mismatch(name))?;
+        let failure_causes = case
+            .get("failure_causes")
+            .and_then(serde_json::Value::as_array);
+        if failed_calls > 0
+            && failure_causes.and_then(|causes| u64::try_from(causes.len()).ok())
+                != Some(failed_calls)
+        {
+            return Err(verdict_mismatch(name));
+        }
         let successful = u64::try_from(verdicts.len()).map_err(|_| verdict_mismatch(name))?;
         if successful.saturating_add(failed_calls) != u64::from(run.repeats) {
             return Err(verdict_mismatch(name));
@@ -483,47 +511,52 @@ pub async fn record_eval_run(
         }
     }
     let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO public.approval_judge_eval_run
+    let schema: String = sqlx::query_scalar("SELECT quote_ident(current_schema())")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let insert_run = format!(
+        "INSERT INTO {schema}.approval_judge_eval_run
             (eval_run_id, direct_model_selection_id,
              resolved_provider_model_identity_id, provider_model,
              credential_reference, usage_input_includes_cache_tokens,
              corpus_digest, contract_digest, rendered_digest, repeats,
              scorecard)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-    )
-    .bind(run.run.into_uuid())
-    .bind(run.selection.into_uuid())
-    .bind(run.target.identity().into_uuid())
-    .bind(run.provider_model.as_str())
-    .bind(run.credential_reference.as_str())
-    .bind(run.usage_input_includes_cache_tokens)
-    .bind(run.corpus_digest.as_str())
-    .bind(run.contract_digest.as_str())
-    .bind(run.rendered_digest.as_str())
-    .bind(Decimal::from(run.repeats))
-    .bind(Json(&run.scorecard))
-    .execute(&mut *transaction)
-    .await?;
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+    );
+    sqlx::query(&insert_run)
+        .bind(run.run.into_uuid())
+        .bind(run.selection.into_uuid())
+        .bind(run.target.identity().into_uuid())
+        .bind(run.provider_model.as_str())
+        .bind(run.credential_reference.as_str())
+        .bind(run.usage_input_includes_cache_tokens)
+        .bind(run.corpus_digest.as_str())
+        .bind(run.contract_digest.as_str())
+        .bind(run.rendered_digest.as_str())
+        .bind(Decimal::from(run.repeats))
+        .bind(Json(&run.scorecard))
+        .execute(&mut *transaction)
+        .await?;
     for call in calls {
-        sqlx::query(
-            "INSERT INTO public.approval_judge_eval_call
+        let insert_call = format!(
+            "INSERT INTO {schema}.approval_judge_eval_call
                 (eval_run_id, case_name, repeat_ordinal, recommendation_kind,
                  rationale, input_tokens, output_tokens,
                  cache_creation_input_tokens, cache_read_input_tokens)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
-        .bind(run.run.into_uuid())
-        .bind(call.case_name.as_str())
-        .bind(Decimal::from(call.repeat_ordinal))
-        .bind(approval_judge_recommendation_to_str(call.recommendation))
-        .bind(call.rationale.as_str())
-        .bind(call.usage.input_tokens().map(Decimal::from))
-        .bind(call.usage.output_tokens().map(Decimal::from))
-        .bind(call.usage.cache_creation_input_tokens().map(Decimal::from))
-        .bind(call.usage.cache_read_input_tokens().map(Decimal::from))
-        .execute(&mut *transaction)
-        .await?;
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+        );
+        sqlx::query(&insert_call)
+            .bind(run.run.into_uuid())
+            .bind(call.case_name.as_str())
+            .bind(Decimal::from(call.repeat_ordinal))
+            .bind(approval_judge_recommendation_to_str(call.recommendation))
+            .bind(call.rationale.as_str())
+            .bind(call.usage.input_tokens().map(Decimal::from))
+            .bind(call.usage.output_tokens().map(Decimal::from))
+            .bind(call.usage.cache_creation_input_tokens().map(Decimal::from))
+            .bind(call.usage.cache_read_input_tokens().map(Decimal::from))
+            .execute(&mut *transaction)
+            .await?;
     }
     transaction
         .commit()
