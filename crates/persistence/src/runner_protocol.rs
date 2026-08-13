@@ -102,6 +102,12 @@ enum PlacementProjectionAuthority {
     RunnerReplacementTestProjection,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LeaseResultCommitEffect {
+    Applied,
+    Replay,
+}
+
 impl PlacementProjectionAuthority {
     const fn admits_runner_replacement(self) -> bool {
         match self {
@@ -4663,17 +4669,140 @@ impl RunnerProtocolStore {
         crate::tool_loop::lock_tool_session(transaction.as_mut(), correlation.dispatch.session())
             .await
             .map_err(map_runner_tool_loop_error)?;
+        let (completion, effect) = self
+            .commit_lease_result_in(&mut transaction, correlation, observation)
+            .await?;
+        match effect {
+            LeaseResultCommitEffect::Applied => commit_mutation(transaction).await?,
+            LeaseResultCommitEffect::Replay => transaction.rollback().await?,
+        }
+        Ok(completion)
+    }
+
+    /// Authenticates one resume identity and commits its retained terminal
+    /// result before registration reconciliation may consume the attempt.
+    pub async fn commit_retained_result_before_resume(
+        &self,
+        request: RunnerEnrollmentRequestId,
+        observed: IssuedRunnerEnrollmentIdentities,
+        prior_revision: RunnerRegistrationRevision,
+        advertisement: RunnerAdvertisement,
+        result: RunnerLeaseResultRequest,
+    ) -> Result<RunnerLeaseCompletion, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        crate::tool_loop::lock_tool_session(
+            transaction.as_mut(),
+            result.correlation().dispatch.session(),
+        )
+        .await
+        .map_err(map_runner_tool_loop_error)?;
+        let stored = load_enrollment_request_facts(transaction.as_mut(), request)
+            .await?
+            .ok_or(RunnerEnrollmentRequestFailure::UnknownRequest { request })?;
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(stored.identities.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        if stored.identities != observed {
+            return Err(RunnerEnrollmentRequestFailure::ResumeIdentityMismatch {
+                request,
+                expected: stored.identities,
+                observed,
+            }
+            .into());
+        }
+        let enrollment = load_enrollment_in(transaction.as_mut(), stored.identities.enrollment())
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        if enrollment.state() == RunnerEnrollmentState::Revoked {
+            return Err(RunnerEnrollmentRequestFailure::EnrollmentRevoked {
+                request,
+                enrollment: enrollment.enrollment(),
+            }
+            .into());
+        }
+        let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let current = current.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let current = decode_registration_revision(current)?;
+        let registration = load_registration_in(
+            transaction.as_mut(),
+            enrollment.enrollment(),
+            current,
+            Some(&enrollment),
+            &self.catalog,
+        )
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let authority = match enrollment.state() {
+            RunnerEnrollmentState::Pending => RunnerEnrollmentAuthority::ReplacementPending,
+            RunnerEnrollmentState::Active | RunnerEnrollmentState::Revoked => {
+                RunnerEnrollmentAuthority::Active
+            }
+        };
+        let receipt = RunnerEnrollmentReceipt {
+            request,
+            authority,
+            enrollment,
+            registration,
+        };
+        match prior_revision.cmp(&current) {
+            Ordering::Less if receipt.advertisement() != advertisement => {
+                return Err(RunnerEnrollmentRequestFailure::StaleResumeAdvertisement {
+                    request,
+                    prior: prior_revision,
+                    current,
+                }
+                .into());
+            }
+            Ordering::Greater => {
+                return Err(RunnerEnrollmentRequestFailure::ResumeRevisionMismatch {
+                    request,
+                    expected: current,
+                    observed: prior_revision,
+                }
+                .into());
+            }
+            Ordering::Less | Ordering::Equal => {}
+        }
+        if result.correlation().runner != receipt.enrollment().runner() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let (correlation, observation) = result.into_parts();
+        let (completion, effect) = self
+            .commit_lease_result_in(&mut transaction, correlation, observation)
+            .await?;
+        match effect {
+            LeaseResultCommitEffect::Applied => commit_mutation(transaction).await?,
+            LeaseResultCommitEffect::Replay => transaction.rollback().await?,
+        }
+        Ok(completion)
+    }
+
+    async fn commit_lease_result_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        correlation: RunnerLeaseCorrelation,
+        observation: signalbox_domain::ToolAttemptObservation,
+    ) -> Result<(RunnerLeaseCompletion, LeaseResultCommitEffect), RunnerProtocolStoreError> {
         let lease_head = sqlx::query(RUNNER_LEASE_HEAD)
             .bind(correlation.lease.into_uuid())
             .bind(Decimal::from(correlation.generation.get()))
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?
             .ok_or(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ))?;
         let state: String = lease_head.decode_column("state_kind")?;
         let lease = self
-            .load_lease_in(&mut transaction, correlation.lease, correlation.generation)
+            .load_lease_in(transaction, correlation.lease, correlation.generation)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
         if state == "completed" {
@@ -4691,8 +4820,7 @@ impl RunnerProtocolStore {
             let completion = lease
                 .verify_completed_observation(attempt, correlation, observation)
                 .map_err(RunnerProtocolStoreError::Domain)?;
-            transaction.rollback().await?;
-            return Ok(completion);
+            return Ok((completion, LeaseResultCommitEffect::Replay));
         }
         if state != "claimed" {
             return Err(RunnerProtocolStoreError::Domain(
@@ -4724,9 +4852,8 @@ impl RunnerProtocolStore {
             .await
             .map_err(map_runner_tool_loop_error)?;
         }
-        append_lease_event_in(&mut transaction, completion.lease()).await?;
-        commit_mutation(transaction).await?;
-        Ok(completion)
+        append_lease_event_in(transaction, completion.lease()).await?;
+        Ok((completion, LeaseResultCommitEffect::Applied))
     }
 
     /// Atomically pins one workspace-free exact-directory placement, marks its

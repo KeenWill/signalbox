@@ -81,7 +81,7 @@ use signalbox_persistence::{
         RunnerConnectionTransition, RunnerEnrollmentAuthority, RunnerEnrollmentDisposition,
         RunnerEnrollmentRequestFailure, RunnerProtocolCorruption, RunnerProtocolStore,
         RunnerProtocolStoreError, RunnerRegistrationReconciliationDisposition,
-        StoredValidatedRunnerRegistration,
+        RunnerRegistrationRevision, StoredValidatedRunnerRegistration,
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
@@ -2159,6 +2159,129 @@ async fn stored_claimed_pinned_dispatch_fixture(
         "effect_free",
     )
     .await
+}
+
+struct ClaimedResumeFixture {
+    store: RunnerProtocolStore,
+    request: RunnerEnrollmentRequestId,
+    identities: IssuedRunnerEnrollmentIdentities,
+    registration: RunnerRegistrationRevision,
+    successor_registration: RunnerRegistrationRevision,
+    claimed: RunnerLease,
+}
+
+async fn stored_claimed_resume_fixture(
+    pool: &PgPool,
+) -> Result<ClaimedResumeFixture, Box<dyn Error>> {
+    let (session, turn, turn_attempt) = insert_running_turn(pool).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + (RELATED_IDENTITY_OFFSET * 2),
+    ));
+    let boundary = ContextFrontierId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + (RELATED_IDENTITY_OFFSET * 3),
+    ));
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'running'
+          WHERE turn_attempt_id = $1 AND state_kind = 'prepared'",
+    )
+    .bind(turn_attempt.into_uuid())
+    .execute(pool)
+    .await?;
+    attach_continuing_tool_round_projection(
+        pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request)),
+        boundary,
+    )
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_tool_round_call_id = $1
+          WHERE session_id = $2 AND turn_id = $3",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    set_fixture_physical_attempt_effect(pool, INITIAL_PHYSICAL_ATTEMPT, "effect_free").await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?
+        .into_receipt();
+    store
+        .open_connection(receipt.enrollment().enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            receipt.enrollment(),
+            receipt.registration().registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the resume fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the resume fixture registration pins the placement");
+    store.store_pin(&pin, receipt.registration()).await?;
+    terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    append_prepared_pinned_dispatch_attempt(
+        pool,
+        receipt.enrollment().runner(),
+        receipt.registration().registration().revision(),
+    )
+    .await?;
+    let request = PinnedRunnerDispatchRequest::new(
+        pin.placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        receipt.enrollment().runner(),
+        receipt.registration().registration().revision(),
+    );
+    let offered = store
+        .authorize_pinned_dispatch(request, RunnerLeaseId::from_uuid(uuid(LEASE + 5)))
+        .await?;
+    let claimed = store
+        .claim_lease(RunnerLeaseClaimRequest::new(offered.lease().correlation()))
+        .await?;
+    Ok(ClaimedResumeFixture {
+        store,
+        request: receipt.request(),
+        identities: receipt.identities(),
+        registration: receipt.registration().revision(),
+        successor_registration: RunnerRegistrationRevision::try_from_u64(2)
+            .expect("the fixture successor registration is positive"),
+        claimed,
+    })
 }
 
 async fn stored_claimed_pinned_dispatch_fixture_with_authorization(
@@ -18631,6 +18754,132 @@ async fn s31_inv011_inv021_inv043_runner_result_commits_attempt_and_lease_once()
     assert_eq!(attempt_state, "terminal");
     assert_eq!(disposition.as_deref(), Some("completed"));
     assert_eq!(result_text.as_deref(), Some(result.as_str()));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-034 / INV-043: retained terminal evidence commits under the
+/// authenticated resume identity before a changed advertisement advances its
+/// registration and starts availability reconciliation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv034_inv043_retained_result_commits_before_resume_registration_change()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = stored_claimed_resume_fixture(&pool).await?;
+    let correlation = fixture.claimed.correlation();
+    let result = ToolResultText::try_new("retained runner result".to_owned())
+        .expect("the retained fixture result is bounded");
+    let request = RunnerLeaseResultRequest::new(
+        correlation.clone(),
+        ToolAttemptObservation::Completed {
+            result: ToolResultContent::Text(result.clone()),
+        },
+    );
+    let completion = fixture
+        .store
+        .commit_retained_result_before_resume(
+            fixture.request,
+            fixture.identities,
+            fixture.registration,
+            narrowed_advertisement(),
+            request.clone(),
+        )
+        .await?;
+    let replay = fixture
+        .store
+        .commit_retained_result_before_resume(
+            fixture.request,
+            fixture.identities,
+            fixture.registration,
+            narrowed_advertisement(),
+            request,
+        )
+        .await?;
+    let resumed = fixture
+        .store
+        .resume_registration(
+            fixture.request,
+            fixture.identities,
+            fixture.registration,
+            narrowed_advertisement(),
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_lease(correlation.lease, correlation.generation)
+        .await?
+        .expect("the retained-result transaction stores its completed lease");
+
+    assert_eq!(completion.lease(), &loaded);
+    assert_eq!(replay, completion);
+    assert_eq!(completion.lease().state(), RunnerLeaseState::Completed);
+    assert_eq!(
+        completion.attempt().end(),
+        &ToolAttemptEnd::Completed {
+            result: ToolResultContent::Text(result),
+        }
+    );
+    assert_eq!(
+        resumed.registration().revision(),
+        fixture.successor_registration
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-011 / INV-034 / INV-043: a cross-wired resume identity cannot consume
+/// retained terminal evidence or change the claimed attempt and lease.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv011_inv034_inv043_retained_result_rejects_foreign_resume_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = stored_claimed_resume_fixture(&pool).await?;
+    let correlation = fixture.claimed.correlation();
+    let foreign = IssuedRunnerEnrollmentIdentities::new(
+        fixture.identities.enrollment(),
+        fixture.identities.runner(),
+        RunnerAuthenticationId::from_uuid(uuid(LATER_AUTHENTICATION)),
+    );
+    let rejected = fixture
+        .store
+        .commit_retained_result_before_resume(
+            fixture.request,
+            foreign,
+            fixture.registration,
+            advertisement(),
+            RunnerLeaseResultRequest::new(
+                correlation.clone(),
+                ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new("foreign result".to_owned())
+                            .expect("the foreign fixture result is bounded"),
+                    ),
+                },
+            ),
+        )
+        .await
+        .expect_err("another authentication identity cannot commit retained evidence");
+    let loaded = fixture
+        .store
+        .load_lease(correlation.lease, correlation.generation)
+        .await?
+        .expect("the rejected resume leaves the claimed lease readable");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(correlation.dispatch.attempt().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let expected = RunnerEnrollmentRequestFailure::ResumeIdentityMismatch {
+        request: fixture.request,
+        expected: fixture.identities,
+        observed: foreign,
+    };
+
+    assert_eq!(rejected.to_string(), expected.to_string());
+    assert_eq!(loaded.state(), RunnerLeaseState::Claimed);
+    assert_eq!(attempt_state, "in_flight");
     drop(pool);
     Ok(())
 }
