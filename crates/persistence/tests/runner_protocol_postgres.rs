@@ -12,7 +12,7 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
     PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
-    RunnerReplacementProvisioningOutcome,
+    RunnerLeaseClaimRequest, RunnerReplacementProvisioningOutcome,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -2143,6 +2143,12 @@ async fn migrated_unconnected_later_lease_fixture(
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(pool)
+    .await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -4084,7 +4090,9 @@ async fn complete_runner_lease_projection(
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact fixture lease correlation claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let completed = claimed
         .complete(pin.lease.correlation())
         .expect("the exact claimed fixture lease correlation completes");
@@ -7607,7 +7615,9 @@ async fn s31_inv009_inv043_inv044_runner_loss_transaction_retains_claimed_pure_a
         .lease
         .claim(correlation.clone())
         .expect("the offered pure lease accepts its exact claim");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     store
         .transition_connection(
             expected_enrollment.enrollment(),
@@ -7666,7 +7676,9 @@ async fn s31_inv009_inv026_inv043_inv044_runner_loss_transaction_retains_idempot
         .lease
         .claim(correlation.clone())
         .expect("the idempotent lease accepts its exact claim");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     store
         .transition_connection(
             expected_enrollment.enrollment(),
@@ -7725,7 +7737,9 @@ async fn s31_inv009_inv026_inv043_inv044_runner_loss_transaction_preserves_side_
         .lease
         .claim(correlation.clone())
         .expect("the side-effecting lease accepts its exact claim");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     store
         .transition_connection(
             expected_enrollment.enrollment(),
@@ -9473,7 +9487,9 @@ async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
@@ -9503,7 +9519,9 @@ async fn s31_inv043_inv044_connected_later_lease_offer_admits_exact_claim()
     let claimed = duplicate_lease(&lease, registration.registration())
         .claim(lease.correlation())
         .expect("the exact live-connection lease correlation claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loaded = store
         .load_connection(expected_enrollment.enrollment())
         .await?
@@ -12837,7 +12855,9 @@ async fn s32_inv009_inv044_nullable_runner_wait_ignores_retired_claimed_retry_at
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact idempotent lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed
         .lose()
         .expect("claimed idempotent work admits a checked retry");
@@ -14673,7 +14693,9 @@ async fn s32_inv009_inv044_runner_recovery_serializes_lease_head_advances()
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact fixture lease correlation claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let stale_completion = duplicate_lease(&claimed, registration.registration())
         .complete(pin.lease.correlation())
         .expect("the pre-loss claimed snapshot admits its exact completion");
@@ -14853,7 +14875,9 @@ async fn s32_inv009_inv044_runner_recovery_rejects_completed_lease_attempt()
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact fixture lease correlation claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let completed = claimed
         .complete(pin.lease.correlation())
         .expect("the exact claimed lease correlation completes");
@@ -14926,7 +14950,9 @@ async fn s32_inv009_inv044_runner_recovery_rejects_claimed_lease_attempt()
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact fixture lease correlation claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
@@ -15063,7 +15089,9 @@ async fn s32_inv009_inv044_runner_loss_rejects_retired_claimed_retry_attempt()
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact idempotent lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed
         .lose()
         .expect("claimed idempotent work admits a checked retry");
@@ -17901,6 +17929,81 @@ async fn s31_inv043_pinned_dispatch_rejects_stale_registration_atomically()
     Ok(())
 }
 
+/// INV-043: the exact offered correlation becomes the canonical durable claim
+/// before an acknowledgement can authorize execution.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_runner_lease_claim_round_trips_exact_correlation() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let correlation = lease.correlation();
+    store.store_lease(&lease).await?;
+    let claimed = store
+        .claim_lease(RunnerLeaseClaimRequest::new(correlation.clone()))
+        .await?;
+    let loaded = store
+        .load_lease(correlation.lease, correlation.generation)
+        .await?
+        .expect("the exact durable claim is readable");
+
+    assert_eq!(claimed.state(), RunnerLeaseState::Claimed);
+    assert_eq!(claimed.correlation(), correlation);
+    assert_eq!(loaded, claimed);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043: generic state projection cannot bypass the claim transaction.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_generic_lease_store_rejects_claimed_state() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, _, lease) = stored_later_lease_fixture(&pool).await?;
+    store.store_lease(&lease).await?;
+    let claimed = duplicate_lease(&lease, registration.registration())
+        .claim(lease.correlation())
+        .expect("the fixture prepares internally correlated claimed state");
+    let rejected = store
+        .store_lease(&claimed)
+        .await
+        .expect_err("generic persistence cannot originate a runner claim");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043: a cross-wired claim rolls back without changing the offered head.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_runner_lease_claim_rejects_cross_wired_execution_locus()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let correlation = lease.correlation();
+    let cross_wired = RunnerLeaseCorrelation {
+        working_directory: RunnerWorkingDirectory::try_new("/workspace/other".to_owned())
+            .expect("the cross-wired directory remains structurally valid"),
+        ..correlation.clone()
+    };
+    store.store_lease(&lease).await?;
+    let rejected = store
+        .claim_lease(RunnerLeaseClaimRequest::new(cross_wired))
+        .await
+        .expect_err("the claim must match the complete offered correlation");
+    let loaded = store
+        .load_lease(correlation.lease, correlation.generation)
+        .await?
+        .expect("the rejected claim leaves its offer readable");
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    assert_eq!(loaded.state(), RunnerLeaseState::Offered);
+    assert_eq!(loaded.correlation(), correlation);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-007 / INV-043: a lease append rejected after attempt authorization
 /// rolls the attempt back to Prepared instead of exposing partial authority.
 #[tokio::test]
@@ -18061,7 +18164,9 @@ async fn s31_inv043_current_lease_event_head_cannot_rewind() -> Result<(), Box<d
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let rewound_head = sqlx::query(
         "UPDATE runner_current_lease_event
             SET event_ordinal = event_ordinal - 1
@@ -21346,7 +21451,9 @@ async fn s31_inv029_inv043_claimed_retry_reservation_rejects_terminal_source()
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
@@ -21389,7 +21496,9 @@ async fn s31_inv004_inv043_replacement_attempt_commits_only_with_successor_lease
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
@@ -21550,7 +21659,9 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact idempotent lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed
         .lose()
         .expect("claimed idempotent work admits a checked retry");
@@ -21638,7 +21749,9 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     let claimed = offered
         .claim(correlation)
         .expect("the exact lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed.lose().expect("the claimed pure lease may be lost");
     store_fixture_retryable_loss(&store, &pool, &loss).await?;
     let lost = store
@@ -21881,7 +21994,9 @@ async fn s31_inv043_retryable_loss_serializes_with_attempt_termination()
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
@@ -21995,7 +22110,9 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     let claimed = offered
         .claim(correlation)
         .expect("the exact lease fence claims");
-    store.store_lease(&claimed).await?;
+    store
+        .store_claimed_lease_projection_for_test(&claimed)
+        .await?;
     let loss = claimed.lose().expect("the claimed pure lease may be lost");
     store_fixture_retryable_loss(&store, &pool, &loss).await?;
 
@@ -22706,7 +22823,7 @@ async fn s31_inv043_inv044_lease_offer_requires_connection_authority() -> Result
 async fn s31_inv043_inv044_lease_claim_requires_connection_authority() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = unmigrated_postgres().await?;
-    let (store, _, registration, lease) = migrated_unconnected_later_lease_fixture(&pool).await?;
+    let (store, _, _, lease) = migrated_unconnected_later_lease_fixture(&pool).await?;
     sqlx::query(
         "ALTER TABLE runner_lease_generation
          DISABLE TRIGGER runner_lease_generation_connection_loss_fence",
@@ -22720,11 +22837,8 @@ async fn s31_inv043_inv044_lease_claim_requires_connection_authority() -> Result
     )
     .execute(&pool)
     .await?;
-    let claimed = duplicate_lease(&lease, registration.registration())
-        .claim(lease.correlation())
-        .expect("the exact fixture offer correlation prepares its claim");
     let rejected = store
-        .store_lease(&claimed)
+        .claim_lease(RunnerLeaseClaimRequest::new(lease.correlation()))
         .await
         .expect_err("a null-baseline lease cannot claim without connection authority");
 
@@ -23221,14 +23335,10 @@ async fn s31_inv043_inv044_lease_offer_wins_concurrent_connection_loss()
 async fn s31_inv043_inv044_loss_fences_offered_lease_claim_across_reconnect()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, registration, _, lease) =
-        stored_later_lease_fixture(&pool).await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let enrollment = expected_enrollment.enrollment();
     let connection = store.open_connection(enrollment).await?;
     store.store_lease(&lease).await?;
-    let claimed = duplicate_lease(&lease, registration.registration())
-        .claim(lease.correlation())
-        .expect("the exact offered lease correlation prepares its claim");
     store
         .transition_connection(
             enrollment,
@@ -23237,12 +23347,12 @@ async fn s31_inv043_inv044_loss_fences_offered_lease_claim_across_reconnect()
         )
         .await?;
     let lost_rejection = store
-        .store_lease(&claimed)
+        .claim_lease(RunnerLeaseClaimRequest::new(lease.correlation()))
         .await
         .expect_err("terminal loss fences the outstanding lease claim");
     store.open_connection(enrollment).await?;
     let successor_rejection = store
-        .store_lease(&claimed)
+        .claim_lease(RunnerLeaseClaimRequest::new(lease.correlation()))
         .await
         .expect_err("a successor connection cannot revive the prior offer");
 
@@ -23259,14 +23369,11 @@ async fn s31_inv043_inv044_loss_fences_offered_lease_claim_across_reconnect()
 async fn s31_inv043_inv044_connection_loss_wins_concurrent_lease_claim()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, registration, _, lease) =
-        stored_later_lease_fixture(&pool).await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let enrollment = expected_enrollment.enrollment();
     let connection = store.open_connection(enrollment).await?;
     store.store_lease(&lease).await?;
-    let claimed = duplicate_lease(&lease, registration.registration())
-        .claim(lease.correlation())
-        .expect("the exact offered lease correlation prepares its claim");
+    let correlation = lease.correlation();
     let mut authority = pool.begin().await?;
     sqlx::query(
         "SELECT enrollment_id
@@ -23293,7 +23400,11 @@ async fn s31_inv043_inv044_connection_loss_wins_concurrent_lease_claim()
         tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
     let claim_store = RunnerProtocolStore::new(pool.clone(), catalog());
     let claim_task = tokio::spawn(async move {
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, claim_store.store_lease(&claimed)).await
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            claim_store.claim_lease(RunnerLeaseClaimRequest::new(correlation)),
+        )
+        .await
     });
     let claim_observation =
         tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
@@ -23325,17 +23436,14 @@ async fn s31_inv043_inv044_connection_loss_wins_concurrent_lease_claim()
 async fn s31_inv043_inv044_lease_claim_wins_concurrent_connection_loss()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, registration, _, lease) =
-        stored_later_lease_fixture(&pool).await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     let enrollment = expected_enrollment.enrollment();
     let connection = store.open_connection(enrollment).await?;
     store.store_lease(&lease).await?;
-    let claimed = duplicate_lease(&lease, registration.registration())
-        .claim(lease.correlation())
-        .expect("the exact offered lease correlation prepares its claim");
-    let expected_state = claimed.state();
-    let lease_id = claimed.correlation().lease;
-    let generation = claimed.correlation().generation;
+    let correlation = lease.correlation();
+    let expected_state = RunnerLeaseState::Claimed;
+    let lease_id = correlation.lease;
+    let generation = correlation.generation;
     let mut authority = pool.begin().await?;
     sqlx::query(
         "SELECT enrollment_id
@@ -23348,7 +23456,11 @@ async fn s31_inv043_inv044_lease_claim_wins_concurrent_connection_loss()
     .await?;
     let claim_store = RunnerProtocolStore::new(pool.clone(), catalog());
     let claim_task = tokio::spawn(async move {
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, claim_store.store_lease(&claimed)).await
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            claim_store.claim_lease(RunnerLeaseClaimRequest::new(correlation)),
+        )
+        .await
     });
     let claim_observation =
         tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;

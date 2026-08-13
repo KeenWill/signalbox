@@ -6022,6 +6022,35 @@ where
 }
 ```
 
+## application: runner_lease_claim
+
+```rust
+pub struct RunnerLeaseClaimRequest { /* private */ }
+impl RunnerLeaseClaimRequest {
+    pub const fn new(correlation: RunnerLeaseCorrelation) -> Self;
+    // accessors: correlation(), into_correlation()
+}
+
+pub trait RunnerLeaseClaimTransaction {
+    type Error;
+    fn claim(
+        &mut self,
+        request: RunnerLeaseClaimRequest,
+    ) -> impl Future<Output = Result<RunnerLease, Self::Error>> + Send;
+}
+
+pub struct RunnerLeaseClaimService<Transaction> { /* private */ }
+impl<Transaction> RunnerLeaseClaimService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: RunnerLeaseClaimTransaction> RunnerLeaseClaimService<Transaction> {
+    pub async fn execute(
+        &mut self,
+        request: RunnerLeaseClaimRequest,
+    ) -> Result<RunnerLease, Transaction::Error>;
+}
+```
+
 ## application: pinned_runner_dispatch
 
 ```rust
@@ -10850,6 +10879,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: abandon_lost_runner                   | 4 (incl. 1 trait)     |
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
+| application: runner_lease_claim                    | 3 (incl. 1 trait)     |
 | application: pinned_runner_dispatch                | 5 (incl. 2 traits)    |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
@@ -10870,4 +10900,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **275 (+1 free fn)**  |
+| **signalbox-application total**                    | **278 (+1 free fn)**  |
