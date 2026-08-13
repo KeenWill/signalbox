@@ -207,6 +207,38 @@ pub enum ReplaceLostRunnerBeforePinResult {
     Rejected(ReplaceLostRunnerBeforePinRejection),
 }
 
+/// Closed durable refusal while preparing a pinned replacement workspace.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerReplacementProvisioningRejection {
+    /// The selected session does not exist.
+    SessionNotFound { session: SessionId },
+    /// The selected session has no runner placement.
+    RunnerPlacementNotFound { session: SessionId },
+    /// The current placement revision differs from the caller's observation.
+    PlacementRevisionMismatch {
+        session: SessionId,
+        expected: RunnerGeneration,
+        current: RunnerGeneration,
+    },
+    /// The exact current placement is not a lost pinned placement.
+    PlacementNotLost {
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        state: RunnerPlacementRecoveryState,
+    },
+    /// The selected successor is the lost runner without checked registration recovery.
+    ReplacementSameRunner {
+        session: SessionId,
+        runner: RunnerId,
+    },
+    /// Current typed runner authority refused the selected target.
+    ReplacementTargetUnavailable {
+        session: SessionId,
+        target: RunnerReplacementTarget,
+        reason: RunnerReplacementTargetUnavailableReason,
+    },
+}
+
 /// Complete session-scoped request to abandon one exact lost placement.
 #[derive(Clone, Copy, Debug)]
 pub struct AbandonLostRunner {

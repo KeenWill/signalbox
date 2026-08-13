@@ -5951,6 +5951,59 @@ impl<Transaction: ReplaceLostRunnerBeforePinTransaction>
 }
 ```
 
+## application: runner_replacement_provisioning
+
+```rust
+pub struct RunnerReplacementProvisioningRequest { /* private */ }
+impl RunnerReplacementProvisioningRequest {
+    pub fn try_new(
+        command: DurableCommandId,
+        session: SessionId,
+        expected_placement_revision: RunnerGeneration,
+        replacement: RunnerReplacementTarget,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command(), session(), expected_placement_revision(), replacement()
+}
+
+pub trait RunnerReplacementProvisioningIdGenerator {
+    fn next_authorization_id(&mut self) -> WorkspaceProvisioningAuthorizationId;
+}
+
+pub struct UuidV7RunnerReplacementProvisioningIdGenerator;
+// Clone, Copy, Debug, Default; impl RunnerReplacementProvisioningIdGenerator
+
+pub trait RunnerReplacementProvisioningTransaction {
+    type Error;
+    fn stage(
+        &mut self,
+        command: ReplaceLostRunner,
+        authorization: WorkspaceProvisioningAuthorizationId,
+    ) -> impl Future<Output = Result<RunnerReplacementProvisioningOutcome, Self::Error>> + Send;
+}
+
+pub enum RunnerReplacementProvisioningOutcome {
+    Staged(WorkspaceProvisioningAuthorization),
+    Rejected(RunnerReplacementProvisioningRejection),
+    NotApplicable,
+    ConflictingReuse { command: DurableCommandId },
+}
+
+pub struct RunnerReplacementProvisioningService<Transaction, Ids> { /* private */ }
+impl<Transaction, Ids> RunnerReplacementProvisioningService<Transaction, Ids> {
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self;
+}
+impl<Transaction, Ids> RunnerReplacementProvisioningService<Transaction, Ids>
+where
+    Transaction: RunnerReplacementProvisioningTransaction,
+    Ids: RunnerReplacementProvisioningIdGenerator,
+{
+    pub async fn execute(
+        &mut self,
+        request: RunnerReplacementProvisioningRequest,
+    ) -> Result<RunnerReplacementProvisioningOutcome, Transaction::Error>;
+}
+```
+
 ## application: create_session_from_imported_frontier
 
 ```rust
@@ -8705,6 +8758,26 @@ pub enum ReplaceLostRunnerBeforePinResult {
     Applied(ReplacedLostRunnerBeforePin),
     Rejected(ReplaceLostRunnerBeforePinRejection),
 }
+pub enum RunnerReplacementProvisioningRejection {
+    SessionNotFound { session: SessionId },
+    RunnerPlacementNotFound { session: SessionId },
+    PlacementRevisionMismatch {
+        session: SessionId,
+        expected: RunnerGeneration,
+        current: RunnerGeneration,
+    },
+    PlacementNotLost {
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        state: RunnerPlacementRecoveryState,
+    },
+    ReplacementSameRunner { session: SessionId, runner: RunnerId },
+    ReplacementTargetUnavailable {
+        session: SessionId,
+        target: RunnerReplacementTarget,
+        reason: RunnerReplacementTargetUnavailableReason,
+    },
+}
 pub struct AbandonLostRunner { /* private */ }
 impl AbandonLostRunner {
     pub const fn new(
@@ -10698,9 +10771,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 90                    |
+| domain: runner                                     | 91                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **793 (+12 free fn)** |
+| **signalbox-domain total**                         | **794 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10708,6 +10781,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: promote_pending_runner                | 4 (incl. 1 trait)     |
 | application: abandon_lost_runner                   | 4 (incl. 1 trait)     |
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
+| application: runner_replacement_provisioning       | 6 (incl. 2 traits)    |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
@@ -10727,4 +10801,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **263 (+1 free fn)**  |
+| **signalbox-application total**                    | **269 (+1 free fn)**  |

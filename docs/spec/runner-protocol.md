@@ -41,7 +41,10 @@ checked same-runner registration-recovery domain transition is verified against
 this PR (`agent/runner-same-runner-domain`). The checked repository-workspace
 provisioning authorization for a distinct successor or the narrow same-runner
 recovery is verified against this PR
-(`agent/runner-replacement-workspace-authorization-domain`).
+(`agent/runner-replacement-workspace-authorization-domain`). The application
+coordination boundary that supplies one fresh authorization identity to the
+atomic staging transaction is verified against this PR
+(`agent/runner-replacement-provisioning-application`).
 
 **Committed unimplemented functionality.** No current adapter consumes the
 checked same-runner transition or handles pinned replacement staging or the
@@ -1554,8 +1557,16 @@ credential profile. A distinct successor uses the ordinary pinned-replacement
 check; the same runner additionally requires the exact registration-loss
 recovery evidence. A connection loss cannot authorize a same-runner successor,
 and a stale registration, unsupported request, or request with no repository
-produces no authorization. Durable command claim, storage, dispatch, receipt
-consumption, and restart recovery remain the unimplemented producer named above.
+produces no authorization. Durable command claim and authorization insertion,
+dispatch, receipt consumption, and restart recovery remain the unimplemented
+producer named above; the append-only relational representation and checked
+readback exist independently. The application service supplies the complete
+replacement command and one fresh UUIDv7 authorization candidate to a single
+atomic transaction call. Its closed outcome distinguishes a stored retryable
+authorization, a recorded terminal refusal, conflicting command reuse, and a
+placement for which repository provisioning is not applicable. No present
+production transaction implements that port, so the service alone neither claims
+the command nor authorizes runner I/O.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and

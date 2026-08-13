@@ -18,6 +18,7 @@ mod replace_session_defaults;
 mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
+mod runner_replacement_provisioning;
 mod scheduler;
 mod session_delegation;
 mod session_metadata;
@@ -119,6 +120,11 @@ pub use review_workflow::{
     ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
     ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
     ReviewWorkflowOperationKind, ReviewWorkflowReader, ReviewWorkflowTransaction,
+};
+pub use runner_replacement_provisioning::{
+    RunnerReplacementProvisioningIdGenerator, RunnerReplacementProvisioningOutcome,
+    RunnerReplacementProvisioningRequest, RunnerReplacementProvisioningService,
+    RunnerReplacementProvisioningTransaction, UuidV7RunnerReplacementProvisioningIdGenerator,
 };
 pub use scheduler::{
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,
