@@ -1215,6 +1215,8 @@ impl RunnerProtocolStore {
 
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
+        } else {
+            yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
         }
         outbox::append(
             transaction.as_mut(),
@@ -3102,6 +3104,17 @@ async fn require_runner_loss_authority(
     transaction: &mut Transaction<'_, Postgres>,
     loss: RunnerConnectionLossSnapshot,
 ) -> Result<(), RunnerProtocolStoreError> {
+    let identity = sqlx::query(
+        "SELECT lock_runner_loss_identity(runner_id)
+           FROM runner_enrollment
+          WHERE enrollment_id = $1",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if identity.is_none() {
+        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    }
     let enrollment = sqlx::query_scalar::<_, Uuid>(RUNNER_ENROLLMENT)
         .bind(loss.enrollment().into_uuid())
         .fetch_optional(&mut **transaction)
@@ -3157,10 +3170,11 @@ async fn lock_runner_loss_propagation(
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     let state: String = row.decode_column("state_kind")?;
-    let complete = match state.as_str() {
-        "pending" => false,
-        "completed" => true,
-        _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    let complete = match runner_loss_propagation_state_from_str(&state)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+    {
+        RunnerLossPropagationStateStorageKind::Pending => false,
+        RunnerLossPropagationStateStorageKind::Completed => true,
     };
     Ok(LockedRunnerLossPropagation {
         propagated_through: row
@@ -3260,6 +3274,69 @@ async fn persist_runner_loss_lease_and_wait(
         terminalize_runner_loss_attempt_ambiguous(transaction, &correlation).await?;
     }
     yield_turn_to_runner_recovery(transaction, placement, &correlation).await
+}
+
+async fn yield_turn_to_runner_recovery_without_lease(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+) -> Result<(), RunnerProtocolStoreError> {
+    let runner = placement_loss_fence_runner(placement)
+        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+    let yielded = sqlx::query(
+        "UPDATE turn_attempt AS attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+           FROM turn_lifecycle AS lifecycle
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'running'
+            AND lifecycle.active_tool_round_call_id IS NOT NULL
+            AND lifecycle.current_attempt_id = attempt.turn_attempt_id
+            AND lifecycle.turn_id = attempt.turn_id
+            AND lifecycle.session_id = attempt.session_id
+            AND attempt.state_kind = 'running'
+            AND attempt.end_variant IS NULL
+            AND attempt.end_disposition IS NULL",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if yielded != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let changed = sqlx::query(
+        "UPDATE turn_lifecycle AS lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3,
+                runner_recovery_tool_attempt_id = NULL
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'running'
+            AND lifecycle.active_tool_round_call_id IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt AS attempt
+                 WHERE attempt.turn_attempt_id = lifecycle.current_attempt_id
+                   AND attempt.turn_id = lifecycle.turn_id
+                   AND attempt.session_id = lifecycle.session_id
+                   AND attempt.state_kind = 'ended'
+                   AND attempt.end_variant = 'without_stop'
+                   AND attempt.end_disposition = 'yielded_to_durable_wait'
+            )",
+    )
+    .bind(placement.session().into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
 }
 
 async fn append_lost_unclaimed_lease_event(
