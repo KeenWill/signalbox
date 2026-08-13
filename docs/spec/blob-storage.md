@@ -19,6 +19,11 @@ The configuration catalog, route validation, filesystem namespace admission, and
 startup store registry are verified against this implementing change
 (`agent/blob-storage-registry`).
 
+The disk-backed upload lifecycle, routed-store-only live deduplication,
+publication-before-registration ordering, process-protocol messages, and shared
+bulk-ingest resource bounds are verified against this implementing change
+(`agent/blob-storage-upload`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire

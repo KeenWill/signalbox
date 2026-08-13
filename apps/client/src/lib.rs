@@ -350,6 +350,13 @@ fn delegation_rejection_matches(
         | RejectionDetail::ConversationImportSourceTooLarge { .. }
         | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
         | RejectionDetail::ConversationImportConversionFailed { .. } => false,
+        RejectionDetail::BulkIngestAlreadyInProgress { .. }
+        | RejectionDetail::BlobUploadAlreadyInProgress {}
+        | RejectionDetail::BlobUploadNotInProgress {}
+        | RejectionDetail::BlobUploadLengthOutOfRange { .. }
+        | RejectionDetail::BlobUploadSizeExceeded { .. }
+        | RejectionDetail::BlobUploadLengthMismatch { .. }
+        | RejectionDetail::BlobUploadDigestMismatch { .. } => false,
     }
 }
 
@@ -450,6 +457,11 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ConversationImportInserted { .. }
         | ServerMessage::ConversationImportAlreadyImported { .. }
         | ServerMessage::ConversationImportAborted {}
+        | ServerMessage::BlobUploadBegun { .. }
+        | ServerMessage::BlobUploadAlreadyPresent { .. }
+        | ServerMessage::BlobUploadAppended { .. }
+        | ServerMessage::BlobUploadCommitted { .. }
+        | ServerMessage::BlobUploadAborted {}
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
@@ -544,6 +556,11 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ToolRequestDecided { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportAborted {}
+        | ServerMessage::BlobUploadBegun { .. }
+        | ServerMessage::BlobUploadAlreadyPresent { .. }
+        | ServerMessage::BlobUploadAppended { .. }
+        | ServerMessage::BlobUploadCommitted { .. }
+        | ServerMessage::BlobUploadAborted {}
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
