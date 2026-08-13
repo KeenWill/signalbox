@@ -89,7 +89,13 @@ query RepositoryWatchReviewThreads(
   repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
-        nodes { id isResolved }
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes { pullRequestReview { fullDatabaseId } }
+          }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -1346,6 +1352,15 @@ impl GitHubRepositoryPoller {
                 .map(|pull_request| pull_request.review_threads)
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
             for thread in connection.nodes {
+                let originating_review_id = thread
+                    .comments
+                    .nodes
+                    .first()
+                    .and_then(|comment| comment.pull_request_review.as_ref())
+                    .and_then(|review| review.full_database_id.parse::<u64>().ok())
+                    .and_then(NonZeroU64::new)
+                    .map(GitHubObjectId::new)
+                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
                 observations.push(RepoWatchThreadObservation::new(
                     ReviewThreadId::try_new(thread.id)
                         .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
@@ -1354,6 +1369,7 @@ impl GitHubRepositoryPoller {
                     } else {
                         RepoWatchThreadState::Open
                     },
+                    Some(originating_review_id),
                 ));
             }
             if !connection.page_info.has_next_page {
@@ -2544,6 +2560,24 @@ struct ThreadResponse {
     id: String,
     #[serde(rename = "isResolved")]
     is_resolved: bool,
+    comments: ThreadCommentConnection,
+}
+
+#[derive(Clone, Deserialize)]
+struct ThreadCommentConnection {
+    nodes: Vec<ThreadCommentResponse>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ThreadCommentResponse {
+    #[serde(rename = "pullRequestReview")]
+    pull_request_review: Option<ThreadReviewResponse>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ThreadReviewResponse {
+    #[serde(rename = "fullDatabaseId")]
+    full_database_id: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2578,17 +2612,18 @@ mod tests {
     };
 
     use super::{
-        CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
-        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PollCycleTiming, PullResponse,
-        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, UuidV7RepoWatchEventIdGenerator, WorkflowName,
-        WorkflowResponse, derive_repo_watch_events, dispatch_context_json,
-        normalize_checks_outcome, normalize_pull_request_context, object_id, remaining_interval,
-        rule_activation_error, supervise_repository_tasks,
+        CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubObjectId,
+        GitHubRepositoryPoller, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
+        PollCache, PollCycleTiming, PullResponse, ReactionContent, RepoWatchAuthorLogin,
+        RepoWatchBranchHead, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+        RepoWatchReactionObservation, RepoWatchReviewObservation, RepoWatchThreadState,
+        RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug,
+        RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError, ResourceKey,
+        ReviewState, Url, UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse,
+        derive_repo_watch_events, dispatch_context_json, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, remaining_interval, rule_activation_error,
+        supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -3004,8 +3039,24 @@ mod tests {
                     "pullRequest": {
                         "reviewThreads": {
                             "nodes": [
-                                { "id": REVIEW_THREADS[0], "isResolved": false },
-                                { "id": REVIEW_THREADS[1], "isResolved": true }
+                                {
+                                    "id": REVIEW_THREADS[0],
+                                    "isResolved": false,
+                                    "comments": { "nodes": [{
+                                        "pullRequestReview": {
+                                            "fullDatabaseId": RETAINED_REVIEW_IDS[0].to_string()
+                                        }
+                                    }] }
+                                },
+                                {
+                                    "id": REVIEW_THREADS[1],
+                                    "isResolved": true,
+                                    "comments": { "nodes": [{
+                                        "pullRequestReview": {
+                                            "fullDatabaseId": RETAINED_REVIEW_IDS[1].to_string()
+                                        }
+                                    }] }
+                                }
                             ],
                             "pageInfo": { "hasNextPage": false, "endCursor": null }
                         }
@@ -4981,8 +5032,20 @@ mod tests {
         assert_eq!(pull.threads().len(), REVIEW_THREADS.len());
         assert_eq!(pull.threads()[0].thread().as_str(), REVIEW_THREAD);
         assert_eq!(pull.threads()[0].state(), EXPECTED_OPEN_THREAD_STATE);
+        assert_eq!(
+            pull.threads()[0]
+                .originating_review_id()
+                .map(GitHubObjectId::get),
+            Some(RETAINED_REVIEW_IDS[0])
+        );
         assert_eq!(pull.threads()[1].thread().as_str(), RESOLVED_REVIEW_THREAD);
         assert_eq!(pull.threads()[1].state(), EXPECTED_RESOLVED_THREAD_STATE);
+        assert_eq!(
+            pull.threads()[1]
+                .originating_review_id()
+                .map(GitHubObjectId::get),
+            Some(RETAINED_REVIEW_IDS[1])
+        );
     }
 
     #[tokio::test]

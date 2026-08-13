@@ -205,11 +205,20 @@ pub enum RepoWatchThreadState {
 pub struct RepoWatchThreadObservation {
     thread: ReviewThreadId,
     state: RepoWatchThreadState,
+    originating_review_id: Option<GitHubObjectId>,
 }
 
 impl RepoWatchThreadObservation {
-    pub const fn new(thread: ReviewThreadId, state: RepoWatchThreadState) -> Self {
-        Self { thread, state }
+    pub const fn new(
+        thread: ReviewThreadId,
+        state: RepoWatchThreadState,
+        originating_review_id: Option<GitHubObjectId>,
+    ) -> Self {
+        Self {
+            thread,
+            state,
+            originating_review_id,
+        }
     }
 
     pub const fn thread(&self) -> &ReviewThreadId {
@@ -218,6 +227,10 @@ impl RepoWatchThreadObservation {
 
     pub const fn state(&self) -> RepoWatchThreadState {
         self.state
+    }
+
+    pub const fn originating_review_id(&self) -> Option<GitHubObjectId> {
+        self.originating_review_id
     }
 }
 
@@ -2139,6 +2152,7 @@ mod tests {
                 threads: vec![RepoWatchThreadObservation::new(
                     ReviewThreadId::try_new(String::from(THREAD_ID))?,
                     RepoWatchThreadState::Resolved,
+                    Some(object_id(REVIEW_ID)),
                 )],
                 reactions: vec![reaction()?],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
@@ -2593,6 +2607,7 @@ mod tests {
                 threads: vec![RepoWatchThreadObservation::new(
                     thread.clone(),
                     RepoWatchThreadState::Resolved,
+                    Some(object_id(REVIEW_ID)),
                 )],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
             })?],

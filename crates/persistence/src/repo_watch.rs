@@ -697,6 +697,7 @@ struct ReviewRecord {
 struct ThreadRecord {
     thread: String,
     state: String,
+    originating_review_id: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -865,6 +866,7 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
             .map(|thread| ThreadRecord {
                 thread: thread.thread().as_str().to_owned(),
                 state: repo_watch_thread_state_to_str(thread.state()).to_owned(),
+                originating_review_id: thread.originating_review_id().map(GitHubObjectId::get),
             })
             .collect(),
         reactions: state
@@ -1076,6 +1078,10 @@ fn decode_pull_request_state(
                 repo_watch_thread_state_from_str(&thread.state).ok_or(
                     RepoWatchPersistenceCorruption::UnknownCursorDiscriminator("thread.state"),
                 )?,
+                thread
+                    .originating_review_id
+                    .map(|id| github_object_id(id, "thread.originating_review_id"))
+                    .transpose()?,
             ))
         })
         .collect::<Result<Vec<_>, RepoWatchStoreError>>()?;
@@ -1509,6 +1515,22 @@ async fn record_event_self_cause(
             AND observed.cursor_generation = $3
             AND (
                 ($4 = 'review_submitted' AND receipt.review_id = $5)
+                OR ($4 = 'thread_opened' AND receipt.operation_kind = 'publish_review'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM repo_watch_cursor AS cursor_record
+                          CROSS JOIN LATERAL jsonb_array_elements(
+                              cursor_record.cursor_payload -> 'state' -> 'pull_requests'
+                          ) AS pull_request(value)
+                          CROSS JOIN LATERAL jsonb_array_elements(
+                              pull_request.value -> 'threads'
+                          ) AS thread(value)
+                         WHERE cursor_record.repository = $2
+                           AND cursor_record.generation = $3
+                           AND thread.value ->> 'thread' = $6
+                           AND (thread.value ->> 'originating_review_id')::numeric
+                               = receipt.review_id
+                    ))
                 OR ($4 = 'thread_opened' AND receipt.operation_kind = 'thread_reply'
                     AND receipt.thread_id = $6)
                 OR ($4 = 'thread_resolved' AND receipt.operation_kind = 'thread_resolve'

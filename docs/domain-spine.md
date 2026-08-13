@@ -6804,8 +6804,12 @@ pub enum RepoWatchThreadState {
 
 pub struct RepoWatchThreadObservation { /* private */ }
 impl RepoWatchThreadObservation {
-    pub const fn new(thread: ReviewThreadId, state: RepoWatchThreadState) -> Self;
-    // accessors: thread(), state()
+    pub const fn new(
+        thread: ReviewThreadId,
+        state: RepoWatchThreadState,
+        originating_review_id: Option<GitHubObjectId>,
+    ) -> Self;
+    // accessors: thread(), state(), originating_review_id()
 }
 
 pub struct RepoWatchReactionObservation { /* private */ }

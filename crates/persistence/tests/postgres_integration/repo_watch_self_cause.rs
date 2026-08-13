@@ -127,6 +127,9 @@ fn observation(review_ids: &[u64]) -> Result<RepoWatchObservation, Box<dyn Error
         vec![RepoWatchThreadObservation::new(
             ReviewThreadId::try_new(String::from(THREAD))?,
             RepoWatchThreadState::Open,
+            Some(GitHubObjectId::new(
+                NonZeroU64::new(SELF_REVIEW_ID).expect("fixture id is positive"),
+            )),
         )],
     )
 }
@@ -211,6 +214,57 @@ async fn complete_thread_reply(pool: &PgPool, seed: u128) -> Result<(), Box<dyn 
     Ok(())
 }
 
+async fn complete_published_review(pool: &PgPool, seed: u128) -> Result<(), Box<dyn Error>> {
+    let arguments = format!(
+        r#"{{"commit_id":"{HEAD}","comments":[],"event":"comment","number":41,"repository":"{REPOSITORY}"}}"#
+    );
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        pool,
+        seed,
+        "github_pull_request_publish_review",
+        &arguments,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    let authorized = repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(format!(
+                            r#"{{"commit_id":"{HEAD}","id":{SELF_REVIEW_ID},"state":"COMMENTED","url":"https://github.example/review/{SELF_REVIEW_ID}"}}"#
+                        ))
+                        .expect("fixture tool result is bounded"),
+                    ),
+                }),
+        )
+        .await?;
+    Ok(())
+}
+
 fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
     let RepoWatchCommitOutcome::Committed(cursor) = outcome else {
         panic!("fixture cursor commit is new")
@@ -223,6 +277,89 @@ fn assert_dispatched(outcome: RepoWatchRuleEvaluationOutcome) {
     let RepoWatchRuleEvaluationOutcome::Dispatched { .. } = outcome else {
         panic!("fixture user event dispatches")
     };
+}
+
+/// A published review's inline thread is suppressed by the exact immutable
+/// parent-review identity retained by the poller.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn published_review_inline_thread_is_self_caused() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    complete_published_review(&pool, 0x90_000).await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let rule = rule()?;
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let before = observation_without_threads()?;
+    let first_generation = committed_generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(before.clone()),
+                    Vec::new(),
+                ),
+            )
+            .await?,
+    );
+    let published = observation(&[SELF_REVIEW_ID])?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(&before),
+        &published,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(published.clone()),
+                events,
+            ),
+        )
+        .await?;
+    let review_event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the published review event is pending");
+    let review_outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                review_event,
+                &rule,
+                &published,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+
+    assert_eq!(review_outcome, RepoWatchRuleEvaluationOutcome::SelfCaused);
+    let thread_event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the published inline-thread event is pending");
+    let thread_outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+            .evaluate(
+                thread_event,
+                &rule,
+                &published,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+
+    assert_eq!(thread_outcome, RepoWatchRuleEvaluationOutcome::SelfCaused);
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_action")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(sessions, 0);
+    Ok(())
 }
 
 /// A session-created review is suppressed by exact provider identity, while a
