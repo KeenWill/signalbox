@@ -133,9 +133,10 @@ CREATE TABLE approval_judge_eval_call (
 CREATE FUNCTION stamp_eval_run_recording_transaction()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
-    NEW.recording_transaction_id := pg_current_xact_id();
+    NEW.recording_transaction_id := pg_catalog.pg_current_xact_id();
     RETURN NEW;
 END;
 $$;
