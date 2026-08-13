@@ -801,19 +801,12 @@ async fn append_blob_upload(
     Ok(())
 }
 
-/// INV-060: the daemon streams exact bytes through one upload lifecycle,
-/// registers one identity, and short-circuits an exact routed-store retry.
-#[tokio::test]
-#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_upload_round_trips_and_exact_retry_is_already_present()
--> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start_with_blob_storage().await?;
-    let bytes = b"exact immutable upload bytes";
-    let digest = BlobDigest::digest(bytes);
-    let wire_digest = CanonicalBlobDigest::from_digest(digest);
-    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
-    let mut connection = Connection::connect(runtime.socket()).await?;
-
+async fn commit_blob_upload(
+    connection: &mut Connection,
+    wire_digest: CanonicalBlobDigest,
+    expected_length: CanonicalU64,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
     connection
         .request(
             1,
@@ -830,7 +823,7 @@ async fn inv060_blob_upload_round_trips_and_exact_retry_is_already_present()
             expected_length_bytes: expected_length,
         }
     );
-    append_blob_upload(&mut connection, 2, bytes).await?;
+    append_blob_upload(connection, 2, bytes).await?;
     connection
         .request(3, ClientRequest::CommitBlobUpload {})
         .await?;
@@ -841,22 +834,22 @@ async fn inv060_blob_upload_round_trips_and_exact_retry_is_already_present()
             byte_length: expected_length,
         }
     );
-    connection
-        .request(
-            4,
-            ClientRequest::BeginBlobUpload {
-                expected_digest: wire_digest,
-                expected_length_bytes: expected_length,
-            },
-        )
-        .await?;
-    assert_eq!(
-        connection.response().await?.message(),
-        &ServerMessage::BlobUploadAlreadyPresent {
-            digest: wire_digest,
-            byte_length: expected_length,
-        }
-    );
+    Ok(())
+}
+
+/// INV-060: the daemon streams exact bytes through one upload lifecycle and
+/// registers one immutable identity.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_upload_round_trips_exact_bytes() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
+    let bytes = b"exact immutable upload bytes";
+    let digest = BlobDigest::digest(bytes);
+    let wire_digest = CanonicalBlobDigest::from_digest(digest);
+    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    commit_blob_upload(&mut connection, wire_digest, expected_length, bytes).await?;
 
     let catalog = BlobCatalogRepository::new(runtime.pool.clone())
         .find(digest)
@@ -872,6 +865,39 @@ async fn inv060_blob_upload_round_trips_and_exact_retry_is_already_present()
     opened.into_reader().read_to_end(&mut observed).await?;
     assert_eq!(observed, bytes);
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-060: an exact retry against the routed store short-circuits as already
+/// present without accepting another upload body.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_upload_exact_retry_is_already_present() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
+    let bytes = b"exact immutable upload retry bytes";
+    let wire_digest = CanonicalBlobDigest::from_digest(BlobDigest::digest(bytes));
+    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    commit_blob_upload(&mut connection, wire_digest, expected_length, bytes).await?;
+
+    connection
+        .request(
+            4,
+            ClientRequest::BeginBlobUpload {
+                expected_digest: wire_digest,
+                expected_length_bytes: expected_length,
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::BlobUploadAlreadyPresent {
+            digest: wire_digest,
+            byte_length: expected_length,
+        }
+    );
     drop(connection);
     runtime.stop().await
 }
