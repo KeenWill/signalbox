@@ -12,6 +12,7 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
     PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome,
+    RunnerReplacementProvisioningOutcome,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -34,18 +35,18 @@ use signalbox_domain::{
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
     RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
-    RunnerRegistrationReconciliation, RunnerReplacementTarget,
-    RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
-    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState,
-    StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    RunnerRegistrationReconciliation, RunnerReplacementProvisioningRejection,
+    RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, SubmitInput,
+    ToolAdmissibleLoci, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -136,6 +137,7 @@ const ACTIVATED_PENDING_REPLACEMENT_COMMAND: u128 = 0x937d;
 const UNADVERTISED_PENDING_REPLACEMENT_COMMAND: u128 = 0x937e;
 const WORKSPACE_REPLACEMENT_COMMAND: u128 = 0x937f;
 const WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9380;
+const REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9382;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -1457,6 +1459,126 @@ async fn workspace_provisioning_authorization_fixture(
         repository,
         sandbox,
         credential_profile,
+    })
+}
+
+async fn same_runner_workspace_provisioning_authorization_fixture(
+    pool: &PgPool,
+) -> Result<WorkspaceProvisioningAuthorizationFixture, Box<dyn Error>> {
+    insert_session(pool).await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let predecessor = enrollment();
+    store.insert_enrollment(&predecessor).await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let repository = repository_key();
+    let sandbox = RunnerSandboxProfile::Ambient;
+    let fixture_advertisement = RunnerAdvertisement::new(
+        [class()],
+        [tool("inspect")],
+        [profile(), replacement_profile()],
+        [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+        [RunnerRepositoryEntry::new(repository.clone(), None)],
+    );
+    let predecessor_registration = store
+        .register(&predecessor, fixture_advertisement.clone())
+        .await?;
+    let connection = store.open_connection(predecessor.enrollment()).await?;
+    let request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: None,
+        workspace: WorkspaceRequirement::RepositoryWorktree {
+            repository: repository.clone(),
+        },
+        sandbox,
+        permission_overrides: no_permission_overrides(),
+    };
+    let placement = SessionRunnerPlacement::new(session, request);
+    store.store_placement(&placement, None, None).await?;
+    let working_directory = RunnerWorkingDirectory::try_new(
+        "/workspace/same-runner-replacement-authorization-predecessor".to_owned(),
+    )
+    .expect("the same-runner fixture workspace directory is valid");
+    let workspace = ProvisionedWorkspace {
+        session,
+        placement_revision: RunnerGeneration::one(),
+        runner: predecessor.runner(),
+        repository: Some(repository.clone()),
+        canonical_clone_url_digest: Some(
+            CanonicalCloneUrlDigest::try_new("a".repeat(64))
+                .expect("the same-runner fixture clone URL digest is canonical"),
+        ),
+        credential_profile: None,
+        sandbox,
+        working_directory: working_directory.clone(),
+        relative_path: WorkspaceRelativePath::try_new(format!(
+            "sessions/{}/1/repo",
+            session.as_uuid()
+        ))
+        .expect("the same-runner fixture repository path is relative"),
+        manifest_id: WorkspaceManifestId::from_uuid(uuid(0x9381)),
+        recovery: Some(WorkspaceRecovery::Commit {
+            revision: WorkspaceRevision::try_new("b".repeat(40))
+                .expect("the same-runner fixture revision is canonical"),
+        }),
+    };
+    let pin = placement
+        .pin_and_offer_lease(
+            &predecessor,
+            predecessor_registration.registration(),
+            working_directory,
+            Some(workspace),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the same-runner repository placement pins");
+    store.store_pin(&pin, &predecessor_registration).await?;
+    store
+        .register(&predecessor, narrowed_advertisement())
+        .await?;
+    append_runner_registration_loss_projection(&store, &predecessor_registration, &pin).await?;
+    let recovered_registration = store.register(&predecessor, fixture_advertisement).await?;
+    let lost_placement_event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_current_session_placement
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let connection_event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT connection_event_ordinal
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1",
+    )
+    .bind(predecessor.enrollment().into_uuid())
+    .fetch_one(pool)
+    .await?;
+    Ok(WorkspaceProvisioningAuthorizationFixture {
+        store,
+        command: DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        authorization: WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+            WORKSPACE_PROVISIONING_AUTHORIZATION,
+        )),
+        session,
+        lost_placement_event_ordinal: lost_placement_event_ordinal
+            .to_u64()
+            .expect("the same-runner fixture event ordinal is unsigned"),
+        lost_placement_revision: RunnerGeneration::one(),
+        successor_placement_revision: RunnerGeneration::try_from_u64(2)
+            .expect("the same-runner successor revision is positive"),
+        enrollment: predecessor.enrollment(),
+        runner: predecessor.runner(),
+        registration_revision: recovered_registration.registration().revision(),
+        connection_epoch: connection.epoch(),
+        connection_event_ordinal: connection_event_ordinal
+            .to_u64()
+            .expect("the same-runner connection event ordinal is unsigned"),
+        repository,
+        sandbox,
+        credential_profile: None,
     })
 }
 
@@ -20144,6 +20266,531 @@ async fn s32_inv044_profileless_workspace_provisioning_authorization_round_trips
     assert_eq!(loaded.repository(), &fixture.repository);
     assert_eq!(loaded.sandbox(), fixture.sandbox);
     assert_eq!(loaded.credential_profile(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012 / INV-044: one atomic command claim authenticates and stores
+/// the exact pinned replacement provisioning stage, and equal replay returns
+/// the first single-use identity.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_inv044_pinned_replacement_provisioning_stage_round_trips_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    let command = ReplaceLostRunner::new(
+        fixture.command,
+        fixture.session,
+        fixture.lost_placement_revision,
+        RunnerReplacementTarget::Runner(fixture.runner),
+    );
+    let first = fixture
+        .store
+        .stage_runner_replacement_provisioning(command, fixture.authorization)
+        .await?;
+    let replay = fixture
+        .store
+        .stage_runner_replacement_provisioning(
+            command,
+            WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+                REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION,
+            )),
+        )
+        .await?;
+    let conflicting = fixture
+        .store
+        .stage_runner_replacement_provisioning(
+            ReplaceLostRunner::new(
+                fixture.command,
+                fixture.session,
+                fixture.lost_placement_revision,
+                RunnerReplacementTarget::Runner(enrollment().runner()),
+            ),
+            WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+                REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION,
+            )),
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_provisioning_authorization(fixture.authorization)
+        .await?
+        .expect("the atomically staged authorization reads back");
+    let expected_stage = signalbox_application::RunnerReplacementProvisioningStage::from_stored(
+        fixture.authorization,
+        fixture.session,
+        fixture.successor_placement_revision,
+        fixture.enrollment,
+        fixture.runner,
+        fixture.registration_revision,
+        fixture.repository.clone(),
+        fixture.sandbox,
+        None,
+    );
+
+    assert_eq!(
+        first,
+        RunnerReplacementProvisioningOutcome::Staged(expected_stage.clone())
+    );
+    assert_eq!(
+        replay,
+        RunnerReplacementProvisioningOutcome::Staged(expected_stage)
+    );
+    assert_eq!(
+        conflicting,
+        RunnerReplacementProvisioningOutcome::ConflictingReuse {
+            command: fixture.command
+        }
+    );
+    assert_eq!(loaded.command(), fixture.command);
+    assert_eq!(loaded.authorization(), fixture.authorization);
+    assert_eq!(loaded.runner(), fixture.runner);
+    assert_eq!(loaded.repository(), &fixture.repository);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012: concurrent equal replacement staging serializes at the
+/// user-global command claim and both callers observe the same first stage.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_equal_replacement_provisioning_claims_serialize_with_a_timeout()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    let command = ReplaceLostRunner::new(
+        fixture.command,
+        fixture.session,
+        fixture.lost_placement_revision,
+        RunnerReplacementTarget::Runner(fixture.runner),
+    );
+    let first_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let second_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let first_authorization = fixture.authorization;
+    let second_authorization = WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+        REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION,
+    ));
+    let (first, second) = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, async {
+        tokio::join!(
+            first_store.stage_runner_replacement_provisioning(command, first_authorization),
+            second_store.stage_runner_replacement_provisioning(command, second_authorization),
+        )
+    })
+    .await
+    .expect("the competing replacement claims complete within the lock timeout");
+    let first = first?;
+    let second = second?;
+    let command_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM replace_lost_runner_command WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let authorization_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_workspace_provisioning_authorization
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(first, second);
+    assert_eq!(command_count, 1);
+    assert_eq!(authorization_count, 1);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-042 / INV-044: an exact connected pending successor remains
+/// provisioning-only while receiving its command-bound workspace stage.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provisioning()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let active = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?;
+    let active_enrollment = active.receipt().enrollment();
+    let active_registration = store
+        .load_registration(
+            active_enrollment,
+            active.receipt().registration().revision(),
+        )
+        .await?
+        .expect("the pristine registration reads back");
+    let active_connection = store
+        .open_connection(active_enrollment.enrollment())
+        .await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let repository = repository_key();
+    let sandbox = RunnerSandboxProfile::Ambient;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(active_enrollment.runner()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: repository.clone(),
+            },
+            sandbox,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let working_directory = RunnerWorkingDirectory::try_new(
+        "/workspace/pending-replacement-authorization-predecessor".to_owned(),
+    )
+    .expect("the pending fixture workspace directory is valid");
+    let workspace = ProvisionedWorkspace {
+        session,
+        placement_revision: RunnerGeneration::one(),
+        runner: active_enrollment.runner(),
+        repository: Some(repository.clone()),
+        canonical_clone_url_digest: Some(
+            CanonicalCloneUrlDigest::try_new("a".repeat(64))
+                .expect("the pending fixture clone URL digest is canonical"),
+        ),
+        credential_profile: None,
+        sandbox,
+        working_directory: working_directory.clone(),
+        relative_path: WorkspaceRelativePath::try_new(format!(
+            "sessions/{}/1/repo",
+            session.as_uuid()
+        ))
+        .expect("the pending fixture repository path is relative"),
+        manifest_id: WorkspaceManifestId::from_uuid(uuid(0x9381)),
+        recovery: Some(WorkspaceRecovery::Commit {
+            revision: WorkspaceRevision::try_new("b".repeat(40))
+                .expect("the pending fixture revision is canonical"),
+        }),
+    };
+    let pin = placement
+        .pin_and_offer_lease(
+            active_enrollment,
+            active_registration.registration(),
+            working_directory,
+            Some(workspace),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the pending predecessor repository placement pins");
+    store
+        .store_pin(&pin, &active_registration)
+        .await
+        .expect("the pending predecessor pin stores");
+    store
+        .transition_connection(
+            active_enrollment.enrollment(),
+            active_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await
+        .expect("the pending predecessor connection closes");
+    let _loss = store
+        .load_current_connection_loss(active_enrollment.enrollment())
+        .await
+        .expect("the pending predecessor loss reads")
+        .expect("the predecessor loss owns its propagation cursor");
+    append_runner_lost_projection(&pool, session).await?;
+    let pending = store
+        .enroll_pristine(pristine_enrollment_request(
+            PENDING_ENROLLMENT_REQUEST,
+            REPLACEMENT_ENROLLMENT,
+            REPLACEMENT_RUNNER,
+            REPLACEMENT_AUTHENTICATION,
+        ))
+        .await
+        .expect("the pending successor enrolls after predecessor loss");
+    let pending_enrollment = pending.receipt().enrollment();
+    store
+        .open_connection(pending_enrollment.enrollment())
+        .await
+        .expect("the pending successor connection opens");
+    let command_id = DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND));
+    let authorization =
+        WorkspaceProvisioningAuthorizationId::from_uuid(uuid(WORKSPACE_PROVISIONING_AUTHORIZATION));
+    let command = ReplaceLostRunner::new(
+        command_id,
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::PendingEnrollment(pending.receipt().request()),
+    );
+    let staged = store
+        .stage_runner_replacement_provisioning(command, authorization)
+        .await
+        .expect("the pending successor stages its repository workspace");
+    let loaded_pending = store
+        .load_pending_enrollment(pending.receipt().request())
+        .await?
+        .expect("the staged candidate remains pending");
+    let loaded_authorization = store
+        .load_workspace_provisioning_authorization(authorization)
+        .await?
+        .expect("the pending successor authorization reads back");
+
+    assert_eq!(
+        staged,
+        RunnerReplacementProvisioningOutcome::Staged(
+            signalbox_application::RunnerReplacementProvisioningStage::from_stored(
+                authorization,
+                session,
+                RunnerGeneration::try_from_u64(2)
+                    .expect("the pending successor placement revision is positive"),
+                pending_enrollment.enrollment(),
+                pending_enrollment.runner(),
+                RunnerGeneration::try_from_u64(pending.receipt().registration().revision().get(),)
+                    .expect("the pending registration revision is positive"),
+                repository.clone(),
+                sandbox,
+                None,
+            )
+        )
+    );
+    assert_eq!(loaded_pending.receipt(), pending.receipt());
+    assert_eq!(loaded_authorization.command(), command_id);
+    assert_eq!(loaded_authorization.runner(), pending_enrollment.runner());
+    assert_eq!(loaded_authorization.repository(), &repository);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: registration-triggered loss plus a newer satisfying
+/// registration admits the checked same-runner provisioning exception.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_registration_loss_stages_same_runner_replacement_provisioning()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = same_runner_workspace_provisioning_authorization_fixture(&pool).await?;
+    let command = ReplaceLostRunner::new(
+        fixture.command,
+        fixture.session,
+        fixture.lost_placement_revision,
+        RunnerReplacementTarget::SameRunnerReenrollment(fixture.runner),
+    );
+    let staged = fixture
+        .store
+        .stage_runner_replacement_provisioning(command, fixture.authorization)
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_provisioning_authorization(fixture.authorization)
+        .await?
+        .expect("the same-runner provisioning authorization reads back");
+
+    assert_eq!(
+        staged,
+        RunnerReplacementProvisioningOutcome::Staged(
+            signalbox_application::RunnerReplacementProvisioningStage::from_stored(
+                fixture.authorization,
+                fixture.session,
+                fixture.successor_placement_revision,
+                fixture.enrollment,
+                fixture.runner,
+                fixture.registration_revision,
+                fixture.repository.clone(),
+                fixture.sandbox,
+                None,
+            )
+        )
+    );
+    assert_eq!(loaded.command(), fixture.command);
+    assert_eq!(loaded.runner(), fixture.runner);
+    assert_eq!(
+        loaded.registration_revision(),
+        fixture.registration_revision
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a disconnected selected successor produces the exact durable
+/// unavailability refusal and no workspace authorization.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_pinned_replacement_provisioning_rejects_disconnected_successor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let command = ReplaceLostRunner::new(
+        fixture.command,
+        fixture.session,
+        fixture.lost_placement_revision,
+        RunnerReplacementTarget::Runner(fixture.runner),
+    );
+    let rejected = fixture
+        .store
+        .stage_runner_replacement_provisioning(command, fixture.authorization)
+        .await?;
+
+    assert_eq!(
+        rejected,
+        RunnerReplacementProvisioningOutcome::Rejected(
+            RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: fixture.session,
+                target: RunnerReplacementTarget::Runner(fixture.runner),
+                reason: RunnerReplacementTargetUnavailableReason::NotConnected,
+            }
+        )
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_workspace_provisioning_authorization(fixture.authorization)
+            .await?,
+        None
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a pinned replacement without a repository stage leaves the
+/// command identity unclaimed for its later single terminal transaction.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_free_pinned_replacement_provisioning_is_not_applicable()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let outcome = store
+        .stage_runner_replacement_provisioning(
+            command,
+            WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+                WORKSPACE_PROVISIONING_AUTHORIZATION,
+            )),
+        )
+        .await?;
+    let claimed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM durable_command WHERE command_id = $1
+        )",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(outcome, RunnerReplacementProvisioningOutcome::NotApplicable);
+    assert!(!claimed);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: ordinary replacement targeting the exact lost runner is a
+/// durable terminal refusal rather than a workspace authorization.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_pinned_replacement_provisioning_rejects_same_runner()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    let lost_runner = enrollment().runner();
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(SAME_RUNNER_REPLACEMENT_COMMAND)),
+        fixture.session,
+        fixture.lost_placement_revision,
+        RunnerReplacementTarget::Runner(lost_runner),
+    );
+    let rejected = fixture
+        .store
+        .stage_runner_replacement_provisioning(command, fixture.authorization)
+        .await?;
+    let replay = fixture
+        .store
+        .stage_runner_replacement_provisioning(
+            command,
+            WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+                REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION,
+            )),
+        )
+        .await?;
+    let expected = RunnerReplacementProvisioningOutcome::Rejected(
+        RunnerReplacementProvisioningRejection::ReplacementSameRunner {
+            session: fixture.session,
+            runner: lost_runner,
+        },
+    );
+
+    assert_eq!(rejected, expected);
+    assert_eq!(replay, expected);
+    assert_eq!(
+        fixture
+            .store
+            .load_workspace_provisioning_authorization(fixture.authorization)
+            .await?,
+        None
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: the explicit same-runner exception cannot relabel a
+/// connection-triggered loss as registration recovery.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_connection_loss_rejects_same_runner_reenrollment_provisioning()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_provisioning_authorization_fixture(&pool, None).await?;
+    let lost_runner = enrollment().runner();
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(SAME_RUNNER_REPLACEMENT_COMMAND)),
+        fixture.session,
+        fixture.lost_placement_revision,
+        RunnerReplacementTarget::SameRunnerReenrollment(lost_runner),
+    );
+    let rejected = fixture
+        .store
+        .stage_runner_replacement_provisioning(command, fixture.authorization)
+        .await?;
+
+    assert_eq!(
+        rejected,
+        RunnerReplacementProvisioningOutcome::Rejected(
+            RunnerReplacementProvisioningRejection::ReplacementSameRunner {
+                session: fixture.session,
+                runner: lost_runner,
+            }
+        )
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_workspace_provisioning_authorization(fixture.authorization)
+            .await?,
+        None
+    );
     drop(pool);
     Ok(())
 }

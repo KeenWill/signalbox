@@ -3,9 +3,10 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    DurableCommandId, ReplaceLostRunner, RunnerGeneration, RunnerReplacementProvisioningRejection,
-    RunnerReplacementTarget, SessionId, WorkspaceProvisioningAuthorization,
-    WorkspaceProvisioningAuthorizationId,
+    CredentialProfileName, DurableCommandId, ReplaceLostRunner, RunnerEnrollmentId,
+    RunnerGeneration, RunnerId, RunnerReplacementProvisioningRejection, RunnerReplacementTarget,
+    RunnerSandboxProfile, SessionId, WorkspaceProvisioningAuthorization,
+    WorkspaceProvisioningAuthorizationId, WorkspaceRepositoryKey,
 };
 
 use crate::InvalidDurableCommandId;
@@ -88,11 +89,113 @@ pub trait RunnerReplacementProvisioningTransaction {
     ) -> impl Future<Output = Result<RunnerReplacementProvisioningOutcome, Self::Error>> + Send;
 }
 
+/// Immutable durable facts for one retryable workspace-provisioning stage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerReplacementProvisioningStage {
+    authorization: WorkspaceProvisioningAuthorizationId,
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    repository: WorkspaceRepositoryKey,
+    sandbox: RunnerSandboxProfile,
+    credential_profile: Option<CredentialProfileName>,
+}
+
+impl RunnerReplacementProvisioningStage {
+    /// Converts freshly checked domain authority into its durable stage receipt.
+    pub fn from_authorization(authorization: &WorkspaceProvisioningAuthorization) -> Self {
+        Self {
+            authorization: authorization.authorization(),
+            session: authorization.session(),
+            placement_revision: authorization.placement_revision(),
+            enrollment: authorization.enrollment(),
+            runner: authorization.runner(),
+            registration_revision: authorization.registration_revision(),
+            repository: authorization.repository().clone(),
+            sandbox: authorization.sandbox(),
+            credential_profile: authorization.credential_profile().cloned(),
+        }
+    }
+
+    /// Reconstitutes already-authenticated durable stage facts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_stored(
+        authorization: WorkspaceProvisioningAuthorizationId,
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        registration_revision: RunnerGeneration,
+        repository: WorkspaceRepositoryKey,
+        sandbox: RunnerSandboxProfile,
+        credential_profile: Option<CredentialProfileName>,
+    ) -> Self {
+        Self {
+            authorization,
+            session,
+            placement_revision,
+            enrollment,
+            runner,
+            registration_revision,
+            repository,
+            sandbox,
+            credential_profile,
+        }
+    }
+
+    /// Returns the single-use workspace-provisioning identity.
+    pub const fn authorization(&self) -> WorkspaceProvisioningAuthorizationId {
+        self.authorization
+    }
+
+    /// Returns the session whose successor workspace is being prepared.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the successor placement revision reserved by this stage.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the selected successor enrollment.
+    pub const fn enrollment(&self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the selected successor runner.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the checked registration revision for the successor.
+    pub const fn registration_revision(&self) -> RunnerGeneration {
+        self.registration_revision
+    }
+
+    /// Returns the repository the runner is authorized to provision.
+    pub const fn repository(&self) -> &WorkspaceRepositoryKey {
+        &self.repository
+    }
+
+    /// Returns the exact sandbox profile retained by the lost placement.
+    pub const fn sandbox(&self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+
+    /// Returns the optional credential profile retained by the lost placement.
+    pub const fn credential_profile(&self) -> Option<&CredentialProfileName> {
+        self.credential_profile.as_ref()
+    }
+}
+
 /// Durable stage, terminal refusal, inapplicable placement, or command conflict.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunnerReplacementProvisioningOutcome {
     /// The exact command owns this retryable provisioning authorization.
-    Staged(WorkspaceProvisioningAuthorization),
+    Staged(RunnerReplacementProvisioningStage),
     /// The exact command owns this terminal durable refusal.
     Rejected(RunnerReplacementProvisioningRejection),
     /// The current placement requires no repository-provisioning stage.
