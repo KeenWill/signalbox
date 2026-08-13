@@ -6,11 +6,12 @@
 use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
 
 use signalbox_runner::{
-    ArgumentError, ConnectionEnd, EnrollmentOutcome, RunnerConfiguration, RunnerConfigurationError,
-    RunnerConfigurationPath, RunnerConnection, RunnerConnectionError, RunnerStateError,
-    RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
+    ArgumentError, ConnectionEnd, EnrollmentOutcome, ProtocolViolation, RunnerConfiguration,
+    RunnerConfigurationError, RunnerConfigurationPath, RunnerConnection, RunnerConnectionError,
+    RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
 };
-use signalbox_tools_exec::TokioProcessRunner;
+use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
+use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
 
 const CONFIGURATION_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_CONFIG_FILE";
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -49,7 +50,7 @@ async fn run(
     let mut state =
         RunnerStateRoot::open(configuration.runner_root()).map_err(RunnerDaemonError::State)?;
     // Keep both pinned executable identities live across every connection epoch.
-    let _execution_programs = TokioProcessRunner::try_new_with_bubblewrap(
+    let execution_programs = TokioProcessRunner::try_new_with_bubblewrap(
         configuration.exec_supervisor_executable(),
         configuration.bubblewrap_path(),
     )
@@ -98,13 +99,31 @@ async fn run(
         };
         report_established(&connection);
         backoff.reset();
-        let shutdown = async {
-            tokio::select! {
-                _ = terminate.recv() => {}
-                _ = interrupt.recv() => {}
+        let served = loop {
+            let shutdown = async {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = interrupt.recv() => {}
+                }
+            };
+            match connection.serve_until_shutdown(&mut state, shutdown).await {
+                Ok(ServeOutcome::DispatchReady(dispatch)) => {
+                    let execution = execute_dispatch(
+                        execution_programs.clone(),
+                        configuration.read_only_paths().to_vec(),
+                        dispatch.correlation().clone(),
+                        dispatch.normalized_arguments().clone(),
+                    );
+                    if let Err(error) = connection
+                        .execute_while_serving(&mut state, *dispatch, execution)
+                        .await
+                    {
+                        break Err(error);
+                    }
+                }
+                outcome => break outcome,
             }
         };
-        let served = connection.serve_until_shutdown(&mut state, shutdown).await;
         match served {
             Ok(ServeOutcome::ConnectionEnded(end @ ConnectionEnd::DaemonShutdown { .. })) => {
                 report_graceful_shutdown(&connection, end);
@@ -121,7 +140,9 @@ async fn run(
                 return shutdown_with_timeout(&mut connection).await;
             }
             Ok(ServeOutcome::DispatchReady(_)) => {
-                return Err(RunnerDaemonError::ExecutionUnavailable);
+                return Err(RunnerDaemonError::Connection(
+                    RunnerConnectionError::Violation(ProtocolViolation::DispatchMismatch),
+                ));
             }
             Err(error) if error.is_reconnectable() => {
                 let delay = backoff.next_delay();
@@ -132,6 +153,64 @@ async fn run(
             }
             Err(error) => return Err(RunnerDaemonError::Connection(error)),
         }
+    }
+}
+
+async fn execute_dispatch(
+    process_runner: TokioProcessRunner,
+    read_only_paths: Vec<std::path::PathBuf>,
+    correlation: signalbox_runner_wire::LeaseCorrelation,
+    normalized_arguments: serde_json::Value,
+) -> TerminalResult {
+    if correlation.sandbox_profile != SandboxProfile::WorkspaceRestricted {
+        return TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ExecutionFailed,
+            detail: None,
+        };
+    }
+    let arguments = match serde_json::from_value::<ExecArguments>(normalized_arguments) {
+        Ok(arguments) => arguments,
+        Err(_) => {
+            return TerminalResult::KnownFailure {
+                error_kind: ExecutionErrorKind::InvalidArguments,
+                detail: None,
+            };
+        }
+    };
+    let mut runner = match SandboxedCommandRunner::try_new_runner_restricted(
+        process_runner,
+        correlation.working_directory.as_str(),
+        &read_only_paths,
+    ) {
+        Ok(runner) => runner,
+        Err(_) => {
+            return TerminalResult::KnownFailure {
+                error_kind: ExecutionErrorKind::ExecutionFailed,
+                detail: None,
+            };
+        }
+    };
+    let result = match runner.try_run(arguments).await {
+        Ok(result) => result,
+        Err(_) => {
+            return TerminalResult::KnownFailure {
+                error_kind: ExecutionErrorKind::InvalidArguments,
+                detail: None,
+            };
+        }
+    };
+    match serde_json::to_string(&result) {
+        Ok(text) if text.len() <= signalbox_runner_wire::SUCCESS_TEXT_BYTES as usize => {
+            TerminalResult::Success { text }
+        }
+        Ok(_) => TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ResultTooLarge,
+            detail: None,
+        },
+        Err(_) => TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ExecutionFailed,
+            detail: None,
+        },
     }
 }
 
@@ -268,7 +347,6 @@ enum RunnerDaemonError {
     Argument(ArgumentError),
     Configuration(RunnerConfigurationError),
     ExecutionPrograms,
-    ExecutionUnavailable,
     State(RunnerStateError),
     Socket(SocketConnectError),
     Connection(RunnerConnectionError),
@@ -283,7 +361,6 @@ impl fmt::Display for RunnerDaemonError {
             Self::Argument(_) => "runner arguments are invalid",
             Self::Configuration(_) => "runner configuration is invalid",
             Self::ExecutionPrograms => "runner execution programs are unavailable",
-            Self::ExecutionUnavailable => "runner executor is not yet composed",
             Self::State(_) => "runner durable state is unavailable",
             Self::Socket(_) => "runner socket is unavailable",
             Self::Connection(_) => "runner connection failed",
@@ -303,10 +380,7 @@ impl Error for RunnerDaemonError {
             Self::Socket(error) => Some(error),
             Self::Connection(error) => Some(error),
             Self::Signal(error) => Some(error),
-            Self::ExecutionPrograms
-            | Self::ExecutionUnavailable
-            | Self::ShutdownTimeout
-            | Self::StaleConnectionRejected => None,
+            Self::ExecutionPrograms | Self::ShutdownTimeout | Self::StaleConnectionRejected => None,
         }
     }
 }
