@@ -1091,7 +1091,6 @@ async fn inv060_blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>
             code: ErrorCode::InvalidRequest,
             message: String::from("blob read was rejected"),
             detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
-                digest: fixture.wire_digest,
                 offset_bytes,
                 length_bytes,
                 blob_length_bytes: fixture.expected_length,

@@ -388,6 +388,7 @@ fn delegation_rejection_matches(
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
         | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadLengthOutOfRange { .. }
         | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     }
 }

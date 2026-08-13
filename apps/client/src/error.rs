@@ -708,14 +708,24 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "blob_upload_digest_mismatch expected_digest={expected_digest} actual_digest={actual_digest}"
             ),
+            RejectionDetail::BlobReadLengthOutOfRange {
+                min_length_bytes,
+                max_length_bytes,
+                requested_length_bytes,
+            } => write!(
+                formatter,
+                "blob_read_length_out_of_range min_length_bytes={} max_length_bytes={} requested_length_bytes={}",
+                min_length_bytes.value(),
+                max_length_bytes.value(),
+                requested_length_bytes.value()
+            ),
             RejectionDetail::BlobReadRangeOutOfBounds {
-                digest,
                 offset_bytes,
                 length_bytes,
                 blob_length_bytes,
             } => write!(
                 formatter,
-                "blob_read_range_out_of_bounds digest={digest} offset_bytes={} length_bytes={} blob_length_bytes={}",
+                "blob_read_range_out_of_bounds offset_bytes={} length_bytes={} blob_length_bytes={}",
                 offset_bytes.value(),
                 length_bytes.value(),
                 blob_length_bytes.value()
