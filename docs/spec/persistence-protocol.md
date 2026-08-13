@@ -366,10 +366,14 @@ Representation rules, all enforced in the schema:
   later loss for its selected runner despite having no enrollment baseline; the
   page and both cursor guards associate it through the runner identity. Cursor
   advancement is monotonic, cannot pass an affected current placement, and
-  cannot complete while one remains. The cursor and ordered page are
-  implemented; the per-session transaction that changes placement, lease, turn,
-  release, and runner-event state remains the committed unimplemented
-  propagation step below.
+  cannot complete while one remains. Enrollment insertion, exact-identity
+  placement baseline derivation, and cursor completion share a transaction-level
+  runner-identity fence. An insertion that observes enrollment absence therefore
+  becomes visible before that enrollment can create and complete a loss cursor;
+  a completion that wins the fence becomes visible before a later insertion
+  derives its baseline. The cursor and ordered page are implemented; the
+  per-session transaction that changes placement, lease, turn, release, and
+  runner-event state remains the committed unimplemented propagation step below.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -698,7 +702,11 @@ statements live in the schema instead:
 - the placement-loss baseline trigger in migration `202608110005` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
-  deriving the immutable baseline and before the placement row becomes visible.
+  deriving the immutable baseline and before the placement row becomes visible;
+  migration `202608110006` adds a transaction-level runner-identity advisory
+  lock between the scheduler and enrollment locks, and enrollment insertion and
+  loss-cursor completion take that same identity lock before they can publish
+  the competing fact.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
