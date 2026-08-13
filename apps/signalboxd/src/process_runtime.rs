@@ -5708,7 +5708,7 @@ where
     drop(permit);
     match outcome {
         Ok(bytes) => {
-            write_message(
+            write_message_via_spool(
                 writer,
                 version,
                 request_id,
