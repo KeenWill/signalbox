@@ -29,7 +29,9 @@ workspace-provisioning authorization representation and checked readback were
 verified against this PR
 (`agent/runner-workspace-provisioning-authorization-persistence`). The atomic
 pinned-replacement command claim and provisioning-stage producer were verified
-against this PR (`agent/runner-replacement-provisioning-transaction`).
+against this PR (`agent/runner-replacement-provisioning-transaction`). The exact
+lease-offer registration and execution-placement reconstitution facts are
+verified against this PR (`agent/runner-lease-domain-correlation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -159,8 +161,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-eight files, `202607180001` through
-`202608110012` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — eighty-four files, `202607180001` through
+`202608110018` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -603,6 +605,14 @@ Representation rules, all enforced in the schema:
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
   and returns `NotApplicable`, leaving its terminal replacement transaction as
   the only command owner. No transaction remains open across runner I/O.
+- Migration `202608110018` separates the registration revision retained by an
+  immutable pinned placement from the then-current registration revision that
+  authorizes each lease offer. Existing lease generations preserve their
+  historical revision during backfill. New offers must name the exact current
+  registration under its guarded head, while their placement foreign key still
+  names the immutable pin. Lease readback reconstructs placement revision,
+  concrete execution directory, and sandbox from that exact placement record and
+  rejects any caller-supplied disagreement before insert.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed
@@ -760,8 +770,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-six explicit lock statements
-live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-seven explicit lock
+statements live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -815,7 +825,10 @@ live in the schema instead:
   predecessor's exact current lost connection head under `FOR SHARE` when
   inserting the immutable relation. Later activation uses the reviewed Rust lock
   subsequence above; the relation remains historical if the predecessor
-  reconnects.
+  reconnects; and
+- the lease-offer registration fence in migration `202608110018` takes
+  `FOR SHARE` on the selected enrollment's current registration head after the
+  connection-loss offer fence has acquired enrollment and connection authority.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here

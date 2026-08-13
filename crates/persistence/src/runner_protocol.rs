@@ -4982,6 +4982,12 @@ impl RunnerProtocolStore {
                         AS canonical_dispatch_generation,
                     placement.state_kind AS canonical_placement_state,
                     placement.pinned_runner_id AS canonical_placement_runner,
+                    placement.placement_revision
+                        AS canonical_placement_revision,
+                    placement.pinned_working_directory
+                        AS canonical_working_directory,
+                    placement.requested_sandbox_profile
+                        AS canonical_sandbox_profile,
                     placement.registration_enrollment_id
                         AS canonical_registration_enrollment,
                     placement.registration_revision
@@ -5028,7 +5034,7 @@ impl RunnerProtocolStore {
         let registration = load_registration_in(
             transaction.as_mut(),
             runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
-            decode_registration_revision(row.decode_column("registration_revision")?)?,
+            decode_registration_revision(row.decode_column("offer_registration_revision")?)?,
             None,
             &self.catalog,
         )
@@ -5061,6 +5067,7 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(generation.get()))
         .fetch_optional(transaction.as_mut())
         .await?;
+        let lease_correlation = loaded.correlation();
         let no_execution = row
             .map(|row| {
                 let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
@@ -5077,13 +5084,21 @@ impl RunnerProtocolStore {
                         )?,
                     },
                 );
-                Ok::<_, RunnerProtocolStoreError>(RunnerLeaseCorrelation {
+                let stored = RunnerLeaseCorrelation {
                     lease: runner_lease_id(row.decode_column("lease_id")?),
                     runner: runner_id(row.decode_column("runner_id")?),
+                    registration_revision: lease_correlation.registration_revision,
+                    placement_revision: lease_correlation.placement_revision,
+                    working_directory: lease_correlation.working_directory.clone(),
+                    sandbox: lease_correlation.sandbox,
                     tool: tool_name(row.decode_column("tool_name")?)?,
                     dispatch,
                     generation: decode_generation(row.decode_column("generation")?)?,
-                })
+                };
+                if stored != lease_correlation {
+                    return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+                }
+                Ok::<_, RunnerProtocolStoreError>(stored)
             })
             .transpose()?;
         let retry_prepared: bool = sqlx::query_scalar(
@@ -10048,7 +10063,26 @@ async fn insert_lease_generation(
     let placement_runner = placement
         .decode_column::<Option<Uuid>>("pinned_runner_id")?
         .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
-    if placement_runner != lease.runner().into_uuid() {
+    let placement_registration_revision = decode_generation(
+        placement
+            .decode_column::<Option<Decimal>>("registration_revision")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?,
+    )?;
+    let placement_revision =
+        decode_generation(placement.decode_column::<Decimal>("placement_revision")?)?;
+    let placement_working_directory = RunnerWorkingDirectory::try_new(
+        placement
+            .decode_column::<Option<String>>("pinned_working_directory")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?,
+    )
+    .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+    let placement_sandbox =
+        decode_sandbox(placement.decode_column::<String>("requested_sandbox_profile")?)?;
+    if placement_runner != lease.runner().into_uuid()
+        || placement_revision != correlation.placement_revision
+        || placement_working_directory != correlation.working_directory
+        || placement_sandbox != correlation.sandbox
+    {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     let enrollment = placement
@@ -10083,13 +10117,14 @@ async fn insert_lease_generation(
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
+             offer_registration_revision,
              credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-             $15
+             $15, $16
          )",
     )
     .bind(correlation.lease.into_uuid())
@@ -10105,11 +10140,8 @@ async fn insert_lease_generation(
             .decode_column::<Option<Uuid>>("registration_enrollment_id")?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?,
     )
-    .bind(
-        placement
-            .decode_column::<Option<Decimal>>("registration_revision")?
-            .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?,
-    )
+    .bind(Decimal::from(placement_registration_revision.get()))
+    .bind(Decimal::from(correlation.registration_revision.get()))
     .bind(authorization.map(|authorization| authorization.profile.as_str()))
     .bind(authorization_origin)
     .bind(authorization.map(|authorization| Decimal::from(authorization.grant_revision.get())))
@@ -10168,6 +10200,19 @@ fn decode_lease(
     let canonical_placement_state = row
         .decode_column::<Option<String>>("canonical_placement_state")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let canonical_placement_revision = decode_generation(
+        row.decode_column::<Option<Decimal>>("canonical_placement_revision")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?,
+    )?;
+    let canonical_working_directory = RunnerWorkingDirectory::try_new(
+        row.decode_column::<Option<String>>("canonical_working_directory")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?,
+    )
+    .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+    let canonical_sandbox = decode_sandbox(
+        row.decode_column::<Option<String>>("canonical_sandbox_profile")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?,
+    )?;
     let canonical_registration_enrollment = row
         .decode_column::<Option<Uuid>>("canonical_registration_enrollment")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
@@ -10227,6 +10272,12 @@ fn decode_lease(
             lease,
             dispatch,
             runner,
+            registration_revision: decode_generation(
+                row.decode_column("offer_registration_revision")?,
+            )?,
+            placement_revision: canonical_placement_revision,
+            working_directory: canonical_working_directory.clone(),
+            sandbox: canonical_sandbox,
             tool: tool.clone(),
             effect: decode_effect(row.decode_column("effect_class")?)?,
             credential_authorization: authorization.clone(),
@@ -10235,6 +10286,12 @@ fn decode_lease(
             recorded_correlation: RunnerLeaseCorrelation {
                 lease,
                 runner: runner_id(canonical_runner),
+                registration_revision: decode_generation(
+                    row.decode_column("offer_registration_revision")?,
+                )?,
+                placement_revision: canonical_placement_revision,
+                working_directory: canonical_working_directory,
+                sandbox: canonical_sandbox,
                 tool: tool_name(canonical_tool)?,
                 dispatch,
                 generation,

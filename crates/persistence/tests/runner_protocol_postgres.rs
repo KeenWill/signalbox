@@ -910,19 +910,28 @@ fn lease_with_cross_wired_dispatch(
                 .expect("the second dispatch generation is representable"),
         },
     );
-    let authorization = lease.credential_authorization().cloned();
     let correlation = RunnerLeaseCorrelation {
-        lease: lease.correlation().lease,
-        runner: lease.runner(),
-        tool: lease.tool().clone(),
         dispatch,
-        generation: lease.generation(),
+        ..lease.correlation()
     };
+    lease_with_correlation(lease, registration, correlation)
+}
+
+fn lease_with_correlation(
+    lease: &RunnerLease,
+    registration: &ValidatedRunnerRegistration,
+    correlation: RunnerLeaseCorrelation,
+) -> RunnerLease {
+    let authorization = lease.credential_authorization().cloned();
     RunnerLease::reconstitute(
         RunnerLeaseReconstitutionInput {
             lease: correlation.lease,
-            dispatch,
+            dispatch: correlation.dispatch,
             runner: lease.runner(),
+            registration_revision: correlation.registration_revision,
+            placement_revision: correlation.placement_revision,
+            working_directory: correlation.working_directory.clone(),
+            sandbox: correlation.sandbox,
             tool: lease.tool().clone(),
             effect: lease.effect(),
             credential_authorization: authorization.clone(),
@@ -937,7 +946,42 @@ fn lease_with_cross_wired_dispatch(
         },
         registration,
     )
-    .expect("the cross-wired dispatch remains internally self-consistent")
+    .expect("the fixture correlation remains internally self-consistent")
+}
+
+fn lease_with_cross_wired_placement_revision(
+    lease: &RunnerLease,
+    registration: &ValidatedRunnerRegistration,
+) -> RunnerLease {
+    let correlation = RunnerLeaseCorrelation {
+        placement_revision: RunnerGeneration::try_from_u64(2)
+            .expect("the cross-wired placement revision is positive"),
+        ..lease.correlation()
+    };
+    lease_with_correlation(lease, registration, correlation)
+}
+
+fn lease_with_cross_wired_working_directory(
+    lease: &RunnerLease,
+    registration: &ValidatedRunnerRegistration,
+) -> RunnerLease {
+    let correlation = RunnerLeaseCorrelation {
+        working_directory: RunnerWorkingDirectory::try_new("/workspace/other-session".to_owned())
+            .expect("the cross-wired working directory is valid"),
+        ..lease.correlation()
+    };
+    lease_with_correlation(lease, registration, correlation)
+}
+
+fn lease_with_cross_wired_sandbox(
+    lease: &RunnerLease,
+    registration: &ValidatedRunnerRegistration,
+) -> RunnerLease {
+    let correlation = RunnerLeaseCorrelation {
+        sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+        ..lease.correlation()
+    };
+    lease_with_correlation(lease, registration, correlation)
 }
 
 fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistration) -> RunnerLease {
@@ -948,6 +992,10 @@ fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistrati
             lease: correlation.lease,
             dispatch: correlation.dispatch,
             runner: lease.runner(),
+            registration_revision: correlation.registration_revision,
+            placement_revision: correlation.placement_revision,
+            working_directory: correlation.working_directory.clone(),
+            sandbox: correlation.sandbox,
             tool: lease.tool().clone(),
             effect: lease.effect(),
             credential_authorization: authorization.clone(),
@@ -17579,6 +17627,95 @@ async fn s31_inv043_initial_lease_rejects_cross_wired_dispatch_fence() -> Result
     Ok(())
 }
 
+/// INV-043: the durable offer rejects every caller-supplied execution-placement
+/// fact that differs from the exact immutable placement record it references.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_initial_lease_rejects_cross_wired_execution_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let wrong_revision =
+        lease_with_cross_wired_placement_revision(&lease, registration.registration());
+    let revision_rejected = store
+        .store_lease(&wrong_revision)
+        .await
+        .expect_err("an offered lease must match the canonical placement revision");
+    let wrong_directory =
+        lease_with_cross_wired_working_directory(&lease, registration.registration());
+    let directory_rejected = store
+        .store_lease(&wrong_directory)
+        .await
+        .expect_err("an offered lease must match the canonical working directory");
+    let wrong_sandbox = lease_with_cross_wired_sandbox(&lease, registration.registration());
+    let sandbox_rejected = store
+        .store_lease(&wrong_sandbox)
+        .await
+        .expect_err("an offered lease must match the canonical sandbox");
+
+    assert_store_corruption(
+        revision_rejected,
+        RunnerProtocolCorruption::CrossWiredReference,
+    );
+    assert_store_corruption(
+        directory_rejected,
+        RunnerProtocolCorruption::CrossWiredReference,
+    );
+    assert_store_corruption(
+        sandbox_rejected,
+        RunnerProtocolCorruption::CrossWiredReference,
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042 / INV-043: a later lease retains the current registration that
+/// revalidated the immutable pin, independently of the pin's original revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_inv043_later_lease_round_trips_offer_registration_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, original_registration, pin) =
+        stored_pin_fixture(&pool).await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
+    let current_registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let lease = pin
+        .placement
+        .offer_lease(
+            &expected_enrollment,
+            current_registration.registration(),
+            pin.grant.as_ref(),
+            authorized(LATER_LEASE_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("the current matching registration revalidates the immutable pin");
+    let correlation = lease.correlation();
+    store.store_lease(&lease).await?;
+    let loaded = store
+        .load_lease(correlation.lease, correlation.generation)
+        .await?
+        .expect("the later lease and offer registration are durable");
+
+    assert_ne!(
+        original_registration.revision(),
+        current_registration.revision()
+    );
+    assert_eq!(
+        correlation.registration_revision.get(),
+        current_registration.revision().get()
+    );
+    assert_eq!(loaded, lease);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
@@ -21287,6 +21424,10 @@ async fn s31_inv043_adapter_rejects_caller_reconstituted_no_execution_proof()
             lease: correlation.lease,
             dispatch: correlation.dispatch,
             runner: correlation.runner,
+            registration_revision: correlation.registration_revision,
+            placement_revision: correlation.placement_revision,
+            working_directory: correlation.working_directory.clone(),
+            sandbox: correlation.sandbox,
             tool: correlation.tool.clone(),
             effect: pin.lease.effect(),
             credential_authorization: credential_authorization.clone(),
