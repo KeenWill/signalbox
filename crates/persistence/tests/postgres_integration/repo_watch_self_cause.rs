@@ -36,9 +36,9 @@ const REPOSITORY: &str = "signalbox/repository";
 const HEAD_REPOSITORY: &str = "contributor/repository";
 const HEAD: &str = "1111111111111111111111111111111111111111";
 const THREAD: &str = "PRRT_fixture_thread";
-const OWNER: &str = "fixture-owner";
+const USER: &str = "fixture-user";
 const SELF_REVIEW_ID: u64 = 80_021;
-const OWNER_REVIEW_ID: u64 = 80_022;
+const USER_REVIEW_ID: u64 = 80_022;
 
 struct TemplateResolver;
 
@@ -81,7 +81,7 @@ fn context() -> Result<PullRequestEventContext, Box<dyn Error>> {
         body: PullRequestBody::try_new(String::from("A synthetic pull request."))?,
         labels: Vec::new(),
         draft: false,
-        author: Some(RepoWatchAuthorLogin::try_new(String::from(OWNER))?),
+        author: Some(RepoWatchAuthorLogin::try_new(String::from(USER))?),
     }))
 }
 
@@ -94,7 +94,7 @@ fn observation_with_threads(
         .map(|id| {
             Ok(RepoWatchReviewObservation::new(
                 GitHubObjectId::new(NonZeroU64::new(*id).expect("fixture id is positive")),
-                RepoWatchAuthorLogin::try_new(String::from(OWNER))?,
+                RepoWatchAuthorLogin::try_new(String::from(USER))?,
                 Some(ReviewState::Commented),
                 CommitSha::try_new(String::from(HEAD))?,
             ))
@@ -221,15 +221,15 @@ fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGener
 #[track_caller]
 fn assert_dispatched(outcome: RepoWatchRuleEvaluationOutcome) {
     let RepoWatchRuleEvaluationOutcome::Dispatched { .. } = outcome else {
-        panic!("fixture owner event dispatches")
+        panic!("fixture user event dispatches")
     };
 }
 
 /// A session-created review is suppressed by exact provider identity, while a
-/// distinct owner-created review with the same login still dispatches.
+/// distinct user-created review with the same login still dispatches.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn exact_session_write_is_self_caused_but_same_author_owner_write_dispatches()
+async fn exact_session_write_is_self_caused_but_same_author_user_write_dispatches()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     complete_thread_reply(&pool, 0x91_000).await?;
@@ -315,11 +315,11 @@ async fn exact_session_write_is_self_caused_but_same_author_owner_write_dispatch
         .load_cursor(&repository)
         .await?
         .expect("the self-caused cursor exists");
-    let owner_authored = observation(&[SELF_REVIEW_ID, OWNER_REVIEW_ID])?;
-    let owner_events = derive_repo_watch_events(
+    let user_authored = observation(&[SELF_REVIEW_ID, USER_REVIEW_ID])?;
+    let user_events = derive_repo_watch_events(
         &repository,
         Some(&self_caused),
-        &owner_authored,
+        &user_authored,
         &mut UuidV7RepoWatchEventIdGenerator,
     )?;
     event_store
@@ -327,30 +327,30 @@ async fn exact_session_write_is_self_caused_but_same_author_owner_write_dispatch
             &repository,
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
-                RepoWatchCursorCandidate::new(owner_authored.clone()),
-                owner_events,
+                RepoWatchCursorCandidate::new(user_authored.clone()),
+                user_events,
             ),
         )
         .await?;
-    let owner_event = dispatch_store
+    let user_event = dispatch_store
         .load_next_event(&repository, rule.id(), rule.version())
         .await?
-        .expect("the owner-authored review is pending");
-    let owner_outcome =
+        .expect("the user-authored review is pending");
+    let user_outcome =
         RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
             .evaluate(
-                owner_event,
+                user_event,
                 &rule,
-                &owner_authored,
+                &user_authored,
                 &TemplateResolver,
                 dispatch_context(),
             )
             .await?;
 
-    assert_dispatched(owner_outcome);
-    let owner_sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_action")
+    assert_dispatched(user_outcome);
+    let user_sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_action")
         .fetch_one(&pool)
         .await?;
-    assert_eq!(owner_sessions, 1);
+    assert_eq!(user_sessions, 1);
     Ok(())
 }

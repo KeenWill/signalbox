@@ -513,9 +513,9 @@ first repository-watch cursor that observes a matching review write, thread
 reply, or thread resolution durably links every resulting event to the creating
 tool attempt. A matching rule records `self_caused` and creates no dispatch
 batch or session. Mutable thread writes are consumed by that first observation,
-so a later owner transition of the same thread remains dispatchable. Correlation
-uses provider object identity, never author login: a distinct owner-created
-review remains eligible even when the session token and owner share one login.
+so a later user transition of the same thread remains dispatchable. Correlation
+uses provider object identity, never author login: a distinct user-created
+review remains eligible even when the session token and user share one login.
 
 ## First live rule
 
