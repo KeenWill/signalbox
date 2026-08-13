@@ -15,7 +15,10 @@ use signalbox_process_protocol::{
 pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
-    BlobSourceFile(io::Error),
+    BlobSourceFile {
+        path: PathBuf,
+        source: io::Error,
+    },
     SystemPromptFile(io::Error),
     GoalTextFile {
         path: PathBuf,
@@ -68,8 +71,11 @@ impl ClientError {
         Self::SourceFile(error)
     }
 
-    pub(crate) fn blob_source_file(error: io::Error) -> Self {
-        Self::BlobSourceFile(error)
+    pub(crate) fn blob_source_file(path: &Path, source: io::Error) -> Self {
+        Self::BlobSourceFile {
+            path: path.to_path_buf(),
+            source,
+        }
     }
 
     pub(crate) fn system_prompt_file(error: io::Error) -> Self {
@@ -117,7 +123,7 @@ impl ClientError {
             } => Self::AmbiguousMutation,
             Self::Remote { .. }
             | Self::SourceFile(_)
-            | Self::BlobSourceFile(_)
+            | Self::BlobSourceFile { .. }
             | Self::SystemPromptFile(_)
             | Self::GoalTextFile { .. }
             | Self::DelegationContentFile { .. }
@@ -155,9 +161,11 @@ impl fmt::Display for ClientError {
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
             }
-            Self::BlobSourceFile(_) => {
-                formatter.write_str("the blob upload source file could not be read")
-            }
+            Self::BlobSourceFile { path, source } => write!(
+                formatter,
+                "the blob upload source file '{}' could not be read: {source}",
+                path.display()
+            ),
             Self::SystemPromptFile(_) => {
                 formatter.write_str("the system prompt file could not be read")
             }
@@ -244,12 +252,12 @@ impl Error for ClientError {
         match self {
             Self::Io(error)
             | Self::SourceFile(error)
-            | Self::BlobSourceFile(error)
             | Self::SystemPromptFile(error)
             | Self::GoalTextFile { source: error, .. }
             | Self::DelegationContentFile { source: error, .. }
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
+            Self::BlobSourceFile { source, .. } => Some(source),
             Self::DelegationContentFileUtf8 { source, .. } => Some(source),
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
