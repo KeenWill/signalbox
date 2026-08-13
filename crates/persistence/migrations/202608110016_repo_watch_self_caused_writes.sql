@@ -186,7 +186,7 @@ BEGIN
             pull_request_number, review_id
         ) VALUES (
             stored.attempt_id, stored.session_id, 'publish_review',
-            arguments ->> 'repository', (arguments ->> 'number')::numeric,
+            lower(arguments ->> 'repository'), (arguments ->> 'number')::numeric,
             (result ->> 'id')::numeric
         ) ON CONFLICT (tool_attempt_id) DO NOTHING;
     ELSIF stored.tool_name = 'change_request_thread_reply' THEN
@@ -211,7 +211,7 @@ BEGIN
             pull_request_number, comment_id
         ) VALUES (
             stored.attempt_id, stored.session_id, 'comment',
-            arguments ->> 'repository', (arguments ->> 'number')::numeric,
+            lower(arguments ->> 'repository'), (arguments ->> 'number')::numeric,
             (result ->> 'id')::numeric
         ) ON CONFLICT (tool_attempt_id) DO NOTHING;
     END IF;
