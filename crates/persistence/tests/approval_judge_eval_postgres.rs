@@ -111,12 +111,11 @@ fn verdict_entry(recommendation: &str, rationale: &str) -> serde_json::Value {
     serde_json::json!({"recommendation": recommendation, "rationale": rationale})
 }
 
-fn scorecard_case(name: &str, repeats: &[serde_json::Value]) -> serde_json::Value {
-    // Recording requires every configured attempt accounted for, so the
-    // fixture states the failures as exactly the attempts its verdicts do
-    // not cover.
-    let failed_calls =
-        usize::try_from(REPEATS).expect("the fixture repeat count is small") - repeats.len();
+fn scorecard_case(
+    name: &str,
+    repeats: &[serde_json::Value],
+    failed_calls: u32,
+) -> serde_json::Value {
     serde_json::json!({"name": name, "repeats": repeats, "failed_calls": failed_calls})
 }
 
@@ -143,10 +142,12 @@ fn both_call_scorecard_cases() -> Vec<serde_json::Value> {
         scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            2,
         ),
         scorecard_case(
             SECOND_CASE,
             &[verdict_entry(DENY_SPELLING, SECOND_RATIONALE)],
+            2,
         ),
     ]
 }
@@ -409,6 +410,7 @@ async fn an_inadmissible_call_row_leaves_no_run_row() -> Result<(), Box<dyn Erro
         &[scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, "")],
+            2,
         )],
     );
     let mut broken = first_call();
@@ -479,6 +481,7 @@ async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<
         &[scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            2,
         )],
     );
     let mut overflowing = first_call();
@@ -578,6 +581,7 @@ async fn recorded_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
         &[scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            2,
         )],
     );
     record_eval_run(&pool, &run, &[first_call()]).await?;
@@ -756,6 +760,7 @@ async fn unaccounted_attempts_are_rejected() -> Result<(), Box<dyn Error>> {
         &[scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            2,
         )],
     );
     // One verdict plus zero failures leaves two configured attempts
@@ -783,6 +788,7 @@ async fn late_call_rows_are_rejected_after_the_run_commits() -> Result<(), Box<d
         &[scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            2,
         )],
     );
     record_eval_run(&pool, &run, &[first_call()]).await?;
@@ -823,6 +829,7 @@ async fn contradictory_scorecard_verdicts_are_rejected() -> Result<(), Box<dyn E
         &[scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            2,
         )],
     );
     let error = record_eval_run(&pool, &run, &[])
@@ -850,6 +857,7 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
         &[scorecard_case(
             FIRST_CASE,
             &[verdict_entry(APPROVE_SPELLING, &widest)],
+            2,
         )],
     );
     record_eval_run(&pool, &run, &[at_bound]).await?;
@@ -862,6 +870,7 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
         &[scorecard_case(
             SECOND_CASE,
             &[verdict_entry(DENY_SPELLING, &overlong)],
+            2,
         )],
     );
     let error = record_eval_run(&pool, &second_run, &[past_bound])
