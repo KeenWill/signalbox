@@ -152,13 +152,18 @@ EXECUTE FUNCTION stamp_eval_run_recording_transaction();
 CREATE FUNCTION reject_eval_call_outside_run_recording()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     run_transaction xid8;
 BEGIN
-    SELECT recording_transaction_id INTO run_transaction
-      FROM approval_judge_eval_run
-     WHERE eval_run_id = NEW.eval_run_id;
+    EXECUTE pg_catalog.format(
+        'SELECT recording_transaction_id '
+        'FROM %I.approval_judge_eval_run WHERE eval_run_id = $1',
+        TG_TABLE_SCHEMA
+    )
+    INTO run_transaction
+    USING NEW.eval_run_id;
     IF run_transaction IS NULL THEN
         RAISE EXCEPTION 'approval_judge_eval_call requires its run row first'
             USING ERRCODE = '23514';
