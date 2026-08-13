@@ -58,17 +58,19 @@ runner transmission and checked directive consumption are re-verified through
 this PR (`agent/runner-retained-result-resume`). Lease-offer operation-failure
 retention, exact live acknowledgement, and checked reconnect resend or
 retirement are re-verified through this PR
-(`agent/runner-lease-offer-failure-journal`). The placement loss-source, pre-pin
-replacement and abandonment state shapes, and append-only reconstitution-history
-contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
-It owns logical runner enrollment, daemon-authoritative catalog validation,
-runner leases, the independent session-composition axes, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant test index](../invariants.md).
+(`agent/runner-lease-offer-failure-journal`). Live durable refusal of an offer
+whose tool is absent from the registration-only empty catalog is re-verified
+through this PR (`agent/runner-empty-catalog-offer-refusal`). The placement
+loss-source, pre-pin replacement and abandonment state shapes, and append-only
+reconstitution-history contract are re-verified through this PR
+(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, the independent
+session-composition axes, session placement and affinity, credential-profile
+grants, and workspace requirements. The tool registry's common declarations
+remain owned by [tool loop](tool-loop.md); session transcript and frontier
+mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
+physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
+cite [the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
@@ -244,10 +246,12 @@ identities and registration revision.
 
 The executable connection implements `enroll`/`enrolled`, empty-inventory
 `resume`/`resumed`, `advertise`/`registered`, heartbeat challenge and
+acknowledgement, empty-catalog lease-offer refusal, exact operation-failure
 acknowledgement, and typed `rejected` closure. The daemon commits enrollment or
-registration before acknowledging it. The runner fsyncs its request identity and
-exact returned receipt before treating either as current, reconnects after
-transient transport loss, and never infers an unadvertised capability.
+registration before acknowledging it. The runner fsyncs its request identity,
+exact returned receipt, and lease-offer refusal evidence before treating each as
+current, reconnects after transient transport loss, and never infers an
+unadvertised capability.
 
 After durable handshake admission, the daemon connection task registers its
 exact enrollment, runner, and physical connection epoch with a process-local
@@ -689,9 +693,10 @@ the runner sends the complete stored inventory. It accepts only matching paired
 evidence and atomically frees both slots. For a retained lease-offer failure,
 `resend` emits the exact stored envelope while retaining it, and
 `discard_as_recorded` or `fail_stale` frees it. Unsupported actions preserve the
-journal and fail closed. No live execution or offer-admission path populates
-this inventory, so the failure boundary supplies neither lease admission nor a
-workstation tool inventory.
+journal and fail closed. The only live producer is the registration-only empty
+catalog refusing an offered unknown tool; no successful offer admission or
+execution path populates this inventory, so the failure boundary supplies
+neither lease admission nor a workstation tool inventory.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
