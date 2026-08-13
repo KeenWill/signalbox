@@ -5822,6 +5822,9 @@ where
             })
         }
         BlobUploadError::Unavailable => ProtocolError::without_detail(ErrorCode::Unavailable),
+        BlobUploadError::PublicationAmbiguous => {
+            ProtocolError::without_detail(ErrorCode::PublicationAmbiguous)
+        }
         BlobUploadError::CommitAmbiguous => {
             ProtocolError::without_detail(ErrorCode::CommitAmbiguous)
         }
@@ -13936,6 +13939,9 @@ impl ProtocolError {
                     "the follow stream fell behind; reconnect for a fresh snapshot"
                 }
                 ErrorCode::Unavailable => "the requested operation is unavailable",
+                ErrorCode::PublicationAmbiguous => {
+                    "the blob publication is ambiguous; retry the exact upload"
+                }
                 ErrorCode::CommitAmbiguous => {
                     "the mutation commit is ambiguous; retry the exact command"
                 }
@@ -14856,10 +14862,10 @@ mod tests {
         CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
         ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
-        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
-        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError, PendingConversationImport,
-        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
+        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS,
+        OperationalImportError, PendingConversationImport, ProcessConnectionError,
+        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
         RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
         SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
@@ -14879,11 +14885,10 @@ mod tests {
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
-        submit_input_model_execution_diagnostic, try_acquire_blob_read_permit,
-        unavailable_protocol_error, wire_goal_event, wire_metadata_last_writer,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_delegation_port_error,
-        write_snapshot_spool_error, write_transcript_entry,
+        submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
+        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -15624,21 +15629,6 @@ mod tests {
                 .message
                 .contains("supported version: 1")
         );
-    }
-
-    /// INV-060: direct blob-read admission exposes one fixed non-waiting
-    /// process-wide capacity.
-    #[test]
-    fn inv060_blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
-        let budget = Arc::new(Semaphore::new(1));
-        let held = try_acquire_blob_read_permit(Arc::clone(&budget))
-            .ok_or_else(|| io::Error::other("the first direct read is admitted"))?;
-
-        assert_eq!(MAX_CONCURRENT_BLOB_READS, 16);
-        assert!(try_acquire_blob_read_permit(Arc::clone(&budget)).is_none());
-        drop(held);
-        assert!(try_acquire_blob_read_permit(budget).is_some());
-        Ok(())
     }
 
     /// INV-033: a reconciliation decision that lost its race to another

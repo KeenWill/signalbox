@@ -716,7 +716,9 @@ impl BlobStore for S3BlobStore {
                     {
                         Ok(Ok(())) if replacing => Ok(BlobPutOutcome::Repaired { key }),
                         Ok(Ok(())) => Ok(BlobPutOutcome::Published { key }),
-                        _ => Err(BlobStoreError::unavailable("bound S3 put deadline")),
+                        _ => Err(BlobStoreError::publication_ambiguous(
+                            "reconcile S3 put deadline",
+                        )),
                     }
                 }
             }

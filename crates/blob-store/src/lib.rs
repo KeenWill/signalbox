@@ -292,6 +292,8 @@ pub enum BlobStoreFailureKind {
     NotFound,
     /// Stored or supplied bytes do not match the expected digest and length.
     VerificationFailed,
+    /// Publication may have completed, but exact verification could not decide.
+    PublicationAmbiguous,
     /// Backend I/O failed without proving absence or corruption.
     Unavailable,
 }
@@ -368,6 +370,16 @@ impl BlobStoreError {
     pub const fn unavailable(operation: &'static str) -> Self {
         Self {
             kind: BlobStoreFailureKind::Unavailable,
+            operation,
+            verification: None,
+            source: None,
+        }
+    }
+
+    /// Constructs a failure whose publication effect could not be reconciled.
+    pub const fn publication_ambiguous(operation: &'static str) -> Self {
+        Self {
+            kind: BlobStoreFailureKind::PublicationAmbiguous,
             operation,
             verification: None,
             source: None,

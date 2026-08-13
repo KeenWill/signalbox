@@ -34,27 +34,80 @@ fn live_store() -> Result<S3BlobStore, Box<dyn Error>> {
 
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
-async fn live_s3_store_conformance() -> Result<(), Box<dyn Error>> {
+async fn inv059_live_s3_rejects_publication_verification_failure() -> Result<(), Box<dyn Error>> {
     let store = live_store()?;
     let expected = expected_fixture();
 
     store.delete_for_conformance(expected).await?;
     assert_verification_failure(&store).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit live S3-compatible test bucket"]
+async fn inv059_live_s3_puts_and_reads_exact_bytes() -> Result<(), Box<dyn Error>> {
+    let store = live_store()?;
+    let expected = expected_fixture();
 
     store.delete_for_conformance(expected).await?;
     assert_put_and_exact_read_back(&store).await;
+    store.delete_for_conformance(expected).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit live S3-compatible test bucket"]
+async fn inv059_live_s3_reads_exact_bounded_ranges() -> Result<(), Box<dyn Error>> {
+    let store = live_store()?;
+    let expected = expected_fixture();
 
     store.delete_for_conformance(expected).await?;
     assert_exact_range_read_back(&store).await;
+    store.delete_for_conformance(expected).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit live S3-compatible test bucket"]
+async fn inv059_live_s3_rejects_oversized_ranges() -> Result<(), Box<dyn Error>> {
+    let store = live_store()?;
+    let expected = expected_fixture();
 
     store.delete_for_conformance(expected).await?;
     assert_oversized_range_is_rejected(&store).await;
+    store.delete_for_conformance(expected).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit live S3-compatible test bucket"]
+async fn inv059_live_s3_deduplicates_an_existing_destination() -> Result<(), Box<dyn Error>> {
+    let store = live_store()?;
+    let expected = expected_fixture();
 
     store.delete_for_conformance(expected).await?;
     assert_existing_destination_deduplicates(&store).await;
+    store.delete_for_conformance(expected).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit live S3-compatible test bucket"]
+async fn inv059_live_s3_concurrent_publication_is_no_clobber() -> Result<(), Box<dyn Error>> {
+    let store = live_store()?;
+    let expected = expected_fixture();
 
     store.delete_for_conformance(expected).await?;
     assert_concurrent_publication_deduplicates(&store).await;
+    store.delete_for_conformance(expected).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit live S3-compatible test bucket"]
+async fn inv059_live_s3_repairs_a_corrupt_existing_destination() -> Result<(), Box<dyn Error>> {
+    let store = live_store()?;
+    let expected = expected_fixture();
 
     store.delete_for_conformance(expected).await?;
     store
