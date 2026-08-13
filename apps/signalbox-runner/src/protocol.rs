@@ -12,12 +12,12 @@ use std::{
 use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, DetailName,
-    Digest, DirectiveAction, Dispatch, Enroll, FailureCategory, FailureDetail, Frame, FrameError,
-    Heartbeat, HeartbeatAck, LeaseClaimed, LeaseCorrelation, LeasePhase, LeasePhaseKind,
-    MAX_FRAME_BYTES, Message, OperationCorrelation, OperationFailed, OperationFailure, PositiveU64,
-    ReconnectDirectives, ReconnectInventory, Registered, Rejected, RejectionCode, ResultFrame,
-    Resume, Shutdown, ShutdownReason, TerminalResult, ValueError, advertisement_digest,
-    decode_line, encode_line,
+    Digest, DirectiveAction, Dispatch, EffectClass, Enroll, FailureCategory, FailureDetail, Frame,
+    FrameError, Heartbeat, HeartbeatAck, LeaseClaim, LeaseClaimed, LeaseCorrelation, LeaseOffer,
+    LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message, OperationCorrelation, OperationFailed,
+    OperationFailure, PositiveU64, ReconnectDirectives, ReconnectInventory, Registered, Rejected,
+    RejectionCode, ResultFrame, Resume, SandboxProfile, Shutdown, ShutdownReason, TerminalResult,
+    ValueError, advertisement_digest, decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -30,6 +30,7 @@ use tokio::{
 use crate::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
 };
+use signalbox_tools_exec::{ExecArguments, SANDBOXED_EXEC_NAME};
 
 const SOCKET_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
@@ -37,6 +38,8 @@ const FIRST_RUNNER_SEQUENCE: u64 = 1;
 const NO_ACCEPTED_PEER_SEQUENCE: u64 = 0;
 const TOOL_UNAVAILABLE_DETAIL_CODE: &str = "tool-unavailable";
 const TOOL_UNAVAILABLE_DETAIL_MESSAGE: &str = "offered tool is absent from the registered catalog";
+const LEASE_REFUSED_DETAIL_CODE: &str = "lease-admission-refused";
+const LEASE_REFUSED_DETAIL_MESSAGE: &str = "offered execution facts are not locally admissible";
 
 /// Connects only to one stable owner-only same-user Unix socket identity.
 pub async fn connect_verified(path: &Path) -> Result<UnixStream, SocketConnectError> {
@@ -574,6 +577,7 @@ pub struct RunnerConnection<S> {
     connection_epoch: PositiveU64,
     heartbeat: Option<HeartbeatExchange>,
     claimed_capability: Option<LeaseCorrelation>,
+    pending_offer: Option<LeaseOffer>,
 }
 
 #[derive(Clone)]
@@ -684,6 +688,7 @@ where
             connection_epoch,
             heartbeat: None,
             claimed_capability: None,
+            pending_offer: None,
         })
     }
 
@@ -876,17 +881,30 @@ where
                     offer.correlation.runner_id,
                     offer.correlation.registration_revision,
                 )?;
-                if self
+                let advertised = self
                     .advertisement
                     .tools
                     .binary_search(&offer.correlation.tool_name)
-                    .is_ok()
+                    .is_ok();
+                if advertised
+                    && self.pending_offer.is_none()
+                    && state.reconnect_inventory() == &ReconnectInventory::default()
+                    && live_offer_is_admissible(&offer)
                 {
-                    return Err(RunnerConnectionError::RecoveryUnavailable(
-                        self.recovery_unavailable(),
-                    ));
+                    let correlation = offer.correlation.clone();
+                    self.pending_offer = Some(offer);
+                    send_message(
+                        &mut self.io,
+                        Message::LeaseClaim(LeaseClaim { correlation }),
+                    )
+                    .await?;
+                    return Ok(None);
                 }
-                let failure = empty_catalog_offer_failure(offer.correlation)?;
+                let failure = if advertised {
+                    refused_offer_failure(offer.correlation)?
+                } else {
+                    empty_catalog_offer_failure(offer.correlation)?
+                };
                 state.record_lease_offer_failure(failure.clone())?;
                 send_message(
                     &mut self.io,
@@ -896,16 +914,24 @@ where
                 Ok(None)
             }
             Message::LeaseClaimed(LeaseClaimed { correlation }) => {
-                let lease = state.reconnect_inventory().lease.as_ref().ok_or(
-                    RunnerConnectionError::Violation(
-                        ProtocolViolation::LeaseAcknowledgementMismatch,
-                    ),
-                )?;
-                if lease.correlation != correlation
-                    || !matches!(
-                        lease.phase,
-                        LeasePhaseKind::WaitingDispatch | LeasePhaseKind::DispatchReceived
-                    )
+                let pending_matches = self
+                    .pending_offer
+                    .as_ref()
+                    .is_some_and(|offer| offer.correlation == correlation);
+                let retained_matches =
+                    state
+                        .reconnect_inventory()
+                        .lease
+                        .as_ref()
+                        .is_some_and(|lease| {
+                            lease.correlation == correlation
+                                && matches!(
+                                    lease.phase,
+                                    LeasePhaseKind::WaitingDispatch
+                                        | LeasePhaseKind::DispatchReceived
+                                )
+                        });
+                if (!pending_matches && !retained_matches)
                     || state.reconnect_inventory().result.is_some()
                     || self
                         .claimed_capability
@@ -916,6 +942,12 @@ where
                         ProtocolViolation::LeaseAcknowledgementMismatch,
                     ));
                 }
+                if pending_matches {
+                    state.record_lease_phase(LeasePhase {
+                        correlation: correlation.clone(),
+                        phase: LeasePhaseKind::WaitingDispatch,
+                    })?;
+                }
                 self.claimed_capability = Some(correlation);
                 Ok(None)
             }
@@ -924,6 +956,14 @@ where
                 normalized_arguments,
             }) => {
                 if self.claimed_capability.as_ref() != Some(&correlation) {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::DispatchMismatch,
+                    ));
+                }
+                if self.pending_offer.as_ref().is_some_and(|offer| {
+                    offer.correlation != correlation
+                        || offer.normalized_arguments != normalized_arguments
+                }) {
                     return Err(RunnerConnectionError::Violation(
                         ProtocolViolation::DispatchMismatch,
                     ));
@@ -941,6 +981,7 @@ where
                         other => RunnerConnectionError::State(other),
                     })?;
                 self.claimed_capability = None;
+                self.pending_offer = None;
                 Ok(Some(ServeOutcome::DispatchReady(Box::new(
                     RunnerDispatchReady {
                         correlation,
@@ -1272,6 +1313,37 @@ fn empty_catalog_offer_failure(
         category: FailureCategory::LeaseAdmissionRefused,
         detail,
     })
+}
+
+fn refused_offer_failure(
+    correlation: LeaseCorrelation,
+) -> Result<OperationFailure, RunnerConnectionError> {
+    let code = DetailName::try_new(String::from(LEASE_REFUSED_DETAIL_CODE))
+        .map_err(RunnerConnectionError::InvalidLocalFrame)?;
+    let detail = FailureDetail::try_new(
+        code,
+        String::from(LEASE_REFUSED_DETAIL_MESSAGE),
+        serde_json::Value::Object(serde_json::Map::new()),
+    )
+    .map_err(RunnerConnectionError::InvalidLocalFrame)?;
+    Ok(OperationFailure {
+        correlation: OperationCorrelation::LeaseOffer(correlation),
+        category: FailureCategory::LeaseAdmissionRefused,
+        detail,
+    })
+}
+
+fn live_offer_is_admissible(offer: &LeaseOffer) -> bool {
+    let working_directory = Path::new(offer.correlation.working_directory.as_str());
+    offer.correlation.tool_name.as_str() == SANDBOXED_EXEC_NAME
+        && offer.correlation.sandbox_profile == SandboxProfile::WorkspaceRestricted
+        && offer.effect_class == EffectClass::SideEffecting
+        && offer.credential_profile.is_none()
+        && offer.grant_revision.is_none()
+        && serde_json::from_value::<ExecArguments>(offer.normalized_arguments.clone()).is_ok()
+        && working_directory
+            .canonicalize()
+            .is_ok_and(|canonical| canonical == working_directory && canonical.is_dir())
 }
 
 async fn send_message<S>(
@@ -1912,11 +1984,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advertised_offer_stays_at_the_typed_execution_seam() {
+    async fn advertised_offer_emits_claim_without_premature_journaling() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let advertisement = advertisement_with_exec_tool();
         let mut state = enrolled_state_for(&parent, &advertisement);
-        let offer = unavailable_lease_offer();
+        let mut offer = unavailable_lease_offer();
+        offer.correlation.working_directory = WorkingDirectory::try_new(
+            parent
+                .path()
+                .canonicalize()
+                .expect("the fixture directory canonicalizes")
+                .display()
+                .to_string(),
+        )
+        .expect("the canonical fixture directory is bounded");
+        let expected = Message::LeaseClaim(LeaseClaim {
+            correlation: offer.correlation.clone(),
+        });
+        let correlation = offer.correlation.clone();
+        let dispatch = Dispatch {
+            correlation: correlation.clone(),
+            normalized_arguments: offer.normalized_arguments.clone(),
+        };
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
 
@@ -1924,10 +2013,27 @@ mod tests {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
                 .expect("resume completes before the advertised lease offer");
-            connection
+            let offered = connection
                 .serve_one(&mut state)
                 .await
-                .expect_err("advertised execution remains at the typed unimplemented seam")
+                .expect("the admitted offer emits its exact claim");
+            let inventory_before_claim = state.reconnect_inventory().clone();
+            let claimed = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical acknowledgement is accepted");
+            let inventory_after_claim = state.reconnect_inventory().clone();
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the admitted dispatch reaches its executor handoff");
+            (
+                offered,
+                inventory_before_claim,
+                claimed,
+                inventory_after_claim,
+                ready,
+            )
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
@@ -1941,16 +2047,39 @@ mod tests {
             )
             .await;
             send_hub_message(&mut hub_io, Message::LeaseOffer(offer)).await;
+            let claim = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+            claim
         };
-        let (error, ()) = tokio::join!(runner, hub);
+        let ((offered, before_claim, claimed, after_claim, ready), observed) =
+            tokio::join!(runner, hub);
 
-        assert!(matches!(
-            error,
-            RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
-                gap: RecoveryGap::UnbornHeadNotRepresentable,
+        assert_eq!(offered, None);
+        assert_eq!(before_claim, ReconnectInventory::default());
+        assert_eq!(claimed, None);
+        assert_eq!(
+            after_claim.lease,
+            Some(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
             })
-        ));
-        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+        );
+        assert!(matches!(ready, Some(ServeOutcome::DispatchReady(_))));
+        assert_eq!(observed, expected);
+        assert_eq!(
+            state.reconnect_inventory().lease,
+            Some(LeasePhase {
+                correlation,
+                phase: LeasePhaseKind::DispatchReceived,
+            })
+        );
     }
 
     /// INV-011 / INV-024: an exact await directive preserves the durable
