@@ -32,19 +32,19 @@ use signalbox_domain::{
     RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
     RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
     RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerReplacementTarget,
-    RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
-    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
-    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
-    WorkspaceRevision,
+    RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
+    RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceBranchName,
+    WorkspaceCapability, WorkspaceManifestId, WorkspaceRecovery, WorkspaceRelativePath,
+    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use sqlx::{
     PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow, types::Uuid,
@@ -1635,8 +1635,17 @@ impl RunnerProtocolStore {
             .load_current_loss_lease_in(&mut transaction, session, prior_event_ordinal)
             .await?;
         let interrupted_attempt = current_lease.as_ref().map(RunnerLease::attempt);
+        let pinned_registration =
+            pinned_registration
+                .as_ref()
+                .ok_or(RunnerProtocolStoreError::Corruption(
+                    RunnerProtocolCorruption::MissingCanonicalRegistration,
+                ))?;
         let reconciled = placement
-            .reconcile_registration(registration.registration())
+            .reconcile_registration(RunnerRegistrationReconciliation {
+                pinned_registration: pinned_registration.registration().clone(),
+                current_registration: registration.registration().clone(),
+            })
             .map_err(RunnerProtocolStoreError::Domain)?;
         if matches!(reconciled.state(), SessionRunnerPlacementState::Pinned(_)) {
             insert_registration_reconciliation_observation(
@@ -1663,7 +1672,7 @@ impl RunnerProtocolStore {
             "runner_lost",
             &reconciled,
             PlacementRecordEvidence {
-                registration_identity: stored_registration_identity(pinned_registration.as_ref()),
+                registration_identity: stored_registration_identity(Some(pinned_registration)),
                 grant_origin,
                 interrupted_tool_attempt: interrupted_attempt,
                 loss_registration_revision: Some(reconciliation.registration_revision()),
@@ -7574,6 +7583,10 @@ async fn decode_placement(
                 SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
                     pinned,
                     source,
+                    match source {
+                        RunnerPlacementLossSource::Connection => None,
+                        RunnerPlacementLossSource::Registration => registration,
+                    },
                     loss_registration_revision,
                 ))
             }
@@ -7582,6 +7595,10 @@ async fn decode_placement(
                     Box::new(LostPinnedRunnerPlacement::from_stored(
                         pinned,
                         source,
+                        match source {
+                            RunnerPlacementLossSource::Connection => None,
+                            RunnerPlacementLossSource::Registration => registration,
+                        },
                         loss_registration_revision,
                     )),
                 ))
@@ -7931,9 +7948,23 @@ async fn authenticate_pinned_predecessor(
                         .await?;
                 let grant_succeeds = runner_replacement_grant_is_successor(&predecessor, row)?
                     && durable_grant.matches;
+                let pinned_registration =
+                    load_placement_registration(connection, &predecessor, catalog)
+                        .await?
+                        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+                let successor_registration = load_placement_registration(connection, row, catalog)
+                    .await?
+                    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
                 let same_runner_replacement_admitted = match source {
                     RunnerPlacementLossSource::Connection => false,
-                    RunnerPlacementLossSource::Registration => true,
+                    RunnerPlacementLossSource::Registration => loss_registration_revision
+                        .is_some_and(|loss| {
+                            pinned_registration.registration().enrollment()
+                                == successor_registration.registration().enrollment()
+                                && pinned_registration.registration().authentication()
+                                    == successor_registration.registration().authentication()
+                                && successor_registration.revision().get() >= loss.get()
+                        }),
                 };
                 if lost_runner != prior_pinned.runner
                     || (current_pinned.runner == lost_runner && !same_runner_replacement_admitted)
@@ -7946,6 +7977,12 @@ async fn authenticate_pinned_predecessor(
                     LostPinnedRunnerPlacement::from_stored(
                         prior_pinned,
                         source,
+                        match source {
+                            RunnerPlacementLossSource::Connection => None,
+                            RunnerPlacementLossSource::Registration => {
+                                Some(pinned_registration.registration())
+                            }
+                        },
                         loss_registration_revision,
                     ),
                 );
