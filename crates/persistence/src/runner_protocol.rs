@@ -7577,6 +7577,25 @@ async fn decode_placement(
         )
         .await?;
         let runner = pinned.runner;
+        let loss_registration = match (loss_source, loss_registration_revision) {
+            (Some(RunnerPlacementLossSource::Registration), Some(revision)) => {
+                let pinned_registration =
+                    registration.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+                let revision = RunnerRegistrationRevision::try_from_u64(revision.get())
+                    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+                load_registration_in(
+                    connection,
+                    pinned_registration.enrollment(),
+                    revision,
+                    None,
+                    catalog,
+                )
+                .await?
+            }
+            (Some(RunnerPlacementLossSource::Connection), _)
+            | (Some(RunnerPlacementLossSource::Registration), None)
+            | (None, _) => None,
+        };
         match (state_kind.as_str(), lost_runner, loss_source) {
             ("pinned", None, None) => SessionRunnerPlacementState::Pinned(pinned),
             ("runner_lost", Some(lost), Some(source)) if lost == runner => {
@@ -7587,7 +7606,9 @@ async fn decode_placement(
                         RunnerPlacementLossSource::Connection => None,
                         RunnerPlacementLossSource::Registration => registration,
                     },
-                    loss_registration_revision,
+                    loss_registration
+                        .as_ref()
+                        .map(StoredValidatedRunnerRegistration::registration),
                 ))
             }
             ("runner_abandoned", Some(lost), Some(source)) if lost == runner => {
@@ -7599,7 +7620,9 @@ async fn decode_placement(
                             RunnerPlacementLossSource::Connection => None,
                             RunnerPlacementLossSource::Registration => registration,
                         },
-                        loss_registration_revision,
+                        loss_registration
+                            .as_ref()
+                            .map(StoredValidatedRunnerRegistration::registration),
                     )),
                 ))
             }
@@ -7955,6 +7978,23 @@ async fn authenticate_pinned_predecessor(
                 let successor_registration = load_placement_registration(connection, row, catalog)
                     .await?
                     .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+                let loss_registration = match source {
+                    RunnerPlacementLossSource::Connection => None,
+                    RunnerPlacementLossSource::Registration => {
+                        let revision = loss_registration_revision
+                            .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+                        let revision = RunnerRegistrationRevision::try_from_u64(revision.get())
+                            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+                        load_registration_in(
+                            connection,
+                            pinned_registration.registration().enrollment(),
+                            revision,
+                            None,
+                            catalog,
+                        )
+                        .await?
+                    }
+                };
                 let same_runner_replacement_admitted = match source {
                     RunnerPlacementLossSource::Connection => false,
                     RunnerPlacementLossSource::Registration => loss_registration_revision
@@ -7983,7 +8023,9 @@ async fn authenticate_pinned_predecessor(
                                 Some(pinned_registration.registration())
                             }
                         },
-                        loss_registration_revision,
+                        loss_registration
+                            .as_ref()
+                            .map(StoredValidatedRunnerRegistration::registration),
                     ),
                 );
                 let (prior_row, prior_request, prior_pinned) =
