@@ -41,10 +41,11 @@ use signalbox_domain::{
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState,
+    StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -6484,8 +6485,10 @@ async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_ru
         SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
             expected_pinned,
             RunnerPlacementLossSource::Registration,
-            Some(pinned_registration.registration()),
-            Some(registration.registration()),
+            Some(StoredRunnerRegistrationLossEvidence {
+                pinned_registration: pinned_registration.registration(),
+                loss_registration: registration.registration(),
+            }),
         ));
     let pending = store.load_pending_registration_reconciliations().await?;
     let reconciliation = pending[0];

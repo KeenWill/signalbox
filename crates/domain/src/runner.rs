@@ -2764,20 +2764,30 @@ pub struct LostPinnedRunnerPlacement {
     loss_registration: Option<Box<ValidatedRunnerRegistration>>,
 }
 
+/// Named historical registration snapshots retained by a stored registration loss.
+#[derive(Clone, Copy, Debug)]
+pub struct StoredRunnerRegistrationLossEvidence<'a> {
+    /// The exact registration snapshot that produced the retained pin.
+    pub pinned_registration: &'a ValidatedRunnerRegistration,
+    /// The exact later registration snapshot that invalidated the retained pin.
+    pub loss_registration: &'a ValidatedRunnerRegistration,
+}
+
 impl LostPinnedRunnerPlacement {
     /// Supplies complete stored facts to placement reconstitution.
     pub fn from_stored(
         pinned: PinnedRunnerPlacement,
         source: RunnerPlacementLossSource,
-        pinned_registration: Option<&ValidatedRunnerRegistration>,
-        loss_registration: Option<&ValidatedRunnerRegistration>,
+        registration_loss: Option<StoredRunnerRegistrationLossEvidence<'_>>,
     ) -> Self {
         Self {
             pinned,
             source,
-            pinned_registration: pinned_registration
-                .map(RunnerRegistrationLineage::from_registration),
-            loss_registration: loss_registration.cloned().map(Box::new),
+            pinned_registration: registration_loss.map(|evidence| {
+                RunnerRegistrationLineage::from_registration(evidence.pinned_registration)
+            }),
+            loss_registration: registration_loss
+                .map(|evidence| Box::new(evidence.loss_registration.clone())),
         }
     }
 
@@ -7624,7 +7634,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_registration_loss_reconstitution_requires_its_revision() {
+    fn s32_inv044_registration_loss_reconstitution_requires_its_named_evidence() {
         let (registration, mut pin) = pinned("readonly");
         let prior_grant = pin.grant.take().expect("the pin carries its grant");
         let request = pin.placement.request().clone();
@@ -7646,7 +7656,6 @@ mod tests {
             state: SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
                 stored,
                 RunnerPlacementLossSource::Registration,
-                Some(&registration),
                 None,
             )),
             history: RunnerPlacementReconstitutionHistory::Initial,
@@ -7686,8 +7695,10 @@ mod tests {
             state: SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
                 stored,
                 RunnerPlacementLossSource::Registration,
-                Some(&registration),
-                Some(&registration),
+                Some(StoredRunnerRegistrationLossEvidence {
+                    pinned_registration: &registration,
+                    loss_registration: &registration,
+                }),
             )),
             history: RunnerPlacementReconstitutionHistory::Initial,
         };
@@ -7726,8 +7737,10 @@ mod tests {
             state: SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
                 stored,
                 RunnerPlacementLossSource::Connection,
-                None,
-                Some(&registration),
+                Some(StoredRunnerRegistrationLossEvidence {
+                    pinned_registration: &registration,
+                    loss_registration: &registration,
+                }),
             )),
             history: RunnerPlacementReconstitutionHistory::Initial,
         };

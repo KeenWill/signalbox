@@ -38,13 +38,14 @@ use signalbox_domain::{
     RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
     RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
     SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
-    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
-    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceBranchName,
-    WorkspaceCapability, WorkspaceManifestId, WorkspaceRecovery, WorkspaceRelativePath,
-    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
+    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
+    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
+    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkspaceRevision,
 };
 use sqlx::{
     PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow, types::Uuid,
@@ -7596,19 +7597,27 @@ async fn decode_placement(
             | (Some(RunnerPlacementLossSource::Registration), None)
             | (None, _) => None,
         };
+        let registration_loss = match (loss_source, registration, loss_registration.as_ref()) {
+            (
+                Some(RunnerPlacementLossSource::Registration),
+                Some(pinned_registration),
+                Some(loss_registration),
+            ) => Some(StoredRunnerRegistrationLossEvidence {
+                pinned_registration,
+                loss_registration: loss_registration.registration(),
+            }),
+            (Some(RunnerPlacementLossSource::Connection), _, _)
+            | (Some(RunnerPlacementLossSource::Registration), None, _)
+            | (Some(RunnerPlacementLossSource::Registration), Some(_), None)
+            | (None, _, _) => None,
+        };
         match (state_kind.as_str(), lost_runner, loss_source) {
             ("pinned", None, None) => SessionRunnerPlacementState::Pinned(pinned),
             ("runner_lost", Some(lost), Some(source)) if lost == runner => {
                 SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
                     pinned,
                     source,
-                    match source {
-                        RunnerPlacementLossSource::Connection => None,
-                        RunnerPlacementLossSource::Registration => registration,
-                    },
-                    loss_registration
-                        .as_ref()
-                        .map(StoredValidatedRunnerRegistration::registration),
+                    registration_loss,
                 ))
             }
             ("runner_abandoned", Some(lost), Some(source)) if lost == runner => {
@@ -7616,13 +7625,7 @@ async fn decode_placement(
                     Box::new(LostPinnedRunnerPlacement::from_stored(
                         pinned,
                         source,
-                        match source {
-                            RunnerPlacementLossSource::Connection => None,
-                            RunnerPlacementLossSource::Registration => registration,
-                        },
-                        loss_registration
-                            .as_ref()
-                            .map(StoredValidatedRunnerRegistration::registration),
+                        registration_loss,
                     )),
                 ))
             }
@@ -8013,20 +8016,18 @@ async fn authenticate_pinned_predecessor(
                 {
                     return Err(RunnerProtocolCorruption::CrossWiredReference.into());
                 }
+                let registration_loss = match (source, loss_registration.as_ref()) {
+                    (RunnerPlacementLossSource::Connection, _) => None,
+                    (RunnerPlacementLossSource::Registration, Some(loss_registration)) => {
+                        Some(StoredRunnerRegistrationLossEvidence {
+                            pinned_registration: pinned_registration.registration(),
+                            loss_registration: loss_registration.registration(),
+                        })
+                    }
+                    (RunnerPlacementLossSource::Registration, None) => None,
+                };
                 let lost = SessionRunnerPlacementState::RunnerLost(
-                    LostPinnedRunnerPlacement::from_stored(
-                        prior_pinned,
-                        source,
-                        match source {
-                            RunnerPlacementLossSource::Connection => None,
-                            RunnerPlacementLossSource::Registration => {
-                                Some(pinned_registration.registration())
-                            }
-                        },
-                        loss_registration
-                            .as_ref()
-                            .map(StoredValidatedRunnerRegistration::registration),
-                    ),
+                    LostPinnedRunnerPlacement::from_stored(prior_pinned, source, registration_loss),
                 );
                 let (prior_row, prior_request, prior_pinned) =
                     load_authenticated_pinned_loss_predecessor(
