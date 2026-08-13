@@ -9025,13 +9025,26 @@ impl RunnerLostBeforePin {
     pub const fn from_stored(runner: RunnerId) -> Self;
     // accessor: runner()
 }
-pub struct LostPinnedRunnerPlacement { /* private pinned facts + loss source */ }
+pub struct LostPinnedRunnerPlacement { /* private pinned facts + exact loss evidence */ }
+pub struct StoredRunnerRegistrationLossEvidence<'a> {
+    pub pinned_registration: &'a ValidatedRunnerRegistration,
+    pub loss_registration: &'a ValidatedRunnerRegistration,
+}
 impl LostPinnedRunnerPlacement {
-    pub const fn from_stored(
+    pub fn from_stored(
         pinned: PinnedRunnerPlacement,
         source: RunnerPlacementLossSource,
+        registration_loss: Option<StoredRunnerRegistrationLossEvidence<'_>>,
     ) -> Self;
-    // accessors: pinned(), source()
+    // accessors: pinned(), source(), loss_registration_revision()
+}
+pub struct RunnerRegistrationReconciliation {
+    pub pinned_registration: ValidatedRunnerRegistration,
+    pub current_registration: ValidatedRunnerRegistration,
+}
+pub struct SameRunnerRegistrationRecovery {
+    pub loss_registration: ValidatedRunnerRegistration,
+    pub current_registration: ValidatedRunnerRegistration,
 }
 pub enum AbandonedRunnerPlacement {
     BeforePin(RunnerLostBeforePin),
@@ -9096,7 +9109,7 @@ impl SessionRunnerPlacement {
     ) -> Result<Self, RunnerDomainError>;
     pub fn reconcile_registration(
         self,
-        registration: &ValidatedRunnerRegistration,
+        reconciliation: RunnerRegistrationReconciliation,
     ) -> Result<Self, RunnerDomainError>;
     pub fn replace_lost_runner_before_pin(
         self,
@@ -9107,6 +9120,14 @@ impl SessionRunnerPlacement {
         self,
         request: SessionRunnerPlacementRequest,
         registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+        prior_grant: Option<CredentialProfileGrant>,
+    ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn replace_lost_runner_after_same_runner_registration_recovery(
+        self,
+        request: SessionRunnerPlacementRequest,
+        recovery: SameRunnerRegistrationRecovery,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
@@ -10659,9 +10680,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 86                    |
+| domain: runner                                     | 89                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **788 (+12 free fn)** |
+| **signalbox-domain total**                         | **791 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

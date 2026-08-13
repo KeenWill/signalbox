@@ -36,12 +36,14 @@ pre-pin replacement result and rejection payloads, application transaction
 boundary, and atomic PostgreSQL transaction for a different exact live runner
 are verified against this PR (`agent/runner-pre-pin-replacement`).
 Pending-enrollment activation inside that pre-pin replacement transaction is
-verified against this PR (`agent/runner-pending-pre-pin-replacement`).
+verified against this PR (`agent/runner-pending-pre-pin-replacement`). The
+checked same-runner registration-recovery domain transition is verified against
+this PR (`agent/runner-same-runner-domain`).
 
-**Committed unimplemented functionality.** No current adapter handles
-same-runner re-enrollment, pinned replacement staging, or the replacement
-process request. Future adapters must preserve the closed constraints below for
-those slices.
+**Committed unimplemented functionality.** No current adapter consumes the
+checked same-runner transition or handles pinned replacement staging or the
+replacement process request. Future adapters must preserve the closed
+constraints below for those slices.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
@@ -657,6 +659,17 @@ this loss source in version one. Why: the runner is present and capable at the
 moment of recovery, so demanding a second runner would leave the only state that
 produced this loss permanently unrecoverable.
 
+The domain transition for that replacement is implemented. It admits the same
+runner only when the supplied loss-causing registration actually invalidates the
+retained pin, the current registration is either the exact same snapshot at the
+loss revision or a genuinely newer registration, both registrations retain the
+exact enrollment, runner, and authentication-reference lineage, and the current
+registration satisfies the complete successor request. The ordinary replacement
+transition still refuses the same runner, so a reconstituted registration-loss
+label alone is not recovery authority. **Committed unimplemented
+functionality.** No persistence transaction or daemon adapter yet supplies those
+checked registrations or installs the resulting pinned replacement.
+
 A pending successor may also be promoted with no lost session placement
 involved. The implemented `promote_pending_runner` transaction is the
 deployment-scoped mutation for explicit user-initiated promotion: it acts on the
@@ -1211,11 +1224,13 @@ and daemon-local fallback remains admissible. An availability-equivalent
 registration leaves the placement unchanged.
 
 Runner loss is explicit state, not implicit reassignment. Marking a pinned
-runner lost retains the prior placement and disables future lease creation.
-Marking an exact-identity request lost before pin retains that request and
-records `RunnerLostBeforePin { runner }`, disabling eligibility and initial pin.
-A user-directed pinned replacement supplies and installs a new complete
-placement request, validated registration, working directory, credential-profile
+runner lost retains the prior placement and disables future lease creation. A
+registration-triggered loss also retains the exact registration revision that
+failed the pin; connection loss carries no registration revision. Marking an
+exact-identity request lost before pin retains that request and records
+`RunnerLostBeforePin { runner }`, disabling eligibility and initial pin. A
+user-directed pinned replacement supplies and installs a new complete placement
+request, validated registration, working directory, credential-profile
 selection, tool inventory, and provisioned workspace. It advances a positive
 placement revision and returns one `RunnerPlacementChange` value carrying the
 complete before-and-after placement requests and pinned facts needed for the
