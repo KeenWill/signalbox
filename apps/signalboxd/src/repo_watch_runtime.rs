@@ -332,13 +332,22 @@ impl RepositoryWatchTask {
     }
 
     async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
-        if !self.rules_activated {
-            self.activate_rules().await?;
-            self.rules_activated = true;
+        let result = async {
+            if !self.rules_activated {
+                self.activate_rules().await?;
+                self.rules_activated = true;
+            }
+            self.process_dispatches().await?;
+            self.poll_and_commit().await?;
+            self.process_dispatches().await
         }
-        self.process_dispatches().await?;
-        self.poll_and_commit().await?;
-        self.process_dispatches().await
+        .await;
+        if result.is_err() {
+            // Any failed attempt may leave published entries tied to an older
+            // durable cursor, regardless of which step failed.
+            self.poller.invalidate_freshness();
+        }
+        result
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -403,58 +412,49 @@ impl RepositoryWatchTask {
     }
 
     async fn poll_and_commit(&mut self) -> Result<(), RepositoryWatchAttemptError> {
-        let result = async {
-            let cursor = self
-                .store
-                .load_cursor(&self.repository)
-                .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-            let previous = cursor
-                .as_ref()
-                .map(|cursor| cursor.candidate().observation());
-            let cursor_generation = cursor.as_ref().map(|cursor| cursor.generation());
-            let observation = self
-                .poller
-                .poll_against_cursor(previous, cursor_generation)
-                .await?;
-            let events = derive_repo_watch_events(
+        let cursor = self
+            .store
+            .load_cursor(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        let previous = cursor
+            .as_ref()
+            .map(|cursor| cursor.candidate().observation());
+        let cursor_generation = cursor.as_ref().map(|cursor| cursor.generation());
+        let observation = self
+            .poller
+            .poll_against_cursor(previous, cursor_generation)
+            .await?;
+        let events = derive_repo_watch_events(
+            &self.repository,
+            previous,
+            &observation,
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+        let outcome = self
+            .store
+            .commit(
                 &self.repository,
-                previous,
-                &observation,
-                &mut UuidV7RepoWatchEventIdGenerator,
+                RepoWatchCommitRequest::new(
+                    cursor_generation,
+                    RepoWatchCursorCandidate::new(observation),
+                    events,
+                ),
             )
-            .map_err(|_| RepositoryWatchAttemptError::Differ)?;
-            let outcome = self
-                .store
-                .commit(
-                    &self.repository,
-                    RepoWatchCommitRequest::new(
-                        cursor_generation,
-                        RepoWatchCursorCandidate::new(observation),
-                        events,
-                    ),
-                )
-                .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-            match outcome {
-                RepoWatchCommitOutcome::Committed(cursor)
-                | RepoWatchCommitOutcome::Replayed(cursor)
-                | RepoWatchCommitOutcome::Unchanged(cursor) => {
-                    self.poller.publish_freshness(cursor.generation());
-                    Ok(())
-                }
-                RepoWatchCommitOutcome::Conflict { current: _ } => {
-                    Err(RepositoryWatchAttemptError::Persistence)
-                }
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        match outcome {
+            RepoWatchCommitOutcome::Committed(cursor)
+            | RepoWatchCommitOutcome::Replayed(cursor)
+            | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                self.poller.publish_freshness(cursor.generation());
+                Ok(())
+            }
+            RepoWatchCommitOutcome::Conflict { current: _ } => {
+                Err(RepositoryWatchAttemptError::Persistence)
             }
         }
-        .await;
-        if result.is_err() {
-            // Any failed poll may leave published entries tied to the cursor
-            // loaded for this attempt while a competing watcher advances it.
-            self.poller.invalidate_freshness();
-        }
-        result
     }
 }
 
@@ -750,7 +750,7 @@ struct GitHubRepositoryPoller {
 
 struct PullRequestFreshness {
     updated_at: String,
-    settled: bool,
+    settlement: PullRequestSettlement,
     skipped_polls: usize,
     // A fetch that never reached the durable cursor must not authorize reuse:
     // the next attempt would compare this updated_at against a stale committed
@@ -762,7 +762,13 @@ struct PullRequestFreshness {
 
 struct FetchedPullRequest {
     state: RepoWatchPullRequestState,
-    settled: bool,
+    settlement: PullRequestSettlement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PullRequestSettlement {
+    Settled,
+    Unsettled,
 }
 
 impl GitHubRepositoryPoller {
@@ -1020,7 +1026,7 @@ impl GitHubRepositoryPoller {
             .await?;
         match listed_updated_at {
             Some(listed_updated_at) => {
-                self.record_fetched_pull_request(number, listed_updated_at, fetched.settled);
+                self.record_fetched_pull_request(number, listed_updated_at, fetched.settlement);
             }
             None => self.forget_pull_request(number),
         }
@@ -1037,7 +1043,7 @@ impl GitHubRepositoryPoller {
             freshness.published_generation == cursor_generation
                 && cursor_generation.is_some()
                 && freshness.updated_at == listed_updated_at
-                && freshness.settled
+                && freshness.settlement == PullRequestSettlement::Settled
                 && freshness.skipped_polls < MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS
         })
     }
@@ -1048,12 +1054,17 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    fn record_fetched_pull_request(&self, number: u64, updated_at: &str, settled: bool) {
+    fn record_fetched_pull_request(
+        &self,
+        number: u64,
+        updated_at: &str,
+        settlement: PullRequestSettlement,
+    ) {
         self.freshness().insert(
             number,
             PullRequestFreshness {
                 updated_at: updated_at.to_owned(),
-                settled,
+                settlement,
                 skipped_polls: 0,
                 published_generation: None,
             },
@@ -1122,9 +1133,14 @@ impl GitHubRepositoryPoller {
         // Neither a check completion nor GitHub finishing its background
         // mergeability calculation moves the listing's updated_at, so a pull
         // request is only reusable when both have already come to rest.
-        let settled = every_run_completed
+        let settlement = if every_run_completed
             && completed_check_suites.len() == check_suite_ids.len()
-            && mergeable_state != MergeableState::Unknown;
+            && mergeable_state != MergeableState::Unknown
+        {
+            PullRequestSettlement::Settled
+        } else {
+            PullRequestSettlement::Unsettled
+        };
         let reviews = self
             .fetch_reviews(
                 number,
@@ -1149,7 +1165,7 @@ impl GitHubRepositoryPoller {
             reactions,
         })
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(FetchedPullRequest { state, settled })
+        Ok(FetchedPullRequest { state, settlement })
     }
 
     async fn fetch_check_suites(
@@ -2578,8 +2594,9 @@ mod tests {
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_POLL_WIRE_BYTES,
-        MergeableState, PAGE_SIZE, PollCache, PollCycleTiming, PullResponse, ReactionContent,
+        MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
+        MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
+        PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
@@ -3821,6 +3838,40 @@ mod tests {
         with_pending_mergeability(settled_typed_observation_responses())
     }
 
+    fn responses_with_only_an_unsettled_check_suite() -> Vec<ScriptedResponse> {
+        complete_typed_observation_responses()
+            .into_iter()
+            .map(|response| {
+                if response.target == COMPLETED_SUITE_CHECK_RUNS_TARGET {
+                    ScriptedResponse::ok(
+                        RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                        ResponseBody(settled_check_runs()),
+                    )
+                } else {
+                    response
+                }
+            })
+            .collect()
+    }
+
+    fn responses_with_only_an_unsettled_check_run() -> Vec<ScriptedResponse> {
+        complete_typed_observation_responses()
+            .into_iter()
+            .filter_map(|response| {
+                if response.target == CHECK_SUITES_TARGET {
+                    Some(ScriptedResponse::ok(
+                        RequestTarget(CHECK_SUITES_TARGET.to_owned()),
+                        ResponseBody(settled_check_suites()),
+                    ))
+                } else if response.target == QUEUED_SUITE_CHECK_RUNS_TARGET {
+                    None
+                } else {
+                    Some(response)
+                }
+            })
+            .collect()
+    }
+
     fn with_pending_mergeability(responses: Vec<ScriptedResponse>) -> Vec<ScriptedResponse> {
         responses
             .into_iter()
@@ -4532,10 +4583,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unchanged_pull_request_with_running_checks_is_refetched() {
-        let responses = complete_typed_observation_responses()
+    async fn an_unchanged_pull_request_with_an_unsettled_check_suite_is_refetched() {
+        let responses = responses_with_only_an_unsettled_check_suite()
             .into_iter()
-            .chain(revalidated(complete_typed_observation_responses()))
+            .chain(revalidated(
+                responses_with_only_an_unsettled_check_suite(),
+            ))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_pull_request_with_an_unsettled_check_run_is_refetched() {
+        let responses = responses_with_only_an_unsettled_check_run()
+            .into_iter()
+            .chain(revalidated(responses_with_only_an_unsettled_check_run()))
             .collect();
         let server = ConcurrentScriptedServer::start(responses).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4674,7 +4754,11 @@ mod tests {
         let number = 7_u64;
         fixture
             .poller
-            .record_fetched_pull_request(number, PULL_UPDATED_AT, true);
+            .record_fetched_pull_request(
+                number,
+                PULL_UPDATED_AT,
+                PullRequestSettlement::Settled,
+            );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -4711,7 +4795,11 @@ mod tests {
             .expect("fixture cursor generation has a successor");
         fixture
             .poller
-            .record_fetched_pull_request(number, PULL_UPDATED_AT, true);
+            .record_fetched_pull_request(
+                number,
+                PULL_UPDATED_AT,
+                PullRequestSettlement::Settled,
+            );
         fixture.poller.publish_freshness(published_generation);
 
         assert!(
@@ -4722,6 +4810,70 @@ mod tests {
             ),
             "freshness published against another durable cursor must not authorize reuse"
         );
+    }
+
+    #[test]
+    fn changed_pull_request_timestamp_authorizes_no_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let number = 7_u64;
+        fixture.poller.record_fetched_pull_request(
+            number,
+            PULL_UPDATED_AT,
+            PullRequestSettlement::Settled,
+        );
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+
+        assert!(!fixture.poller.pull_request_is_unchanged(
+            number,
+            "2026-08-03T12:30:01Z",
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
+    }
+
+    #[test]
+    fn pull_request_reuse_stops_at_the_skipped_poll_limit() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let number = 7_u64;
+        fixture.poller.record_fetched_pull_request(
+            number,
+            PULL_UPDATED_AT,
+            PullRequestSettlement::Settled,
+        );
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        fixture
+            .poller
+            .freshness()
+            .get_mut(&number)
+            .expect("fixture freshness is recorded")
+            .skipped_polls = MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS - 1;
+
+        assert!(fixture.poller.pull_request_is_unchanged(
+            number,
+            PULL_UPDATED_AT,
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
+        fixture.poller.record_skipped_poll(number);
+        assert!(!fixture.poller.pull_request_is_unchanged(
+            number,
+            PULL_UPDATED_AT,
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
+        fixture.poller.record_skipped_poll(number);
+        assert!(!fixture.poller.pull_request_is_unchanged(
+            number,
+            PULL_UPDATED_AT,
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
     }
 
     #[tokio::test]
