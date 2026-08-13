@@ -2205,6 +2205,45 @@ mod tests {
         }
     }
 
+    struct FailingOverrideTransaction {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl OverrideDeniedToolRequestTransaction for FailingOverrideTransaction {
+        type Error = FakeError;
+
+        async fn override_denied(
+            &mut self,
+            _command: OverrideDeniedToolRequest,
+        ) -> Result<PreparedOverrideDeniedToolRequest, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(FakeError::Ordinary)
+        }
+    }
+
+    #[tokio::test]
+    async fn override_service_returns_transaction_failure_without_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transaction = FailingOverrideTransaction {
+            calls: Arc::clone(&calls),
+        };
+        let mut service = OverrideDeniedToolRequestService::new(transaction);
+        let command = OverrideDeniedToolRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(1)),
+            SessionId::from_uuid(Uuid::from_u128(2)),
+            ToolRequestId::from_uuid(Uuid::from_u128(3)),
+        )
+        .expect("fixture command identity is admitted");
+
+        let error = service
+            .execute(command)
+            .await
+            .expect_err("the transaction failure is returned");
+
+        assert_eq!(error, FakeError::Ordinary);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     struct FakeTransaction {
         batch: ToolBatch,
         prepared: signalbox_domain::CurrentToolAttempt,
