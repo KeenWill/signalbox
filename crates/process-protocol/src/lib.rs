@@ -9373,7 +9373,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(10)?,
                 session_id: uuid(11),
-                content: content.clone(),
+                content,
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -9383,7 +9383,6 @@ mod tests {
         let encoded = encode_client_line(&frame)?;
 
         assert_eq!(decode_client_line(&encoded)?, frame);
-        assert_eq!(content.parts().len(), 3);
         assert_eq!(
             String::from_utf8(encoded)?,
             concat!(
