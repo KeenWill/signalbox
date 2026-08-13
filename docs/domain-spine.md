@@ -9025,13 +9025,13 @@ impl RunnerLostBeforePin {
     pub const fn from_stored(runner: RunnerId) -> Self;
     // accessor: runner()
 }
-pub struct LostPinnedRunnerPlacement { /* private pinned facts + loss source */ }
+pub struct LostPinnedRunnerPlacement { /* private pinned facts + exact loss evidence */ }
 impl LostPinnedRunnerPlacement {
-    pub const fn from_stored(
+    pub fn from_stored(
         pinned: PinnedRunnerPlacement,
         source: RunnerPlacementLossSource,
         pinned_registration: Option<&ValidatedRunnerRegistration>,
-        loss_registration_revision: Option<RunnerGeneration>,
+        loss_registration: Option<&ValidatedRunnerRegistration>,
     ) -> Self;
     // accessors: pinned(), source(), loss_registration_revision()
 }

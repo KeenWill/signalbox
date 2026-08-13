@@ -6485,7 +6485,7 @@ async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_ru
             expected_pinned,
             RunnerPlacementLossSource::Registration,
             Some(pinned_registration.registration()),
-            Some(registration.registration().revision()),
+            Some(registration.registration()),
         ));
     let pending = store.load_pending_registration_reconciliations().await?;
     let reconciliation = pending[0];
