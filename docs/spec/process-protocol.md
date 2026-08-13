@@ -12,6 +12,9 @@ against this PR (`agent/runner-awaiting-recovery-persistence`).
 The `runner_placement_changed` transcript entry and daemon/client projection
 were verified against this PR (`agent/runner-placement-semantic-persistence`).
 
+The closed daemon/runner execution object on transcript tool results is verified
+against this PR (`agent/runner-wire-projection`).
+
 The deployment-scoped pending-runner promotion request, receipt, and rejection
 vocabulary was verified against this PR
 (`agent/runner-pending-successor-process`).
@@ -1654,7 +1657,7 @@ Each non-text native frontier member is one `transcript_entry` with
 `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
 `turn_cancelled { turn_id }`. The tool-bearing vocabulary also admits
 `assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments, approval? }`,
-`tool_execution_result { tool_request_id, tool_attempt_id, content }`,
+`tool_execution_result { tool_request_id, tool_attempt_id, execution, content }`,
 `tool_denied { tool_request_id, content }`, and
 `tool_closed { tool_request_id, content }`. The vocabulary also admits
 `model_identity_changed { turn_id, defaults_version, selected_model_id }`,
@@ -1689,22 +1692,22 @@ credential-scrubbed undecodable text stored on the request. `content` contains
 the exact provider-visible result string: admitted success text, or the compact
 closed error object serialized as text by the provider bridge. Tool entry
 discriminators and identifiers determine the semantic arm; clients never infer
-it by reparsing either string. The runner proposal adds a required `execution`
-object to every `tool_execution_result`, tagged by `type` and closed against
-unknown members in both arms. A daemon-local result carries exactly
-`{"type":"daemon"}`. A runner-produced result carries exactly `type` `runner`
-plus `runner_id` and `lease_id` as canonical UUID strings, `placement_revision`
-and `lease_generation` as positive canonical decimal strings,
-`working_directory` as the bounded directory the dispatch executed in or JSON
-null when the placement selected the runner default, `sandbox_profile` as
-exactly `workspace-restricted` or `ambient`, and `outcome` as exactly
-`succeeded` or `known_failed`. The discriminator is what lets a client tell the
-arms apart instead of inferring the shape from which members are present, and
-`outcome` is the closed classification the durable attempt reached rather than a
-restatement of the result content. The set has no ambiguous member because a
-physically ambiguous attempt never becomes an execution result: it stays the
-turn's ambiguity set and projects as `tool_closed`, which names only the tool
-request and therefore carries no attempt and no `execution` object
+it by reparsing either string. Every `tool_execution_result` carries a required
+`execution` object tagged by `type` and closed against unknown members in both
+arms. A daemon-local result carries exactly `{"type":"daemon"}`. A
+runner-produced result carries exactly `type` `runner` plus `runner_id` and
+`lease_id` as canonical UUID strings, `placement_revision` and
+`lease_generation` as positive canonical decimal strings, `working_directory` as
+the bounded directory the dispatch executed in or JSON null when the placement
+selected the runner default, `sandbox_profile` as exactly `workspace-restricted`
+or `ambient`, and `outcome` as exactly `succeeded` or `known_failed`. The
+discriminator is what lets a client tell the arms apart instead of inferring the
+shape from which members are present, and `outcome` is the closed classification
+the durable attempt reached rather than a restatement of the result content. The
+set has no ambiguous member because a physically ambiguous attempt never becomes
+an execution result: it stays the turn's ambiguity set and projects as
+`tool_closed`, which names only the tool request and therefore carries no
+attempt and no `execution` object
 ([tool-loop](tool-loop.md#serialized-staged-execution)). Admitting an
 `ambiguous` outcome here would have obliged clients to accept an
 execution-result state no domain transition can produce. The relocation members

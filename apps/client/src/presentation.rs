@@ -2441,6 +2441,7 @@ impl<'a> Output<'a> {
             SnapshotEntryKind::Marker(TranscriptEntry::ToolExecutionResult {
                 tool_request_id,
                 tool_attempt_id,
+                execution: _,
                 content,
             }) => writeln!(
                 self.stdout,
