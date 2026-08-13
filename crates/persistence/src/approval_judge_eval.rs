@@ -562,7 +562,10 @@ pub async fn record_eval_run(
     }
     let mut transaction = pool.begin().await?;
     let schema = schema.quoted_name.as_str();
-    let insert_run = format!(
+    // The only interpolated value is the schema token's quoted identifier,
+    // produced by pg_catalog.quote_ident from the catalog-resolved physical
+    // schema. Record values remain bind parameters.
+    let insert_run = sqlx::AssertSqlSafe(format!(
         "INSERT INTO {schema}.approval_judge_eval_run
             (eval_run_id, direct_model_selection_id,
              resolved_provider_model_identity_id, provider_model,
@@ -570,8 +573,8 @@ pub async fn record_eval_run(
              corpus_digest, contract_digest, rendered_digest, repeats,
              scorecard)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
-    );
-    sqlx::query(&insert_run)
+    ));
+    sqlx::query(insert_run)
         .bind(run.run.into_uuid())
         .bind(run.selection.into_uuid())
         .bind(run.target.identity().into_uuid())
@@ -586,14 +589,16 @@ pub async fn record_eval_run(
         .execute(&mut *transaction)
         .await?;
     for call in calls {
-        let insert_call = format!(
+        // The same audited, catalog-quoted schema identifier is the only
+        // interpolated value; every call value remains a bind parameter.
+        let insert_call = sqlx::AssertSqlSafe(format!(
             "INSERT INTO {schema}.approval_judge_eval_call
                 (eval_run_id, case_name, repeat_ordinal, recommendation_kind,
                  rationale, input_tokens, output_tokens,
                  cache_creation_input_tokens, cache_read_input_tokens)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
-        );
-        sqlx::query(&insert_call)
+        ));
+        sqlx::query(insert_call)
             .bind(run.run.into_uuid())
             .bind(call.case_name.as_str())
             .bind(Decimal::from(call.repeat_ordinal))
