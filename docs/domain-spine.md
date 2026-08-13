@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-eight identities defined in `lib.rs`:
+The twenty-nine identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -75,6 +75,7 @@ pub struct RunnerId(/* private */);
 pub struct RunnerAuthenticationId(/* private */);
 pub struct RunnerLeaseId(/* private */);
 pub struct WorkspaceManifestId(/* private */);
+pub struct WorkspaceProvisioningAuthorizationId(/* private */);
 pub struct ReviewTargetId(/* private */);
 pub struct ReviewRunId(/* private */);
 pub struct ReviewPassId(/* private */);
@@ -9001,6 +9002,11 @@ pub struct ProvisionedWorkspace {
     pub manifest_id: WorkspaceManifestId,
     pub recovery: Option<WorkspaceRecovery>,
 }
+pub struct WorkspaceProvisioningAuthorization { /* private */ }
+impl WorkspaceProvisioningAuthorization {
+    // accessors: authorization(), session(), placement_revision(), enrollment(),
+    // runner(), registration_revision(), repository(), sandbox(), credential_profile()
+}
 pub struct SessionRunnerPlacementRequest {
     pub selector: RunnerSelector,
     pub working_directory: WorkingDirectorySelection,
@@ -9124,6 +9130,18 @@ impl SessionRunnerPlacement {
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn authorize_lost_runner_replacement_workspace(
+        &self,
+        authorization: WorkspaceProvisioningAuthorizationId,
+        request: &SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<WorkspaceProvisioningAuthorization, RunnerDomainError>;
+    pub fn authorize_same_runner_replacement_workspace(
+        &self,
+        authorization: WorkspaceProvisioningAuthorizationId,
+        request: &SessionRunnerPlacementRequest,
+        recovery: &SameRunnerRegistrationRecovery,
+    ) -> Result<WorkspaceProvisioningAuthorization, RunnerDomainError>;
     pub fn replace_lost_runner_after_same_runner_registration_recovery(
         self,
         request: SessionRunnerPlacementRequest,
@@ -10644,7 +10662,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types          |
 | -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 28                    |
+| domain: lib.rs identities                          | 29                    |
 | domain: actor                                      | 1                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
@@ -10680,9 +10698,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 89                    |
+| domain: runner                                     | 90                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **791 (+12 free fn)** |
+| **signalbox-domain total**                         | **793 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
