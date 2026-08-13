@@ -4686,13 +4686,6 @@ mod tests {
             ),
             "a published settled entry authorizes reuse against its cursor generation"
         );
-        assert!(
-            !fixture
-                .poller
-                .pull_request_is_unchanged(number, PULL_UPDATED_AT, None),
-            "a different loaded cursor generation authorizes no reuse"
-        );
-
         fixture.poller.invalidate_freshness();
 
         assert!(
@@ -4702,6 +4695,32 @@ mod tests {
                 Some(RepoWatchCursorGeneration::INITIAL),
             ),
             "an invalidated record authorizes nothing"
+        );
+    }
+
+    #[test]
+    fn freshness_published_against_another_cursor_authorizes_no_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let number = 7_u64;
+        let published_generation = RepoWatchCursorGeneration::INITIAL;
+        let loaded_generation = published_generation
+            .next()
+            .expect("fixture cursor generation has a successor");
+        fixture
+            .poller
+            .record_fetched_pull_request(number, PULL_UPDATED_AT, true);
+        fixture.poller.publish_freshness(published_generation);
+
+        assert!(
+            !fixture.poller.pull_request_is_unchanged(
+                number,
+                PULL_UPDATED_AT,
+                Some(loaded_generation),
+            ),
+            "freshness published against another durable cursor must not authorize reuse"
         );
     }
 
@@ -5023,6 +5042,48 @@ mod tests {
             MAX_CACHED_WIRE_BYTES + 1,
             Vec::<u8>::new(),
         );
+
+        assert_eq!(cache.entity_tag(&key), None);
+    }
+
+    #[test]
+    fn process_local_cache_retains_an_entry_for_four_untouched_poll_completions() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+
+        assert_eq!(
+            cache.entity_tag(&key),
+            Some(&EntityTag(ENTITY_TAG.to_owned()))
+        );
+    }
+
+    #[test]
+    fn process_local_cache_evicts_an_entry_on_the_fifth_untouched_poll_completion() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
 
         assert_eq!(cache.entity_tag(&key), None);
     }
