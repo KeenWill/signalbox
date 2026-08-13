@@ -264,6 +264,26 @@ fn main() -> ExitCode {
 async fn run(options: RunOptions) -> Result<(), String> {
     let configuration = HubModelConfiguration::read(&options.configuration)
         .map_err(|error| format!("configuration rejected: {error:?}"))?;
+    // Daemon startup rejects the whole configuration when any posture entry
+    // in `tool_approval_postures()` names a tool absent from the statically
+    // selected composition — even an entry for a tool no selected corpus case
+    // exercises. Mirror that full-map check here, before any paid call, so a
+    // configuration no deployment could start with cannot still complete a
+    // replay and report a clean scorecard.
+    let tool_composition = match configuration.daemon_tools() {
+        Some(_) => DaemonToolComposition::WithMappedFamilies,
+        None => DaemonToolComposition::Base,
+    };
+    DaemonToolCatalog::validate_approval_postures_for_composition(
+        configuration.tool_approval_postures(),
+        tool_composition,
+    )
+    .map_err(|error| {
+        format!(
+            "configuration rejected: a configured tool approval posture names a tool the daemon \
+             could not start with: {error}"
+        )
+    })?;
     let selection = configuration
         .configured_approval_judge_selection()
         .ok_or_else(|| String::from("configuration has no [approval_judge] selection"))?;
@@ -388,14 +408,21 @@ async fn run(options: RunOptions) -> Result<(), String> {
         .collect::<Result<Vec<_>, String>>()?;
     // The contract digest covers everything the operation sends or enforces
     // beyond the payloads: the system prompt, the structured-output schema,
-    // and the resolved model's configured output and context bounds.
+    // the resolved model's configured output and context bounds, and the
+    // credential profile name selected for the call. The profile is not a
+    // secret — `route.credential_profile()` names which configured
+    // credential the call uses, not its contents — but it does select which
+    // provider account or CLI credential `binding.credential_reference`
+    // carries into the actual call, so two configurations that differ only
+    // in that profile must not be presented as replay-compatible.
     let operation_contract = format!(
-        "{}\u{0}{}\u{0}adapter={:?}\u{0}max_output_tokens={}\u{0}context_window_tokens={}",
+        "{}\u{0}{}\u{0}adapter={:?}\u{0}max_output_tokens={}\u{0}context_window_tokens={}\u{0}credential_profile={}",
         judge_system_prompt(),
         approval_judge_output_contract_text(),
         route.adapter(),
         definition_max_output_tokens,
         definition_context_window_tokens,
+        route.credential_profile(),
     );
     let contract_digest = stable_digest(operation_contract.as_bytes());
     let rendered_digest = stable_digest(rendered_payloads.as_bytes());
@@ -424,10 +451,6 @@ async fn run(options: RunOptions) -> Result<(), String> {
     // `main.rs` calls it. A tool assigned `delegated` but absent from that
     // composition can never be routed to the judge in deployment, so it
     // must count as speculative here too, not just an untagged posture.
-    let tool_composition = match configuration.daemon_tools() {
-        Some(_) => DaemonToolComposition::WithMappedFamilies,
-        None => DaemonToolComposition::Base,
-    };
     let speculative_tools = cases
         .iter()
         .map(|case| case.tool.as_str())
@@ -458,6 +481,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
     for (case, eval_case) in cases.iter().zip(&eval_cases) {
         let mut verdicts: Vec<ApprovalJudgeEvalVerdict> = Vec::new();
         let mut failures = 0_usize;
+        let mut failure_causes: Vec<String> = Vec::new();
         for _ in 0..options.repeats {
             match judge_eval_case(&model, &binding, eval_case).await {
                 Ok(verdict) => {
@@ -471,17 +495,18 @@ async fn run(options: RunOptions) -> Result<(), String> {
                     ) != Some(false)
                     {
                         failures += 1;
-                        eprintln!(
-                            "call failed for {}: reported usage exceeds configured limits",
-                            case.name
-                        );
+                        let cause = String::from("reported usage exceeds configured limits");
+                        eprintln!("call failed for {}: {cause}", case.name);
+                        failure_causes.push(cause);
                     } else {
                         verdicts.push(verdict);
                     }
                 }
                 Err(error) => {
                     failures += 1;
-                    eprintln!("call failed for {}: {error}", case.name);
+                    let cause = error.to_string();
+                    eprintln!("call failed for {}: {cause}", case.name);
+                    failure_causes.push(cause);
                 }
             }
         }
@@ -542,6 +567,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "stable": stable,
             "correct": correct,
             "failed_calls": failures,
+            "failure_causes": failure_causes,
             "repeats": verdicts.iter().map(|verdict| serde_json::json!({
                 "recommendation": recommendation_label(verdict.recommendation),
                 "rationale": verdict.rationale,
