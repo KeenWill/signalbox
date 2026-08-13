@@ -8039,6 +8039,14 @@ mod tests {
         assert_ambiguous_blob_upload_restarts(ErrorCode::CommitAmbiguous).await
     }
 
+    /// INV-060: an ambiguous remote publication restarts the complete
+    /// high-level upload instead of retrying commit alone.
+    #[tokio::test]
+    async fn inv060_blob_upload_restarts_after_ambiguous_publication() -> Result<(), Box<dyn Error>>
+    {
+        assert_ambiguous_blob_upload_restarts(ErrorCode::PublicationAmbiguous).await
+    }
+
     /// INV-060: an already-present receipt succeeds only after re-reading the
     /// same descriptor and proving its identity is unchanged.
     #[tokio::test]
