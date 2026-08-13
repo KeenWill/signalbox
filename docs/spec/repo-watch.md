@@ -508,17 +508,19 @@ can be evaluated under semantics different from the activation that admitted
 them.
 
 **Implemented behavior.** Completed session mutations record the exact GitHub
-review, comment, or review-thread identity acknowledged by the provider. The
-first repository-watch cursor that observes a matching review write, thread
-reply, or thread resolution durably links every resulting event to the creating
-tool attempt. For a published review, the poller retains the immutable parent
-review identity of every created thread, so both its review and inline-thread
-events carry the same exact cause. A matching rule records `self_caused` and
-creates no dispatch batch or session. Mutable thread writes are consumed by that
-first observation, so a later user transition of the same thread remains
-dispatchable. Correlation uses provider object identity, never author login: a
-distinct user-created review remains eligible even when the session token and
-user share one login.
+review, comment, or review-thread identity acknowledged by the provider. A
+repository-watch cursor that observes a matching review write, thread reply, or
+thread resolution durably links every resulting event to the creating tool
+attempt. For a published review, the poller retains the immutable parent review
+identity of every created thread; its receipt remains correlatable until each
+exact child thread appears, so the review and delayed inline-thread events carry
+the same exact cause once each. A matching rule records `self_caused` and
+creates no dispatch batch or session. Mutable thread writes are consumed by the
+first cursor containing that exact thread, whether or not the requested
+transition is still visible, so a later user transition of the same thread
+remains dispatchable. Correlation uses provider object identity, never author
+login: a distinct user-created review remains eligible even when the session
+token and user share one login.
 
 ## First live rule
 

@@ -1,5 +1,8 @@
 -- Retain the immutable review identity that created each review thread.
 
+ALTER TABLE repo_watch_cursor
+    DISABLE TRIGGER repo_watch_cursor_is_append_only;
+
 UPDATE repo_watch_cursor AS cursor_record
    SET cursor_payload = jsonb_set(
        cursor_record.cursor_payload,
@@ -34,6 +37,9 @@ UPDATE repo_watch_cursor AS cursor_record
            '[]'::jsonb
        )
    );
+
+ALTER TABLE repo_watch_cursor
+    ENABLE TRIGGER repo_watch_cursor_is_append_only;
 
 -- Existing cursor threads predate exact self-cause accounting. They cannot be
 -- attributed safely, so retain their unknown identity until the next refresh.

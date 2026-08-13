@@ -1435,11 +1435,14 @@ async fn record_github_write_observations(
          )
          SELECT receipt.tool_attempt_id, $1, $2
            FROM repo_watch_github_write_receipt AS receipt
-          WHERE NOT EXISTS (
+          WHERE (
+                receipt.operation_kind = 'publish_review'
+                OR NOT EXISTS (
                     SELECT 1
                       FROM repo_watch_github_write_observation AS observed
                      WHERE observed.tool_attempt_id = receipt.tool_attempt_id
                 )
+            )
             AND EXISTS (
                 SELECT 1
                   FROM pull_requests AS pull_request
@@ -1479,11 +1482,10 @@ async fn record_github_write_observations(
                               pull_request.document -> 'threads'
                           ) AS thread(value)
                          WHERE thread.value ->> 'thread' = receipt.thread_id
-                           AND thread.value ->> 'state' = 'resolved'
                     )
                  )
             )
-         ON CONFLICT (tool_attempt_id) DO NOTHING",
+         ON CONFLICT (tool_attempt_id, repository, cursor_generation) DO NOTHING",
     )
     .bind(repository.as_str())
     .bind(generation_to_i64(generation))
@@ -1530,6 +1532,15 @@ async fn record_event_self_cause(
                            AND thread.value ->> 'thread' = $6
                            AND (thread.value ->> 'originating_review_id')::numeric
                                = receipt.review_id
+                           AND NOT EXISTS (
+                               SELECT 1
+                                 FROM repo_watch_event_self_cause AS prior_cause
+                                 JOIN repo_watch_event AS prior_event
+                                   ON prior_event.event_id = prior_cause.event_id
+                                WHERE prior_cause.tool_attempt_id = receipt.tool_attempt_id
+                                  AND prior_event.event_kind = 'thread_opened'
+                                  AND prior_event.thread_id = $6
+                           )
                     ))
                 OR ($4 = 'thread_opened' AND receipt.operation_kind = 'thread_reply'
                     AND receipt.thread_id = $6)

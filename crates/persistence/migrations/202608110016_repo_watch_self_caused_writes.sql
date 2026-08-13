@@ -4,6 +4,92 @@ ALTER TABLE repo_watch_event
     ADD COLUMN review_id numeric(20, 0);
 
 ALTER TABLE repo_watch_event
+    DISABLE TRIGGER repo_watch_event_is_append_only;
+
+WITH review_events AS (
+    SELECT event.event_id, event.repository, event.cursor_generation,
+           event.pull_request_number, event.review_reviewer,
+           event.review_state, event.review_commit,
+           row_number() OVER (
+               PARTITION BY event.repository, event.cursor_generation,
+                            event.pull_request_number, event.review_reviewer,
+                            event.review_state, event.review_commit
+               ORDER BY event.event_ordinal
+           ) AS matching_ordinal
+      FROM repo_watch_event AS event
+     WHERE event.event_kind = 'review_submitted'
+), new_reviews AS (
+    SELECT cursor_record.repository, cursor_record.generation,
+           (pull_request.value ->> 'number')::numeric AS pull_request_number,
+           review.value ->> 'reviewer' AS reviewer,
+           review.value ->> 'state' AS state,
+           review.value ->> 'commit' AS commit,
+           (review.value ->> 'id')::numeric AS review_id,
+           row_number() OVER (
+               PARTITION BY cursor_record.repository, cursor_record.generation,
+                            pull_request.value ->> 'number',
+                            review.value ->> 'reviewer', review.value ->> 'state',
+                            review.value ->> 'commit'
+               ORDER BY review.ordinality
+           ) AS matching_ordinal
+      FROM repo_watch_cursor AS cursor_record
+      CROSS JOIN LATERAL jsonb_array_elements(
+          cursor_record.cursor_payload -> 'state' -> 'pull_requests'
+      ) AS pull_request(value)
+      CROSS JOIN LATERAL jsonb_array_elements(
+          pull_request.value -> 'reviews'
+      ) WITH ORDINALITY AS review(value, ordinality)
+     WHERE NOT EXISTS (
+         SELECT 1
+           FROM repo_watch_cursor AS previous_cursor
+           CROSS JOIN LATERAL jsonb_array_elements(
+               previous_cursor.cursor_payload -> 'state' -> 'pull_requests'
+           ) AS previous_pull_request(value)
+           CROSS JOIN LATERAL jsonb_array_elements(
+               previous_pull_request.value -> 'reviews'
+           ) AS previous_review(value)
+          WHERE previous_cursor.repository = cursor_record.repository
+            AND previous_cursor.generation = (
+                SELECT max(candidate.generation)
+                  FROM repo_watch_cursor AS candidate
+                 WHERE candidate.repository = cursor_record.repository
+                   AND candidate.generation < cursor_record.generation
+            )
+            AND previous_pull_request.value ->> 'number'
+                = pull_request.value ->> 'number'
+            AND previous_review.value ->> 'id' = review.value ->> 'id'
+     )
+)
+UPDATE repo_watch_event AS event
+   SET review_id = new_review.review_id
+  FROM review_events AS review_event
+  JOIN new_reviews AS new_review
+    ON new_review.repository = review_event.repository
+   AND new_review.generation = review_event.cursor_generation
+   AND new_review.pull_request_number = review_event.pull_request_number
+   AND new_review.reviewer = review_event.review_reviewer
+   AND new_review.state = review_event.review_state
+   AND new_review.commit = review_event.review_commit
+   AND new_review.matching_ordinal = review_event.matching_ordinal
+ WHERE event.event_id = review_event.event_id;
+
+ALTER TABLE repo_watch_event
+    ENABLE TRIGGER repo_watch_event_is_append_only;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM repo_watch_event
+         WHERE event_kind = 'review_submitted'
+           AND review_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'cannot recover an exact review identity for every review event';
+    END IF;
+END;
+$$;
+
+ALTER TABLE repo_watch_event
     ADD CONSTRAINT repo_watch_event_review_id_u64
         CHECK (review_id IS NULL OR review_id BETWEEN 1 AND 18446744073709551615),
     ADD CONSTRAINT repo_watch_event_review_id_shape
@@ -168,9 +254,10 @@ SELECT record_repo_watch_github_write_receipt(attempt.attempt_id)
    );
 
 CREATE TABLE repo_watch_github_write_observation (
-    tool_attempt_id uuid PRIMARY KEY,
+    tool_attempt_id uuid NOT NULL,
     repository text NOT NULL,
     cursor_generation bigint NOT NULL,
+    PRIMARY KEY (tool_attempt_id, repository, cursor_generation),
     FOREIGN KEY (tool_attempt_id)
         REFERENCES repo_watch_github_write_receipt(tool_attempt_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
