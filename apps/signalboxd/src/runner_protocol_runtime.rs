@@ -2746,7 +2746,11 @@ mod tests {
                 .expect("the exact resumed connection accepts the operation");
             expected
         };
-        let (served, observed, expected) = tokio::join!(served, runner_client, operation_producer);
+        let (served, observed, expected) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(served, runner_client, operation_producer)
+        })
+        .await
+        .expect("the resumed broker exchange completes within its test deadline");
 
         served.expect("the runner connection closes cleanly");
         assert_eq!(observed, expected);
