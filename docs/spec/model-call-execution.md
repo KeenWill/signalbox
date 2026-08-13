@@ -16,6 +16,9 @@ this PR (`agent/runner-executable-tool-snapshot-source`).
 The PostgreSQL runner-placement snapshot adapter is verified against this PR
 (`agent/runner-postgres-executable-tool-snapshot`).
 
+The production composition of that adapter is verified against this PR
+(`agent/runner-executable-snapshot-composition`).
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
@@ -339,23 +342,24 @@ definition/locus value together with its frozen initial approval. Runner entries
 admit only runner policy's confirm or automatic outcomes and reject both a
 daemon locus and daemon blanket provenance. The model-call terminal transition
 copies its exact selected locus into every resulting durable `ToolRequest`; an
-unknown proposal remains fail-closed on the daemon locus. The current production
-snapshot source still wraps the daemon-local catalog as daemon-locus entries.
-Model-call orchestration asks an injected `ExecutableToolSnapshotSource` for the
-session's ordered snapshot before provider capability preparation, and a
-classified source failure stops before provider work. The default source wraps
-the daemon catalog exactly as before. The injectable PostgreSQL source reads one
-durable placement and its live current registration in a repeatable-read
-snapshot, asks the placement aggregate for its exact runner definitions, loci,
-and pair approvals, and merges those with daemon definitions in canonical name
-order. A shared name must match model definition, permission, and mapped effect;
-a daemon-capable declaration selects the daemon when that executor is present,
-while a runner-only declaration cannot be laundered through a same-named local
-executor. The temporary singleton boundary permits one live capability-class
-candidate and fails closed if storage ever exposes an ambiguous selection. No
-present production composition installs this source, so production model calls
-still advertise no runner-locus entry; composing it is committed unimplemented
-functionality.
+unknown proposal remains fail-closed on the daemon locus. Model-call
+orchestration asks an injected `ExecutableToolSnapshotSource` for the session's
+ordered snapshot before provider capability preparation, and a classified source
+failure stops before provider work. The default source wraps the daemon catalog
+exactly as before. The PostgreSQL source reads one durable placement and its
+live current registration in a repeatable-read snapshot, asks the placement
+aggregate for its exact runner definitions, loci, and pair approvals, and merges
+those with daemon definitions in canonical name order. A shared name must match
+model definition, permission, and mapped effect; a daemon-capable declaration
+selects the daemon when that executor is present, while a runner-only
+declaration cannot be laundered through a same-named local executor. The
+temporary singleton boundary permits one live capability-class candidate and
+fails closed if storage ever exposes an ambiguous selection. Production
+composition installs this source over the same runner-protocol store used by
+registration and dispatch. Its production runner catalog remains empty, so
+current production model calls still advertise no runner-locus entry; the narrow
+generic `sandboxed_exec` proof catalog is integration-only pending the
+owner-gated workstation inventory decision.
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native
