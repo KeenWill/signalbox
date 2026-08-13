@@ -2914,9 +2914,14 @@ async fn s10_workspace_write_gates_through_process_protocol() -> Result<(), Box<
 async fn s10_github_publish_gates_through_process_protocol() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let workspace = tempdir()?;
-    let expected = serde_json::json!({"review_id": 91, "state": "APPROVED"});
-    let github =
-        RecordingGitHubTransport::responding(GitHubResult::published_review(expected.clone()));
+    let response = serde_json::json!({
+        "id": 91,
+        "state": "APPROVED",
+        "html_url": "https://github.example/review/91",
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    });
+    let expected = response.clone();
+    let github = RecordingGitHubTransport::responding(GitHubResult::published_review(response));
     let (tool_catalog, tool_executor) = commissioned_daemon_tools(
         &fixture.pool,
         UnusedCodeHostTransport,
@@ -2925,7 +2930,7 @@ async fn s10_github_publish_gates_through_process_protocol() -> Result<(), Box<d
     )?
     .into_parts();
     let arguments = serde_json::json!({
-        "repository": "KeenWill/signalbox",
+        "repository": "owner/repository",
         "number": 17,
         "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "event": "approve",
@@ -3156,7 +3161,12 @@ async fn tier_one_change_request_thread_reply_completes_offline_tool_loop()
         CHANGE_REQUEST_THREAD_REPLY_NAME,
         serde_json::json!({"body": "fixed offline", "thread_id": "PRRT_thread"}).to_string(),
         thread_reply_result(),
-        serde_json::json!({"id": "PRRC_reply", "url": "https://github.example/comment/7002"}),
+        serde_json::json!({
+            "comment_id": 7002,
+            "comment_node_id": "PRRC_reply",
+            "review_id": 8002,
+            "url": "https://github.example/comment/7002"
+        }),
         ExpectedCodeHostOperation::ThreadReply {
             thread_id: "PRRT_thread",
             body: "fixed offline",
