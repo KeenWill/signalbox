@@ -1472,6 +1472,13 @@ async fn record_github_write_observations(
     observation_started_at: Option<sqlx::types::time::OffsetDateTime>,
 ) -> Result<(), RepoWatchStoreError> {
     sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+             hashtextextended('repo-watch' || chr(31) || 'github-write-visibility', 0)
+         )",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
         "WITH pull_requests AS (
              SELECT pull_request.value AS document
                FROM repo_watch_cursor AS cursor_record
