@@ -4408,7 +4408,6 @@ pub enum RejectionDetail {
     },
     /// The requested exact half-open range is not contained by the blob.
     BlobReadRangeOutOfBounds {
-        digest: CanonicalBlobDigest,
         offset_bytes: CanonicalU64,
         length_bytes: CanonicalU64,
         blob_length_bytes: CanonicalU64,
@@ -11146,15 +11145,12 @@ mod tests {
                 code: ErrorCode::InvalidRequest,
                 message: String::from("blob read was rejected"),
                 detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
-                    digest,
                     offset_bytes: CanonicalU64::new(u64::MAX),
                     length_bytes: CanonicalU64::new(1),
                     blob_length_bytes: CanonicalU64::new(9),
                 }),
             },
-            &format!(
-                "{{\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"blob read was rejected\",\"detail\":{{\"type\":\"blob_read_range_out_of_bounds\",\"digest\":\"{digest}\",\"offset_bytes\":\"18446744073709551615\",\"length_bytes\":\"1\",\"blob_length_bytes\":\"9\"}}}}"
-            ),
+            r#"{"type":"error","code":"invalid_request","message":"blob read was rejected","detail":{"type":"blob_read_range_out_of_bounds","offset_bytes":"18446744073709551615","length_bytes":"1","blob_length_bytes":"9"}}"#,
         )?;
         Ok(())
     }

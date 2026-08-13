@@ -5647,7 +5647,7 @@ where
             )
             .await
         }
-        Err(error) => write_blob_read_error(writer, version, request_id, digest, None, error).await,
+        Err(error) => write_blob_read_error(writer, version, request_id, None, error).await,
     }
 }
 
@@ -5725,7 +5725,6 @@ where
                 writer,
                 version,
                 request_id,
-                digest,
                 Some((offset_bytes, length_bytes)),
                 error,
             )
@@ -5738,7 +5737,6 @@ async fn write_blob_read_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    digest: CanonicalBlobDigest,
     range: Option<(CanonicalU64, CanonicalU64)>,
     error: BlobReadError,
 ) -> Result<(), ProcessConnectionError>
@@ -5752,7 +5750,6 @@ where
                 return Err(ProcessConnectionError::EncodeInvariant);
             };
             ProtocolError::invalid_blob_read(RejectionDetail::BlobReadRangeOutOfBounds {
-                digest,
                 offset_bytes,
                 length_bytes,
                 blob_length_bytes: CanonicalU64::new(blob_length),
