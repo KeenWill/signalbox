@@ -571,6 +571,12 @@ struct RunningRuntime {
     blob_storage_root: Option<BlobStorageFixture>,
 }
 
+#[derive(Clone, Copy)]
+enum BlobStorageFixtureMode {
+    Disabled,
+    Enabled,
+}
+
 impl RunningRuntime {
     async fn start() -> Result<Self, Box<dyn Error>> {
         Self::start_with_optional_compaction(None).await
@@ -585,39 +591,39 @@ impl RunningRuntime {
     async fn start_with_optional_compaction(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(compaction_model, false).await
+        Self::start_with_options(compaction_model, BlobStorageFixtureMode::Disabled).await
     }
 
     async fn start_with_blob_storage() -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(None, true).await
+        Self::start_with_options(None, BlobStorageFixtureMode::Enabled).await
     }
 
     async fn start_with_options(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
-        enable_blob_storage: bool,
+        blob_storage: BlobStorageFixtureMode,
     ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
         let listener = LocalProcessListener::bind(socket_directory.socket())?;
         let sweep = PostgresEligibilitySweep::new(pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let blob_storage_root = enable_blob_storage
-            .then(BlobStorageFixture::create)
-            .transpose()?;
+        let blob_storage_root = match blob_storage {
+            BlobStorageFixtureMode::Disabled => None,
+            BlobStorageFixtureMode::Enabled => Some(BlobStorageFixture::create()?),
+        };
         let configuration = blob_storage_root.as_ref().map_or_else(
             || String::from(MODEL_CONFIGURATION),
             BlobStorageFixture::model_configuration,
         );
         let model_configuration = HubModelConfiguration::parse(&configuration)?;
-        let blob_store_registry = if enable_blob_storage {
-            BlobStoreRegistry::initialize_for_conformance(
+        let blob_store_registry = match blob_storage {
+            BlobStorageFixtureMode::Disabled => None,
+            BlobStorageFixtureMode::Enabled => BlobStoreRegistry::initialize_for_conformance(
                 model_configuration.blob_storage(),
                 pool.clone(),
             )
             .await?
-            .map(Arc::new)
-        } else {
-            None
+            .map(Arc::new),
         };
         let runtime_models = model_configuration.runtime_model_catalog();
         let template_configuration = session_template_configuration(&model_configuration)?;
@@ -972,9 +978,8 @@ async fn inv060_registration_failure_after_publication_leaves_only_an_orphan()
         }
     );
     append_blob_upload(&mut connection, 2, bytes).await?;
-    sqlx::query("ALTER TABLE blob RENAME TO blob_registration_unavailable")
-        .execute(&runtime.pool)
-        .await?;
+    let catalog = BlobCatalogRepository::new(runtime.pool.clone());
+    let catalog_fault = catalog.inject_registration_fault().await?;
     connection
         .request(3, ClientRequest::CommitBlobUpload {})
         .await?;
@@ -986,14 +991,9 @@ async fn inv060_registration_failure_after_publication_leaves_only_an_orphan()
             detail: ErrorDetail::none(),
         }
     );
-    sqlx::query("ALTER TABLE blob_registration_unavailable RENAME TO blob")
-        .execute(&runtime.pool)
-        .await?;
+    catalog_fault.restore().await?;
 
-    let catalog = BlobCatalogRepository::new(runtime.pool.clone())
-        .find(digest)
-        .await?;
-    assert!(catalog.is_none());
+    assert!(catalog.find(digest).await?.is_none());
     let registry = runtime.blob_store_registry();
     let (_store_name, store) = registry.routed_store(BlobStorageClass::UserAttachment);
     let orphan = store.open(&BlobObjectKey::for_digest(digest)).await?;

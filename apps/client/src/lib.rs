@@ -665,7 +665,79 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
             message,
             detail,
         },
-        _ => BlobUploadResponse::Unexpected,
+        ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionSpawned { .. }
+        | ServerMessage::SessionAwaitRegistered { .. }
+        | ServerMessage::ChildResult { .. }
+        | ServerMessage::SessionMessageSent { .. }
+        | ServerMessage::SessionPlacementUpdated { .. }
+        | ServerMessage::InputSubmitted { .. }
+        | ServerMessage::SteeringSubmitted { .. }
+        | ServerMessage::GoalTransitionApplied { .. }
+        | ServerMessage::GoalHistoryStart { .. }
+        | ServerMessage::GoalHistoryState { .. }
+        | ServerMessage::GoalHistoryItem { .. }
+        | ServerMessage::GoalHistoryEnd { .. }
+        | ServerMessage::SessionsStart {}
+        | ServerMessage::SessionSummary { .. }
+        | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::TemplatesStart {}
+        | ServerMessage::TemplateSummary { .. }
+        | ServerMessage::TemplatesEnd { .. }
+        | ServerMessage::SessionMetadataPageStart {}
+        | ServerMessage::SessionMetadataSummary { .. }
+        | ServerMessage::SessionMetadataPageEnd { .. }
+        | ServerMessage::ConversationPageStart {}
+        | ServerMessage::ConversationSummary { .. }
+        | ServerMessage::ConversationPageEnd { .. }
+        | ServerMessage::ModelAliasesStart {}
+        | ServerMessage::ModelAliasSummary { .. }
+        | ServerMessage::ModelAliasesEnd { .. }
+        | ServerMessage::ModelCapabilitiesStart {}
+        | ServerMessage::ModelCapabilityItem { .. }
+        | ServerMessage::ModelCapabilitiesEnd { .. }
+        | ServerMessage::SessionMetadata { .. }
+        | ServerMessage::SessionMetadataReplaced { .. }
+        | ServerMessage::SessionDefaultsReplaced { .. }
+        | ServerMessage::SessionDefaults { .. }
+        | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::SessionCompacted { .. }
+        | ServerMessage::ConversationImportBegun { .. }
+        | ServerMessage::ConversationImportAppended { .. }
+        | ServerMessage::ConversationImportInserted { .. }
+        | ServerMessage::ConversationImportAlreadyImported { .. }
+        | ServerMessage::ConversationImportAborted {}
+        | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::ImportedConversationStart { .. }
+        | ServerMessage::ImportedConversationEntry { .. }
+        | ServerMessage::ImportedConversationEnd { .. }
+        | ServerMessage::TranscriptSnapshotStart { .. }
+        | ServerMessage::TranscriptTurn { .. }
+        | ServerMessage::TranscriptModelCallUsage { .. }
+        | ServerMessage::TranscriptModelCallsEnd { .. }
+        | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptTextEntry { .. }
+        | ServerMessage::TranscriptContent { .. }
+        | ServerMessage::TranscriptSnapshotEnd { .. }
+        | ServerMessage::SessionEvent { .. }
+        | ServerMessage::ProviderTextDelta { .. }
+        | ServerMessage::ReviewTargetCreated { .. }
+        | ServerMessage::ReviewRunStarted { .. }
+        | ServerMessage::ReviewPassActivated { .. }
+        | ServerMessage::ReviewPassCompleted { .. }
+        | ServerMessage::ReviewFindingsRecorded { .. }
+        | ServerMessage::ReviewFindingEventRecorded { .. }
+        | ServerMessage::ReviewExternalLinkReserved { .. }
+        | ServerMessage::ReviewExternalLinkAttached { .. }
+        | ServerMessage::ReviewTarget { .. }
+        | ServerMessage::ReviewRun { .. }
+        | ServerMessage::ReviewFinding { .. }
+        | ServerMessage::ReviewFindingsStart { .. }
+        | ServerMessage::ReviewFindingItem { .. }
+        | ServerMessage::ReviewFindingsEnd { .. }
+        | ServerMessage::ReviewOrchestrationStarted { .. }
+        | ServerMessage::ReviewOrchestrationAdvanced { .. }
+        | ServerMessage::ReviewOrchestration { .. } => BlobUploadResponse::Unexpected,
     }
 }
 
@@ -822,7 +894,29 @@ async fn execute(
     };
     let prepared_blob = match &arguments.command {
         Command::BlobUpload { source } => Some(open_blob_source(source)?),
-        _ => None,
+        Command::Create { .. }
+        | Command::Place { .. }
+        | Command::Continue { .. }
+        | Command::Compact { .. }
+        | Command::Session(_)
+        | Command::Goal(_)
+        | Command::Imported { .. }
+        | Command::List
+        | Command::Templates
+        | Command::Search(_)
+        | Command::Conversations(_)
+        | Command::Send { .. }
+        | Command::Steer { .. }
+        | Command::Model { .. }
+        | Command::Transcript { .. }
+        | Command::Follow { .. }
+        | Command::Chat { .. }
+        | Command::Reconcile { .. }
+        | Command::Review(_)
+        | Command::Stop { .. }
+        | Command::Approve { .. }
+        | Command::Deny { .. }
+        | Command::Import { .. } => None,
     };
     let system_prompt_text = match &arguments.command {
         Command::Create {
@@ -1162,9 +1256,44 @@ async fn upload_blob(
     if expected_length_bytes.value() == 0 {
         return Err(ClientError::Input("blob source must be nonempty"));
     }
-    file.seek(std::io::SeekFrom::Start(0))
+    let first = upload_blob_once(
+        client,
+        output,
+        &mut file,
+        &path,
+        expected_digest,
+        expected_length_bytes,
+    )
+    .await;
+    match first {
+        Err(error) if error.is_ambiguous_mutation() => {
+            verify_blob_source_unchanged(&mut file, &path, expected_digest, expected_length_bytes)
+                .await?;
+            upload_blob_once(
+                client,
+                output,
+                &mut file,
+                &path,
+                expected_digest,
+                expected_length_bytes,
+            )
+            .await
+        }
+        result => result,
+    }
+}
+
+async fn upload_blob_once(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    file: &mut tokio::fs::File,
+    path: &Path,
+    expected_digest: CanonicalBlobDigest,
+    expected_length_bytes: CanonicalU64,
+) -> Result<(), ClientError> {
+    file.seek(SeekFrom::Start(0))
         .await
-        .map_err(|source| ClientError::blob_source_file(&path, source))?;
+        .map_err(|source| ClientError::blob_source_file(path, source))?;
     let mut connection = client
         .setup_request(ClientRequest::BeginBlobUpload {
             expected_digest,
@@ -1176,7 +1305,7 @@ async fn upload_blob(
             digest,
             byte_length,
         } if digest == expected_digest && byte_length == expected_length_bytes => {
-            verify_blob_source_unchanged(&mut file, &path, expected_digest, expected_length_bytes)
+            verify_blob_source_unchanged(file, path, expected_digest, expected_length_bytes)
                 .await?;
             output.blob_uploaded(
                 digest,
@@ -1194,7 +1323,11 @@ async fn upload_blob(
             message,
             detail,
         } => return Err(ClientError::remote(code, message, detail)),
-        _ => {
+        BlobUploadResponse::AlreadyPresent { .. }
+        | BlobUploadResponse::Begun { .. }
+        | BlobUploadResponse::Appended(_)
+        | BlobUploadResponse::Committed { .. }
+        | BlobUploadResponse::Unexpected => {
             return Err(ClientError::Protocol(
                 "blob upload begin returned an unexpected response",
             ));
@@ -1204,11 +1337,11 @@ async fn upload_blob(
     let mut assembled_length = 0_u64;
     loop {
         let mut chunk = Vec::with_capacity(MAX_BLOB_CHUNK_BYTES);
-        (&mut file)
+        (&mut *file)
             .take(u64::try_from(MAX_BLOB_CHUNK_BYTES).unwrap_or(u64::MAX))
             .read_to_end(&mut chunk)
             .await
-            .map_err(|source| ClientError::blob_source_file(&path, source))?;
+            .map_err(|source| ClientError::blob_source_file(path, source))?;
         if chunk.is_empty() {
             break;
         }
@@ -1232,7 +1365,11 @@ async fn upload_blob(
                 message,
                 detail,
             } => return Err(ClientError::remote(code, message, detail)),
-            _ => {
+            BlobUploadResponse::Begun { .. }
+            | BlobUploadResponse::AlreadyPresent { .. }
+            | BlobUploadResponse::Appended(_)
+            | BlobUploadResponse::Committed { .. }
+            | BlobUploadResponse::Unexpected => {
                 return Err(ClientError::Protocol(
                     "blob upload append returned an unexpected response",
                 ));
@@ -1261,9 +1398,14 @@ async fn upload_blob(
             message,
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
-        _ => Err(
-            ClientError::Protocol("blob upload commit returned an unexpected response").mutation(),
-        ),
+        BlobUploadResponse::Begun { .. }
+        | BlobUploadResponse::AlreadyPresent { .. }
+        | BlobUploadResponse::Appended(_)
+        | BlobUploadResponse::Committed { .. }
+        | BlobUploadResponse::Unexpected => Err(ClientError::Protocol(
+            "blob upload commit returned an unexpected response",
+        )
+        .mutation()),
     }
 }
 
@@ -1386,6 +1528,9 @@ async fn verify_blob_source_unchanged(
     expected_digest: CanonicalBlobDigest,
     expected_length: CanonicalU64,
 ) -> Result<(), ClientError> {
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|source| ClientError::blob_source_file(path, source))?;
     let (actual_digest, actual_length) = hash_blob_source(file, path).await?;
     if actual_digest != expected_digest || actual_length != expected_length {
         return Err(ClientError::Input(
@@ -5681,21 +5826,21 @@ mod tests {
         ConversationImportSource, ConversationOriginFilter, ConversationSummary,
         DelegationMessageDirection, DelegationOutcome, DelegationPolicy, DelegationProvenance,
         DelegationReason, DelegationWaitMode, DescendantTerminationScope, EffectiveModelSettings,
-        FastMode, FrameEncodeError, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
-        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
-        InputDelivery, MAX_BLOB_CHUNK_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES,
-        ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingSource,
-        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion,
-        ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
-        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
-        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
-        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
-        RunnerConnectionHealth, RunnerPlacementRevision, RunnerProjection,
-        RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
-        RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
-        SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision, TurnState,
-        decode_client_line, encode_server_line,
+        ErrorCode, ErrorDetail, FastMode, FrameEncodeError, GoalCommandRejection, GoalHistoryEvent,
+        GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
+        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
+        MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
+        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+        ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+        ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
+        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, RunnerConnectionHealth,
+        RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
+        RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
+        SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision,
+        TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -7811,13 +7956,9 @@ mod tests {
             io::Error::new(io::ErrorKind::PermissionDenied, "fixture denied"),
         );
 
-        assert_eq!(
-            failure.to_string(),
-            format!(
-                "the blob upload source file '{}' could not be read: fixture denied",
-                path.display()
-            )
-        );
+        expect_test::expect![[r#"
+            the blob upload source file 'fixture.bin' could not be read: fixture denied"#]]
+        .assert_eq(&failure.to_string());
     }
 
     /// INV-060: opening a FIFO as an upload source is nonblocking and rejects
@@ -7856,6 +7997,160 @@ mod tests {
         assert_eq!(metadata_length, 0);
         assert!(observed_length.value() > 0);
         Ok(())
+    }
+
+    async fn reply_to_ambiguous_blob_upload(
+        listener: &UnixListener,
+        bytes: &[u8],
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+        code: ErrorCode,
+    ) -> Result<(), io::Error> {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+
+        reader.read_until(b'\n', &mut line).await?;
+        let begin = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(
+            begin.request(),
+            &ClientRequest::BeginBlobUpload {
+                expected_digest: digest,
+                expected_length_bytes: byte_length,
+            }
+        );
+        let begun = ServerFrame::try_new_for_version(
+            begin.version(),
+            begin.request_id(),
+            ServerMessage::BlobUploadBegun {
+                expected_digest: digest,
+                expected_length_bytes: byte_length,
+            },
+        )
+        .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&begun).map_err(io::Error::other)?)
+            .await?;
+
+        line.clear();
+        reader.read_until(b'\n', &mut line).await?;
+        let append = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(
+            append.request(),
+            &ClientRequest::AppendBlobUpload {
+                chunk: BlobChunk::new(bytes.to_vec()),
+            }
+        );
+        let appended = ServerFrame::try_new_for_version(
+            append.version(),
+            append.request_id(),
+            ServerMessage::BlobUploadAppended {
+                assembled_length_bytes: byte_length,
+            },
+        )
+        .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&appended).map_err(io::Error::other)?)
+            .await?;
+
+        line.clear();
+        reader.read_until(b'\n', &mut line).await?;
+        let commit = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(commit.request(), &ClientRequest::CommitBlobUpload {});
+        let ambiguous = ServerFrame::try_new_for_version(
+            commit.version(),
+            commit.request_id(),
+            ServerMessage::Error {
+                code,
+                message: String::from("blob publication outcome is ambiguous"),
+                detail: ErrorDetail::none(),
+            },
+        )
+        .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&ambiguous).map_err(io::Error::other)?)
+            .await
+    }
+
+    async fn reply_to_restarted_blob_upload(
+        listener: &UnixListener,
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+    ) -> Result<(), io::Error> {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let begin = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(
+            begin.request(),
+            &ClientRequest::BeginBlobUpload {
+                expected_digest: digest,
+                expected_length_bytes: byte_length,
+            }
+        );
+        let present = ServerFrame::try_new_for_version(
+            begin.version(),
+            begin.request_id(),
+            ServerMessage::BlobUploadAlreadyPresent {
+                digest,
+                byte_length,
+            },
+        )
+        .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&present).map_err(io::Error::other)?)
+            .await?;
+        line.clear();
+        assert_eq!(reader.read_until(b'\n', &mut line).await?, 0);
+        Ok(())
+    }
+
+    async fn assert_ambiguous_blob_upload_restarts(code: ErrorCode) -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let source_path = directory.path().join("blob.bin");
+        let bytes = b"ambiguously published bytes";
+        fs::write(&source_path, bytes)?;
+        let digest = CanonicalBlobDigest::from_digest(signalbox_domain::BlobDigest::digest(bytes));
+        let byte_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            reply_to_ambiguous_blob_upload(&listener, bytes, digest, byte_length, code).await?;
+            reply_to_restarted_blob_upload(&listener, digest, byte_length).await
+        });
+        let mut client = ProcessClient::new(socket);
+        let source = open_blob_source(&source_path)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+
+        upload_blob(&mut client, &mut output, source).await?;
+
+        expect_test::expect![[r#"
+            already_present digest=sha256:0e6161e59e9ca2ce9118def8a479a2a9696dc6352eca107b5a580069df4db7e2 byte_length=27
+        "#]].assert_eq(&String::from_utf8(stdout)?);
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-060: an ambiguous catalog commit restarts the complete high-level
+    /// upload instead of retrying commit alone.
+    #[tokio::test]
+    async fn inv060_blob_upload_restarts_after_ambiguous_catalog_commit()
+    -> Result<(), Box<dyn Error>> {
+        assert_ambiguous_blob_upload_restarts(ErrorCode::CommitAmbiguous).await
+    }
+
+    /// INV-060: an ambiguous remote publication restarts the complete
+    /// high-level upload instead of retrying commit alone.
+    #[tokio::test]
+    async fn inv060_blob_upload_restarts_after_ambiguous_publication() -> Result<(), Box<dyn Error>>
+    {
+        assert_ambiguous_blob_upload_restarts(ErrorCode::PublicationAmbiguous).await
     }
 
     /// INV-060: an already-present receipt succeeds only after re-reading the
@@ -8043,13 +8338,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(
-            String::from_utf8(stdout)?,
-            format!(
-                "committed digest={digest} byte_length={}\n",
-                byte_length.value()
-            )
-        );
+        expect_test::expect![[r#"
+            committed digest=sha256:dc8dba98d0eeeb8521413d99301f4b1efe3a2eab5e514460aabbd3e9b9d5684e byte_length=4194322
+        "#]].assert_eq(&String::from_utf8(stdout)?);
         assert!(stderr.is_empty());
         server.await??;
         Ok(())

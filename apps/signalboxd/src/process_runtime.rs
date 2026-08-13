@@ -13836,6 +13836,9 @@ impl ProtocolError {
                     "the follow stream fell behind; reconnect for a fresh snapshot"
                 }
                 ErrorCode::Unavailable => "the requested operation is unavailable",
+                ErrorCode::PublicationAmbiguous => {
+                    "the blob publication is ambiguous; retry the exact upload"
+                }
                 ErrorCode::CommitAmbiguous => {
                     "the mutation commit is ambiguous; retry the exact command"
                 }
