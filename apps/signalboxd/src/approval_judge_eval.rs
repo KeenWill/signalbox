@@ -65,6 +65,7 @@ pub struct ApprovalJudgeEvalVerdict {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgeEvalCaseError {
     field: &'static str,
+    admission_failure: String,
 }
 
 impl ApprovalJudgeEvalCaseError {
@@ -73,11 +74,21 @@ impl ApprovalJudgeEvalCaseError {
     pub const fn field(&self) -> &'static str {
         self.field
     }
+
+    /// Renders the underlying domain admission failure.
+    #[must_use]
+    pub fn admission_failure(&self) -> &str {
+        &self.admission_failure
+    }
 }
 
 impl fmt::Display for ApprovalJudgeEvalCaseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "eval case field is not admitted: {}", self.field)
+        write!(
+            formatter,
+            "eval case field {} is not admitted: {}",
+            self.field, self.admission_failure
+        )
     }
 }
 
@@ -158,10 +169,16 @@ fn eval_tool_request(
     case: &ApprovalJudgeEvalCase,
 ) -> Result<ToolRequest, ApprovalJudgeEvalCaseError> {
     let identity = fnv1a_128(case.name.as_bytes());
-    let name = ToolName::try_new(case.tool.clone())
-        .map_err(|_| ApprovalJudgeEvalCaseError { field: "tool" })?;
+    let name =
+        ToolName::try_new(case.tool.clone()).map_err(|error| ApprovalJudgeEvalCaseError {
+            field: "tool",
+            admission_failure: format!("{error:?}"),
+        })?;
     let arguments = NormalizedToolArguments::try_from_provider_text(case.arguments.clone())
-        .map_err(|_| ApprovalJudgeEvalCaseError { field: "arguments" })?;
+        .map_err(|error| ApprovalJudgeEvalCaseError {
+            field: "arguments",
+            admission_failure: format!("{error:?}"),
+        })?;
     Ok(ToolRequestReconstitutionInput::new(
         ToolRequestId::from_uuid(uuid::Uuid::from_u128(identity)),
         SessionId::from_uuid(uuid::Uuid::from_u128(fnv1a_128(b"approval-judge-eval"))),
@@ -184,23 +201,29 @@ fn eval_session_context(
         .goal
         .clone()
         .map(|value| {
-            GoalStatement::try_new(value).map_err(|_| ApprovalJudgeEvalCaseError { field: "goal" })
+            GoalStatement::try_new(value).map_err(|error| ApprovalJudgeEvalCaseError {
+                field: "goal",
+                admission_failure: error.to_string(),
+            })
         })
         .transpose()?;
     let template = case
         .template
         .clone()
         .map(|value| {
-            SessionTemplateName::try_new(value)
-                .map_err(|_| ApprovalJudgeEvalCaseError { field: "template" })
+            SessionTemplateName::try_new(value).map_err(|error| ApprovalJudgeEvalCaseError {
+                field: "template",
+                admission_failure: error.to_string(),
+            })
         })
         .transpose()?;
     let system_prompt = case
         .system_prompt
         .clone()
         .map(|value| {
-            SessionSystemPrompt::try_new(value).map_err(|_| ApprovalJudgeEvalCaseError {
+            SessionSystemPrompt::try_new(value).map_err(|error| ApprovalJudgeEvalCaseError {
                 field: "system_prompt",
+                admission_failure: error.to_string(),
             })
         })
         .transpose()?;
@@ -273,10 +296,11 @@ mod tests {
 
     #[test]
     fn rendered_case_quotes_session_context_beside_the_request() {
-        let rendered = render_eval_case(&case()).expect("fixture case renders");
+        let case = case();
+        let rendered = render_eval_case(&case).expect("fixture case renders");
         assert!(rendered.contains("session_context"));
-        assert!(rendered.contains("unsandboxed_exec"));
-        assert!(rendered.contains("review-response"));
+        assert!(rendered.contains(&case.tool));
+        assert!(rendered.contains(case.template.as_deref().expect("fixture sets template")));
     }
 
     #[test]
