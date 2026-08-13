@@ -11,13 +11,15 @@ restart-recovery authority were verified through PR #267
 fences are re-verified through this PR (`agent/runner-loss-epoch`). Sandbox,
 repository-entry, permission-override, manifest-recovery, structural wire, and
 persistence-adapter contracts were re-verified through PR #350
-(`agent/runner-wire-protocol`). The corrected reconstitution mismatch contract
-was re-verified through PR #322 (`agent/docs-discipline`; pinned and pinned-loss
-request mismatches). The placement loss-source, pre-pin replacement and
-abandonment state shapes, and append-only reconstitution-history contract are
-re-verified through this PR (`agent/runner-placement-loss-domain`). It owns
-logical runner enrollment, daemon-authoritative catalog validation, runner
-leases, the independent session-composition axes, session placement and
+(`agent/runner-wire-protocol`). The lease correlation's complete execution
+placement facts are re-verified through this PR
+(`agent/runner-lease-execution-correlation`). The corrected reconstitution
+mismatch contract was re-verified through PR #322 (`agent/docs-discipline`;
+pinned and pinned-loss request mismatches). The placement loss-source, pre-pin
+replacement and abandonment state shapes, and append-only reconstitution-history
+contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
+It owns logical runner enrollment, daemon-authoritative catalog validation,
+runner leases, the independent session-composition axes, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
 session transcript and frontier mechanics remain owned by
@@ -275,15 +277,20 @@ members. `version` is the integer `1`, `kind` is one table token, and `payload`
 is one object whose required members are fixed by that kind; none permits an
 additional member. Shared correlations are records rather than flattened
 prefixes. A lease correlation contains, in this order, registration revision,
-lease id, positive lease-lineage generation, runner, tool name, session, turn,
-tool request, physical tool attempt, issuing turn attempt, and positive tool
-dispatch generation. A provisioning correlation contains authorization id,
-session, positive placement revision, runner, registration revision, optional
-repository key, sandbox profile, and optional credential-profile name. A release
-correlation contains session, positive retired placement revision, runner, and
-stable workspace-manifest id. A leak-page correlation contains registration
-revision, report digest, and positive page. Repeating a shared correlation in an
-acknowledgement means repeating that complete record.
+lease id, positive lease-lineage generation, runner, positive pinned-placement
+revision, the concrete bounded working directory selected for execution, sandbox
+profile, tool name, session, turn, tool request, physical tool attempt, issuing
+turn attempt, and positive tool dispatch generation. The placement members make
+every claim, dispatch, result, acknowledgement, heartbeat phase, and reconnect
+directive repeat the same execution locus; a runner never infers them from the
+tool name or repository presence. A provisioning correlation contains
+authorization id, session, positive placement revision, runner, registration
+revision, optional repository key, sandbox profile, and optional
+credential-profile name. A release correlation contains session, positive
+retired placement revision, runner, and stable workspace-manifest id. A
+leak-page correlation contains registration revision, report digest, and
+positive page. Repeating a shared correlation in an acknowledgement means
+repeating that complete record.
 
 A lease offer's result bounds record has exactly `success_text_bytes` and
 `failure_detail_bytes`, both unsigned integers. Version one requires 1,048,576

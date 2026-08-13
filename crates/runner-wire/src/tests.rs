@@ -56,6 +56,11 @@ fn repository(value: &str) -> RepositoryKey {
         .unwrap_or_else(|error| panic!("repository fixture is valid: {error}"))
 }
 
+fn working_directory(value: &str) -> WorkingDirectory {
+    WorkingDirectory::try_new(value.to_owned())
+        .unwrap_or_else(|error| panic!("working-directory fixture is valid: {error}"))
+}
+
 fn capability(value: &str) -> CapabilityName {
     CapabilityName::try_new(value.to_owned())
         .unwrap_or_else(|error| panic!("capability fixture is valid: {error}"))
@@ -67,6 +72,9 @@ fn lease_correlation() -> LeaseCorrelation {
         lease_id: uuid(ARBITRARY_UUID_A),
         lease_generation: positive(2),
         runner_id: uuid(ARBITRARY_UUID_B),
+        placement_revision: positive(3),
+        working_directory: working_directory("sessions/example/3/repo"),
+        sandbox_profile: SandboxProfile::WorkspaceRestricted,
         tool_name: tool("git_fetch"),
         session_id: uuid(ARBITRARY_UUID_C),
         turn_id: uuid(ARBITRARY_UUID_D),
@@ -437,6 +445,13 @@ fn decoder_rejects_duplicate_terminal_result_member() {
     );
 
     assert!(decode_line(encoded.as_bytes()).is_err());
+}
+
+#[test]
+fn working_directory_rejects_empty_nul_and_oversized_text() {
+    assert!(WorkingDirectory::try_new(String::new()).is_err());
+    assert!(WorkingDirectory::try_new("workspace\0repo".to_owned()).is_err());
+    assert!(WorkingDirectory::try_new("x".repeat(WorkingDirectory::MAX_BYTES + 1)).is_err());
 }
 
 #[test]

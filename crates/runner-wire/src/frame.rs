@@ -10,7 +10,7 @@ use crate::{
     },
     value::{
         CanonicalUuid, DetailName, Digest, EffectClass, PositiveU64, ProfileName, RepositoryKey,
-        ResultBounds, SandboxProfile, TerminalResult, ValueError, WireToolName,
+        ResultBounds, SandboxProfile, TerminalResult, ValueError, WireToolName, WorkingDirectory,
     },
 };
 
@@ -29,6 +29,12 @@ pub struct LeaseCorrelation {
     pub lease_generation: PositiveU64,
     /// Selected runner.
     pub runner_id: CanonicalUuid,
+    /// Exact pinned placement revision executed by this lease.
+    pub placement_revision: PositiveU64,
+    /// Concrete runner-interpreted directory used for execution.
+    pub working_directory: WorkingDirectory,
+    /// Exact pinned sandbox profile used for execution.
+    pub sandbox_profile: SandboxProfile,
     /// Exact tool name.
     pub tool_name: WireToolName,
     /// Owning session.
