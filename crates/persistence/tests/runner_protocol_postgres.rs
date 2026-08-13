@@ -29,12 +29,12 @@ use signalbox_domain::{
     PromotedRunnerEnrollment, ProvisionedWorkspace, ReplaceLostRunner,
     ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
     ReplacedLostRunnerBeforePin, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerCredentialGrantLineage,
-    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
-    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
-    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementRecoveryState, RunnerRegistrationReconciliation, RunnerReplacementTarget,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
+    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerGeneration, RunnerId,
+    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
+    RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
+    RunnerRegistrationReconciliation, RunnerReplacementTarget,
     RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
     RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
@@ -1415,6 +1415,14 @@ async fn stored_active_pin_fixture_with_authorization(
         pin,
         connection.epoch(),
     ))
+}
+
+#[track_caller]
+fn pinned_fixture_state(pin: &SessionRunnerPin) -> PinnedRunnerPlacement {
+    let SessionRunnerPlacementState::Pinned(pinned) = pin.placement.state() else {
+        panic!("the stored pin fixture carries a pinned placement");
+    };
+    pinned.clone()
 }
 
 async fn stored_side_effecting_pin_fixture(
@@ -6471,25 +6479,7 @@ async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_ru
     let registration = store
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
-    let expected_pinned = PinnedRunnerPlacement {
-        runner: expected_enrollment.runner(),
-        working_directory: RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
-            .expect("the fixture working directory is valid"),
-        credential_profile: Some(profile()),
-        grant_lineage: Some(RunnerCredentialGrantLineage {
-            runner: expected_enrollment.runner(),
-            revision: pin
-                .grant
-                .as_ref()
-                .expect("the credentialed pin carries its grant")
-                .revision(),
-        }),
-        tools: std::collections::BTreeSet::from([tool("inspect")]),
-        runner_required_tools: std::collections::BTreeSet::from([tool("inspect")]),
-        workspace: None,
-        sandbox: RunnerSandboxProfile::Ambient,
-        permission_overrides: no_permission_overrides(),
-    };
+    let expected_pinned = pinned_fixture_state(&pin);
     let expected_state =
         SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
             expected_pinned,
