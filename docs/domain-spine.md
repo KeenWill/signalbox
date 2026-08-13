@@ -6527,6 +6527,27 @@ impl ExecutableToolSnapshotEntry {
     ) -> Self;
     // accessors: definition(), execution_locus(), initial_approval()
 }
+pub trait ExecutableToolSnapshotSource: Send + Sync {
+    fn executable_tools<'a>(
+        &'a self,
+        session: SessionId,
+        daemon_catalog: &'a dyn ToolCatalog,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Pin<Box<dyn Future<Output = Result<
+        Box<[ExecutableToolSnapshotEntry]>,
+        ExecutableToolSnapshotSourceError,
+    >> + Send + 'a>>;
+}
+pub struct DaemonExecutableToolSnapshotSource;
+// Copy + Default; impl ExecutableToolSnapshotSource
+pub struct ExecutableToolSnapshotSourceError { /* private */ }
+impl ExecutableToolSnapshotSourceError {
+    pub fn new(
+        error: impl Error + ClassifyOperatorFailure + Send + Sync + 'static,
+    ) -> Self;
+}
+// impl Display + std::error::Error + ClassifyOperatorFailure
+pub struct ExecutableToolSnapshotComposition { /* private */ }
 pub struct PreparedModelOperation { /* private */ }
 pub struct ResolvedRunnerPlacementConversationEntry { /* private */ }
 impl ResolvedRunnerPlacementConversationEntry {
@@ -6770,6 +6791,7 @@ pub enum ModelCallExecutionError<
 > {
     Prepare(PrepareError),
     Render(ModelFrontierRenderingError),
+    ExecutableToolSnapshot(ExecutableToolSnapshotSourceError),
     CapabilityPreparation(ProviderError),
     CapabilityFailureCommit(FailureError),
     CapabilityFailureReread(FailureError),
@@ -6817,6 +6839,10 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         gate: Gate,
     ) -> Self;
     pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
+    pub fn with_executable_tool_snapshot_source(
+        self,
+        source: impl ExecutableToolSnapshotSource + 'static,
+    ) -> Self;
     pub fn from_parts(
         ids: Ids,
         prepare: Prepare,
@@ -6825,7 +6851,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
-        catalog: Arc<dyn ToolCatalog>,
+        executable_tools: ExecutableToolSnapshotComposition,
         retained_state: Option<RetainedModelCallExecutionState>,
     ) -> Self;
     pub fn into_parts(
@@ -6838,7 +6864,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
-        Arc<dyn ToolCatalog>,
+        ExecutableToolSnapshotComposition,
         Option<RetainedModelCallExecutionState>,
     );
     pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
@@ -11120,7 +11146,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 34 (incl. 8 traits)   |
+| application: model_execution                       | 38 (incl. 9 traits)   |
 | application: tool_loop                             | 32 (incl. 6 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
@@ -11136,4 +11162,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **294 (+1 free fn)**  |
+| **signalbox-application total**                    | **298 (+1 free fn)**  |

@@ -10,6 +10,9 @@ The resolved runner-placement boundary and both exact profile-specific provider
 messages were verified against this PR
 (`agent/runner-placement-semantic-persistence`).
 
+The session-aware executable-tool snapshot source boundary is verified against
+this PR (`agent/runner-executable-tool-snapshot-source`).
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
@@ -335,9 +338,12 @@ daemon locus and daemon blanket provenance. The model-call terminal transition
 copies its exact selected locus into every resulting durable `ToolRequest`; an
 unknown proposal remains fail-closed on the daemon locus. The current production
 snapshot source still wraps the daemon-local catalog as daemon-locus entries.
-Capability-derived filtering and runner-locus selection are committed
-unimplemented functionality; no present production model call advertises a
-runner-locus entry.
+Model-call orchestration asks an injected `ExecutableToolSnapshotSource` for the
+session's ordered snapshot before provider capability preparation, and a
+classified source failure stops before provider work. The default source wraps
+the daemon catalog exactly as before. The PostgreSQL capability-derived source
+and its runner-locus selection remain committed unimplemented functionality; no
+present production model call advertises a runner-locus entry.
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native
