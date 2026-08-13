@@ -2362,7 +2362,7 @@ mod tests {
             rationale,
         )
         .expect("the delegated fixture permits approval");
-        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(delegated)
+        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(delegated, None)
             .reconstitute()
             .expect("the delegate evidence is internally valid");
         let input = ToolBatchReconstitutionInput::new(

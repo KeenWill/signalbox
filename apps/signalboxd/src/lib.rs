@@ -36,6 +36,8 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 use tracing::Instrument;
+mod blob_storage_configuration;
+mod blob_storage_runtime;
 mod configuration;
 mod context_guard;
 mod conversation_introspection;
@@ -55,6 +57,11 @@ mod single_hub;
 mod telemetry;
 pub mod usage_limits;
 
+pub use blob_storage_configuration::{
+    BlobStorageClass, BlobStorageConfiguration, BlobStorageConfigurationError,
+    BlobStoreConfiguration,
+};
+pub use blob_storage_runtime::{BlobStoreRegistry, BlobStoreRegistryError};
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
     FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelAdapter,

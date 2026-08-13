@@ -10,8 +10,9 @@ instead. The mirror covers the public type and function surface of
 comments, no tests, no bodies. Any pull request that adds, removes, or changes a
 public item in either crate must update this file in the same change;
 `AGENTS.md` carries that rule, and CI (`scripts/check_domain_spine.py`) fails
-when an exported name is missing here or an inventory count disagrees with
-source.
+when an exported name or a listed type's public method is missing here, when a
+declaration outlives its source counterpart, or when an inventory count
+disagrees with source.
 
 Conventions used below:
 
@@ -100,6 +101,28 @@ pub enum Actor {
     Model { turn: TurnId },
     Recovery,
     Tool { request: ToolRequestId },
+}
+```
+
+## domain: blob
+
+```rust
+pub struct BlobDigest(/* private [u8; 32] */);
+impl BlobDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+    pub fn digest(bytes: &[u8]) -> Self;
+}
+
+pub enum BlobDigestParseFailure {
+    MissingSha256Prefix,
+    InvalidLength,
+    InvalidHex,
+}
+
+pub struct BlobDigestParseError { /* private */ }
+impl BlobDigestParseError {
+    // accessors: rejected(), failure()
 }
 ```
 
@@ -4563,6 +4586,7 @@ pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
     pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
+    pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
 }
@@ -4587,7 +4611,10 @@ impl ToolApprovalResolution {
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
-    pub fn delegate(approval: DelegateToolApproval) -> Self;
+    pub fn delegate(
+        approval: DelegateToolApproval,
+        stored_denial_reason: Option<ToolDenialReason>,
+    ) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,
@@ -6899,16 +6926,6 @@ pub enum RepoWatchSingletonKey {
     Repository { repository: RepositorySlug },
 }
 
-pub struct RepoWatchDispatchGoal { /* private */ }
-impl RepoWatchDispatchGoal {
-    pub const fn new(
-        command: GoalUserCommand,
-        accepted_input: AcceptedInputId,
-        turn: TurnId,
-    ) -> Self;
-    // accessors: command(), accepted_input(), turn()
-}
-
 pub struct RepoWatchPreparedDispatchAction { /* private */ }
 impl RepoWatchPreparedDispatchAction {
     // accessors: action(), prepared_session(), goal()
@@ -6922,7 +6939,7 @@ impl RepoWatchPreparedDispatchAction {
         TurnId,
         SemanticTranscriptEntryId,
         ContextFrontierId,
-        RepoWatchDispatchGoal,
+        GoalUserCommand,
     );
 }
 
@@ -10272,6 +10289,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | -------------------------------------------------- | --------------------- |
 | domain: lib.rs identities                          | 27                    |
 | domain: actor                                      | 1                     |
+| domain: blob                                       | 3                     |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
@@ -10308,7 +10326,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **771 (+12 free fn)** |
+| **signalbox-domain total**                         | **774 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10321,7 +10339,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 34 (incl. 4 traits)   |
+| application: repo_watch                            | 33 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10332,4 +10350,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **250 (+1 free fn)**  |
+| **signalbox-application total**                    | **249 (+1 free fn)**  |
