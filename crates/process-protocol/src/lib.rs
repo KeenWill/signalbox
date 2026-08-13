@@ -7195,6 +7195,7 @@ pub enum ServerMessage {
         replica_count: CanonicalU64,
     },
     /// One exact verified byte range.
+    #[serde(rename = "blob_chunk")]
     BlobChunkRead {
         digest: CanonicalBlobDigest,
         offset_bytes: CanonicalU64,
@@ -11069,7 +11070,7 @@ mod tests {
                 bytes: BlobChunk::new(vec![0, 255]),
             },
             &format!(
-                "{{\"type\":\"blob_chunk_read\",\"digest\":\"{digest}\",\"offset_bytes\":\"{offset}\",\"bytes\":\"AP8=\"}}"
+                "{{\"type\":\"blob_chunk\",\"digest\":\"{digest}\",\"offset_bytes\":\"{offset}\",\"bytes\":\"AP8=\"}}"
             ),
         )?;
         Ok(())
