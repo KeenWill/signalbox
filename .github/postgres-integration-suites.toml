@@ -66,9 +66,10 @@ include_binaries = ["runner_protocol_postgres"]
 [[suite]]
 name = "runner-process"
 package = "signalbox-runner"
-features = []
+features = ["runner-execution-proof"]
 # This archive includes the actual runner executable and only the spawned
-# registration integration target; it does not repeat the persistence suite.
+# process integration target; the proof feature exposes only the existing
+# generic sandboxed-exec slice and is absent from ordinary runner builds.
 shards = 1
 skip = []
 include_binaries = ["runner_process_postgres"]
