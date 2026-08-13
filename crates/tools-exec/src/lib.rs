@@ -5,9 +5,13 @@
 //! also exposes a small read-only operating-system runtime needed to start
 //! ordinary programs, clears the ambient environment, and admits only a
 //! bounded locale plus executable search paths rooted in that runtime.
-//! Production uses the trusted absolute `/usr/bin/bwrap`; missing, unsupported,
-//! or unusable `bwrap` is typed refusal evidence and never falls back to
-//! unsandboxed execution.
+//! The daemon-local production composition uses the trusted absolute
+//! `/usr/bin/bwrap`. A caller with an explicit configuration can instead pin
+//! one absolute bubblewrap executable during [`TokioProcessRunner`]
+//! construction; both the availability probe and every later sandbox request
+//! use that retained executable identity. Missing, unsupported, or unusable
+//! `bwrap` is typed refusal evidence and never falls back to unsandboxed
+//! execution.
 //!
 //! [`UnsandboxedExecTool`] is a separate catalog-composable tool whose fixed
 //! permission default requires user confirmation. This crate ships the two

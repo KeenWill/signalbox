@@ -159,6 +159,13 @@ pub enum ExecToolConstructionError {
         /// Underlying filesystem failure, when one occurred.
         source: Option<std::io::Error>,
     },
+    /// The injected bubblewrap program was not an absolute canonical file.
+    BubblewrapProgram {
+        /// Supplied program associated with the failure.
+        path: PathBuf,
+        /// Underlying filesystem failure, when one occurred.
+        source: Option<std::io::Error>,
+    },
 }
 
 impl fmt::Display for ExecToolConstructionError {
@@ -182,6 +189,13 @@ impl fmt::Display for ExecToolConstructionError {
                     path.display()
                 )
             }
+            Self::BubblewrapProgram { path, .. } => {
+                write!(
+                    formatter,
+                    "exec bubblewrap program `{}` is invalid",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -196,13 +210,18 @@ impl Error for ExecToolConstructionError {
             | Self::SupervisorProgram {
                 source: Some(source),
                 ..
+            }
+            | Self::BubblewrapProgram {
+                source: Some(source),
+                ..
             } => Some(source),
             Self::Name
             | Self::Schema
             | Self::ErrorDetail
             | Self::Duplicate
             | Self::WorkspaceRoot { source: None, .. }
-            | Self::SupervisorProgram { source: None, .. } => None,
+            | Self::SupervisorProgram { source: None, .. }
+            | Self::BubblewrapProgram { source: None, .. } => None,
         }
     }
 }
@@ -245,6 +264,18 @@ impl SandboxedExecTool<TokioProcessRunner> {
     ) -> Result<Self, ExecToolConstructionError> {
         Self::try_new(
             TokioProcessRunner::try_new(supervisor_program)?,
+            workspace_root,
+        )
+    }
+
+    /// Builds the production sandboxed tool around one configured bubblewrap executable.
+    pub fn try_new_production_with_bubblewrap(
+        workspace_root: impl AsRef<Path>,
+        supervisor_program: impl AsRef<Path>,
+        bubblewrap_program: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        Self::try_new(
+            TokioProcessRunner::try_new_with_bubblewrap(supervisor_program, bubblewrap_program)?,
             workspace_root,
         )
     }
@@ -511,6 +542,11 @@ pub trait ProcessRunner: Clone + Send {
     /// Inherited descriptor for the exact sandbox launcher, when supported.
     fn sandbox_launcher_descriptor(&self) -> Option<i32>;
 
+    /// Exact bubblewrap executable used for sandbox profile probes and runs.
+    fn bubblewrap_program(&self) -> &Path {
+        Path::new(BWRAP_PROGRAM)
+    }
+
     /// Probes the exact bubblewrap profile used for later execution.
     fn bwrap_availability(
         &mut self,
@@ -525,8 +561,11 @@ pub trait ProcessRunner: Clone + Send {
 #[derive(Clone, Debug)]
 pub struct TokioProcessRunner {
     supervisor_program: PathBuf,
+    bubblewrap_program: PathBuf,
     #[cfg(target_os = "linux")]
     _supervisor: Arc<rustix::fd::OwnedFd>,
+    #[cfg(target_os = "linux")]
+    _bubblewrap: Option<Arc<rustix::fd::OwnedFd>>,
     #[cfg(target_os = "linux")]
     sandbox_launcher: Arc<rustix::fd::OwnedFd>,
 }
@@ -550,7 +589,25 @@ impl TokioProcessRunner {
     pub fn try_new(
         supervisor_program: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
-        let supplied = supervisor_program.as_ref();
+        Self::try_new_inner(supervisor_program.as_ref(), None)
+    }
+
+    /// Pins the separately packaged supervisor and one configured bubblewrap executable.
+    pub fn try_new_with_bubblewrap(
+        supervisor_program: impl AsRef<Path>,
+        bubblewrap_program: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        Self::try_new_inner(
+            supervisor_program.as_ref(),
+            Some(bubblewrap_program.as_ref()),
+        )
+    }
+
+    fn try_new_inner(
+        supervisor_program: &Path,
+        bubblewrap_program: Option<&Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        let supplied = supervisor_program;
         if !supplied.is_absolute() {
             return Err(ExecToolConstructionError::SupervisorProgram {
                 path: supplied.to_owned(),
@@ -558,7 +615,7 @@ impl TokioProcessRunner {
             });
         }
         #[cfg(target_os = "linux")]
-        let (supervisor_program, _supervisor, sandbox_launcher) = {
+        let (supervisor_program, _supervisor, sandbox_launcher, bubblewrap_program, _bubblewrap) = {
             let supervisor = rustix::fs::open(
                 supplied,
                 rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
@@ -568,7 +625,8 @@ impl TokioProcessRunner {
                 path: supplied.to_owned(),
                 source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
             })?;
-            let (supervisor_program, supervisor) = pin_supervisor_program(supplied, supervisor)?;
+            let (supervisor_program, supervisor) =
+                pin_executable_program(supplied, supervisor, supervisor_program_error)?;
             let sandbox_launcher = inherited_descriptor_above_standard_streams(
                 rustix::io::dup(supervisor.as_ref()).map_err(|source| {
                     ExecToolConstructionError::SupervisorProgram {
@@ -581,10 +639,38 @@ impl TokioProcessRunner {
                 path: supplied.to_owned(),
                 source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
             })?;
-            (supervisor_program, supervisor, Arc::new(sandbox_launcher))
+            let (bubblewrap_program, bubblewrap) = match bubblewrap_program {
+                Some(bubblewrap) => {
+                    if !bubblewrap.is_absolute() {
+                        return Err(bubblewrap_program_error(bubblewrap.to_owned(), None));
+                    }
+                    let descriptor = rustix::fs::open(
+                        bubblewrap,
+                        rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
+                        rustix::fs::Mode::empty(),
+                    )
+                    .map_err(|source| {
+                        bubblewrap_program_error(
+                            bubblewrap.to_owned(),
+                            Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                        )
+                    })?;
+                    let (program, descriptor) =
+                        pin_executable_program(bubblewrap, descriptor, bubblewrap_program_error)?;
+                    (program, Some(descriptor))
+                }
+                None => (PathBuf::from(BWRAP_PROGRAM), None),
+            };
+            (
+                supervisor_program,
+                supervisor,
+                Arc::new(sandbox_launcher),
+                bubblewrap_program,
+                bubblewrap,
+            )
         };
         #[cfg(not(target_os = "linux"))]
-        let supervisor_program = {
+        let (supervisor_program, bubblewrap_program) = {
             let canonical = supplied.canonicalize().map_err(|source| {
                 ExecToolConstructionError::SupervisorProgram {
                     path: supplied.to_owned(),
@@ -597,12 +683,19 @@ impl TokioProcessRunner {
                     source: None,
                 });
             }
-            canonical
+            let bubblewrap = match bubblewrap_program {
+                Some(bubblewrap) => canonical_program(bubblewrap, bubblewrap_program_error)?,
+                None => PathBuf::from(BWRAP_PROGRAM),
+            };
+            (canonical, bubblewrap)
         };
         Ok(Self {
             supervisor_program,
+            bubblewrap_program,
             #[cfg(target_os = "linux")]
             _supervisor,
+            #[cfg(target_os = "linux")]
+            _bubblewrap,
             #[cfg(target_os = "linux")]
             sandbox_launcher,
         })
@@ -610,31 +703,29 @@ impl TokioProcessRunner {
 }
 
 #[cfg(target_os = "linux")]
-fn pin_supervisor_program(
+fn pin_executable_program(
     supplied_path: &Path,
-    supervisor: rustix::fd::OwnedFd,
+    descriptor: rustix::fd::OwnedFd,
+    program_error: fn(PathBuf, Option<std::io::Error>) -> ExecToolConstructionError,
 ) -> Result<(PathBuf, Arc<rustix::fd::OwnedFd>), ExecToolConstructionError> {
-    let supervisor = inherited_descriptor_above_standard_streams(supervisor).map_err(|source| {
-        ExecToolConstructionError::SupervisorProgram {
-            path: supplied_path.to_owned(),
-            source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
-        }
+    let descriptor = inherited_descriptor_above_standard_streams(descriptor).map_err(|source| {
+        program_error(
+            supplied_path.to_owned(),
+            Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+        )
     })?;
-    let metadata = rustix::fs::fstat(&supervisor).map_err(|source| {
-        ExecToolConstructionError::SupervisorProgram {
-            path: supplied_path.to_owned(),
-            source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
-        }
+    let metadata = rustix::fs::fstat(&descriptor).map_err(|source| {
+        program_error(
+            supplied_path.to_owned(),
+            Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+        )
     })?;
     if rustix::fs::FileType::from_raw_mode(metadata.st_mode) != rustix::fs::FileType::RegularFile {
-        return Err(ExecToolConstructionError::SupervisorProgram {
-            path: supplied_path.to_owned(),
-            source: None,
-        });
+        return Err(program_error(supplied_path.to_owned(), None));
     }
     let pinned_program = PathBuf::from(format!(
         "/proc/self/fd/{}",
-        rustix::fd::AsRawFd::as_raw_fd(&supervisor)
+        rustix::fd::AsRawFd::as_raw_fd(&descriptor)
     ));
     rustix::fs::accessat(
         rustix::fs::CWD,
@@ -642,23 +733,50 @@ fn pin_supervisor_program(
         rustix::fs::Access::EXEC_OK,
         rustix::fs::AtFlags::EACCESS,
     )
-    .map_err(|source| ExecToolConstructionError::SupervisorProgram {
-        path: supplied_path.to_owned(),
-        source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+    .map_err(|source| {
+        program_error(
+            supplied_path.to_owned(),
+            Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+        )
     })?;
-    let canonical = pinned_program.canonicalize().map_err(|source| {
-        ExecToolConstructionError::SupervisorProgram {
-            path: supplied_path.to_owned(),
-            source: Some(source),
-        }
-    })?;
+    let canonical = pinned_program
+        .canonicalize()
+        .map_err(|source| program_error(supplied_path.to_owned(), Some(source)))?;
     if !canonical.is_absolute() {
-        return Err(ExecToolConstructionError::SupervisorProgram {
-            path: supplied_path.to_owned(),
-            source: None,
-        });
+        return Err(program_error(supplied_path.to_owned(), None));
     }
-    Ok((pinned_program, Arc::new(supervisor)))
+    Ok((pinned_program, Arc::new(descriptor)))
+}
+
+fn supervisor_program_error(
+    path: PathBuf,
+    source: Option<std::io::Error>,
+) -> ExecToolConstructionError {
+    ExecToolConstructionError::SupervisorProgram { path, source }
+}
+
+fn bubblewrap_program_error(
+    path: PathBuf,
+    source: Option<std::io::Error>,
+) -> ExecToolConstructionError {
+    ExecToolConstructionError::BubblewrapProgram { path, source }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn canonical_program(
+    supplied: &Path,
+    program_error: fn(PathBuf, Option<std::io::Error>) -> ExecToolConstructionError,
+) -> Result<PathBuf, ExecToolConstructionError> {
+    if !supplied.is_absolute() {
+        return Err(program_error(supplied.to_owned(), None));
+    }
+    let canonical = supplied
+        .canonicalize()
+        .map_err(|source| program_error(supplied.to_owned(), Some(source)))?;
+    if !canonical.is_absolute() || !canonical.is_file() {
+        return Err(program_error(supplied.to_owned(), None));
+    }
+    Ok(canonical)
 }
 
 impl ProcessRunner for TokioProcessRunner {
@@ -677,6 +795,10 @@ impl ProcessRunner for TokioProcessRunner {
         {
             None
         }
+    }
+
+    fn bubblewrap_program(&self) -> &Path {
+        &self.bubblewrap_program
     }
 
     async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
@@ -709,6 +831,7 @@ fn classify_bwrap_availability(result: &ProcessRunResult) -> BwrapAvailability {
 pub struct SandboxedCommandRunner<Runner> {
     runner: Runner,
     workspace_root: PathBuf,
+    bubblewrap_program: PathBuf,
     #[cfg(not(target_os = "linux"))]
     sandbox_launcher: PathBuf,
     #[cfg(target_os = "linux")]
@@ -730,6 +853,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         #[cfg(not(target_os = "linux"))]
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         let sandbox_launcher = runner.sandbox_launcher_program().to_owned();
+        let bubblewrap_program = runner.bubblewrap_program().to_owned();
         #[cfg(target_os = "linux")]
         let sandbox_launcher_descriptor = runner
             .sandbox_launcher_descriptor()
@@ -747,6 +871,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             #[cfg(target_os = "linux")]
             workspace_identity,
             workspace_root,
+            bubblewrap_program,
         })
     }
 
@@ -832,6 +957,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 #[cfg(target_os = "linux")]
                 working_directory_bind_descriptor: None,
             },
+            &self.bubblewrap_program,
             &probe_program,
             &[String::from("-c"), String::from("exit 0")],
             ".",
@@ -903,6 +1029,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         #[cfg(not(target_os = "linux"))]
                         working_directory_bind_source: None,
                     },
+                    &self.bubblewrap_program,
                     &arguments.program,
                     &arguments.arguments,
                     &arguments.working_directory,
@@ -1239,6 +1366,7 @@ struct SandboxLaunchContext<'a> {
 
 fn bwrap_request(
     context: SandboxLaunchContext<'_>,
+    bubblewrap_program: &Path,
     program: &str,
     arguments: &[String],
     working_directory: &str,
@@ -1374,7 +1502,7 @@ fn bwrap_request(
     ]);
     bwrap_arguments.extend(arguments.iter().map(OsString::from));
     ProcessRequest {
-        program: OsString::from(BWRAP_PROGRAM),
+        program: bubblewrap_program.as_os_str().to_owned(),
         arguments: bwrap_arguments,
         working_directory: context.bind_source.to_owned(),
         timeout,
@@ -2763,6 +2891,7 @@ mod tests {
     const SLOW_PROBE_DELAY: Duration = Duration::from_millis(1_100);
     const OVERSIZED_CAPTURE_BYTES: usize = PROCESS_CAPTURE_BYTES_LIMIT + 1;
     const TEST_SANDBOX_LAUNCHER: &str = "/fixture/signalbox-exec-supervisor";
+    const TEST_BUBBLEWRAP_PROGRAM: &str = "/configured/bin/bwrap";
     #[cfg(target_os = "linux")]
     const TEST_SANDBOX_BIND_DESCRIPTOR: i32 = 90;
     const TEST_SANDBOX_WORKSPACE_ROOT: &str = "/fixture/workspace";
@@ -3097,7 +3226,8 @@ mod tests {
         )?;
         supervisor.replace()?;
 
-        let (pinned, _descriptor) = pin_supervisor_program(&supervisor.path, descriptor)?;
+        let (pinned, _descriptor) =
+            pin_executable_program(&supervisor.path, descriptor, supervisor_program_error)?;
 
         assert_eq!(pinned.canonicalize()?, supervisor.retired.canonicalize()?);
         Ok(())
@@ -3174,6 +3304,39 @@ mod tests {
             result,
             Err(ExecToolConstructionError::SupervisorProgram { source: None, .. })
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_runner_pins_the_configured_bubblewrap_identity() -> Result<(), Box<dyn Error>> {
+        let supervisor = ReplacementSupervisor::new()?;
+        let bubblewrap = ReplacementSupervisor::new()?;
+        let runner =
+            TokioProcessRunner::try_new_with_bubblewrap(&supervisor.path, &bubblewrap.path)?;
+        let pinned = runner.bubblewrap_program().to_owned();
+        bubblewrap.replace()?;
+
+        assert_eq!(pinned.canonicalize()?, bubblewrap.retired.canonicalize()?);
+        assert_ne!(pinned.canonicalize()?, bubblewrap.path.canonicalize()?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_runner_rejects_a_relative_configured_bubblewrap_before_opening_it()
+    -> Result<(), Box<dyn Error>> {
+        let supervisor = ReplacementSupervisor::new()?;
+
+        let result = TokioProcessRunner::try_new_with_bubblewrap(
+            &supervisor.path,
+            Path::new("relative-bwrap"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExecToolConstructionError::BubblewrapProgram { source: None, .. })
+        ));
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -3468,6 +3631,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct FakeRunner {
         availability: BwrapAvailability,
+        bubblewrap_program: PathBuf,
         probe_delay: Duration,
         results: Arc<Mutex<Vec<ProcessRunResult>>>,
         probes: Arc<Mutex<Vec<ProcessRequest>>>,
@@ -3478,6 +3642,7 @@ mod tests {
         fn returning(availability: BwrapAvailability, result: ProcessRunResult) -> Self {
             Self {
                 availability,
+                bubblewrap_program: PathBuf::from(BWRAP_PROGRAM),
                 probe_delay: Duration::ZERO,
                 results: Arc::new(Mutex::new(vec![result])),
                 probes: Arc::new(Mutex::new(Vec::new())),
@@ -3503,6 +3668,11 @@ mod tests {
             self.probe_delay = probe_delay;
             self
         }
+
+        fn with_bubblewrap_program(mut self, bubblewrap_program: PathBuf) -> Self {
+            self.bubblewrap_program = bubblewrap_program;
+            self
+        }
     }
 
     impl ProcessRunner for FakeRunner {
@@ -3512,6 +3682,10 @@ mod tests {
 
         fn sandbox_launcher_descriptor(&self) -> Option<i32> {
             Some(TEST_SANDBOX_LAUNCHER_DESCRIPTOR)
+        }
+
+        fn bubblewrap_program(&self) -> &Path {
+            &self.bubblewrap_program
         }
 
         async fn bwrap_availability(&mut self, probe: ProcessRequest) -> BwrapAvailability {
@@ -3888,7 +4062,8 @@ mod tests {
         let runner = FakeRunner::returning(
             BwrapAvailability::Available,
             successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
-        );
+        )
+        .with_bubblewrap_program(PathBuf::from(TEST_BUBBLEWRAP_PROGRAM));
         let observation = runner.clone();
         let mut command_runner = SandboxedCommandRunner::try_new(runner, &root)?;
         let bind_descriptor =
@@ -3925,6 +4100,7 @@ mod tests {
             descriptor_path(TEST_SANDBOX_LAUNCHER_DESCRIPTOR).into_os_string(),
             OsString::from(SANDBOX_DISPATCH_PROGRAM),
         ];
+        let expected_bubblewrap_program = OsString::from(TEST_BUBBLEWRAP_PROGRAM);
         let dispatch_arguments = [
             OsString::from("--"),
             OsString::from(SANDBOX_DISPATCH_PROGRAM),
@@ -3933,8 +4109,8 @@ mod tests {
             OsString::from("check"),
         ];
 
-        assert_eq!(request.program, OsString::from(BWRAP_PROGRAM));
-        assert_eq!(probe.program, OsString::from(BWRAP_PROGRAM));
+        assert_eq!(request.program, expected_bubblewrap_program);
+        assert_eq!(probe.program, OsString::from(TEST_BUBBLEWRAP_PROGRAM));
         assert_eq!(
             request.status_protocol,
             ProcessStatusProtocol::SandboxDispatch
@@ -4038,6 +4214,7 @@ mod tests {
 
         let request = bwrap_request(
             isolation_fixture_context(workspace_root),
+            Path::new(BWRAP_PROGRAM),
             "cargo",
             &[String::from("check")],
             ".",
@@ -4060,6 +4237,7 @@ mod tests {
 
         let request = bwrap_request(
             isolation_fixture_context(workspace_root),
+            Path::new(BWRAP_PROGRAM),
             "cargo",
             &[String::from("check")],
             ".",
