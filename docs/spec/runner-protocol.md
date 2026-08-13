@@ -60,9 +60,11 @@ retention, exact live acknowledgement, and checked reconnect resend or
 retirement are re-verified through this PR
 (`agent/runner-lease-offer-failure-journal`). Live durable refusal of an offer
 whose tool is absent from the registration-only empty catalog is re-verified
-through this PR (`agent/runner-empty-catalog-offer-refusal`). The placement
-loss-source, pre-pin replacement and abandonment state shapes, and append-only
-reconstitution-history contract are re-verified through this PR
+through this PR (`agent/runner-empty-catalog-offer-refusal`). Durable checked
+readback of an exact claimed lease under authenticated resume facts is
+re-verified through this PR (`agent/runner-claimed-resume-readback`). The
+placement loss-source, pre-pin replacement and abandonment state shapes, and
+append-only reconstitution-history contract are re-verified through this PR
 (`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, the independent
 session-composition axes, session placement and affinity, credential-profile
@@ -714,6 +716,15 @@ marks that lease lost and applies its effect-class ambiguity law. A claimed
 lease reported without a terminal envelope likewise follows its fsynced phase.
 Rejected duplicate or stale frames are retained only as bounded operator
 classification, never as domain evidence.
+
+The persistence adapter can read an exact retained claimed lease against the
+enrollment request, all daemon-issued enrollment identities, the current
+registration and advertisement, and the complete durable lease correlation under
+the owning session lock. It returns only the canonical `Claimed` lease as
+repeatable-read reconstitution evidence. The read does not authorize later
+projection: no live resume transaction consumes and rechecks it yet, so a
+lease-only reconnect inventory remains unavailable rather than reconstructing
+claim or dispatch authority from connection memory.
 
 ## Identity, enrollment, and registration
 

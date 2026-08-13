@@ -4696,12 +4696,97 @@ impl RunnerProtocolStore {
         )
         .await
         .map_err(map_runner_tool_loop_error)?;
+        let receipt = self
+            .authenticate_resume_in(
+                &mut transaction,
+                request,
+                observed,
+                prior_revision,
+                advertisement,
+            )
+            .await?;
+        if result.correlation().runner != receipt.enrollment().runner() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let (correlation, observation) = result.into_parts();
+        let (completion, effect) = self
+            .commit_lease_result_in(&mut transaction, correlation, observation)
+            .await?;
+        match effect {
+            LeaseResultCommitEffect::Applied => commit_mutation(transaction).await?,
+            LeaseResultCommitEffect::Replay => transaction.rollback().await?,
+        }
+        Ok(completion)
+    }
+
+    /// Reads one exact claimed lease under authenticated resume facts.
+    ///
+    /// This repeatable-read snapshot is reconstitution evidence only. A later
+    /// resume transaction must recheck it before projecting recovery frames.
+    pub async fn load_claimed_lease_for_authenticated_resume(
+        &self,
+        request: RunnerEnrollmentRequestId,
+        observed: IssuedRunnerEnrollmentIdentities,
+        prior_revision: RunnerRegistrationRevision,
+        advertisement: RunnerAdvertisement,
+        correlation: RunnerLeaseCorrelation,
+    ) -> Result<RunnerLease, RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        crate::tool_loop::lock_tool_session(transaction.as_mut(), correlation.dispatch.session())
+            .await
+            .map_err(map_runner_tool_loop_error)?;
+        let receipt = self
+            .authenticate_resume_in(
+                &mut transaction,
+                request,
+                observed,
+                prior_revision,
+                advertisement,
+            )
+            .await?;
+        if correlation.runner != receipt.enrollment().runner()
+            || correlation.registration_revision.get() != receipt.registration().revision().get()
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let lease = self
+            .load_lease_in(&mut transaction, correlation.lease, correlation.generation)
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+        if lease.state() != RunnerLeaseState::Claimed {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        if lease.correlation() != correlation {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        transaction.commit().await?;
+        Ok(lease)
+    }
+
+    async fn authenticate_resume_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        request: RunnerEnrollmentRequestId,
+        observed: IssuedRunnerEnrollmentIdentities,
+        prior_revision: RunnerRegistrationRevision,
+        advertisement: RunnerAdvertisement,
+    ) -> Result<RunnerEnrollmentReceipt, RunnerProtocolStoreError> {
         let stored = load_enrollment_request_facts(transaction.as_mut(), request)
             .await?
             .ok_or(RunnerEnrollmentRequestFailure::UnknownRequest { request })?;
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(stored.identities.enrollment().into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(transaction.as_mut())
             .await?;
         if locked.is_none() {
             return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
@@ -4726,7 +4811,7 @@ impl RunnerProtocolStore {
         }
         let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
             .bind(enrollment.enrollment().into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(transaction.as_mut())
             .await?;
         let current = current.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
         let current = decode_registration_revision(current)?;
@@ -4770,20 +4855,7 @@ impl RunnerProtocolStore {
             }
             Ordering::Less | Ordering::Equal => {}
         }
-        if result.correlation().runner != receipt.enrollment().runner() {
-            return Err(RunnerProtocolStoreError::Domain(
-                RunnerDomainError::CorrelationMismatch,
-            ));
-        }
-        let (correlation, observation) = result.into_parts();
-        let (completion, effect) = self
-            .commit_lease_result_in(&mut transaction, correlation, observation)
-            .await?;
-        match effect {
-            LeaseResultCommitEffect::Applied => commit_mutation(transaction).await?,
-            LeaseResultCommitEffect::Replay => transaction.rollback().await?,
-        }
-        Ok(completion)
+        Ok(receipt)
     }
 
     async fn commit_lease_result_in(
