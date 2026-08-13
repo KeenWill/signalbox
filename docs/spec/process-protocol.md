@@ -59,6 +59,10 @@ content arrays remain the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with their implementing
 children.
 
+The terminal blob-upload command and its bounded, open-once source handling are
+verified against this implementing change
+(`agent/blob-storage-upload-terminal`).
+
 The coherent review-orchestration snapshot's single-transaction construction,
 the pool capacity it draws, and the writer independence that follows from both
 are verified against this PR (`agent/review-snapshot-mvcc`).
@@ -2657,10 +2661,11 @@ then sends the exact text.
 buffer to determine its digest and length, rewinds the same descriptor, and uses
 begin, bounded appends, and commit on one connection. It validates every
 cumulative acknowledgement and the final identity; an already-present receipt
-sends no append. `blob metadata` prints only digest, byte length, and replica
-count. `blob read` makes one bounded exact-range request, validates its digest,
-offset, and decoded length, then writes only those bytes to the named output.
-Local paths never cross the wire or appear in daemon logs.
+revalidates the same descriptor before sending no append. `blob metadata` prints
+only digest, byte length, and replica count. `blob read` makes one bounded
+exact-range request, validates its digest, offset, and decoded length, then
+writes only those bytes to the named output. Local paths never cross the wire or
+appear in daemon logs.
 
 **Implemented behavior.** The `goal` verbs expose only commission, inspection,
 resume, stop, and supersession. Mutations print a generated command identity

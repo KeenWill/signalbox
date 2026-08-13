@@ -660,7 +660,79 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
             message,
             detail,
         },
-        _ => BlobUploadResponse::Unexpected,
+        ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionSpawned { .. }
+        | ServerMessage::SessionAwaitRegistered { .. }
+        | ServerMessage::ChildResult { .. }
+        | ServerMessage::SessionMessageSent { .. }
+        | ServerMessage::SessionPlacementUpdated { .. }
+        | ServerMessage::InputSubmitted { .. }
+        | ServerMessage::SteeringSubmitted { .. }
+        | ServerMessage::GoalTransitionApplied { .. }
+        | ServerMessage::GoalHistoryStart { .. }
+        | ServerMessage::GoalHistoryState { .. }
+        | ServerMessage::GoalHistoryItem { .. }
+        | ServerMessage::GoalHistoryEnd { .. }
+        | ServerMessage::SessionsStart {}
+        | ServerMessage::SessionSummary { .. }
+        | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::TemplatesStart {}
+        | ServerMessage::TemplateSummary { .. }
+        | ServerMessage::TemplatesEnd { .. }
+        | ServerMessage::SessionMetadataPageStart {}
+        | ServerMessage::SessionMetadataSummary { .. }
+        | ServerMessage::SessionMetadataPageEnd { .. }
+        | ServerMessage::ConversationPageStart {}
+        | ServerMessage::ConversationSummary { .. }
+        | ServerMessage::ConversationPageEnd { .. }
+        | ServerMessage::ModelAliasesStart {}
+        | ServerMessage::ModelAliasSummary { .. }
+        | ServerMessage::ModelAliasesEnd { .. }
+        | ServerMessage::ModelCapabilitiesStart {}
+        | ServerMessage::ModelCapabilityItem { .. }
+        | ServerMessage::ModelCapabilitiesEnd { .. }
+        | ServerMessage::SessionMetadata { .. }
+        | ServerMessage::SessionMetadataReplaced { .. }
+        | ServerMessage::SessionDefaultsReplaced { .. }
+        | ServerMessage::SessionDefaults { .. }
+        | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::SessionCompacted { .. }
+        | ServerMessage::ConversationImportBegun { .. }
+        | ServerMessage::ConversationImportAppended { .. }
+        | ServerMessage::ConversationImportInserted { .. }
+        | ServerMessage::ConversationImportAlreadyImported { .. }
+        | ServerMessage::ConversationImportAborted {}
+        | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::ImportedConversationStart { .. }
+        | ServerMessage::ImportedConversationEntry { .. }
+        | ServerMessage::ImportedConversationEnd { .. }
+        | ServerMessage::TranscriptSnapshotStart { .. }
+        | ServerMessage::TranscriptTurn { .. }
+        | ServerMessage::TranscriptModelCallUsage { .. }
+        | ServerMessage::TranscriptModelCallsEnd { .. }
+        | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptTextEntry { .. }
+        | ServerMessage::TranscriptContent { .. }
+        | ServerMessage::TranscriptSnapshotEnd { .. }
+        | ServerMessage::SessionEvent { .. }
+        | ServerMessage::ProviderTextDelta { .. }
+        | ServerMessage::ReviewTargetCreated { .. }
+        | ServerMessage::ReviewRunStarted { .. }
+        | ServerMessage::ReviewPassActivated { .. }
+        | ServerMessage::ReviewPassCompleted { .. }
+        | ServerMessage::ReviewFindingsRecorded { .. }
+        | ServerMessage::ReviewFindingEventRecorded { .. }
+        | ServerMessage::ReviewExternalLinkReserved { .. }
+        | ServerMessage::ReviewExternalLinkAttached { .. }
+        | ServerMessage::ReviewTarget { .. }
+        | ServerMessage::ReviewRun { .. }
+        | ServerMessage::ReviewFinding { .. }
+        | ServerMessage::ReviewFindingsStart { .. }
+        | ServerMessage::ReviewFindingItem { .. }
+        | ServerMessage::ReviewFindingsEnd { .. }
+        | ServerMessage::ReviewOrchestrationStarted { .. }
+        | ServerMessage::ReviewOrchestrationAdvanced { .. }
+        | ServerMessage::ReviewOrchestration { .. } => BlobUploadResponse::Unexpected,
     }
 }
 
@@ -815,7 +887,29 @@ async fn execute(
     };
     let prepared_blob = match &arguments.command {
         Command::BlobUpload { source } => Some(open_blob_source(source)?),
-        _ => None,
+        Command::Create { .. }
+        | Command::Place { .. }
+        | Command::Continue { .. }
+        | Command::Compact { .. }
+        | Command::Session(_)
+        | Command::Goal(_)
+        | Command::Imported { .. }
+        | Command::List
+        | Command::Templates
+        | Command::Search(_)
+        | Command::Conversations(_)
+        | Command::Send { .. }
+        | Command::Steer { .. }
+        | Command::Model { .. }
+        | Command::Transcript { .. }
+        | Command::Follow { .. }
+        | Command::Chat { .. }
+        | Command::Reconcile { .. }
+        | Command::Review(_)
+        | Command::Stop { .. }
+        | Command::Approve { .. }
+        | Command::Deny { .. }
+        | Command::Import { .. } => None,
     };
     let system_prompt_text = match &arguments.command {
         Command::Create {
@@ -1141,7 +1235,7 @@ async fn upload_blob(
     if expected_length_bytes.value() == 0 {
         return Err(ClientError::Input("blob source must be nonempty"));
     }
-    file.seek(std::io::SeekFrom::Start(0))
+    file.seek(SeekFrom::Start(0))
         .await
         .map_err(|source| ClientError::blob_source_file(&path, source))?;
     let mut connection = client
@@ -1173,7 +1267,11 @@ async fn upload_blob(
             message,
             detail,
         } => return Err(ClientError::remote(code, message, detail)),
-        _ => {
+        BlobUploadResponse::AlreadyPresent { .. }
+        | BlobUploadResponse::Begun { .. }
+        | BlobUploadResponse::Appended(_)
+        | BlobUploadResponse::Committed { .. }
+        | BlobUploadResponse::Unexpected => {
             return Err(ClientError::Protocol(
                 "blob upload begin returned an unexpected response",
             ));
@@ -1211,7 +1309,11 @@ async fn upload_blob(
                 message,
                 detail,
             } => return Err(ClientError::remote(code, message, detail)),
-            _ => {
+            BlobUploadResponse::Begun { .. }
+            | BlobUploadResponse::AlreadyPresent { .. }
+            | BlobUploadResponse::Appended(_)
+            | BlobUploadResponse::Committed { .. }
+            | BlobUploadResponse::Unexpected => {
                 return Err(ClientError::Protocol(
                     "blob upload append returned an unexpected response",
                 ));
@@ -1240,9 +1342,14 @@ async fn upload_blob(
             message,
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
-        _ => Err(
-            ClientError::Protocol("blob upload commit returned an unexpected response").mutation(),
-        ),
+        BlobUploadResponse::Begun { .. }
+        | BlobUploadResponse::AlreadyPresent { .. }
+        | BlobUploadResponse::Appended(_)
+        | BlobUploadResponse::Committed { .. }
+        | BlobUploadResponse::Unexpected => Err(ClientError::Protocol(
+            "blob upload commit returned an unexpected response",
+        )
+        .mutation()),
     }
 }
 
@@ -7705,13 +7812,9 @@ mod tests {
             io::Error::new(io::ErrorKind::PermissionDenied, "fixture denied"),
         );
 
-        assert_eq!(
-            failure.to_string(),
-            format!(
-                "the blob upload source file '{}' could not be read: fixture denied",
-                path.display()
-            )
-        );
+        expect_test::expect![[r#"
+            the blob upload source file 'fixture.bin' could not be read: fixture denied"#]]
+        .assert_eq(&failure.to_string());
     }
 
     /// INV-060: opening a FIFO as an upload source is nonblocking and rejects
