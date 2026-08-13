@@ -628,7 +628,7 @@ async fn serve_connections(
         inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
-        blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
+        blob_read_budget: blob_read_budget(),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
         blob_store_registry: dependencies.blob_store_registry,
@@ -1123,6 +1123,10 @@ async fn acquire_import_waiter_permit(
 
 fn try_acquire_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
     budget.try_acquire_owned().ok()
+}
+
+fn blob_read_budget() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS))
 }
 
 async fn acquire_review_command_permit(
@@ -13903,6 +13907,9 @@ impl ProtocolError {
                     "the follow stream fell behind; reconnect for a fresh snapshot"
                 }
                 ErrorCode::Unavailable => "the requested operation is unavailable",
+                ErrorCode::PublicationAmbiguous => {
+                    "the blob publication is ambiguous; retry the exact upload"
+                }
                 ErrorCode::CommitAmbiguous => {
                     "the mutation commit is ambiguous; retry the exact command"
                 }
@@ -14825,14 +14832,15 @@ mod tests {
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
         MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError, PendingConversationImport,
-        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
-        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
-        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
+        MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError,
+        PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
+        ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
+        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
+        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        admit_snapshot_reader, admitted_user_content, blob_read_budget,
         blob_upload_begin_preflight, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
@@ -15597,14 +15605,15 @@ mod tests {
     /// process-wide capacity.
     #[test]
     fn inv060_blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
-        let budget = Arc::new(Semaphore::new(1));
-        let held = try_acquire_blob_read_permit(Arc::clone(&budget))
-            .ok_or_else(|| io::Error::other("the first direct read is admitted"))?;
+        let budget = blob_read_budget();
+        let held = Arc::clone(&budget)
+            .try_acquire_many_owned(u32::try_from(MAX_CONCURRENT_BLOB_READS)?)
+            .map_err(io::Error::other)?;
 
         assert_eq!(MAX_CONCURRENT_BLOB_READS, 16);
         assert!(try_acquire_blob_read_permit(Arc::clone(&budget)).is_none());
         drop(held);
-        assert!(try_acquire_blob_read_permit(budget).is_some());
+        assert_eq!(budget.available_permits(), MAX_CONCURRENT_BLOB_READS);
         Ok(())
     }
 
