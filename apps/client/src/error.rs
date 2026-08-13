@@ -129,7 +129,7 @@ impl ClientError {
     pub(crate) fn mutation(self) -> Self {
         match self {
             Self::Remote {
-                code: ErrorCode::CommitAmbiguous,
+                code: ErrorCode::PublicationAmbiguous | ErrorCode::CommitAmbiguous,
                 ..
             } => Self::AmbiguousMutation,
             Self::Remote { .. }
@@ -342,6 +342,7 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Rejected => "rejected",
         ErrorCode::ResyncRequired => "resync_required",
         ErrorCode::Unavailable => "unavailable",
+        ErrorCode::PublicationAmbiguous => "publication_ambiguous",
         ErrorCode::CommitAmbiguous => "commit_ambiguous",
         ErrorCode::Internal => "internal",
     }
@@ -876,6 +877,20 @@ mod tests {
         let error = ClientError::remote(
             ErrorCode::CommitAmbiguous,
             "the commit response was lost".to_owned(),
+            ErrorDetail::none(),
+        )
+        .mutation();
+
+        expect![[r#"
+            the mutation outcome may be ambiguous; retry the original command with the same arguments and exact input, using any printed recovery values"#]]
+        .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn publication_ambiguous_mutation_names_the_complete_replay_inputs() {
+        let error = ClientError::remote(
+            ErrorCode::PublicationAmbiguous,
+            "the publication response was lost".to_owned(),
             ErrorDetail::none(),
         )
         .mutation();
