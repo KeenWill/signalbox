@@ -837,6 +837,7 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
             .await?,
     );
     complete_thread_resolve(&pool, 0x90_100).await?;
+    let post_mutation_poll = event_store.begin_observation().await?;
     let unchanged = event_store
         .commit(
             &repository,
@@ -844,7 +845,8 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(reopened.clone()),
                 Vec::new(),
-            ),
+            )
+            .observed_after(post_mutation_poll),
         )
         .await?;
     assert_eq!(unchanged_generation(unchanged), first_generation);
@@ -963,6 +965,72 @@ async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt()
     Ok(())
 }
 
+/// A resolved state fetched before a session resolve completed cannot consume
+/// that receipt or suppress the user's earlier transition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pre_mutation_user_resolution_does_not_consume_later_resolve_receipt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let rule = thread_resolved_rule()?;
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let open = thread_observation(RepoWatchThreadState::Open)?;
+    let first_generation = committed_generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(open.clone()),
+                    Vec::new(),
+                ),
+            )
+            .await?,
+    );
+
+    let user_poll = event_store.begin_observation().await?;
+    let resolved = thread_observation(RepoWatchThreadState::Resolved)?;
+    complete_thread_resolve(&pool, 0x90_180).await?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(&open),
+        &resolved,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(resolved.clone()),
+                events,
+            )
+            .observed_after(user_poll),
+        )
+        .await?;
+    let event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the user resolution event is pending");
+    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+        .evaluate(
+            event,
+            &rule,
+            &resolved,
+            &TemplateResolver,
+            dispatch_context(),
+        )
+        .await?;
+
+    assert_dispatched(outcome);
+    Ok(())
+}
+
 /// Dispatch waits while an exact mutation is in flight, then reconciles the
 /// completed receipt to the already-stored provider events.
 #[tokio::test(flavor = "multi_thread")]
@@ -1066,6 +1134,17 @@ async fn provider_event_before_tool_completion_is_reconciled_before_dispatch()
                 }),
         )
         .await?;
+    let durable_cause: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_event_self_cause
+              WHERE event_id = $1
+         )",
+    )
+    .bind(event.id().as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(durable_cause);
     let reconciled =
         RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
             .evaluate(

@@ -1488,17 +1488,7 @@ async fn record_github_write_observations(
            FROM repo_watch_github_write_receipt AS receipt
           WHERE (
                 receipt.operation_kind <> 'thread_resolve'
-                OR $3::timestamptz IS NULL
-                OR receipt.recorded_at <= $3
-                OR EXISTS (
-                    SELECT 1
-                      FROM pull_requests AS pull_request
-                      CROSS JOIN LATERAL jsonb_array_elements(
-                          pull_request.document -> 'threads'
-                      ) AS thread(value)
-                     WHERE thread.value ->> 'thread' = receipt.thread_id
-                       AND thread.value ->> 'state' = 'resolved'
-                )
+                OR ($3::timestamptz IS NOT NULL AND receipt.recorded_at <= $3)
             )
             AND NOT EXISTS (
                 SELECT 1
