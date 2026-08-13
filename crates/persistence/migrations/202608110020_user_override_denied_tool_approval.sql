@@ -374,6 +374,9 @@ BEGIN
           FROM tool_request AS request
           JOIN tool_approval_user_override AS armed
             ON armed.denied_request_id = NEW.override_denied_request_id
+          JOIN model_call_user_override AS frozen
+            ON frozen.model_call_id = request.producing_model_call_id
+           AND frozen.denied_request_id = armed.denied_request_id
           JOIN tool_request AS denied_request
             ON denied_request.request_id = armed.denied_request_id
          WHERE request.request_id = NEW.request_id
