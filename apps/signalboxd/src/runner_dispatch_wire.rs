@@ -342,11 +342,13 @@ mod tests {
             .expect("the fixture profile name is portable")
     }
 
+    fn wire_arguments() -> serde_json::Value {
+        serde_json::json!({"argv": ["printf", "runner"]})
+    }
+
     fn arguments() -> NormalizedToolArguments {
-        NormalizedToolArguments::try_from_provider_text(String::from(
-            r#"{"argv":["printf","runner"]}"#,
-        ))
-        .expect("the fixture arguments are canonical")
+        NormalizedToolArguments::try_from_provider_text(wire_arguments().to_string())
+            .expect("the fixture arguments are canonical")
     }
 
     fn registration() -> ValidatedRunnerRegistration {
@@ -499,7 +501,7 @@ mod tests {
                 effect_class: EffectClass::Pure,
                 credential_profile: None,
                 grant_revision: None,
-                normalized_arguments: serde_json::json!({"argv": ["printf", "runner"]}),
+                normalized_arguments: wire_arguments(),
                 result_bounds: ResultBounds::version_one(),
             })
         );
@@ -531,7 +533,7 @@ mod tests {
             dispatch,
             Message::Dispatch(Dispatch {
                 correlation: wire_correlation(),
-                normalized_arguments: serde_json::json!({"argv": ["printf", "runner"]}),
+                normalized_arguments: wire_arguments(),
             })
         );
     }
@@ -566,7 +568,7 @@ mod tests {
                     signalbox_runner_wire::PositiveU64::try_new(1)
                         .expect("the fixture grant revision is positive"),
                 ),
-                normalized_arguments: serde_json::json!({"argv": ["printf", "runner"]}),
+                normalized_arguments: wire_arguments(),
                 result_bounds: ResultBounds::version_one(),
             })
         );
