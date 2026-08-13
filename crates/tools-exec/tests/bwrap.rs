@@ -2,7 +2,8 @@
 //!
 //! `real_bwrap_profile_confines_or_proves_typed_host_refusal` runs the actual
 //! `bwrap` binary against the compiled `signalbox-exec-supervisor` and asserts
-//! either genuine filesystem confinement or a typed host-refusal outcome;
+//! both the daemon-local and runner-restricted request profiles either confine
+//! genuinely or return a typed host-refusal outcome;
 //! `real_bwrap_gate` decides when that check is mandatory (CI) versus skipped
 //! (unsupported local host, unless opted in).
 
@@ -39,7 +40,7 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
         .ok_or("tools-exec manifest is not nested under the workspace root")?
         .canonicalize()?;
     let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
-    let mut runner = SandboxedCommandRunner::try_new(process_runner, root)?;
+    let mut runner = SandboxedCommandRunner::try_new(process_runner, &root)?;
     let arguments = ExecArguments {
         program: String::from("test"),
         arguments: vec![String::from("!"), String::from("-e"), String::from("/home")],
@@ -119,7 +120,24 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     let missing_result = runner.try_run(missing_arguments).await?;
 
-    assert_real_bwrap_spawn_failure(missing_result)
+    assert_real_bwrap_spawn_failure(missing_result)?;
+
+    let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
+    let mut runner = SandboxedCommandRunner::try_new_runner_restricted(
+        process_runner,
+        &root,
+        &[std::path::PathBuf::from("/usr")],
+    )?;
+    let restricted_arguments = ExecArguments {
+        program: String::from("test"),
+        arguments: vec![String::from("!"), String::from("-e"), String::from("/home")],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let restricted_result = runner.try_run(restricted_arguments).await?;
+
+    assert_real_bwrap_result(restricted_result, ci)
 }
 
 fn real_bwrap_gate(

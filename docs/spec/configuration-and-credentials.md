@@ -22,6 +22,10 @@ profile does and does not provide are verified against this PR
 The runner's configured execution-program identities and startup pinning are
 verified against this PR (`agent/runner-exec-program-configuration`).
 
+The process core's pinned projection of runner `read_only_paths` into the
+runner-restricted bubblewrap request is verified against this PR
+(`agent/runner-strict-sandbox-profile`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
