@@ -53,7 +53,7 @@ Options:
 /// Bumped whenever the majority, tie, or stability algorithms change, so
 /// before/after scorecards with identical replay metadata still declare
 /// which analysis produced their summaries.
-const SCORING_SEMANTICS_VERSION: u32 = 2;
+const SCORING_SEMANTICS_VERSION: u32 = 3;
 
 /// Closed scorecard grouping; deserialization is the single source of truth,
 /// so an unknown spelling fails the corpus load and a new variant fails
@@ -553,7 +553,11 @@ async fn run(options: RunOptions) -> Result<(), String> {
         // One observation cannot establish stability across repeats, so a
         // single-repeat run reports stability as unmeasured rather than
         // perfectly stable.
-        let stable = (options.repeats >= 2 && complete).then_some(counts.len() == 1);
+        let stable = if counts.len() > 1 {
+            Some(false)
+        } else {
+            (options.repeats >= 2 && complete).then_some(true)
+        };
         // A tie is an equal leading count, not any majority-less spread: two
         // approvals against one denial with a failed fourth repeat is a
         // partial 2-1 lead, not a tie.
