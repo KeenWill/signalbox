@@ -424,6 +424,11 @@ impl RepositoryWatchTask {
         let previous = cursor
             .as_ref()
             .map(|cursor| cursor.candidate().observation());
+        let observation_started_at = self
+            .store
+            .begin_observation()
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         let observation = self.poller.poll(previous).await?;
         let events = derive_repo_watch_events(
             &self.repository,
@@ -440,7 +445,8 @@ impl RepositoryWatchTask {
                     cursor.as_ref().map(|cursor| cursor.generation()),
                     RepoWatchCursorCandidate::new(observation),
                     events,
-                ),
+                )
+                .observed_after(observation_started_at),
             )
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;

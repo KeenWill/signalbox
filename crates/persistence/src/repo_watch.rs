@@ -124,6 +124,7 @@ pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Box<[RepoWatchEvent]>,
+    observation_started_at: Option<sqlx::types::time::OffsetDateTime>,
 }
 
 impl RepoWatchCommitRequest {
@@ -136,7 +137,14 @@ impl RepoWatchCommitRequest {
             expected_generation,
             candidate,
             events: events.into_boxed_slice(),
+            observation_started_at: None,
         }
+    }
+
+    /// Records the database-clock boundary captured before this observation.
+    pub const fn observed_after(mut self, boundary: RepoWatchObservationBoundary) -> Self {
+        self.observation_started_at = Some(boundary.0);
+        self
     }
 
     pub const fn expected_generation(&self) -> Option<RepoWatchCursorGeneration> {
@@ -151,6 +159,10 @@ impl RepoWatchCommitRequest {
         &self.events
     }
 }
+
+/// Database-clock boundary captured before one provider observation begins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchObservationBoundary(sqlx::types::time::OffsetDateTime);
 
 /// Outcome of one atomic cursor-and-event commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -391,6 +403,17 @@ impl PostgresRepoWatchStore {
         Self { pool }
     }
 
+    /// Captures an ordering boundary before a provider poll starts.
+    pub async fn begin_observation(
+        &self,
+    ) -> Result<RepoWatchObservationBoundary, RepoWatchStoreError> {
+        sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&self.pool)
+            .await
+            .map(RepoWatchObservationBoundary)
+            .map_err(RepoWatchStoreError::Database)
+    }
+
     pub async fn load_cursor(
         &self,
         repository: &RepositorySlug,
@@ -437,8 +460,13 @@ impl PostgresRepoWatchStore {
         {
             if request.events().is_empty() {
                 let cursor = current.clone();
-                record_github_write_observations(&mut transaction, repository, cursor.generation())
-                    .await?;
+                record_github_write_observations(
+                    &mut transaction,
+                    repository,
+                    cursor.generation(),
+                    request.observation_started_at,
+                )
+                .await?;
                 transaction.commit().await.map_err(|error| {
                     if commit_failure_is_ambiguous(&error) {
                         RepoWatchStoreError::CommitAmbiguous(error)
@@ -469,7 +497,14 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
-        insert_events(&mut transaction, repository, generation, request.events()).await?;
+        insert_events(
+            &mut transaction,
+            repository,
+            generation,
+            request.events(),
+            request.observation_started_at,
+        )
+        .await?;
         transaction.commit().await.map_err(|error| {
             if commit_failure_is_ambiguous(&error) {
                 RepoWatchStoreError::CommitAmbiguous(error)
@@ -1354,8 +1389,15 @@ async fn insert_events(
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
     events: &[RepoWatchEvent],
+    observation_started_at: Option<sqlx::types::time::OffsetDateTime>,
 ) -> Result<(), RepoWatchStoreError> {
-    record_github_write_observations(transaction, repository, generation).await?;
+    record_github_write_observations(
+        transaction,
+        repository,
+        generation,
+        observation_started_at,
+    )
+    .await?;
     for (index, event) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
@@ -1427,6 +1469,7 @@ async fn record_github_write_observations(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
+    observation_started_at: Option<sqlx::types::time::OffsetDateTime>,
 ) -> Result<(), RepoWatchStoreError> {
     sqlx::query(
         "WITH pull_requests AS (
@@ -1443,7 +1486,21 @@ async fn record_github_write_observations(
          )
          SELECT receipt.tool_attempt_id, $1, $2
            FROM repo_watch_github_write_receipt AS receipt
-          WHERE NOT EXISTS (
+          WHERE (
+                receipt.operation_kind <> 'thread_resolve'
+                OR $3::timestamptz IS NULL
+                OR receipt.recorded_at <= $3
+                OR EXISTS (
+                    SELECT 1
+                      FROM pull_requests AS pull_request
+                      CROSS JOIN LATERAL jsonb_array_elements(
+                          pull_request.document -> 'threads'
+                      ) AS thread(value)
+                     WHERE thread.value ->> 'thread' = receipt.thread_id
+                       AND thread.value ->> 'state' = 'resolved'
+                )
+            )
+            AND NOT EXISTS (
                 SELECT 1
                   FROM repo_watch_github_write_observation AS observed
                  WHERE observed.tool_attempt_id = receipt.tool_attempt_id
@@ -1494,6 +1551,7 @@ async fn record_github_write_observations(
     )
     .bind(repository.as_str())
     .bind(generation_to_i64(generation))
+    .bind(observation_started_at)
     .execute(&mut **transaction)
     .await?;
     Ok(())
