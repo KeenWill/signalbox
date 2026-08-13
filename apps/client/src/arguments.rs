@@ -116,6 +116,7 @@ pub(crate) enum Command {
         digest: CanonicalBlobDigest,
         offset_bytes: CanonicalU64,
         length_bytes: CanonicalU64,
+        output: PathBuf,
     },
     Reconcile {
         session_id: CanonicalUuid,
@@ -460,7 +461,7 @@ enum BlobSubcommand {
     Upload(BlobUploadArguments),
     /// Print bounded catalog facts for one digest.
     Metadata(BlobMetadataArguments),
-    /// Write one exact verified byte range to standard output.
+    /// Write one exact verified byte range to a new output file.
     Read(BlobReadArguments),
 }
 
@@ -482,9 +483,14 @@ struct BlobReadArguments {
     /// Exact tagged lowercase SHA-256 identity.
     digest: CanonicalBlobDigest,
     /// Zero-based byte offset.
+    #[arg(long = "offset", value_name = "DECIMAL")]
     offset_bytes: u64,
     /// Positive byte count, at most 4,194,304.
+    #[arg(long = "length", value_name = "DECIMAL")]
     length_bytes: u64,
+    /// New file that receives only the verified range bytes.
+    #[arg(long, value_name = "FILE")]
+    output: PathBuf,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2079,6 +2085,7 @@ pub(crate) fn parse(
                 digest: arguments.digest,
                 offset_bytes: CanonicalU64::new(arguments.offset_bytes),
                 length_bytes: CanonicalU64::new(arguments.length_bytes),
+                output: arguments.output,
             },
         },
         CliCommand::Reconcile(arguments) => Command::Reconcile {
@@ -4353,14 +4360,30 @@ mod tests {
     #[test]
     fn blob_read_maps_exact_decimal_range() {
         let digest = "sha256:abababababababababababababababababababababababababababababababab";
-        let parsed = parse(["blob", "read", digest, "7", "2"].map(Into::into))
-            .expect("the grouped blob read command parses");
+        let offset_bytes = 7_u64;
+        let length_bytes = 2_u64;
+        let offset_argument = offset_bytes.to_string();
+        let length_argument = length_bytes.to_string();
+        let output = Path::new("range.bin");
+        let parsed = parse([
+            OsString::from("blob"),
+            OsString::from("read"),
+            OsString::from(digest),
+            OsString::from("--offset"),
+            OsString::from(offset_argument),
+            OsString::from("--length"),
+            OsString::from(length_argument),
+            OsString::from("--output"),
+            output.as_os_str().to_owned(),
+        ])
+        .expect("the grouped blob read command parses");
         let ParseOutcome::Run(Arguments {
             command:
                 Command::BlobRead {
                     digest: parsed,
-                    offset_bytes,
-                    length_bytes,
+                    offset_bytes: parsed_offset,
+                    length_bytes: parsed_length,
+                    output: parsed_output,
                 },
             ..
         }) = parsed
@@ -4369,8 +4392,9 @@ mod tests {
         };
 
         assert_eq!(parsed.to_string(), digest);
-        assert_eq!(offset_bytes.value(), 7);
-        assert_eq!(length_bytes.value(), 2);
+        assert_eq!(parsed_offset.value(), offset_bytes);
+        assert_eq!(parsed_length.value(), length_bytes);
+        assert_eq!(parsed_output, output);
     }
 
     #[test]
