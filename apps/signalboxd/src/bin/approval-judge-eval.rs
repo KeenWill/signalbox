@@ -424,6 +424,30 @@ async fn run(options: RunOptions) -> Result<(), String> {
         definition_context_window_tokens,
         route.credential_profile(),
     );
+    let operation_contract = match route.adapter() {
+        ModelAdapter::ClaudeCli => {
+            let runtime = configuration
+                .claude_cli()
+                .ok_or_else(|| String::from("Claude CLI route has no runtime configuration"))?;
+            format!(
+                "{operation_contract}\u{0}cli_executable={}\u{0}cli_mcp_bridge_executable={}\u{0}cli_working_directory={}",
+                runtime.executable().display(),
+                runtime.mcp_bridge_executable().display(),
+                runtime.working_directory().display(),
+            )
+        }
+        ModelAdapter::CodexCli => {
+            let runtime = configuration
+                .codex_cli()
+                .ok_or_else(|| String::from("Codex CLI route has no runtime configuration"))?;
+            format!(
+                "{operation_contract}\u{0}cli_executable={}\u{0}cli_working_directory={}",
+                runtime.executable().display(),
+                runtime.working_directory().display(),
+            )
+        }
+        ModelAdapter::Anthropic | ModelAdapter::OpenAi => operation_contract,
+    };
     let contract_digest = stable_digest(operation_contract.as_bytes());
     let rendered_digest = stable_digest(rendered_payloads.as_bytes());
     // The judge only ever sees requests the router marks Delegated; a case
