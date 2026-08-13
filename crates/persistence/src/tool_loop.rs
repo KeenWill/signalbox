@@ -27,15 +27,16 @@ use signalbox_domain::{
     DurableCommandId, EndedToolAttempt, GoalGeneration, NormalizedToolArguments,
     PreparedDecideToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, RunnerToolAttemptAuthorization,
-    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
-    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
-    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
-    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
-    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
+    ResolvedContextFrontierSnapshot, RunnerCapabilityClass, RunnerGeneration, RunnerId,
+    RunnerToolAttemptAuthorization, SelectedToolExecutionLocus, SemanticTranscriptEntryPayload,
+    SessionId, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
+    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
+    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
+    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
+    ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -222,6 +223,15 @@ impl PostgresToolLoopRepository {
             credential_families: None,
             cache_inclusive_input_targets: HashSet::new(),
         }
+    }
+
+    /// Loads one immutable logical request without granting execution authority.
+    pub async fn load_request(
+        &self,
+        request: ToolRequestId,
+    ) -> Result<Option<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        load_request_by_id(&mut connection, request).await
     }
 
     /// Uses the shared pool plus immutable model-call configuration required
@@ -2039,7 +2049,9 @@ async fn load_requests(
 ) -> Result<Vec<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text, approval_posture
+                arguments_kind, arguments_text, approval_posture,
+                execution_locus_kind, execution_runner_id,
+                execution_registration_revision, execution_capability_class
            FROM tool_request
           WHERE producing_model_call_id = $1
           ORDER BY request_ordinal",
@@ -2088,6 +2100,63 @@ pub(crate) fn decode_request(
             .into());
         }
     };
+    let execution_runner: Option<Uuid> = row.try_get("execution_runner_id")?;
+    let execution_revision: Option<Decimal> = row.try_get("execution_registration_revision")?;
+    let execution_class: Option<String> = row.try_get("execution_capability_class")?;
+    let execution_locus_kind = required::<String>(&row, "execution_locus_kind")?;
+    let execution_locus = match execution_locus_kind.as_str() {
+        "daemon" => {
+            if execution_runner.is_some()
+                || execution_revision.is_some()
+                || execution_class.is_some()
+            {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("tool request execution locus").into(),
+                );
+            }
+            SelectedToolExecutionLocus::Daemon
+        }
+        "exact_runner" => {
+            if execution_class.is_some() {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("tool request execution locus").into(),
+                );
+            }
+            let runner = execution_runner.map(RunnerId::from_uuid).ok_or(
+                ToolLoopCorruption::Inconsistent("tool request execution locus"),
+            )?;
+            let revision = execution_revision
+                .and_then(|value| u64::try_from(value).ok())
+                .and_then(RunnerGeneration::try_from_u64)
+                .ok_or(ToolLoopCorruption::Inconsistent(
+                    "tool request execution locus",
+                ))?;
+            SelectedToolExecutionLocus::ExactRunner {
+                runner,
+                registration_revision: revision,
+            }
+        }
+        "runner_capability_class" => {
+            if execution_runner.is_some() || execution_revision.is_some() {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("tool request execution locus").into(),
+                );
+            }
+            let class = execution_class
+                .and_then(|value| RunnerCapabilityClass::try_new(value).ok())
+                .ok_or(ToolLoopCorruption::Inconsistent(
+                    "tool request execution locus",
+                ))?;
+            SelectedToolExecutionLocus::RunnerCapabilityClass { class }
+        }
+        _ => {
+            return Err(ToolLoopCorruption::Unsupported {
+                field: "execution_locus_kind",
+                value: execution_locus_kind,
+            }
+            .into());
+        }
+    };
     Ok(ToolRequestReconstitutionInput::new(
         tool_request_id_from_uuid(required(&row, "request_id")?),
         session,
@@ -2098,6 +2167,7 @@ pub(crate) fn decode_request(
         arguments,
     )
     .with_approval_posture(posture)
+    .with_execution_locus(execution_locus)
     .into_request())
 }
 
@@ -2294,7 +2364,10 @@ async fn load_user_decision_receipts(
                 command.result_earliest_undecided_request_id,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
-                request.approval_posture,
+                request.approval_posture, request.execution_locus_kind,
+                request.execution_runner_id,
+                request.execution_registration_revision,
+                request.execution_capability_class,
                 request.producing_model_call_id, request.session_id,
                 request.turn_id
            FROM decide_tool_request_command AS command
@@ -3219,6 +3292,8 @@ pub(crate) async fn load_request_by_id(
     let row = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
                 arguments_kind, arguments_text, approval_posture,
+                execution_locus_kind, execution_runner_id,
+                execution_registration_revision, execution_capability_class,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = $1",
@@ -3250,6 +3325,8 @@ pub(crate) async fn load_requests_by_id(
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
                 arguments_kind, arguments_text, approval_posture,
+                execution_locus_kind, execution_runner_id,
+                execution_registration_revision, execution_capability_class,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = ANY($1)",

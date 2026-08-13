@@ -55,11 +55,14 @@ implementation were verified through PR #314
 automatic machinery. Session-delegation semantic rendering and its
 provider-neutral bridge were verified against this PR (`agent/delegation`). The
 runner-placement rendering is verified against this PR; the executable
-session-tool snapshot paragraph remains the foundation proposal at the bottom of
-its implementing stack and becomes verified only with its child pull requests.
-Availability successor calls are the foundation proposal at the bottom of their
-implementing stack and become verified only with its child pull requests.
-Invariant tags cite [docs/invariants.md](../invariants.md).
+session-tool snapshot value and its propagation into durable tool requests are
+verified against this PR (`agent/tool-request-execution-locus`). Capability-
+derived snapshot construction remains unimplemented; the corresponding selection
+paragraphs remain the foundation proposal at the bottom of their implementing
+stack and become verified only with their child pull requests. Availability
+successor calls are the foundation proposal at the bottom of their implementing
+stack and become verified only with its child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -324,6 +327,17 @@ definitions and accepts `ToolCall` completion parts only with a matching
 `ToolUse` finish reason. A tool absent from the snapshot is an unknown proposal
 for that operation even if another session or a later registration can execute
 it. Provider-native tool types remain inside the bridge.
+
+The prepared-operation representation and provider bridge implement that paired
+definition/locus value together with its frozen initial approval. Runner entries
+admit only runner policy's confirm or automatic outcomes and reject both a
+daemon locus and daemon blanket provenance. The model-call terminal transition
+copies its exact selected locus into every resulting durable `ToolRequest`; an
+unknown proposal remains fail-closed on the daemon locus. The current production
+snapshot source still wraps the daemon-local catalog as daemon-locus entries.
+Capability-derived filtering and runner-locus selection are committed
+unimplemented functionality; no present production model call advertises a
+runner-locus entry.
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native

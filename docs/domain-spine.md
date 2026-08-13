@@ -4015,6 +4015,7 @@ pub enum ToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         approval: InitialToolApproval,
+        execution_locus: SelectedToolExecutionLocus,
     },
 }
 impl ToolResponsePartIdentity {
@@ -4023,6 +4024,12 @@ impl ToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         approval: InitialToolApproval,
+    ) -> Self;
+    pub const fn tool_call_at_locus(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        approval: InitialToolApproval,
+        execution_locus: SelectedToolExecutionLocus,
     ) -> Self;
 }
 pub struct ToolRoundModelCallIdentities { /* private */ }
@@ -4043,6 +4050,7 @@ pub enum StoppedToolResponsePartIdentity {
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
         approval: InitialToolApproval,
+        execution_locus: SelectedToolExecutionLocus,
     },
 }
 impl StoppedToolResponsePartIdentity {
@@ -4052,6 +4060,13 @@ impl StoppedToolResponsePartIdentity {
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
         approval: InitialToolApproval,
+    ) -> Self;
+    pub const fn tool_call_at_locus(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
+        execution_locus: SelectedToolExecutionLocus,
     ) -> Self;
 }
 pub struct StoppedToolRoundModelCallIdentities { /* private */ }
@@ -4524,10 +4539,20 @@ impl ToolUsingAssistantResponseError {
     pub fn into_parts(self) -> Vec<AssistantResponsePart>;
 }
 
+pub enum SelectedToolExecutionLocus {
+    Daemon,
+    ExactRunner {
+        runner: RunnerId,
+        registration_revision: RunnerGeneration,
+    },
+    RunnerCapabilityClass {
+        class: RunnerCapabilityClass,
+    },
+}
 pub struct ToolRequest { /* private */ }
 // sealed live producer: definitive model-call tool-round transition
 impl ToolRequest {
-    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments(), approval_posture()
+    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments(), approval_posture(), execution_locus()
 }
 pub struct ToolRequestReconstitutionInput { /* private */ }
 impl ToolRequestReconstitutionInput {
@@ -4541,6 +4566,7 @@ impl ToolRequestReconstitutionInput {
         arguments: NormalizedToolArguments,
     ) -> Self;
     pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
+    pub fn with_execution_locus(self, locus: SelectedToolExecutionLocus) -> Self;
     pub fn into_request(self) -> ToolRequest;
 }
 
@@ -6416,6 +6442,19 @@ pub enum ModelToolResultContent {
     Delegation(DelegationOutcome),
 }
 
+pub struct ExecutableToolSnapshotEntry { /* private */ }
+impl ExecutableToolSnapshotEntry {
+    pub fn runner(
+        definition: ToolDefinition,
+        execution_locus: SelectedToolExecutionLocus,
+        initial_approval: InitialToolApproval,
+    ) -> Option<Self>;
+    pub fn daemon(
+        definition: ToolDefinition,
+        posture: DangerousToolAutoApproval,
+    ) -> Self;
+    // accessors: definition(), execution_locus(), initial_approval()
+}
 pub struct PreparedModelOperation { /* private */ }
 pub struct ResolvedRunnerPlacementConversationEntry { /* private */ }
 impl ResolvedRunnerPlacementConversationEntry {
@@ -6433,7 +6472,7 @@ impl PreparedModelOperation {
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
         system_prompt: Option<SessionSystemPrompt>,
-        tools: Box<[ToolDefinition]>,
+        tools: Box<[ExecutableToolSnapshotEntry]>,
         tool_entries: &[ResolvedToolConversationEntry],
         runner_placement_entries: &[ResolvedRunnerPlacementConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError>;
@@ -10915,7 +10954,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_execution                            | 51                    |
 | domain: context_frontier                           | 6                     |
 | domain: semantic_entry                             | 4                     |
-| domain: tool                                       | 45                    |
+| domain: tool                                       | 46                    |
 | domain: tool_attempt                               | 27                    |
 | domain: tool_execution                             | 20                    |
 | domain: provider_evidence                          | 5                     |
@@ -10928,7 +10967,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 93                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **796 (+12 free fn)** |
+| **signalbox-domain total**                         | **797 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10943,7 +10982,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 33 (incl. 8 traits)   |
+| application: model_execution                       | 34 (incl. 8 traits)   |
 | application: tool_loop                             | 26 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
@@ -10959,4 +10998,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **281 (+1 free fn)**  |
+| **signalbox-application total**                    | **282 (+1 free fn)**  |

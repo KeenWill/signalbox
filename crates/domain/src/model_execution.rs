@@ -2177,7 +2177,7 @@ impl CompletedModelCallIdentities {
 }
 
 /// Fresh identities and initial policy for one ordered tool-response part.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolResponsePartIdentity {
     /// One semantic assistant-text entry.
     Text {
@@ -2192,6 +2192,8 @@ pub enum ToolResponsePartIdentity {
         request: ToolRequestId,
         /// The explicit initial approval outcome selected by application policy.
         approval: InitialToolApproval,
+        /// Executable locus frozen by the producing model operation.
+        execution_locus: crate::SelectedToolExecutionLocus,
     },
 }
 
@@ -2207,10 +2209,26 @@ impl ToolResponsePartIdentity {
         request: ToolRequestId,
         approval: InitialToolApproval,
     ) -> Self {
+        Self::tool_call_at_locus(
+            entry,
+            request,
+            approval,
+            crate::SelectedToolExecutionLocus::Daemon,
+        )
+    }
+
+    /// Constructs a tool-part identity with its exact frozen executable locus.
+    pub const fn tool_call_at_locus(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        approval: InitialToolApproval,
+        execution_locus: crate::SelectedToolExecutionLocus,
+    ) -> Self {
         Self::ToolCall {
             entry,
             request,
             approval,
+            execution_locus,
         }
     }
 }
@@ -2256,7 +2274,7 @@ impl ToolRoundModelCallIdentities {
 
 /// Fresh identities for one response part when an applied interrupt closes
 /// newly proposed tools instead of continuing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoppedToolResponsePartIdentity {
     /// One semantic assistant-text entry.
     Text {
@@ -2273,6 +2291,8 @@ pub enum StoppedToolResponsePartIdentity {
         closed_result_entry: SemanticTranscriptEntryId,
         /// Frozen policy outcome for the request.
         approval: InitialToolApproval,
+        /// Executable locus frozen by the producing model operation.
+        execution_locus: crate::SelectedToolExecutionLocus,
     },
 }
 
@@ -2289,11 +2309,29 @@ impl StoppedToolResponsePartIdentity {
         closed_result_entry: SemanticTranscriptEntryId,
         approval: InitialToolApproval,
     ) -> Self {
+        Self::tool_call_at_locus(
+            entry,
+            request,
+            closed_result_entry,
+            approval,
+            crate::SelectedToolExecutionLocus::Daemon,
+        )
+    }
+
+    /// Constructs one closed tool proposal with its frozen executable locus.
+    pub const fn tool_call_at_locus(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
+        execution_locus: crate::SelectedToolExecutionLocus,
+    ) -> Self {
         Self::ToolCall {
             entry,
             request,
             closed_result_entry,
             approval,
+            execution_locus,
         }
     }
 }
@@ -3906,6 +3944,7 @@ fn assemble_tool_round(
                     entry,
                     request,
                     approval,
+                    execution_locus,
                 },
             ) => {
                 if !used_entries.insert(entry) || !used_requests.insert(request) {
@@ -3925,6 +3964,7 @@ fn assemble_tool_round(
                     ordinal,
                     proposal.clone(),
                     approval,
+                    execution_locus,
                 );
                 match approval.resolution(request) {
                     Some(resolution) => automatic_approvals.push(resolution),
@@ -4072,6 +4112,7 @@ fn assemble_stopped_tool_round(
                     request,
                     closed_result_entry,
                     approval,
+                    execution_locus,
                 },
             ) => {
                 if !used_entries.insert(entry)
@@ -4094,6 +4135,7 @@ fn assemble_stopped_tool_round(
                     ordinal,
                     proposal.clone(),
                     approval,
+                    execution_locus,
                 ));
                 closed_result_entries.push(SemanticTranscriptEntry::from_validated_parts(
                     closed_result_entry,
