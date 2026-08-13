@@ -27,9 +27,12 @@ existing-pin offer dispatch composition is re-verified through this PR
 (`agent/runner-dispatch-application-composition`). Durable lease-claim admission
 is re-verified through this PR (`agent/runner-lease-claim-transaction`). The
 application tool-loop handoff for a runner-selected prepared attempt is
-re-verified through this PR (`agent/tool-loop-runner-offer-handoff`). The atomic
-claimed-lease and physical-attempt result boundary is re-verified through this
-PR (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
+re-verified through this PR (`agent/tool-loop-runner-offer-handoff`). The
+production composition from that handoff through durable offer dispatch and the
+shared connection broker is re-verified through this PR
+(`agent/daemon-runner-tool-offer-adapter`). The atomic claimed-lease and
+physical-attempt result boundary is re-verified through this PR
+(`agent/runner-lease-result-transaction`). Immutable normalized dispatch
 arguments on every lease and its durable readback are re-verified through this
 PR (`agent/runner-lease-argument-binding`). Exact daemon projection of sealed
 lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
@@ -249,10 +252,14 @@ route, and hands the frame to the broker. Both requests supply the selected
 runner and registration revision from the executable-tool snapshot; neither can
 substitute an enrollment identity for that frozen locus. The application
 tool-loop now crosses a typed runner-offer port for a runner-selected prepared
-attempt before any local executor authority. No production daemon composition
-implements that port or invokes the dispatcher yet. Inbound workspace and
-operation-failure frames remain unimplemented and fail closed. Inbound
-`lease_claim` and `result` instead take the durable boundaries described under
+attempt before any local executor authority. The production daemon installs an
+exact-runner adapter for that port, selects the initial-pin or existing-pin
+transaction from durable placement state, and shares the connection runtime's
+broker with the dispatcher. A capability-class locus remains unavailable until
+its committed current-runner selection boundary exists; the adapter never
+chooses that runner implicitly. Inbound workspace and operation-failure frames
+remain unimplemented and fail closed. Inbound `lease_claim` and `result` instead
+take the durable boundaries described under
 [runner leases](#effect-classes-and-runner-leases).
 
 **Committed unimplemented functionality.** No runner surface serves the
