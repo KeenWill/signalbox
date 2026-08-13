@@ -1033,14 +1033,7 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     .await?;
 
     assert_eq!(prepared.session_context().goal(), Some(&statement));
-    match &achieved {
-        GoalTransitionOutcome::Applied(_) => {}
-        GoalTransitionOutcome::GoalNotAttached
-        | GoalTransitionOutcome::Rejected(_)
-        | GoalTransitionOutcome::NotCurrentGoalTurn => {
-            panic!("the concurrent achievement must apply: {achieved:?}")
-        }
-    }
+    assert_goal_transition_applied(&achieved);
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(parked.judge_state, "terminal");
     assert_eq!(parked.recommendation, "escalate_to_human");

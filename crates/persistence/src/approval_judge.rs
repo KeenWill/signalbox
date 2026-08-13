@@ -1534,10 +1534,7 @@ mod tests {
         let read = judged_turn_goal_statement(stopped.generations(), Some(generation(1)));
         let in_force = judged_turn_authority_in_force(stopped.generations(), Some(generation(1)));
 
-        let [snapshot] = stopped.generations() else {
-            panic!("the stopped lineage holds exactly its one generation")
-        };
-        assert_eq!(read, Ok(Some(snapshot.statement().clone())));
+        assert_eq!(read, Ok(Some(stopped.current().statement().clone())));
         assert_eq!(in_force, Ok(None));
     }
 
@@ -1567,10 +1564,7 @@ mod tests {
 
         let in_force = judged_turn_authority_in_force(goal.generations(), Some(generation(1)));
 
-        let [snapshot] = goal.generations() else {
-            panic!("the commissioned lineage holds exactly its one generation")
-        };
-        assert_eq!(in_force, Ok(Some(snapshot.statement().clone())));
+        assert_eq!(in_force, Ok(Some(goal.current().statement().clone())));
     }
 
     /// The ordinary case: nothing moved while the judge was deciding, so the
