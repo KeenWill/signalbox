@@ -15622,9 +15622,10 @@ mod tests {
         );
     }
 
-    /// INV-060: direct blob reads never wait for the process-wide bound.
+    /// INV-060: direct blob-read admission exposes one fixed non-waiting
+    /// process-wide capacity.
     #[test]
-    fn inv060_blob_read_admission_is_non_waiting_and_bounded() -> Result<(), Box<dyn Error>> {
+    fn inv060_blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
         let budget = Arc::new(Semaphore::new(1));
         let held = try_acquire_blob_read_permit(Arc::clone(&budget))
             .ok_or_else(|| io::Error::other("the first direct read is admitted"))?;
