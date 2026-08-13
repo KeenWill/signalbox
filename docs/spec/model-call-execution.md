@@ -13,6 +13,9 @@ messages were verified against this PR
 The session-aware executable-tool snapshot source boundary is verified against
 this PR (`agent/runner-executable-tool-snapshot-source`).
 
+The PostgreSQL runner-placement snapshot adapter is verified against this PR
+(`agent/runner-postgres-executable-tool-snapshot`).
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
@@ -341,9 +344,18 @@ snapshot source still wraps the daemon-local catalog as daemon-locus entries.
 Model-call orchestration asks an injected `ExecutableToolSnapshotSource` for the
 session's ordered snapshot before provider capability preparation, and a
 classified source failure stops before provider work. The default source wraps
-the daemon catalog exactly as before. The PostgreSQL capability-derived source
-and its runner-locus selection remain committed unimplemented functionality; no
-present production model call advertises a runner-locus entry.
+the daemon catalog exactly as before. The injectable PostgreSQL source reads one
+durable placement and its live current registration in a repeatable-read
+snapshot, asks the placement aggregate for its exact runner definitions, loci,
+and pair approvals, and merges those with daemon definitions in canonical name
+order. A shared name must match model definition, permission, and mapped effect;
+a daemon-capable declaration selects the daemon when that executor is present,
+while a runner-only declaration cannot be laundered through a same-named local
+executor. The temporary singleton boundary permits one live capability-class
+candidate and fails closed if storage ever exposes an ambiguous selection. No
+present production composition installs this source, so production model calls
+still advertise no runner-locus entry; composing it is committed unimplemented
+functionality.
 
 Every message keeps its source-qualified semantic-entry reference and its
 content-authority provenance. Why: inherited entries need not come from a native
