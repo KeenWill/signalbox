@@ -23,7 +23,7 @@ use presentation::{
 };
 use rustix::{
     fd::OwnedFd,
-    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
+    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fchmod, fstat, openat, statat},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -1489,6 +1489,9 @@ async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError>
     )
     .map_err(std::io::Error::from)
     .map_err(|source| ClientError::blob_output_file(path, source))?;
+    fchmod(&descriptor, Mode::RUSR | Mode::WUSR)
+        .map_err(std::io::Error::from)
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
     let mut file = tokio::fs::File::from_std(File::from(descriptor));
     file.write_all(bytes)
         .await
