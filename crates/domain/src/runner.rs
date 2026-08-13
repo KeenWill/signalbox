@@ -16,9 +16,9 @@ use crate::{
     ApprovedToolRequest, AuthorizedToolAttempt, DurableCommandId, EndedToolAttempt,
     NormalizedToolArguments, RunnerAuthenticationId, RunnerEnrollmentId, RunnerEnrollmentRequestId,
     RunnerId, RunnerLeaseId, SessionId, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
-    ToolAttemptId, ToolBatch, ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass,
-    ToolName, ToolPermissionDefault, TurnId, WorkspaceManifestId,
-    WorkspaceProvisioningAuthorizationId,
+    ToolAttemptId, ToolAttemptObservation, ToolAttemptTransitionFailure, ToolBatch,
+    ToolBatchExecutionFailure, ToolDecisionSource, ToolEffectClass, ToolName,
+    ToolPermissionDefault, TurnId, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId,
 };
 
 /// Exact user-selected successor for one lost session placement.
@@ -1941,6 +1941,30 @@ pub struct RunnerLeaseCorrelation {
     pub generation: RunnerGeneration,
 }
 
+/// One exact claimed-lease completion paired with its terminal physical attempt.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerLeaseCompletion {
+    lease: RunnerLease,
+    attempt: EndedToolAttempt,
+}
+
+impl RunnerLeaseCompletion {
+    /// Borrows the terminal lease aggregate.
+    pub const fn lease(&self) -> &RunnerLease {
+        &self.lease
+    }
+
+    /// Borrows the terminal physical-attempt history.
+    pub const fn attempt(&self) -> &EndedToolAttempt {
+        &self.attempt
+    }
+
+    /// Returns the atomically committable terminal pair.
+    pub fn into_parts(self) -> (RunnerLease, EndedToolAttempt) {
+        (self.lease, self.attempt)
+    }
+}
+
 /// Complete caller-supplied identities for one initial lease offer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerLeaseOfferRequest {
@@ -1982,6 +2006,42 @@ pub struct RunnerToolAttemptAuthorization {
     approved: ApprovedToolRequest,
     authorized: AuthorizedToolAttempt,
     retry_evidence: Option<RunnerRetryAttemptEvidence>,
+}
+
+/// Canonical in-flight runner attempt authority used only to admit a result.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerToolResultAuthority {
+    approved: ApprovedToolRequest,
+    authorized: AuthorizedToolAttempt,
+}
+
+impl RunnerToolResultAuthority {
+    pub(crate) fn try_new(
+        approved: ApprovedToolRequest,
+        authorized: AuthorizedToolAttempt,
+    ) -> Result<Self, RunnerDomainError> {
+        let request = approved.request();
+        let correlation = authorized.correlation();
+        if request.id() != correlation.request()
+            || request.session() != correlation.session()
+            || request.turn() != correlation.turn()
+        {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        Ok(Self {
+            approved,
+            authorized,
+        })
+    }
+
+    /// Returns the exact physical-attempt dispatch correlation.
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
+        self.authorized.correlation()
+    }
+
+    fn into_parts(self) -> (ApprovedToolRequest, AuthorizedToolAttempt) {
+        (self.approved, self.authorized)
+    }
 }
 
 impl RunnerToolAttemptAuthorization {
@@ -2181,6 +2241,101 @@ impl RunnerLease {
         }
         self.state = RunnerLeaseState::Completed;
         Ok(self)
+    }
+
+    /// Applies one exact runner observation and completes its claimed lease.
+    pub fn complete_with_observation(
+        self,
+        authorization: RunnerToolResultAuthority,
+        correlation: RunnerLeaseCorrelation,
+        observation: ToolAttemptObservation,
+    ) -> Result<RunnerLeaseCompletion, RunnerDomainError> {
+        if authorization.correlation() != correlation.dispatch {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        let completed = self.complete(correlation)?;
+        let (approved, authorized) = authorization.into_parts();
+        if approved.request().name() != &completed.tool {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        let fence = authorized.executor_fence();
+        let (attempt, dispatch) = authorized.into_parts();
+        if dispatch != completed.dispatch {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        let attempt = attempt
+            .apply_terminal_observation(fence.bind(observation))
+            .map_err(|error| match error.failure() {
+                ToolAttemptTransitionFailure::CorrelationMismatch => {
+                    RunnerDomainError::CorrelationMismatch
+                }
+                ToolAttemptTransitionFailure::InvalidState
+                | ToolAttemptTransitionFailure::InvalidPreflightError
+                | ToolAttemptTransitionFailure::InvalidObservationError
+                | ToolAttemptTransitionFailure::EffectFreeCannotBeAmbiguous
+                | ToolAttemptTransitionFailure::InvalidChildWait => RunnerDomainError::InvalidState,
+            })?;
+        Ok(RunnerLeaseCompletion {
+            lease: completed,
+            attempt,
+        })
+    }
+
+    /// Verifies an exact replay against the already-recorded terminal pair.
+    pub fn verify_completed_observation(
+        self,
+        attempt: EndedToolAttempt,
+        correlation: RunnerLeaseCorrelation,
+        observation: ToolAttemptObservation,
+    ) -> Result<RunnerLeaseCompletion, RunnerDomainError> {
+        if self.state != RunnerLeaseState::Completed || self.correlation() != correlation {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        if attempt.attempt() != correlation.dispatch.attempt()
+            || attempt.request() != correlation.dispatch.request()
+            || attempt.session() != correlation.dispatch.session()
+            || attempt.turn() != correlation.dispatch.turn()
+            || attempt.issuing_attempt() != correlation.dispatch.issuing_attempt()
+            || attempt.generation() != correlation.dispatch.generation()
+            || attempt.effect_class() != tool_effect_class(self.effect)
+        {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        let matches = match (&observation, attempt.end()) {
+            (
+                ToolAttemptObservation::Completed { result: observed },
+                crate::ToolAttemptEnd::Completed { result: stored },
+            ) => observed == stored,
+            (
+                ToolAttemptObservation::KnownFailed { error: observed },
+                crate::ToolAttemptEnd::KnownFailed { error: stored },
+            ) => {
+                matches!(
+                    observed.kind(),
+                    crate::ToolExecutionErrorKind::ExecutionFailed
+                        | crate::ToolExecutionErrorKind::ResultTooLarge
+                ) && observed == stored
+            }
+            (ToolAttemptObservation::Ambiguous, crate::ToolAttemptEnd::Ambiguous) => {
+                attempt.effect_class() == ToolEffectClass::ExternalEffect
+            }
+            (
+                ToolAttemptObservation::Completed { .. }
+                | ToolAttemptObservation::KnownFailed { .. }
+                | ToolAttemptObservation::Ambiguous,
+                crate::ToolAttemptEnd::Completed { .. }
+                | crate::ToolAttemptEnd::KnownFailed { .. }
+                | crate::ToolAttemptEnd::AwaitingChild { .. }
+                | crate::ToolAttemptEnd::Ambiguous,
+            ) => false,
+        };
+        if !matches {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        Ok(RunnerLeaseCompletion {
+            lease: self,
+            attempt,
+        })
     }
 
     /// Classifies loss when runner execution may have occurred.
@@ -4653,9 +4808,10 @@ mod tests {
     use crate::{
         ApprovedToolRequest, DangerousToolAutoApproval, DecideToolRequest, DurableCommandId,
         ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, ToolApprovalDecision,
-        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptObservation,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolExecutionErrorKind,
         ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ToolResultContent, ToolResultText,
         test_support::{
             context_frontier_id, model_call_id, runner_authentication_id, runner_enrollment_id,
             runner_id, runner_lease_id, session_id, tool_attempt_id, tool_request_id,
@@ -6633,6 +6789,85 @@ mod tests {
 
         assert_eq!(loss.retry(), None);
         assert_eq!(loss.crash_attempt(), Some(expected_attempt));
+    }
+
+    #[test]
+    fn s31_inv011_inv021_inv043_exact_runner_observation_completes_lease_and_attempt() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation.clone())
+            .expect("the exact fence claims the offered lease");
+        let expected = ToolResultText::try_new("complete".to_owned())
+            .expect("the fixture result text is bounded");
+        let completion = claimed
+            .complete_with_observation(
+                claimed_batch("inspect", RunnerToolEffectClass::Pure)
+                    .resume_runner_result_attempt(tool_attempt_id(ATTEMPT))
+                    .expect("the canonical batch restores result-only authority"),
+                correlation,
+                ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(expected.clone()),
+                },
+            )
+            .expect("the exact claimed lease and runner observation complete together");
+
+        assert_eq!(completion.lease().state(), RunnerLeaseState::Completed);
+        assert_eq!(
+            completion.attempt().end(),
+            &ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(expected),
+            }
+        );
+    }
+
+    #[test]
+    fn s31_inv011_inv021_inv043_cross_wired_runner_authority_cannot_complete_lease() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation.clone())
+            .expect("the exact fence claims the offered lease");
+
+        assert_eq!(
+            claimed.complete_with_observation(
+                claimed_batch_with_issuing_attempt(
+                    "inspect",
+                    RunnerToolEffectClass::Pure,
+                    turn_attempt_id(0x7b01),
+                )
+                .resume_runner_result_attempt(tool_attempt_id(ATTEMPT))
+                .expect("the cross-wired batch restores its own result-only authority"),
+                correlation,
+                ToolAttemptObservation::KnownFailed {
+                    error: crate::ToolExecutionError::new(
+                        ToolExecutionErrorKind::ExecutionFailed,
+                        None,
+                    ),
+                },
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv011_inv021_inv043_effect_free_runner_cannot_report_ambiguous() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation.clone())
+            .expect("the exact fence claims the offered lease");
+
+        assert_eq!(
+            claimed.complete_with_observation(
+                claimed_batch("inspect", RunnerToolEffectClass::Pure)
+                    .resume_runner_result_attempt(tool_attempt_id(ATTEMPT))
+                    .expect("the canonical batch restores result-only authority"),
+                correlation,
+                ToolAttemptObservation::Ambiguous,
+            ),
+            Err(RunnerDomainError::InvalidState)
+        );
     }
 
     #[test]

@@ -33,9 +33,11 @@ the failed-attempt operator event together with the credential-shaped code-host
 detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
 decision surface through PR #291 (`agent/turn-control-verbs`), and
 runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
-through PR #311 (`agent/session-templates-spec`), and the exact-origin
-`web_fetch` egress policy and complete bounded file-patch lookup through PR #330
+(`agent/runner-protocol-domain`). Atomic runner lease/attempt result admission
+is verified through this PR (`agent/runner-lease-result-transaction`).
+Template-derived blanket creation was verified through PR #311
+(`agent/session-templates-spec`), and the exact-origin `web_fetch` egress policy
+and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
