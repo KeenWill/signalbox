@@ -13,28 +13,63 @@ use std::{
     time::Duration,
 };
 
+use signalbox_application::{
+    EligibilityPass, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
+    InProcessToolDispatchGate, ModelCallCredentialReference, RunnerLeaseClaimRequest,
+    RunnerLeaseResultRequest, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, ToolCatalog, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator,
+};
 use signalbox_domain::{
-    CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-    RunnerSandboxProfile, RunnerSelector, RunnerToolPermissionOverrides, RunnerWorkingDirectory,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, TranscriptAncestry,
+    CreateSession, DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
+    ProviderModelIdentity, ResolvedProviderTarget, RunnerCatalog, RunnerLease,
+    RunnerLeaseCorrelation, RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, SubmitInputAppliedResult, SubmitInputResult, ToolAdmissibleLoci,
+    ToolEffectClass, ToolName, ToolRequestId, TranscriptAncestry, UserContent,
     WorkingDirectorySelection, WorkspaceRequirement,
+};
+use signalbox_model_provider_runtime::{
+    RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
+};
+use signalbox_model_runtime::{
+    AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, ExchangeFacts,
+    ModelOperation, ModelRuntime, ObservationSink, PreparationOutcome, ProviderReportedModel,
+    Script, ScriptedModel, ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage,
+    ToolCallId, ToolCallProposal, ToolName as RuntimeToolName,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     disposable_test_container_labels, local_test_connection_options, migrate,
-    runner_protocol::{
-        RunnerConnectionCause, RunnerConnectionState, RunnerConnectionTransition,
-        RunnerConnectionTransitionOutcome,
+    model_execution::PostgresModelCallRepository,
+    process_read::{
+        ProcessReadRepository, ProcessToolExecution, ProcessToolExecutionResultDisposition,
+        ProcessTranscriptEntry,
     },
+    runner_protocol::{
+        PostgresExecutableToolSnapshotSource, RunnerConnectionCause, RunnerConnectionState,
+        RunnerConnectionTransition, RunnerConnectionTransitionOutcome, RunnerProtocolStore,
+    },
+    scheduler::PostgresEligibilitySweep,
     session_credentials::{SessionCredentialPin, SessionModelCredential},
+    start_eligible_turn::StartEligibleTurnRepository,
+    submit_input::SubmitInputRepository,
 };
 use signalbox_runner_wire::{Advertise, CanonicalUuid, Enroll, PositiveU64, Registered, Resume};
+use signalbox_tools_exec::{
+    CaptureCompleteness, ExecResult, ExecutionConfinement, OutputCapture, OutputEncoding,
+    ProcessOutcome, SANDBOXED_EXEC_NAME, SandboxedExecTool,
+};
 use signalboxd::{
-    LocalProcessListener,
+    ActivatedTurnExecution, ActivatedTurnPass, LocalProcessListener,
+    PostgresProviderModelExecution, PostgresRunnerToolOffer, RunnerConnectionBroker,
     runner_protocol_runtime::{
-        PostgresRunnerRegistrationService, RunnerEnrollmentAccepted, RunnerProtocolRuntime,
-        RunnerRegistrationFuture, RunnerRegistrationService, RunnerResumeAccepted,
+        PostgresRunnerRegistrationService, RunnerEnrollmentAccepted, RunnerLeaseOperationFuture,
+        RunnerLeaseOperationService, RunnerProtocolRuntime, RunnerRegistrationFuture,
+        RunnerRegistrationService, RunnerResumeAccepted,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -55,6 +90,13 @@ const DATABASE_NAME: &str = "signalbox_runner_process";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+const PROOF_MODEL_SELECTION: u128 = 0x540;
+const PROOF_MODEL_TARGET: u128 = 0x541;
+const PROOF_SESSION: u128 = 0x542;
+const PROOF_SESSION_COMMAND: u128 = 0x543;
+const PROOF_INPUT_COMMAND: u128 = 0x544;
+const PROOF_USER_CONTENT: &str = "run the generic sandboxed exec proof";
+const PROOF_OUTPUT: &str = "runner-proof";
 
 #[derive(Clone)]
 struct LossObservedRegistrationService {
@@ -102,6 +144,120 @@ impl RunnerRegistrationService for LossObservedRegistrationService {
             Ok(outcome)
         })
     }
+}
+
+#[derive(Clone)]
+struct ResultObservedLeaseOperations {
+    inner: RunnerProtocolStore,
+    completed: Arc<Mutex<Option<oneshot::Sender<RunnerLeaseCorrelation>>>>,
+}
+
+impl RunnerLeaseOperationService for ResultObservedLeaseOperations {
+    fn claim(
+        &self,
+        request: RunnerLeaseClaimRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+        RunnerLeaseOperationService::claim(&self.inner, request)
+    }
+
+    fn record_result(
+        &self,
+        request: RunnerLeaseResultRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+        let inner = self.inner.clone();
+        let completed = Arc::clone(&self.completed);
+        Box::pin(async move {
+            let lease = RunnerLeaseOperationService::record_result(&inner, request).await?;
+            let correlation = lease.correlation();
+            completed
+                .lock()
+                .expect("the result-observation sender lock remains available")
+                .take()
+                .expect("the runtime records one terminal runner result")
+                .send(correlation)
+                .expect("the result observer remains live");
+            Ok(lease)
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RecordingScriptedModel {
+    inner: Arc<ScriptedModel<ModelCallId>>,
+}
+
+impl ModelRuntime<ModelCallId> for RecordingScriptedModel {
+    type Prepared = ScriptedPrepared<ModelCallId>;
+
+    async fn prepare(
+        &self,
+        operation: ModelOperation<ModelCallId>,
+        cancellation: CancellationSignal,
+    ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
+        self.inner.prepare(operation, cancellation).await
+    }
+
+    async fn execute(
+        &self,
+        prepared: Self::Prepared,
+        sink: &mut (dyn ObservationSink<ModelCallId> + Send),
+        cancellation: CancellationSignal,
+    ) -> TerminalReport<ModelCallId> {
+        self.inner.execute(prepared, sink, cancellation).await
+    }
+}
+
+fn runner_configuration(
+    socket: &std::path::Path,
+    runner_root: &std::path::Path,
+    supervisor: &std::path::Path,
+    bubblewrap: &std::path::Path,
+    proof_configuration: &str,
+) -> String {
+    format!(
+        r#"version = 1
+{proof_configuration}daemon_socket_path = "{}"
+runner_root = "{}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
+read_only_paths = ["/usr"]
+allowed_network_hosts = []
+git_author_name = "Signalbox Test Runner"
+git_author_email = "runner-test@example.invalid"
+credentials = {{}}
+repositories = {{}}
+"#,
+        socket.display(),
+        runner_root.display(),
+        supervisor.display(),
+        bubblewrap.display(),
+    )
+}
+
+fn tool_use_script(arguments: &str) -> Script {
+    Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: Some(ProviderReportedModel::new("scripted-runner-proof")),
+        finish: CompletionFinish::ToolUse,
+        content: vec![AssistantPart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("runner-proof-call"),
+            name: RuntimeToolName::new(SANDBOXED_EXEC_NAME),
+            arguments_json: arguments.to_owned(),
+        })],
+        usage: TokenUsage::unreported(),
+    }))
+}
+
+fn completion_script() -> Script {
+    Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: Some(ProviderReportedModel::new("scripted-runner-proof")),
+        finish: CompletionFinish::EndTurn,
+        content: vec![AssistantPart::Text(String::from("runner result observed"))],
+        usage: TokenUsage::unreported(),
+    }))
 }
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -327,6 +483,337 @@ repositories = {{}}
         .await
         .expect("the daemon runner runtime stops before the integration deadline")
         .expect("the daemon runner runtime task joins")?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S30 / INV-042 / INV-043: a session placed on an actually spawned runner
+/// completes one generic exec-family call inside the restricted bubblewrap
+/// profile, and the transcript retains the exact runner execution object.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL, bubblewrap, and the packaged runner binaries"]
+async fn s30_inv042_inv043_spawned_runner_executes_restricted_generic_dispatch()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres().await?;
+    let directory = private_tempdir()?;
+    let socket = directory.path().join("runner.sock");
+    let runner_root = directory.path().join("runner-state");
+    let working_directory = directory.path().join("session-workspace");
+    let configuration_path = directory.path().join("runner.toml");
+    let runner_binary = std::path::Path::new(env!("CARGO_BIN_EXE_signalbox-runner"));
+    let supervisor_binary = std::path::Path::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+    let bubblewrap_binary = std::path::Path::new("/usr/bin/bwrap");
+    fs::create_dir(&working_directory)?;
+    fs::write(
+        &configuration_path,
+        runner_configuration(
+            &socket,
+            &runner_root,
+            supervisor_binary,
+            bubblewrap_binary,
+            "",
+        ),
+    )?;
+
+    let bootstrap_listener = LocalProcessListener::bind(&socket)?;
+    let bootstrap_service = PostgresRunnerRegistrationService::registration_only(pool.clone())
+        .expect("the registration-only runner catalog is valid");
+    let bootstrap_store = bootstrap_service.protocol_store();
+    let (bootstrap_shutdown_sender, bootstrap_shutdown) = watch::channel(false);
+    let bootstrap_runtime = tokio::spawn(
+        RunnerProtocolRuntime::new(bootstrap_listener, bootstrap_service).run(bootstrap_shutdown),
+    );
+    let mut bootstrap_runner = Command::new(runner_binary)
+        .arg("--config")
+        .arg(&configuration_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let bootstrap_stderr = bootstrap_runner
+        .stderr
+        .take()
+        .expect("the bootstrap runner stderr is piped");
+    let mut bootstrap_stderr = BufReader::new(bootstrap_stderr);
+    let mut enrollment_line = String::new();
+    timeout(
+        PROCESS_TIMEOUT,
+        bootstrap_stderr.read_line(&mut enrollment_line),
+    )
+    .await??;
+    let bootstrap_connections = bootstrap_store.load_nonterminal_connection_heads().await?;
+    assert_eq!(bootstrap_connections.len(), 1);
+    let enrollment = bootstrap_store
+        .load_enrollment(bootstrap_connections[0].enrollment())
+        .await?
+        .expect("the proof runner enrollment is durable");
+
+    bootstrap_shutdown_sender.send(true)?;
+    timeout(PROCESS_TIMEOUT, bootstrap_runtime)
+        .await
+        .expect("the bootstrap daemon runtime stops before the integration deadline")
+        .expect("the bootstrap daemon runtime task joins")?;
+    let bootstrap_status = timeout(PROCESS_TIMEOUT, bootstrap_runner.wait())
+        .await
+        .expect("the bootstrap runner stops after daemon shutdown")?;
+    assert!(bootstrap_status.success());
+
+    let sandboxed = SandboxedExecTool::try_new_production_with_bubblewrap(
+        &working_directory,
+        supervisor_binary,
+        bubblewrap_binary,
+    )?;
+    let (tool_catalog, tool_executor) = sandboxed.into_parts();
+    let tool_name = ToolName::try_new(SANDBOXED_EXEC_NAME.to_owned())
+        .expect("the committed generic exec-family tool name is valid");
+    let tool_definition = tool_catalog
+        .definition(&tool_name)
+        .expect("the generic exec-family catalog contains its declaration");
+    assert_eq!(
+        tool_definition.effect_class(),
+        ToolEffectClass::ExternalEffect
+    );
+    let runner_catalog = RunnerCatalog::try_new(
+        [],
+        [RunnerToolDeclaration::new(
+            tool_name.clone(),
+            RunnerToolModelDefinition::try_new(
+                tool_definition.description().to_owned(),
+                tool_definition.input_schema().as_str().to_owned(),
+            )
+            .expect("the compiled exec-family model definition is runner-admissible"),
+            tool_definition.permission_default(),
+            RunnerToolEffectClass::SideEffecting,
+            ToolAdmissibleLoci::RunnerOnly {
+                selector: RunnerSelector::Identity(enrollment.runner()),
+            },
+        )],
+        [],
+        [],
+        [RunnerSandboxProfile::WorkspaceRestricted],
+    )
+    .expect("the exact proof runner catalog is internally consistent");
+    let store = RunnerProtocolStore::new(pool.clone(), runner_catalog);
+    let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+    let broker = RunnerConnectionBroker::new();
+    let (result_sender, result_observer) = oneshot::channel();
+    let operations = ResultObservedLeaseOperations {
+        inner: store.clone(),
+        completed: Arc::new(Mutex::new(Some(result_sender))),
+    };
+    let listener = LocalProcessListener::bind(&socket)?;
+    let (shutdown_sender, shutdown) = watch::channel(false);
+    let runtime = tokio::spawn(
+        RunnerProtocolRuntime::new(listener, service)
+            .with_lease_operation_service(operations)
+            .with_connection_broker(broker.clone())
+            .run(shutdown),
+    );
+    fs::write(
+        &configuration_path,
+        runner_configuration(
+            &socket,
+            &runner_root,
+            supervisor_binary,
+            bubblewrap_binary,
+            "execution_proof = \"generic_sandboxed_exec\"\n",
+        ),
+    )?;
+    let mut runner = Command::new(runner_binary)
+        .arg("--config")
+        .arg(&configuration_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stderr = runner
+        .stderr
+        .take()
+        .expect("the proof runner stderr is piped");
+    let mut stderr = BufReader::new(stderr);
+    let mut resume_line = String::new();
+    timeout(PROCESS_TIMEOUT, stderr.read_line(&mut resume_line)).await??;
+    assert!(resume_line.contains("runner resumed"));
+
+    let session = SessionId::from_uuid(uuid::Uuid::from_u128(PROOF_SESSION));
+    let selection = DirectModelSelection::from_uuid(uuid::Uuid::from_u128(PROOF_MODEL_SELECTION));
+    let placement = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::Identity(enrollment.runner()),
+        working_directory: WorkingDirectorySelection::Exact(
+            RunnerWorkingDirectory::try_new(working_directory.display().to_string())
+                .expect("the absolute proof working directory is valid"),
+        ),
+        credential_profile: None,
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+        permission_overrides: RunnerToolPermissionOverrides::try_new([])
+            .expect("the proof carries no runner permission override"),
+    };
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(uuid::Uuid::from_u128(PROOF_SESSION_COMMAND)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+    )
+    .with_runner_placement(Some(placement))
+    .prepare(session)
+    .expect("the proof runner-placed session is preparable");
+    let credentials = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        "proof-model-family",
+        "proof-model-credential-reference",
+    )])
+    .expect("the synthetic proof model credential pin is valid");
+    CreateSessionRepository::new(pool.clone(), credentials)
+        .handle(creation)
+        .await?;
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let mut submit = SubmitInputService::new(
+        UuidV7SubmitInputIdGenerator,
+        SubmitInputRepository::new(pool.clone()),
+        nudge,
+        tool_dispatch_gate.clone(),
+    );
+    let submitted = submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(PROOF_INPUT_COMMAND)),
+            session,
+            UserContent::try_text(PROOF_USER_CONTENT.to_owned())
+                .expect("the proof user content is admitted"),
+            signalbox_domain::DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )?)
+        .await?;
+    assert!(matches!(
+        submitted,
+        SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    let start = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        uuid::Uuid::from_u128(PROOF_MODEL_TARGET),
+    ));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("the proof model target is unique");
+    let runtime_models =
+        RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target,
+            String::from("scripted-runner-proof"),
+            64,
+            200_000,
+        )?])?;
+    let arguments = serde_json::json!({
+        "program": "/usr/bin/printf",
+        "arguments": [PROOF_OUTPUT],
+        "timeout_seconds": 5,
+    })
+    .to_string();
+    let model_runtime = Arc::new(ScriptedModel::<ModelCallId>::following([
+        tool_use_script(&arguments),
+        completion_script(),
+    ]));
+    let provider = RuntimeModelCallProvider::new(
+        RecordingScriptedModel {
+            inner: Arc::clone(&model_runtime),
+        },
+        runtime_models,
+    );
+    let execution = PostgresProviderModelExecution::new(
+        PostgresModelCallRepository::new(
+            pool.clone(),
+            targets,
+            ModelCallCredentialReference::new("proof-model-credential-reference"),
+        ),
+        InProcessAttemptDispatchGate::default(),
+        provider,
+    )
+    .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
+    .with_runner_tool_offer(PostgresRunnerToolOffer::new(store.clone(), broker))
+    .with_executable_tool_snapshot_source(PostgresExecutableToolSnapshotSource::new(store.clone()));
+    ActivatedTurnPass::new(start, execution.clone())
+        .run(session)
+        .await?;
+    let completed_correlation = timeout(PROCESS_TIMEOUT, result_observer)
+        .await
+        .expect("the runner result commits before the integration deadline")?;
+    execution.resume_active(session).await?;
+
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the proof session transcript is readable");
+    assert_eq!(transcript.entries().len(), 5);
+    let (result_entry, result_request): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+        "SELECT entry.semantic_entry_id, attempt.request_id
+           FROM semantic_transcript_entry AS entry
+           JOIN tool_attempt AS attempt
+             ON attempt.attempt_id = entry.tool_result_attempt_id
+          WHERE entry.source_session_id = $1
+            AND entry.payload_kind = 'tool_execution_result'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let expected_result = serde_json::to_string(&ExecResult {
+        confinement: ExecutionConfinement::FilesystemConfined,
+        outcome: ProcessOutcome::Exited { code: Some(0) },
+        stdout: OutputCapture {
+            text: PROOF_OUTPUT.to_owned(),
+            completeness: CaptureCompleteness::Complete,
+            encoding: OutputEncoding::Utf8,
+        },
+        stderr: OutputCapture {
+            text: String::new(),
+            completeness: CaptureCompleteness::Complete,
+            encoding: OutputEncoding::Utf8,
+        },
+    })?;
+    assert_eq!(
+        transcript.entries()[2],
+        ProcessTranscriptEntry::ToolExecutionResult {
+            entry_index: 2,
+            source_session: session,
+            entry: signalbox_domain::SemanticTranscriptEntryId::from_uuid(result_entry),
+            request: ToolRequestId::from_uuid(result_request),
+            attempt: completed_correlation.dispatch.attempt(),
+            disposition: ProcessToolExecutionResultDisposition::Completed,
+            execution: ProcessToolExecution::Runner {
+                runner: enrollment.runner(),
+                lease: completed_correlation.lease,
+                placement_revision: completed_correlation.placement_revision,
+                lease_generation: completed_correlation.generation,
+                working_directory: Some(completed_correlation.working_directory),
+                sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            },
+            content: expected_result,
+        }
+    );
+    assert_eq!(model_runtime.received_operations().len(), 2);
+
+    shutdown_sender.send(true)?;
+    timeout(PROCESS_TIMEOUT, runtime)
+        .await
+        .expect("the proof daemon runtime stops before the integration deadline")
+        .expect("the proof daemon runtime task joins")?;
+    let runner_status = timeout(PROCESS_TIMEOUT, runner.wait())
+        .await
+        .expect("the proof runner stops after daemon shutdown")?;
+    assert!(runner_status.success());
     pool.close().await;
     drop(container);
     Ok(())
