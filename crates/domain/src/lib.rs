@@ -234,10 +234,10 @@ pub use runner::{
     RunnerToolPermissionOverrides, RunnerUnclaimedAttemptReauthorization, RunnerWorkingDirectory,
     SameRunnerRegistrationRecovery, SessionRunnerPin, SessionRunnerPlacement,
     SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceBranchName,
-    WorkspaceCapability, WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey,
-    WorkspaceRequirement, WorkspaceRevision,
+    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceRecovery,
+    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
