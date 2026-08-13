@@ -82,6 +82,8 @@ jobs:
           exit "$status"
       - name: Test user vocabulary checker
         run: python3 scripts/test_check_user_vocabulary.py
+      - name: Test domain-spine checker
+        run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
       - name: Test panic-gate checker
@@ -130,7 +132,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            067f7aaa5d2484a74e6097640a7ffde5a409ce572ecce249d56e00693e60e8b3
+            30eb83a0df59d5d3f6e3391438b210a812ac0ba3baa188f226fcd12482436445
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -290,7 +292,7 @@ jobs:
           cache-on-failure: true
           key: postgres-integration
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -399,7 +401,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive

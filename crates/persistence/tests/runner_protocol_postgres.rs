@@ -1512,6 +1512,35 @@ fn propagation_session(ordinal: u128) -> SessionId {
     ))
 }
 
+async fn insert_uncommitted_exact_placement(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+    runner: RunnerId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'workspace_restricted', 0, 'unpinned', 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(runner.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement
+            (session_id, event_ordinal)
+         VALUES ($1, 1)",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn insert_bounded_propagation_session_fixture(
     pool: &PgPool,
     runner: RunnerId,
@@ -4096,6 +4125,106 @@ async fn s32_inv044_runner_loss_cursor_rejects_premature_completion() -> Result<
     Ok(())
 }
 
+/// INV-044: an exact-identity placement that observes enrollment absence
+/// commits before the matching enrollment can create or complete a loss cursor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv044_pre_enrollment_placement_serializes_loss_cursor_creation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let expected_session = SessionId::from_uuid(uuid(SESSION));
+    let mut placement = pool.begin().await?;
+    insert_uncommitted_exact_placement(
+        &mut placement,
+        expected_session,
+        expected_enrollment.runner(),
+    )
+    .await?;
+    let mut enrollment_insert = Box::pin(store.insert_enrollment(&expected_enrollment));
+
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut enrollment_insert)
+        .await
+        .expect_err("enrollment must wait for the absent-baseline placement");
+    placement.commit().await?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, enrollment_insert).await??;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the serialized terminal connection owns its loss cursor");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.sessions(), &[expected_session]);
+    assert!(!page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: cursor completion waits for the runner-identity fence shared with
+/// exact-identity placement insertion before checking the affected set.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv044_loss_cursor_completion_serializes_on_runner_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    let mut placement_identity = pool.begin().await?;
+    sqlx::query("SELECT lock_runner_loss_identity($1)")
+        .bind(expected_enrollment.runner().into_uuid())
+        .execute(&mut *placement_identity)
+        .await?;
+    let mut completion = Box::pin(
+        sqlx::query(
+            "UPDATE runner_connection_loss_propagation
+                SET state_kind = 'completed'
+              WHERE enrollment_id = $1 AND loss_epoch = $2",
+        )
+        .bind(loss.enrollment().into_uuid())
+        .bind(Decimal::from(loss.loss_epoch().get()))
+        .execute(&pool),
+    );
+
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut completion)
+        .await
+        .expect_err("cursor completion must wait for placement's runner-identity fence");
+    placement_identity.commit().await?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, completion).await??;
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.sessions(), &[]);
+    assert!(page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
 /// INV-044: a fully projected loss cursor may transition once to completed.
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -5849,47 +5978,100 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
 #[ignore = "requires Docker"]
 async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
 -> Result<(), Box<dyn Error>> {
+    struct SerializationOutcome {
+        replacement_result: Result<
+            Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError>,
+            tokio::time::error::Elapsed,
+        >,
+        replacement_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        blocker_commit: Result<Result<(), sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
+    }
+
+    struct LeaseAdmissionOutcome {
+        replacement_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        blocker_commit: Result<Result<(), sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
+    }
+
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
-    let mut blocker = pool.begin().await?;
-    sqlx::query(
-        "SELECT enrollment_id
-           FROM runner_current_registration
-          WHERE enrollment_id = $1
-          FOR UPDATE",
-    )
-    .bind(expected_enrollment.enrollment().into_uuid())
-    .fetch_one(&mut *blocker)
-    .await?;
-    let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let replacement = tokio::spawn(async move {
-        tokio::time::timeout(
-            LOCK_COMPLETION_TIMEOUT,
-            replacement_store.register(&expected_enrollment, narrowed_advertisement()),
+    let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
+        let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT enrollment_id
+               FROM runner_current_registration
+              WHERE enrollment_id = $1
+              FOR UPDATE",
         )
-        .await
-    });
-    let replacement_observation =
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
-    let lease_store = tokio::spawn(async move {
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
-    });
-    let lease_observation =
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
-    let blocker_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocker.commit()).await;
-    let replacement_result = replacement.await;
-    let lease_result = lease_store.await;
-    let replacement_blocked = replacement_observation
+        .bind(expected_enrollment.enrollment().into_uuid())
+        .fetch_one(&mut *blocker)
+        .await?;
+        let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
+        let replacement = async move {
+            tokio::time::timeout(
+                LOCK_COMPLETION_TIMEOUT,
+                replacement_store.register(&expected_enrollment, narrowed_advertisement()),
+            )
+            .await
+        };
+        let lease_admission = async {
+            let replacement_observation =
+                tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+                    .await;
+            let lease_store = async move {
+                tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
+            };
+            let release_blocker = async {
+                let lease_observation = tokio::time::timeout(
+                    LOCK_COMPLETION_TIMEOUT,
+                    blocked_backends_reached(&pool, 2),
+                )
+                .await;
+                let blocker_commit =
+                    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocker.commit()).await;
+                (lease_observation, blocker_commit)
+            };
+            let (lease_result, (lease_observation, blocker_commit)) =
+                tokio::join!(lease_store, release_blocker);
+            LeaseAdmissionOutcome {
+                replacement_observation,
+                lease_observation,
+                blocker_commit,
+                lease_result,
+            }
+        };
+        let (replacement_result, lease_admission) = tokio::join!(replacement, lease_admission);
+        Ok::<_, Box<dyn Error>>(SerializationOutcome {
+            replacement_result,
+            replacement_observation: lease_admission.replacement_observation,
+            lease_observation: lease_admission.lease_observation,
+            blocker_commit: lease_admission.blocker_commit,
+            lease_result: lease_admission.lease_result,
+        })
+    })
+    .await;
+    let pool_close = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, pool.close()).await;
+    let outcome = serialization
+        .expect("registration replacement serialization must finish within its test deadline")?;
+    pool_close.expect("registration replacement pool cleanup must remain bounded");
+    let replacement_blocked = outcome
+        .replacement_observation
         .expect("registration replacement lock observation must remain bounded")?;
-    let lease_blocked =
-        lease_observation.expect("lease admission lock observation must remain bounded")?;
-    blocker_commit.expect("registration-head blocker commit must remain bounded")?;
-    replacement_result
-        .expect("registration replacement task must remain joinable")
-        .expect("registration replacement must finish within its task-owned timeout")?;
-    let rejected = lease_result
-        .expect("lease admission task must remain joinable")
-        .expect("lease admission must finish within its task-owned timeout")
+    let lease_blocked = outcome
+        .lease_observation
+        .expect("lease admission lock observation must remain bounded")?;
+    outcome
+        .blocker_commit
+        .expect("registration-head blocker commit must remain bounded")?;
+    outcome
+        .replacement_result
+        .expect("registration replacement must finish within its operation timeout")?;
+    let rejected = outcome
+        .lease_result
+        .expect("lease admission must finish within its operation timeout")
         .expect_err("withdrawn current availability cannot authorize the later lease");
 
     assert!(
@@ -5901,7 +6083,6 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         "lease admission must wait behind registration replacement"
     );
     assert_store_check_violation(rejected);
-    drop(pool);
     Ok(())
 }
 

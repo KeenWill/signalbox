@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The delegate denial-reason storage — the superseded decision-shape constraint
+and its byte-precise checks — was verified against this PR
+(`agent/judge-denial-reason`).
+
 The runner connection authority head, durable loss epoch, and lease offer/claim
 fences were verified against the parent slice (`agent/runner-loss-epoch`).
 Placement-relative lease-offer fencing was verified against the parent slice
@@ -20,6 +24,10 @@ against this PR (`agent/runner-awaiting-recovery-persistence`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
+
+The multipart accepted-input persistence paragraph below is the foundation
+proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
+with its implementing child stack.
 
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
@@ -48,9 +56,11 @@ was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
 extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
-posture storage were verified through PR #420 (`agent/approval-judge-storage`);
-the approval-judge lifecycle transactions were verified through this PR
+PR #384 (`agent/goal-mode-runtime`), with the appends owed when a generation
+binds an already-accepted turn verified against this PR
+(`agent/commission-binding`); and the approval-judge call, decision, and posture
+storage were verified through PR #420 (`agent/approval-judge-storage`); the
+approval-judge lifecycle transactions were verified through this PR
 (`agent/approval-judge-execution-support`); the approval-decision outbox is
 verified against this implementing change; the session-placement event, current
 head, and creation transaction were verified through PR #415
@@ -137,8 +147,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-two files, `202607180001` through
-`202608110006` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — seventy-five files, `202607180001` through
+`202608110015` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -241,7 +251,11 @@ Implemented table families (across the forward-only migrations):
   records dedicated approval-judge calls in the global model-call identity
   namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale;
+  recommendation, and rationale; migration `202608110014` supersedes its
+  decision-shape constraint so a delegate denial stores the checked reason
+  derived from its rationale, and backfills earlier delegate denials with the
+  same derivation, so a null reason means exactly one thing everywhere: the
+  rationale sanitizes to nothing;
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly
@@ -555,9 +569,11 @@ Representation rules, all enforced in the schema:
   rejection directly against its named turn's recorded `awaiting_tool_approval`
   wait, so a receipt naming a running or terminal turn cannot commit and
   therefore never replays as authoritative.
-- Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
-  `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
-  application admission bound.
+- Accepted user content is stored only in the mirrored ordered command and
+  `accepted_input` part satellites. Their parent completeness, ordinal,
+  structural, text-byte, attachment-metadata, and blob-correlation constraints
+  are owned by [blob storage](blob-storage.md#multipart-user-content); neither
+  parent retains a `content_text` column.
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
@@ -588,7 +604,7 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `update_session_placement`) and a kind-scoped `storage_version`. The gates above
 fix the current numbers: create-session records write version 7, imported-create
 records write version 5, replace-defaults records write version 4, and
-submit-input records write version 2; every other closed kind writes version 1.
+submit-input records write version 3; every other closed kind writes version 1.
 The four settings-bearing families require the migration's provider-default full
 settings or inherit-all overlay on every earlier supported version.
 Create-session records reconstitute version 1 with the disabled dangerous-tool
@@ -690,7 +706,11 @@ statements live in the schema instead:
 - the placement-loss baseline trigger in migration `202608110005` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
-  deriving the immutable baseline and before the placement row becomes visible.
+  deriving the immutable baseline and before the placement row becomes visible;
+  migration `202608110006` adds a transaction-level runner-identity advisory
+  lock between the scheduler and enrollment locks, and enrollment insertion and
+  loss-cursor completion take that same identity lock before they can publish
+  the competing fact.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -819,17 +839,26 @@ Locks per transaction, in acquisition order:
   authority trigger takes the `tool_request` row `FOR UPDATE` after the
   scheduler lock and before checking that no nonterminal judge remains.
 
-- **Approval-judge transactions** (prepare, authorize, complete, and fail): the
-  `session_scheduler` row `FOR UPDATE` is always the first Rust-issued explicit
-  lock. Preparation then inserts the call; its schema guard takes the exact
-  `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
-  `FOR UPDATE`, before checking for an existing decision and validating the
-  prepared call. Completion performs its guarded lifecycle transition under the
-  scheduler lock; at commit, the deferred decision-authority trigger then takes
-  the `tool_request` row `FOR UPDATE`. Authorization and failure need no
-  additional explicit lock. The shared scheduler-first prefix prevents
-  approval-judge, tool-loop, and lifecycle-transition transactions from holding
-  these rows in reverse order.
+- **Approval-judge transactions** (prepare, authorize, complete, and fail):
+  preparation, authorization, and failure take the `session_scheduler` row
+  `FOR UPDATE` as their first Rust-issued explicit lock. Preparation then
+  inserts the call; its schema guard takes the exact `tool_request` row
+  `FOR UPDATE`, followed by the active `turn_lifecycle` row `FOR UPDATE`, before
+  checking for an existing decision and validating the prepared call. Completion
+  first locks the session row `FOR NO KEY UPDATE` and only then the scheduler
+  row: it resolves the goal authority in force before committing a decision, and
+  a goal system transition — a model declaration or scheduler-failure blocking —
+  serializes on the session row without taking the scheduler row, so holding the
+  session row from before that read until commit is what makes a goal-closing
+  transition and the completion recheck mutually exclusive. Applied goal
+  commands take the scheduler row too, after that same session row. The session
+  row precedes the scheduler row because every transaction that locks both
+  acquires them in that order. Completion performs its guarded lifecycle
+  transition under the scheduler lock; at commit, the deferred
+  decision-authority trigger then takes the `tool_request` row `FOR UPDATE`.
+  Authorization and failure need no additional explicit lock. The shared
+  scheduler-lock position prevents approval-judge, tool-loop, and
+  lifecycle-transition transactions from holding these rows in reverse order.
 
 - **Delegated terminal-observation transactions**: after nonlocking reads of the
   call's turn and delegation identity, observation commit and authoritative
@@ -1149,21 +1178,22 @@ identifiers.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
-holding a `Prepared` call follows the same logical closure after ending the call
-known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
-wait. A persisted `stop_requested` attempt and `cancellation_requested` call
-reconstruct through their exact applied interrupt, end the abandoned attempt
-`after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
-ambiguous call without erasing stop intent. The schema guard
-(`turn_lifecycle_pending_steering_closed`) independently requires every pending
-row to be consumed or reclassified before terminalization. The same finite
-startup inventory includes every nonterminal dedicated compaction call. Under
-the session scheduler lock it requires exactly one matching pending command,
-terminalizes Prepared as `known_failed` or InFlight as `ambiguous`, and marks
-the command failed in the same transaction; disagreement fails closed and no
-summary or result frontier is synthesized. Why: a pending steering row is an
-accepted delivery obligation, so every recovery branch must account for it
-rather than block startup or strand it.
+holding a `Prepared` call proves that no send authorization existed, so startup
+validates its exact stored frontier and leaves the call, attempt, and turn
+unchanged for scheduler retry; an in-flight call recovers into the
+`awaiting_model_call_recovery` wait. A persisted `stop_requested` attempt and
+`cancellation_requested` call reconstruct through their exact applied interrupt,
+end the abandoned attempt `after_cancellation/lost`, and terminalize
+proof-bearing reconciliation for the ambiguous call without erasing stop intent.
+The schema guard (`turn_lifecycle_pending_steering_closed`) independently
+requires every pending row to be consumed or reclassified before
+terminalization. The same finite startup inventory includes every nonterminal
+dedicated compaction call. Under the session scheduler lock it requires exactly
+one matching pending command, terminalizes Prepared as `known_failed` or
+InFlight as `ambiguous`, and marks the command failed in the same transaction;
+disagreement fails closed and no summary or result frontier is synthesized. Why:
+a pending steering row is an accepted delivery obligation, so every recovery
+branch must account for it rather than block startup or strand it.
 
 An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
 does not rewrite its terminal ambiguous call. In the accepting transaction, the
@@ -1531,16 +1561,20 @@ successor turn and appends that correlated `input_accepted`; an applied
 stopped issued work becomes ambiguous; terminal reclassification of pending
 steering appends its correlated `input_accepted`. Goal-owned turn creation
 appends the same correlated `input_accepted`; dispatch authenticates its exact
-`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command. A
-stop or supersede that makes a queued goal turn ineligible appends
-`goal_turn_retired` in the same transaction; supersede appends retirement before
-the replacement `input_accepted`. The typed record names the exact queued,
-now-ineligible `goal_turn`, and dispatch rechecks that durable correlation.
-Model-call state transitions append `model_call_transition`, tool-round creation
-appends `tool_batch_transition { proposed }`, all-resolved result projection
-appends `tool_batch_transition { results_projected }`, and an external-effect
-ambiguity appends `tool_batch_transition { recovery_required }`. Completion
-closure appends `turn_completed`, refusal closure appends `turn_refused`, and
+`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command.
+Binding an already-accepted turn to a generation appends nothing, because the
+command that accepted that turn appended its correlated `input_accepted`
+already; dispatch authenticates that command, and the `goal_turn` row recording
+which generation the turn runs under does not disqualify it. A stop or supersede
+that makes a queued goal turn ineligible appends `goal_turn_retired` in the same
+transaction; supersede appends retirement before the replacement
+`input_accepted`. The typed record names the exact queued, now-ineligible
+`goal_turn`, and dispatch rechecks that durable correlation. Model-call state
+transitions append `model_call_transition`, tool-round creation appends
+`tool_batch_transition { proposed }`, all-resolved result projection appends
+`tool_batch_transition { results_projected }`, and an external-effect ambiguity
+appends `tool_batch_transition { recovery_required }`. Completion closure
+appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
 appends `turn_cancelled`, and live stopped ambiguity appends
 `turn_reconciliation_required`; completion of a context compaction appends

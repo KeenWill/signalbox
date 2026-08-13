@@ -4,6 +4,82 @@
 -- loss committed after that migration but before this one begins pending when
 -- an affected current placement still retains an older baseline.
 
+-- An exact-identity placement may begin before its runner enrolls. The runner
+-- identity advisory lock serializes that absence observation with enrollment
+-- insertion and with cursor completion, so an uncommitted null-baseline
+-- placement cannot appear behind a completed loss cursor.
+
+CREATE FUNCTION lock_runner_loss_identity(checked_runner uuid)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'signalbox.runner-loss-identity.' || checked_runner::text,
+            0
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION serialize_runner_enrollment_loss_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM lock_runner_loss_identity(NEW.runner_id);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_enrollment_00_serializes_loss_identity
+BEFORE INSERT ON runner_enrollment
+FOR EACH ROW
+EXECUTE FUNCTION serialize_runner_enrollment_loss_identity();
+
+CREATE FUNCTION serialize_runner_placement_loss_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    selected_runner uuid;
+BEGIN
+    -- This trigger runs immediately before the baseline trigger. It extends
+    -- that trigger's existing total order with the absence fence without
+    -- duplicating its baseline predicate.
+    PERFORM 1
+      FROM session_scheduler
+     WHERE session_id = NEW.session_id
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'runner placement lacks its session scheduler'
+            USING ERRCODE = '23514';
+    END IF;
+
+    selected_runner := COALESCE(
+        NEW.pinned_runner_id,
+        NEW.selector_runner_id,
+        NEW.lost_runner_id
+    );
+    IF selected_runner IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM lock_runner_loss_identity(selected_runner);
+    RETURN NEW;
+END;
+$$;
+
+ALTER TRIGGER runner_session_placement_00_sets_loss_baseline
+ON runner_session_placement_record
+RENAME TO runner_session_placement_01_sets_loss_baseline;
+
+CREATE TRIGGER runner_session_placement_00_serializes_loss_identity
+BEFORE INSERT ON runner_session_placement_record
+FOR EACH ROW
+EXECUTE FUNCTION serialize_runner_placement_loss_identity();
+
 CREATE TABLE runner_connection_loss_propagation (
     enrollment_id uuid NOT NULL,
     loss_epoch numeric(20, 0) NOT NULL,
@@ -91,6 +167,8 @@ CREATE FUNCTION guard_runner_connection_loss_propagation()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    lost_runner uuid;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'runner connection loss propagation is durable'
@@ -127,6 +205,13 @@ BEGIN
     THEN
         RAISE EXCEPTION 'runner connection loss propagation must advance monotonically'
             USING ERRCODE = '23514';
+    END IF;
+    IF NEW.state_kind = 'completed' THEN
+        SELECT runner_id
+          INTO STRICT lost_runner
+          FROM runner_enrollment
+         WHERE enrollment_id = NEW.enrollment_id;
+        PERFORM lock_runner_loss_identity(lost_runner);
     END IF;
     IF NEW.state_kind = 'pending'
        AND EXISTS (
