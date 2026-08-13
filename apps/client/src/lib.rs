@@ -47,7 +47,7 @@ use signalbox_process_protocol::{
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
     decode_server_line, encode_client_line, encode_server_line,
 };
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
 
@@ -1043,7 +1043,11 @@ async fn execute(
             digest,
             offset_bytes,
             length_bytes,
-        } => read_blob_chunk(&mut client, &mut output, digest, offset_bytes, length_bytes).await,
+            output,
+        } => {
+            let bytes = read_blob_chunk(&mut client, digest, offset_bytes, length_bytes).await?;
+            write_blob_output(&output, &bytes).await
+        }
         Command::Reconcile {
             session_id,
             turn_id,
@@ -1156,42 +1160,13 @@ async fn upload_blob(
     source: PreparedBlobSource,
 ) -> Result<(), ClientError> {
     let PreparedBlobSource { path, mut file } = source;
-    let byte_length = file
-        .metadata()
-        .await
-        .map_err(|source| ClientError::blob_source_file(&path, source))?
-        .len();
-    if byte_length == 0 {
+    let (expected_digest, expected_length_bytes) = hash_blob_source(&mut file, &path).await?;
+    if expected_length_bytes.value() == 0 {
         return Err(ClientError::Input("blob source must be nonempty"));
-    }
-    let mut digest = Sha256::new();
-    let mut observed_length = 0_u64;
-    let mut buffer = vec![0_u8; BLOB_HASH_BUFFER_BYTES];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|source| ClientError::blob_source_file(&path, source))?;
-        if read == 0 {
-            break;
-        }
-        observed_length = observed_length
-            .checked_add(u64::try_from(read).map_err(|_| {
-                ClientError::Protocol("blob source read length is not representable")
-            })?)
-            .ok_or(ClientError::Protocol("blob source length overflowed"))?;
-        digest.update(&buffer[..read]);
-    }
-    if observed_length != byte_length {
-        return Err(ClientError::Input(
-            "blob source length changed while it was hashed",
-        ));
     }
     file.seek(std::io::SeekFrom::Start(0))
         .await
         .map_err(|source| ClientError::blob_source_file(&path, source))?;
-    let expected_digest = CanonicalBlobDigest::from_bytes(digest.finalize().into());
-    let expected_length_bytes = CanonicalU64::new(byte_length);
     let mut connection = client
         .setup_request(ClientRequest::BeginBlobUpload {
             expected_digest,
@@ -1203,6 +1178,8 @@ async fn upload_blob(
             digest,
             byte_length,
         } if digest == expected_digest && byte_length == expected_length_bytes => {
+            verify_blob_source_unchanged(&mut file, &path, expected_digest, expected_length_bytes)
+                .await?;
             output.blob_uploaded(
                 digest,
                 byte_length.value(),
@@ -1321,11 +1298,10 @@ async fn read_blob_metadata(
 
 async fn read_blob_chunk(
     client: &mut ProcessClient,
-    output: &mut Output<'_>,
     digest: CanonicalBlobDigest,
     offset_bytes: CanonicalU64,
     length_bytes: CanonicalU64,
-) -> Result<(), ClientError> {
+) -> Result<Vec<u8>, ClientError> {
     if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
         return Err(ClientError::Input(
             "blob read length must be between 1 and 4194304 bytes",
@@ -1347,9 +1323,7 @@ async fn read_blob_chunk(
             && returned_offset == offset_bytes
             && u64::try_from(bytes.as_bytes().len()) == Ok(length_bytes.value()) =>
         {
-            output
-                .blob_bytes(bytes.as_bytes())
-                .map_err(ClientError::from)
+            Ok(bytes.into_bytes())
         }
         ServerMessage::Error {
             code,
@@ -1360,6 +1334,67 @@ async fn read_blob_chunk(
             "blob range returned an unexpected response",
         )),
     }
+}
+
+async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
+    let descriptor = openat(
+        CWD,
+        path,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(std::io::Error::from)
+    .map_err(|source| ClientError::blob_output_file(path, source))?;
+    let mut file = tokio::fs::File::from_std(File::from(descriptor));
+    file.write_all(bytes)
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    file.sync_all()
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))
+}
+
+async fn hash_blob_source(
+    file: &mut tokio::fs::File,
+    path: &Path,
+) -> Result<(CanonicalBlobDigest, CanonicalU64), ClientError> {
+    let mut digest = Sha256::new();
+    let mut observed_length = 0_u64;
+    let mut buffer = vec![0_u8; BLOB_HASH_BUFFER_BYTES];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|source| ClientError::blob_source_file(path, source))?;
+        if read == 0 {
+            break;
+        }
+        observed_length = observed_length
+            .checked_add(u64::try_from(read).map_err(|_| {
+                ClientError::Protocol("blob source read length is not representable")
+            })?)
+            .ok_or(ClientError::Protocol("blob source length overflowed"))?;
+        digest.update(&buffer[..read]);
+    }
+    Ok((
+        CanonicalBlobDigest::from_bytes(digest.finalize().into()),
+        CanonicalU64::new(observed_length),
+    ))
+}
+
+async fn verify_blob_source_unchanged(
+    file: &mut tokio::fs::File,
+    path: &Path,
+    expected_digest: CanonicalBlobDigest,
+    expected_length: CanonicalU64,
+) -> Result<(), ClientError> {
+    let (actual_digest, actual_length) = hash_blob_source(file, path).await?;
+    if actual_digest != expected_digest || actual_length != expected_length {
+        return Err(ClientError::Input(
+            "blob source changed after it was hashed",
+        ));
+    }
+    Ok(())
 }
 
 async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
@@ -5636,7 +5671,7 @@ mod tests {
         ffi::OsString,
         fs,
         io::{self, Cursor},
-        os::unix::fs::symlink,
+        os::unix::fs::{PermissionsExt, symlink},
         path::{Path, PathBuf},
         process::ExitCode,
         time::Duration,
@@ -5723,8 +5758,8 @@ mod tests {
         TurnTerminal, await_turn_terminal, blocker_recovery_snapshot_state, collect_import_paths,
         continue_imported, conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
-        import_conversation_file, imported, model_call_recovery_transition, open_blob_source,
-        open_scanned_import_source, placement_update_receipt_matches,
+        hash_blob_source, import_conversation_file, imported, model_call_recovery_transition,
+        open_blob_source, open_scanned_import_source, placement_update_receipt_matches,
         placement_update_rejection_matches, queued_turn_recovery, queued_turn_runner_recovery,
         read_blob_chunk, read_blob_metadata, read_delegation_content_file, read_goal_text_file,
         read_import_file, read_input, read_review_json_file, read_system_prompt_file,
@@ -5735,7 +5770,7 @@ mod tests {
         review_repair_state_is_coherent, run, search, selected_turn_recovery_transition,
         session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
         submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition, upload_blob,
+        tool_recovery_transition, upload_blob, write_blob_output,
     };
     use crate::{
         child_lifecycle_terminalization, error::ClientError, presentation::Output,
@@ -7809,6 +7844,87 @@ mod tests {
         Ok(())
     }
 
+    /// INV-060: a regular seekable source is nonempty when its hash pass reads
+    /// bytes even if its advisory metadata length is zero.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn inv060_blob_upload_counts_bytes_from_the_hash_pass() -> Result<(), Box<dyn Error>> {
+        let path = Path::new("/proc/version");
+        let mut source = open_blob_source(path)?;
+        let metadata_length = source.file.metadata().await?.len();
+
+        let (_digest, observed_length) = hash_blob_source(&mut source.file, path).await?;
+
+        assert_eq!(metadata_length, 0);
+        assert!(observed_length.value() > 0);
+        Ok(())
+    }
+
+    /// INV-060: an already-present receipt succeeds only after re-reading the
+    /// same descriptor and proving its identity is unchanged.
+    #[tokio::test]
+    async fn inv060_blob_upload_revalidates_source_before_deduplication()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let source_path = directory.path().join("blob.bin");
+        let original = b"catalogued source bytes";
+        let replacement = b"rewritten source bytes";
+        fs::write(&source_path, original)?;
+        let digest =
+            CanonicalBlobDigest::from_digest(signalbox_domain::BlobDigest::digest(original));
+        let byte_length = CanonicalU64::new(u64::try_from(original.len())?);
+        let listener = UnixListener::bind(&socket)?;
+        let rewritten_path = source_path.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let begin = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                begin.request(),
+                &ClientRequest::BeginBlobUpload {
+                    expected_digest: digest,
+                    expected_length_bytes: byte_length,
+                }
+            );
+            fs::write(rewritten_path, replacement)?;
+            let present = ServerFrame::try_new_for_version(
+                begin.version(),
+                begin.request_id(),
+                ServerMessage::BlobUploadAlreadyPresent {
+                    digest,
+                    byte_length,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&present).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+        let source = open_blob_source(&source_path)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+
+        let failure = upload_blob(&mut client, &mut output, source)
+            .await
+            .expect_err("a rewritten source must not accept deduplication");
+
+        assert!(matches!(
+            failure,
+            ClientError::Input("blob source changed after it was hashed")
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
     /// INV-060: the terminal client prehashes one descriptor, streams bounded
     /// chunks in order, validates every echo, and reports the committed identity.
     #[tokio::test]
@@ -7941,25 +8057,21 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: terminal metadata and read commands validate echoed facts and
-    /// write only the exact requested bytes for a range.
+    /// INV-060: terminal metadata validates echoed identity and prints the
+    /// bounded catalog facts returned by the daemon.
     #[tokio::test]
-    async fn inv060_blob_reads_preserve_exact_wire_facts() -> Result<(), Box<dyn Error>> {
+    async fn inv060_blob_metadata_preserves_exact_wire_facts() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
-        let bytes = vec![0, 255];
         let listener = UnixListener::bind(&socket)?;
-        let expected_bytes = bytes.clone();
         let server = tokio::spawn(async move {
-            let (metadata_stream, _) = listener.accept().await?;
-            let (metadata_reader, mut metadata_writer) = metadata_stream.into_split();
-            let mut metadata_reader = BufReader::new(metadata_reader);
-            let mut metadata_line = Vec::new();
-            metadata_reader
-                .read_until(b'\n', &mut metadata_line)
-                .await?;
-            let metadata = decode_client_line(&metadata_line).map_err(io::Error::other)?;
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let metadata = decode_client_line(&line).map_err(io::Error::other)?;
             assert_eq!(
                 metadata.request(),
                 &ClientRequest::ReadBlobMetadata { digest }
@@ -7974,36 +8086,8 @@ mod tests {
                 },
             )
             .map_err(io::Error::other)?;
-            metadata_writer
+            writer
                 .write_all(&encode_server_line(&metadata_response).map_err(io::Error::other)?)
-                .await?;
-
-            let (range_stream, _) = listener.accept().await?;
-            let (range_reader, mut range_writer) = range_stream.into_split();
-            let mut range_reader = BufReader::new(range_reader);
-            let mut range_line = Vec::new();
-            range_reader.read_until(b'\n', &mut range_line).await?;
-            let range = decode_client_line(&range_line).map_err(io::Error::other)?;
-            assert_eq!(
-                range.request(),
-                &ClientRequest::ReadBlobChunk {
-                    digest,
-                    offset_bytes: CanonicalU64::new(7),
-                    length_bytes: CanonicalU64::new(2),
-                }
-            );
-            let range_response = ServerFrame::try_new_for_version(
-                range.version(),
-                range.request_id(),
-                ServerMessage::BlobChunkRead {
-                    digest,
-                    offset_bytes: CanonicalU64::new(7),
-                    bytes: BlobChunk::new(expected_bytes),
-                },
-            )
-            .map_err(io::Error::other)?;
-            range_writer
-                .write_all(&encode_server_line(&range_response).map_err(io::Error::other)?)
                 .await?;
             Ok::<(), io::Error>(())
         });
@@ -8013,20 +8097,109 @@ mod tests {
         let mut output = Output::new(&mut stdout, &mut stderr, false);
 
         read_blob_metadata(&mut client, &mut output, digest).await?;
-        read_blob_chunk(
-            &mut client,
-            &mut output,
-            digest,
-            CanonicalU64::new(7),
-            CanonicalU64::new(2),
-        )
-        .await?;
 
-        let mut expected = format!("digest={digest} byte_length=9 replica_count=1\n").into_bytes();
-        expected.extend_from_slice(&bytes);
-        assert_eq!(stdout, expected);
+        assert_eq!(
+            String::from_utf8(stdout)?,
+            format!("digest={digest} byte_length=9 replica_count=1\n")
+        );
         assert!(stderr.is_empty());
         server.await??;
+        Ok(())
+    }
+
+    /// INV-060: a terminal range read validates echoed identity and offset and
+    /// returns only the exact requested bytes for file delivery.
+    #[tokio::test]
+    async fn inv060_blob_read_returns_only_the_exact_range() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let offset_bytes = CanonicalU64::new(7);
+        let bytes = vec![0, 255];
+        let length_bytes = CanonicalU64::new(u64::try_from(bytes.len())?);
+        let listener = UnixListener::bind(&socket)?;
+        let expected_bytes = bytes.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let range = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                range.request(),
+                &ClientRequest::ReadBlobChunk {
+                    digest,
+                    offset_bytes,
+                    length_bytes,
+                }
+            );
+            let response = ServerFrame::try_new_for_version(
+                range.version(),
+                range.request_id(),
+                ServerMessage::BlobChunkRead {
+                    digest,
+                    offset_bytes,
+                    bytes: BlobChunk::new(expected_bytes),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+
+        let observed = read_blob_chunk(&mut client, digest, offset_bytes, length_bytes).await?;
+
+        assert_eq!(observed, bytes);
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-060: terminal range delivery creates one file containing exactly the
+    /// bounded bytes returned by the daemon.
+    #[tokio::test]
+    async fn inv060_blob_output_file_contains_exact_bytes() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let output = directory.path().join("range.bin");
+        let bytes = b"exact range bytes";
+
+        write_blob_output(&output, bytes).await?;
+
+        assert_eq!(fs::read(&output)?, bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_output_file_uses_private_mode() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let output = directory.path().join("range.bin");
+
+        write_blob_output(&output, b"range").await?;
+
+        assert_eq!(fs::metadata(&output)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_output_refuses_to_replace_an_existing_file() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let output = directory.path().join("existing.bin");
+        let existing = b"existing bytes";
+        fs::write(&output, existing)?;
+
+        let failure = write_blob_output(&output, b"replacement")
+            .await
+            .expect_err("blob range delivery must not replace an existing file");
+
+        let ClientError::BlobOutputFile { path, source } = failure else {
+            panic!("an output collision must retain its path and OS failure")
+        };
+        assert_eq!(path, output);
+        assert_eq!(source.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path)?, existing);
         Ok(())
     }
 

@@ -837,6 +837,46 @@ async fn commit_blob_upload(
     Ok(())
 }
 
+struct CommittedBlobReadFixture {
+    runtime: RunningRuntime,
+    connection: Connection,
+    digest: BlobDigest,
+    wire_digest: CanonicalBlobDigest,
+    expected_length: CanonicalU64,
+}
+
+impl CommittedBlobReadFixture {
+    async fn start(bytes: &'static [u8]) -> Result<Self, Box<dyn Error>> {
+        let runtime = RunningRuntime::start_with_blob_storage().await?;
+        let digest = BlobDigest::digest(bytes);
+        let wire_digest = CanonicalBlobDigest::from_digest(digest);
+        let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+        let mut connection = Connection::connect(runtime.socket()).await?;
+        commit_blob_upload(&mut connection, wire_digest, expected_length, bytes).await?;
+        Ok(Self {
+            runtime,
+            connection,
+            digest,
+            wire_digest,
+            expected_length,
+        })
+    }
+
+    fn object_path(&self) -> PathBuf {
+        self.runtime
+            .blob_storage_root
+            .as_ref()
+            .expect("the fixture owns one blob store")
+            .store
+            .join(BlobObjectKey::for_digest(self.digest).as_str())
+    }
+
+    async fn stop(self) -> Result<(), Box<dyn Error>> {
+        drop(self.connection);
+        self.runtime.stop().await
+    }
+}
+
 /// INV-060: the daemon streams exact bytes through one upload lifecycle and
 /// registers one immutable identity.
 #[tokio::test]
@@ -964,117 +1004,124 @@ async fn inv060_registration_failure_after_publication_leaves_only_an_orphan()
     runtime.stop().await
 }
 
-/// INV-060: metadata and exact ranges are bounded, while missing and corrupt
-/// recorded replicas return their distinct content-silent failures.
+/// INV-060: metadata reports the catalog's exact bounded identity, length, and
+/// replica count.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv060_blob_reads_verify_each_recorded_replica() -> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start_with_blob_storage().await?;
-    let bytes = b"verified direct blob range";
-    let digest = BlobDigest::digest(bytes);
-    let wire_digest = CanonicalBlobDigest::from_digest(digest);
-    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
-    let mut connection = Connection::connect(runtime.socket()).await?;
+async fn inv060_blob_metadata_reports_exact_catalog_facts() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"metadata blob fixture").await?;
 
-    connection
-        .request(
-            1,
-            ClientRequest::BeginBlobUpload {
-                expected_digest: wire_digest,
-                expected_length_bytes: expected_length,
-            },
-        )
-        .await?;
-    assert!(matches!(
-        connection.response().await?.message(),
-        ServerMessage::BlobUploadBegun { .. }
-    ));
-    append_blob_upload(&mut connection, 2, bytes).await?;
-    connection
-        .request(3, ClientRequest::CommitBlobUpload {})
-        .await?;
-    assert!(matches!(
-        connection.response().await?.message(),
-        ServerMessage::BlobUploadCommitted { .. }
-    ));
-
-    connection
+    fixture
+        .connection
         .request(
             4,
             ClientRequest::ReadBlobMetadata {
-                digest: wire_digest,
+                digest: fixture.wire_digest,
             },
         )
         .await?;
     assert_eq!(
-        connection.response().await?.message(),
+        fixture.connection.response().await?.message(),
         &ServerMessage::BlobMetadata {
-            digest: wire_digest,
-            byte_length: expected_length,
+            digest: fixture.wire_digest,
+            byte_length: fixture.expected_length,
             replica_count: CanonicalU64::new(1),
         }
     );
-    connection
+
+    fixture.stop().await
+}
+
+/// INV-060: a direct range returns the exact requested bytes only after the
+/// recorded replica verifies.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"verified direct blob range").await?;
+    let offset_bytes = CanonicalU64::new(9);
+    let length_bytes = CanonicalU64::new(6);
+    let expected_bytes = b"direct";
+
+    fixture
+        .connection
         .request(
-            5,
+            4,
             ClientRequest::ReadBlobChunk {
-                digest: wire_digest,
-                offset_bytes: CanonicalU64::new(9),
-                length_bytes: CanonicalU64::new(6),
+                digest: fixture.wire_digest,
+                offset_bytes,
+                length_bytes,
             },
         )
         .await?;
     assert_eq!(
-        connection.response().await?.message(),
+        fixture.connection.response().await?.message(),
         &ServerMessage::BlobChunkRead {
-            digest: wire_digest,
-            offset_bytes: CanonicalU64::new(9),
-            bytes: BlobChunk::new(bytes[9..15].to_vec()),
+            digest: fixture.wire_digest,
+            offset_bytes,
+            bytes: BlobChunk::new(expected_bytes.to_vec()),
         }
     );
-    connection
+
+    fixture.stop().await
+}
+
+/// INV-060: an exact range outside the catalog length is rejected before store
+/// access with the typed range facts.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"out of bounds blob fixture").await?;
+    let offset_bytes = CanonicalU64::new(u64::MAX);
+    let length_bytes = CanonicalU64::new(1);
+
+    fixture
+        .connection
         .request(
-            6,
+            4,
             ClientRequest::ReadBlobChunk {
-                digest: wire_digest,
-                offset_bytes: CanonicalU64::new(u64::MAX),
-                length_bytes: CanonicalU64::new(1),
+                digest: fixture.wire_digest,
+                offset_bytes,
+                length_bytes,
             },
         )
         .await?;
     assert_eq!(
-        connection.response().await?.message(),
+        fixture.connection.response().await?.message(),
         &ServerMessage::Error {
             code: ErrorCode::InvalidRequest,
             message: String::from("blob read was rejected"),
             detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
-                digest: wire_digest,
-                offset_bytes: CanonicalU64::new(u64::MAX),
-                length_bytes: CanonicalU64::new(1),
-                blob_length_bytes: expected_length,
+                digest: fixture.wire_digest,
+                offset_bytes,
+                length_bytes,
+                blob_length_bytes: fixture.expected_length,
             }),
         }
     );
 
-    let object_path = runtime
-        .blob_storage_root
-        .as_ref()
-        .expect("the fixture owns one blob store")
-        .store
-        .join(BlobObjectKey::for_digest(digest).as_str());
-    fs::remove_file(&object_path)?;
-    connection
+    fixture.stop().await
+}
+
+/// INV-060: an absent recorded object returns the content-silent missing code.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_read_missing_replica_is_typed() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"missing replica blob fixture").await?;
+    fs::remove_file(fixture.object_path())?;
+
+    fixture
+        .connection
         .request(
-            7,
+            4,
             ClientRequest::ReadBlobChunk {
-                digest: wire_digest,
+                digest: fixture.wire_digest,
                 offset_bytes: CanonicalU64::new(0),
                 length_bytes: CanonicalU64::new(1),
             },
         )
         .await?;
     assert_eq!(
-        connection.response().await?.message(),
+        fixture.connection.response().await?.message(),
         &ServerMessage::Error {
             code: ErrorCode::BlobMissing,
             message: String::from("all recorded blob replicas are missing"),
@@ -1082,50 +1129,52 @@ async fn inv060_blob_reads_verify_each_recorded_replica() -> Result<(), Box<dyn 
         }
     );
 
-    connection
+    fixture.stop().await
+}
+
+/// INV-060: a recorded object whose bytes no longer match the catalog returns
+/// the content-silent corruption code.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_read_corrupt_replica_is_typed() -> Result<(), Box<dyn Error>> {
+    let mut fixture = CommittedBlobReadFixture::start(b"corrupt replica blob fixture").await?;
+    fs::write(fixture.object_path(), b"corrupt")?;
+
+    fixture
+        .connection
         .request(
-            8,
-            ClientRequest::BeginBlobUpload {
-                expected_digest: wire_digest,
-                expected_length_bytes: expected_length,
-            },
-        )
-        .await?;
-    assert!(matches!(
-        connection.response().await?.message(),
-        ServerMessage::BlobUploadBegun { .. }
-    ));
-    append_blob_upload(&mut connection, 9, bytes).await?;
-    connection
-        .request(10, ClientRequest::CommitBlobUpload {})
-        .await?;
-    assert!(matches!(
-        connection.response().await?.message(),
-        ServerMessage::BlobUploadCommitted { .. }
-    ));
-    fs::write(&object_path, b"corrupt")?;
-    connection
-        .request(
-            11,
+            4,
             ClientRequest::ReadBlobChunk {
-                digest: wire_digest,
+                digest: fixture.wire_digest,
                 offset_bytes: CanonicalU64::new(0),
                 length_bytes: CanonicalU64::new(1),
             },
         )
         .await?;
     assert_eq!(
-        connection.response().await?.message(),
+        fixture.connection.response().await?.message(),
         &ServerMessage::Error {
             code: ErrorCode::BlobCorrupt,
             message: String::from("all usable blob replicas are corrupt"),
             detail: ErrorDetail::none(),
         }
     );
+
+    fixture.stop().await
+}
+
+/// INV-060: a digest absent from the catalog returns the content-silent
+/// not-found code without store access.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_metadata_absent_catalog_entry_is_not_found() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
     let absent_digest = CanonicalBlobDigest::from_bytes([0xcd; 32]);
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
     connection
         .request(
-            12,
+            1,
             ClientRequest::ReadBlobMetadata {
                 digest: absent_digest,
             },
