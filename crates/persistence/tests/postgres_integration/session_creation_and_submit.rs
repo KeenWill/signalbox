@@ -2763,27 +2763,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     Ok(())
 }
 
-/// The persistence contract mirrors the one-mebibyte accepted-input content
-/// bound at correlated layers: oversized text fails domain construction and
-/// never reaches SQL, exact-bound text commits through the real adapter, and a
-/// direct SQL insert of oversized content is refused by the schema checks.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-
-    let error = UserContent::try_text("a".repeat(1_048_577))
-        .expect_err("text over the aggregate bound fails domain construction");
-    assert_eq!(error.failure(), NonEmptyUnicodeTextFailure::TooLong);
-    let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
-        .fetch_one(&pool)
-        .await?;
-    assert_eq!(
-        claimed, 0,
-        "content rejected before typed-command construction claims no durable identifier"
-    );
-
+async fn persist_at_bound_content(pool: &PgPool) -> Result<usize, Box<dyn Error>> {
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x321, 0x721, direct(0x821)))
         .await?;
@@ -2801,6 +2781,16 @@ async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
             Some(TurnId::from_uuid(Uuid::from_u128(0xa21))),
         )
         .await?;
+    Ok(at_bound.len())
+}
+
+/// The persistence adapter and both mirrored rows admit the domain's exact
+/// one-mebibyte text bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn content_size_bound_commits_at_exact_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let expected_length = i32::try_from(persist_at_bound_content(&pool).await?)?;
     let stored_lengths: Vec<i32> = sqlx::query_scalar(
         "SELECT octet_length(text_value)
            FROM submit_input_command_content_part
@@ -2812,9 +2802,22 @@ async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
     .await?;
     assert_eq!(
         stored_lengths,
-        vec![1_048_576, 1_048_576],
+        vec![expected_length, expected_length],
         "the schema must admit the domain's exact maximum"
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The submit-command satellite refuses content one byte above the domain
+/// maximum even when SQL bypasses domain construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    persist_at_bound_content(&pool).await?;
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -2881,6 +2884,19 @@ async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
     );
     transaction.rollback().await?;
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The accepted-input satellite refuses content one byte above the domain
+/// maximum even when SQL bypasses domain construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn accepted_input_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    persist_at_bound_content(&pool).await?;
+
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO accepted_input
@@ -2935,12 +2951,26 @@ async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
     Ok(())
 }
 
-/// INV-012: durable submit replay compares the exact ordered multipart value,
-/// including attachment metadata, and mirrors it into the accepted projection.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_multipart_submit_replay_counts_order_and_attachment_metadata()
--> Result<(), Box<dyn Error>> {
+struct MultipartReplayFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    command: SubmitInput,
+    first: SubmitInputHandlingOutcome,
+    before: UserContentPart,
+    attachment: UserContentPart,
+    after: UserContentPart,
+    digest: BlobDigest,
+}
+
+impl MultipartReplayFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x324, 0x724, direct(0x824)))
@@ -3003,34 +3033,70 @@ async fn inv012_multipart_submit_replay_counts_order_and_attachment_metadata()
             Some(TurnId::from_uuid(Uuid::from_u128(0xa25))),
         )
         .await?;
+
+    Ok(MultipartReplayFixture {
+        container,
+        pool,
+        repository,
+        command,
+        first,
+        before,
+        attachment,
+        after,
+        digest,
+    })
+}
+
+/// INV-012: equal multipart replay returns the original durable receipt and
+/// command value.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
+-> Result<(), Box<dyn Error>> {
+    let fixture = multipart_replay_fixture().await?;
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
-                command.clone(),
+                fixture.command.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x926)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xa26))),
             )
             .await?,
-        first
+        fixture.first
     );
     assert_eq!(
-        repository
-            .load(command.command_id())
+        fixture
+            .repository
+            .load(fixture.command.command_id())
             .await?
             .expect("the multipart command is complete")
             .command(),
-        &command
+        &fixture.command
     );
+    fixture.finish().await;
+    Ok(())
+}
 
+/// INV-012: multipart part order participates in durable replay equality.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+    let fixture = multipart_replay_fixture().await?;
     let reordered = SubmitInput::new(
-        command.command_id(),
-        command.session(),
-        UserContent::try_parts(vec![after, attachment, before])
-            .expect("the reordered fixture parts are canonical"),
-        command.delivery(),
+        fixture.command.command_id(),
+        fixture.command.session(),
+        UserContent::try_parts(vec![
+            fixture.after.clone(),
+            fixture.attachment.clone(),
+            fixture.before.clone(),
+        ])
+        .expect("the reordered fixture parts are canonical"),
+        fixture.command.delivery(),
     );
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
                 reordered,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x927)),
@@ -3038,12 +3104,21 @@ async fn inv012_multipart_submit_replay_counts_order_and_attachment_metadata()
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {
-            command_id: command.command_id(),
+            command_id: fixture.command.command_id(),
         }
     );
+    fixture.finish().await;
+    Ok(())
+}
 
+/// INV-012: attachment display metadata participates in durable replay
+/// equality.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
+    let fixture = multipart_replay_fixture().await?;
     let changed_attachment = UserContentPart::Attachment {
-        digest,
+        digest: fixture.digest,
         kind: AttachmentKind::Document,
         media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
             .expect("the fixture media type is valid"),
@@ -3053,20 +3128,19 @@ async fn inv012_multipart_submit_replay_counts_order_and_attachment_metadata()
         ),
     };
     let changed_metadata = SubmitInput::new(
-        command.command_id(),
-        command.session(),
+        fixture.command.command_id(),
+        fixture.command.session(),
         UserContent::try_parts(vec![
-            UserContentPart::try_text(String::from("before"))
-                .expect("the fixture leading text is valid"),
+            fixture.before.clone(),
             changed_attachment,
-            UserContentPart::try_text(String::from("after"))
-                .expect("the fixture trailing text is valid"),
+            fixture.after.clone(),
         ])
         .expect("the changed-metadata fixture parts are canonical"),
-        command.delivery(),
+        fixture.command.delivery(),
     );
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
                 changed_metadata,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x928)),
@@ -3074,10 +3148,20 @@ async fn inv012_multipart_submit_replay_counts_order_and_attachment_metadata()
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {
-            command_id: command.command_id(),
+            command_id: fixture.command.command_id(),
         }
     );
+    fixture.finish().await;
+    Ok(())
+}
 
+/// INV-012: the command and accepted-input satellites mirror the exact ordered
+/// multipart projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_multipart_command_and_accepted_satellites_are_identical()
+-> Result<(), Box<dyn Error>> {
+    let fixture = multipart_replay_fixture().await?;
     let mirrored: (Value, Value) = sqlx::query_as(
         "SELECT
             (SELECT jsonb_agg(
@@ -3097,13 +3181,12 @@ async fn inv012_multipart_submit_replay_counts_order_and_attachment_metadata()
                  ON accepted.accepted_input_id = part.accepted_input_id
               WHERE accepted.accepting_command_id = $1)",
     )
-    .bind(Uuid::from_u128(0x325))
-    .fetch_one(&pool)
+    .bind(fixture.command.command_id().as_uuid())
+    .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(mirrored.0, mirrored.1);
 
-    pool.close().await;
-    drop(container);
+    fixture.finish().await;
     Ok(())
 }
 
