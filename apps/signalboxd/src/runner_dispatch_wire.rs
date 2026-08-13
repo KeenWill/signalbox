@@ -630,6 +630,24 @@ mod tests {
     }
 
     #[test]
+    fn s12_inv043_invalid_result_detail_fails_before_transaction_admission() {
+        let rejected = RunnerDispatchWireAdapter::result_request(ResultFrame {
+            correlation: wire_correlation(),
+            result: TerminalResult::KnownFailure {
+                error_kind: signalbox_runner_wire::ExecutionErrorKind::ExecutionFailed,
+                detail: Some(" surrounding whitespace ".to_owned()),
+            },
+        });
+
+        assert!(matches!(
+            rejected,
+            Err(RunnerDispatchWireError::Wire(
+                signalbox_runner_wire::ValueError::Result
+            ))
+        ));
+    }
+
+    #[test]
     fn s12_inv043_success_result_frame_reconstitutes_exact_text() {
         let request = RunnerDispatchWireAdapter::result_request(ResultFrame {
             correlation: wire_correlation(),
