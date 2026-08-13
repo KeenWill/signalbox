@@ -758,6 +758,25 @@ unavailable; a descendant that deliberately leaves that group is outside the
 adapter's boundary. Host isolation owns containment beyond the created group —
 specifically the runner sandbox in build-out — and is not an adapter claim.
 
+The rendered prompt opens with a preamble whose tool-authority statement is
+singular and positionally first: the serialized `tools` array is named the
+single authority on tool availability, the harness's own disabled facilities are
+distinguished from the declared tools, and the preamble states no categorical
+tool prohibition. Why: an earlier preamble opened with "Do not use shell, file,
+web, MCP, or collaboration tools" — aimed at the wrapped CLI's native facilities
+— and deployed sessions quoted that sentence verbatim as grounds to refuse work
+their declared tools authorized, because the prohibited categories are exactly
+the categories a caller's tool catalog populates. The prompt carried two
+competing authority statements and the model sometimes obeyed the wrong one; the
+native facilities need no prompt-level prohibition because the invocation
+disables them mechanically, and prompt text is never a capability boundary. The
+residual the adapter cannot remove: the pinned CLI injects its own
+agent-identity instructions around the stdin prompt at runtime, so the
+preamble's authority statement is the first tool statement the adapter controls
+rather than the first text the model sees. The translation unit test pins the
+rendered prompt — no categorical prohibition, exactly one authority statement,
+positioned before the serialized request.
+
 **Committed unimplemented functionality — Codex file delivery.** The present
 adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
 every other direct credential value outside the cleared child environment. The
