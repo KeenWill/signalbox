@@ -59,7 +59,7 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     # The instrumented build compiles the workspace once more and then runs
-    # both the workspace suite and the three dockerized PostgreSQL suites in
+    # both the workspace suite and the four dockerized PostgreSQL suites in
     # one job. They cannot be split across runners: a report needs the
     # profiling data and the instrumented binaries that produced it in the same
     # workspace, and shipping the instrumented binaries between jobs would cost
@@ -124,6 +124,13 @@ jobs:
           cargo llvm-cov --no-report --no-fail-fast
           -p signalbox-persistence --features postgres-integration --tests
           -- --ignored --test-threads=4
+      - name: Measure the runner-process PostgreSQL suite
+        id: runner_process
+        continue-on-error: true
+        run: >-
+          cargo llvm-cov --no-report --no-fail-fast
+          -p signalbox-runner --test runner_process_postgres
+          -- --ignored --test-threads=1
       # `--skip` keeps the whole-daemon live smoke and subprocess-only bridge
       # fixtures out of this run. The live smoke is already inert without
       # GITHUB_TOKEN, which this job never sets, but a measurement job spends
@@ -163,6 +170,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           WORKSPACE_OUTCOME: ${{ steps.workspace.outcome }}
           PERSISTENCE_OUTCOME: ${{ steps.persistence.outcome }}
+          RUNNER_PROCESS_OUTCOME: ${{ steps.runner_process.outcome }}
           SIGNALBOXD_OUTCOME: ${{ steps.signalboxd.outcome }}
           TERMINAL_CLIENT_OUTCOME: ${{ steps.terminal_client.outcome }}
         run: |
@@ -181,6 +189,7 @@ jobs:
             echo '| --- | --- |'
             echo "| workspace (\`--all-targets --all-features\`) | $WORKSPACE_OUTCOME |"
             echo "| persistence PostgreSQL (\`--ignored\`) | $PERSISTENCE_OUTCOME |"
+            echo "| runner process PostgreSQL (\`--ignored\`) | $RUNNER_PROCESS_OUTCOME |"
             echo "| signalboxd PostgreSQL (\`--ignored\`) | $SIGNALBOXD_OUTCOME |"
             echo "| terminal-client PostgreSQL (\`--ignored\`) | $TERMINAL_CLIENT_OUTCOME |"
             echo
