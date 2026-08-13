@@ -60,6 +60,7 @@ pub(crate) enum BlobUploadError {
     LengthMismatch { observed: u64 },
     DigestMismatch { observed: BlobDigest },
     Unavailable,
+    PublicationAmbiguous,
     CommitAmbiguous,
     Integrity,
 }
@@ -241,6 +242,7 @@ fn map_store_error(error: signalbox_blob_store::BlobStoreError) -> BlobUploadErr
         BlobStoreFailureKind::NotFound | BlobStoreFailureKind::VerificationFailed => {
             BlobUploadError::Integrity
         }
+        BlobStoreFailureKind::PublicationAmbiguous => BlobUploadError::PublicationAmbiguous,
         BlobStoreFailureKind::Unavailable => BlobUploadError::Unavailable,
     }
 }
@@ -396,5 +398,16 @@ mod tests {
             panic!("digest mismatch returned another error class")
         };
         assert_eq!(observed, BlobDigest::digest(b"abd"));
+    }
+
+    /// INV-060: an adapter that cannot reconcile a possible publication keeps
+    /// that ambiguity distinct for the wire retry contract.
+    #[test]
+    fn inv060_store_publication_ambiguity_survives_upload_mapping() {
+        let mapped = map_store_error(BlobStoreError::publication_ambiguous(
+            "reconcile fixture publication",
+        ));
+
+        assert!(matches!(mapped, BlobUploadError::PublicationAmbiguous));
     }
 }

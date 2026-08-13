@@ -34,7 +34,6 @@ tempfile = "3.27.0"
 tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
     "rt-multi-thread",
-    "sync",
 ] }
 
 [[test]]

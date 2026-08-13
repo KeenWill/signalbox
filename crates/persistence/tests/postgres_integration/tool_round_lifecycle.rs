@@ -75,7 +75,7 @@ async fn prepare_confirmed_tool_attempt(
 }
 
 /// INV-063: blob-read visibility and decoded-byte charges commit before
-/// dispatch authority; an unattached digest leaves the attempt Prepared.
+/// dispatch authority.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv063_blob_read_preauthorization_is_visible_bounded_and_durable()
@@ -119,6 +119,19 @@ async fn inv063_blob_read_preauthorization_is_visible_bounded_and_durable()
     assert_eq!(charge.0, visible_digest.as_bytes().as_slice());
     assert_eq!(charge.1, Decimal::from(visible_decoded_bytes));
     assert!(charge.2);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-063: an unattached blob-read digest is rejected before dispatch and
+/// leaves the durable attempt Prepared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv063_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
 
     let hidden_seed = 0xd200;
     let hidden_digest = BlobDigest::digest(b"hidden");
