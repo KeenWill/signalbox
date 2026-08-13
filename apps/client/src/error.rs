@@ -19,6 +19,10 @@ pub(crate) enum ClientError {
         path: PathBuf,
         source: io::Error,
     },
+    BlobOutputFile {
+        path: PathBuf,
+        source: io::Error,
+    },
     SystemPromptFile(io::Error),
     GoalTextFile {
         path: PathBuf,
@@ -78,6 +82,13 @@ impl ClientError {
         }
     }
 
+    pub(crate) fn blob_output_file(path: &Path, source: io::Error) -> Self {
+        Self::BlobOutputFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     pub(crate) fn system_prompt_file(error: io::Error) -> Self {
         Self::SystemPromptFile(error)
     }
@@ -124,6 +135,7 @@ impl ClientError {
             Self::Remote { .. }
             | Self::SourceFile(_)
             | Self::BlobSourceFile { .. }
+            | Self::BlobOutputFile { .. }
             | Self::SystemPromptFile(_)
             | Self::GoalTextFile { .. }
             | Self::DelegationContentFile { .. }
@@ -164,6 +176,11 @@ impl fmt::Display for ClientError {
             Self::BlobSourceFile { path, source } => write!(
                 formatter,
                 "the blob upload source file '{}' could not be read: {source}",
+                path.display()
+            ),
+            Self::BlobOutputFile { path, source } => write!(
+                formatter,
+                "the blob range output file '{}' could not be written: {source}",
                 path.display()
             ),
             Self::SystemPromptFile(_) => {
@@ -258,6 +275,7 @@ impl Error for ClientError {
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
             Self::BlobSourceFile { source, .. } => Some(source),
+            Self::BlobOutputFile { source, .. } => Some(source),
             Self::DelegationContentFileUtf8 { source, .. } => Some(source),
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
