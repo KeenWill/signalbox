@@ -9030,9 +9030,14 @@ impl LostPinnedRunnerPlacement {
     pub const fn from_stored(
         pinned: PinnedRunnerPlacement,
         source: RunnerPlacementLossSource,
+        pinned_registration: Option<&ValidatedRunnerRegistration>,
         loss_registration_revision: Option<RunnerGeneration>,
     ) -> Self;
     // accessors: pinned(), source(), loss_registration_revision()
+}
+pub struct RunnerRegistrationReconciliation {
+    pub pinned_registration: ValidatedRunnerRegistration,
+    pub current_registration: ValidatedRunnerRegistration,
 }
 pub struct SameRunnerRegistrationRecovery {
     pub loss_registration: ValidatedRunnerRegistration,
@@ -9101,7 +9106,7 @@ impl SessionRunnerPlacement {
     ) -> Result<Self, RunnerDomainError>;
     pub fn reconcile_registration(
         self,
-        registration: &ValidatedRunnerRegistration,
+        reconciliation: RunnerRegistrationReconciliation,
     ) -> Result<Self, RunnerDomainError>;
     pub fn replace_lost_runner_before_pin(
         self,
@@ -10672,9 +10677,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 87                    |
+| domain: runner                                     | 88                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **789 (+12 free fn)** |
+| **signalbox-domain total**                         | **790 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
