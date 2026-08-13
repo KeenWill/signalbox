@@ -53,9 +53,15 @@ The session-metadata last-writer actor inventory, its native and terminal-client
 projections, and the totality of the daemon projection that produces it are
 verified against this PR (`fix/review-read-snapshot-permit`).
 
-The blob lifecycle messages and multipart content arrays below are the
-foundation proposal from PR #553 (`agent/blob-storage-foundation`) and become
-verified with its implementing child stack.
+The blob upload lifecycle messages below are verified against this implementing
+change (`agent/blob-storage-upload`). The blob read messages and multipart
+content arrays remain the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and become verified with their implementing
+children.
+
+The terminal blob-upload command and its bounded, open-once source handling are
+verified against this implementing change
+(`agent/blob-storage-upload-terminal`).
 
 The coherent review-orchestration snapshot's single-transaction construction,
 the pool capacity it draws, and the writer independence that follows from both
@@ -1039,7 +1045,7 @@ request, or blob-upload transport request — `create_session`,
 - `blob_upload_begun` with the `expected_digest` and admitted
   `expected_length_bytes`;
 - `blob_upload_already_present` with `digest` and `byte_length`;
-- `blob_upload_appended` with the exact `assembled_size_bytes`;
+- `blob_upload_appended` with the exact `assembled_length_bytes`;
 - `blob_upload_committed` with the verified `digest` and `byte_length`;
 - `blob_upload_aborted` with no additional member;
 - `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
@@ -1596,12 +1602,12 @@ or
 All byte counts use canonical decimal strings and both digest fields use the
 canonical blob spelling. The range detail also represents checked-add overflow.
 The request type identifies which append, commit, abort, or read operation
-failed, so state details carry no duplicate operation discriminator. Begin
-checks its declared-length range before connection state and routed-store
-lookup. Append checks cumulative size after state; commit checks state, then
-actual length, then digest. Read checks requested length, catalog existence, and
-then checked range. Each request reports only the first applicable failure in
-that order.
+failed, so state details carry no duplicate operation discriminator. With blob
+storage enabled, Begin checks active connection state before its declared-length
+range and routed-store lookup. Append checks cumulative size after state; commit
+checks state, then actual length, then digest. Read checks requested length,
+catalog existence, and then checked range. Each request reports only the first
+applicable failure in that order.
 
 Conversation-import evidence carries no source bytes, text, paths, identifiers
 taken from source, or parser excerpts; blob evidence carries no blob bytes,
@@ -2686,10 +2692,11 @@ then sends the exact text.
 buffer to determine its digest and length, rewinds the same descriptor, and uses
 begin, bounded appends, and commit on one connection. It validates every
 cumulative acknowledgement and the final identity; an already-present receipt
-sends no append. `blob metadata` prints only digest, byte length, and replica
-count. `blob read` makes one bounded exact-range request, validates its digest,
-offset, and decoded length, then writes only those bytes to the named output.
-Local paths never cross the wire or appear in daemon logs.
+revalidates the same descriptor before sending no append. `blob metadata` prints
+only digest, byte length, and replica count. `blob read` makes one bounded
+exact-range request, validates its digest, offset, and decoded length, then
+writes only those bytes to the named output. Local paths never cross the wire or
+appear in daemon logs.
 
 **Implemented behavior.** The `goal` verbs expose only commission, inspection,
 resume, stop, and supersession. Mutations print a generated command identity

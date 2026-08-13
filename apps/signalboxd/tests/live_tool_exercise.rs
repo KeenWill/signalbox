@@ -701,11 +701,20 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
         ),
         call(
             CHANGE_REQUEST_THREAD_REPLY_NAME,
-            json!({"thread_id": "PRRT_kwDOTWhy-86SHVJQ", "body": "must remain denied"}),
+            json!({
+                "repository": FIXTURE_REPOSITORY,
+                "number": FIXTURE_PULL_REQUEST,
+                "thread_id": "PRRT_kwDOTWhy-86SHVJQ",
+                "body": "must remain denied",
+            }),
         ),
         call(
             CHANGE_REQUEST_THREAD_RESOLVE_NAME,
-            json!({"thread_id": "PRRT_kwDOTWhy-86SHVJQ"}),
+            json!({
+                "repository": FIXTURE_REPOSITORY,
+                "number": FIXTURE_PULL_REQUEST,
+                "thread_id": "PRRT_kwDOTWhy-86SHVJQ",
+            }),
         ),
         call(
             EDIT_FILE_NAME,
