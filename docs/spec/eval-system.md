@@ -80,11 +80,16 @@ results. An evaluation run records: run identity with the pinned program digest,
 corpus digest, and configuration; one trial row per case and repeat ordinal; and
 one stage row per trial stage with a status from the closed set `scored`,
 `skipped`, `infrastructure`, `unmeasured`, plus metrics, error, and duration;
+one relational case-projection row per trial containing the resolved slice labels
+and other declared grouping dimensions as canonical typed key/value rows;
 and one check-outcome row per declared check per scoring stage, recording the
 check kind, its target, the expected value or threshold as resolved from the
 corpus, the measured value, and the check's own outcome from the same closed
 status set. The check-outcome rows are what make the promised views derivable
-without reopening external corpus content: a stage mixing measured and
+without reopening external corpus content; the trial's case projection makes
+slice membership derivable under the same constraint. Both are resolved from
+the digest-verified corpus and committed with the trial before scoring begins,
+so a later corpus move cannot change grouping. A stage mixing measured and
 missing-reference checks is represented check by check, and its single stage
 status summarizes without substituting. Durable cost is recorded per model call
 with the model and rate version that priced that call — an evaluation may score

@@ -23,10 +23,16 @@ executes programs. A program is one TypeScript module whose imports resolve only
 to the versioned in-repo SDK package; any other import — including relative
 files — is a registration error, so the stripped artifact is complete and
 executable with no bundler, no module graph, and no filesystem in the isolate.
-Why: a single-module contract keeps artifact identity one digest over one file's
-bytes; multi-module programs are a future registration-format decision, not a
-present admission. Registration stores the exact TypeScript source, the stripped
-JavaScript artifact, a digest of each, the SDK version, the frame-contract
+The SDK has one canonical bare module specifier containing its version. Before
+loading an artifact, the host registers a synthetic module under that exact
+specifier which exports only the frame-producing SDK surface for the run's
+recorded SDK version. Registration rejects every other specifier, including an
+unversioned SDK name; type stripping preserves the canonical import, and isolate
+loading resolves it only to this host-supplied module, never through a filesystem
+or ambient module loader. Why: a single-module contract keeps artifact identity
+one digest over one file's bytes; multi-module programs are a future
+registration-format decision, not a present admission. Registration stores the
+exact TypeScript source, the stripped JavaScript artifact, a digest of each, the SDK version, the frame-contract
 version, and an explicit capability grant list, as immutable rows keyed by
 unique program name and revision. Each digest is SHA-256 in lowercase
 hexadecimal over an exact preimage: for the artifact, the stripped JavaScript
@@ -103,8 +109,16 @@ clock, or unvirtualized randomness; the only door out of the isolate is the
 frame protocol below. The engine is the pinned `deno_core` crate family; the
 standalone repository is archived and the deno monorepo is its source of truth,
 so the pin is by crate version with upgrades taken deliberately. Every run
-records the engine version it started under. No engine runtime is retained
-across upgrades — per the pre-alpha rule in `AGENTS.md`, keeping superseded
+records the engine version it started under. At creation it also records the
+selected isolate heap ceiling and per-live-turn execution budget. The execution
+budget is deterministic engine work metering, not elapsed wall time: host
+queueing, daemon downtime, journal I/O, and time awaiting an effect do not
+consume it, while replay consumes and checks the same budget at the same
+execution points. Exhaustion produces the journaled `memory` or `timeout` fault
+under the recorded limits regardless of later configuration, host load, or
+machine speed. External operations use capability-specific deadlines whose
+expiry is an ordinary journaled answer. No engine runtime is retained across
+upgrades — per the pre-alpha rule in `AGENTS.md`, keeping superseded
 engines resident would be compatibility machinery for deployments that do not
 exist — so a run that wakes under a newer engine replays under it, protected by
 the fault-not-diverge rule below: an engine-semantics change surfaces as a
@@ -124,10 +138,12 @@ concurrency: delivery order fixes the interleaving, and the named ordinal fixes
 which promise each delivery resolves — the same association during live
 execution and replay. The frame vocabulary is: `now`, `random`, `sleep`,
 `await_event`, `effect`, `scope`, and `terminal` requests; `answer`, `wake`,
-`cancel`, and `fault` deliveries. A `scope` request is a journaled declaration,
-never answered: it carries an operation (`open` or `close`), its own per-run
-scope ordinal, and its parent scope ordinal, recording the structured-
-concurrency tree so that cancellation of a scope deterministically cancels
+`cancel`, `run_cancel`, and `fault` deliveries. A request-scoped `cancel` always
+names the one affected request ordinal and cannot terminalize a run;
+`run_cancel` has no request ordinal and terminalizes the whole run. A `scope`
+request is a journaled declaration, never answered: it carries an operation
+(`open` or `close`), its own per-run scope ordinal, and its parent scope
+ordinal, recording the structured-concurrency tree so that cancellation of a scope deterministically cancels
 exactly the outstanding requests opened under it (each such cancellation is a
 `cancel` delivery naming the affected request ordinal), and replay reproduces
 the same tree from the same frames. Requests made outside any opened scope
@@ -177,8 +193,16 @@ restricting the language.
 growth. A long-lived program does not accumulate one unbounded journal:
 `terminal` carries a `continue` outcome that ends the run and starts a successor
 run row — same pinned artifact, explicit continuation arguments, predecessor
-identity recorded — with a fresh journal, and the built-in dispatch program
-described below continues after each handled event. Continuation is voluntary,
+identity recorded — with a fresh journal. A terminal request is admissible only
+when every earlier answerable request ordinal has an `answer`, `wake`, or
+request-scoped `cancel` delivery; otherwise the host rejects it with a
+deterministic `program_error` without committing terminal state, so no external
+effect can complete after the journal closes. For `continue`, one database
+transaction commits the terminal frame, the predecessor's terminal state, and
+exactly one successor row. The successor has a unique predecessor reference, so
+retry after an ambiguous commit returns the already-created row rather than
+losing or duplicating the continuation. The built-in dispatch program described
+below continues after each handled event. Continuation is voluntary,
 so the bound is enforced by the host, not assumed of the program: each run
 records at creation the frame bound selected from configuration, that recorded
 bound governs the run for its whole life regardless of later configuration
@@ -224,17 +248,35 @@ registration strictly after the current durable event tail — the same watermar
 discipline the structured-rule contract already uses — so a subscription can
 never match an event at or before its activation. After a poll's events commit,
 matching subscriptions produce wake rows keyed by the unique
-subscription-and-event identity, so recovery re-matching is idempotent: an event
-wakes a subscription exactly once, with no historical, missed, or duplicate wake
-at the registration or recovery boundary. The scheduler resumes the woken runs.
+subscription-and-event identity. An `await_event` subscription is one-shot: the
+transaction inserting its first wake also atomically marks the subscription
+consumed, and matching excludes consumed subscriptions. A uniqueness constraint
+permits at most one wake for the subscription itself, so concurrent matching of
+two events chooses the first in durable event order and cannot resolve one
+request ordinal twice. Recovery re-matching is therefore idempotent, with no
+historical, missed, stale, or duplicate wake at the registration or recovery
+boundary. The scheduler resumes the woken runs.
 Program subscription identity, delivery, and cancellation are decided by this
 page; the previously open standing-subscription foundation question is narrowed
 in the same diff to the client-facing callback surface it still owns. This
 constrains repository-watch storage now: its cursor and event rows are the
 substrate's event source and must remain readable by subscription matching. The
 present structured-rule dispatch surface is committed to converge onto this
-mechanism — the dispatch action becomes a built-in program, cut over after one
-shadowed live event — after which rules are subscriptions.
+mechanism — the dispatch action becomes a built-in program. Shadowing is only a
+validation step and never owns delivery. Cutover uses one durable transaction at
+an event frontier: it first requires every old-rule event through that frontier
+to have a terminal evaluation outcome, deactivates the old rule after that
+frontier, activates the replacement subscription strictly after it, and records
+the mapping between rule version and program registration. The same transaction
+transfers each occupied singleton batch, its responsible sessions, and any
+recorded cooldown boundary to substrate-owned dispatch state without recreating
+sessions or changing append-only audit identities. Events at or before the
+frontier remain owned only by the rule evaluator; later events are owned only by
+the subscription matcher. Repository reconciliation, rule evaluation, and
+subscription matching serialize against this transaction, so a crash or
+concurrent poll can retry the cutover but cannot miss or dispatch a boundary
+event twice or release an occupied singleton. After that transaction, rules are
+subscriptions.
 
 **Committed unimplemented functionality.** No present surface cancels program
 runs. The cancel command, its receipt, and their closed reply algebra are
@@ -246,9 +288,13 @@ run-state semantics. Those semantics: a cancel never overwrites a terminal
 outcome — the race against a run's own `terminal` is resolved by whichever
 committed first, and the receipt reports the truth it found (`not_found` and
 `already_terminal` are outcomes, not errors). Cancel authority is user
-authority; an applied cancel is journaled as a `cancel` frame, so a cancelled
-run replays to its cancellation. Programs receive no notice beyond the journal:
-cancellation is terminal, not advisory.
+authority; an applied cancel is journaled as a `run_cancel` delivery carrying
+the command identity and no request ordinal, so a cancelled run replays to its
+cancellation independently of how many requests were outstanding. Any
+request-scoped `cancel` deliveries needed to reconcile outstanding operations
+are committed before the `run_cancel`; they retain their distinct
+ordinal-bearing shape and do not terminalize the run. Programs receive no notice
+beyond the journal: cancellation is terminal, not advisory.
 
 ## Driving sessions
 
