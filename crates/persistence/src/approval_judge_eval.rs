@@ -15,7 +15,7 @@ use signalbox_domain::{
     ResolvedProviderTarget,
 };
 use sqlx::{
-    PgPool,
+    PgPool, Row,
     types::{Json, Uuid},
 };
 
@@ -98,44 +98,88 @@ pub struct ApprovalJudgeEvalCallRecord {
 /// what recording exercises: INSERT on both tables, plus SELECT on the run
 /// table because the sealing trigger reads the run's recording transaction
 /// while admitting each call row.
-pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeEvalRecordingError> {
+/// Schema containing the migration-owned eval recording objects.
+///
+/// This token can only be obtained by resolving the physical sealing trigger
+/// installed by the migration, independently of the connected role's
+/// `search_path`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalJudgeEvalRecordingSchema {
+    quoted_name: String,
+}
+
+/// Resolves and verifies the migration-owned recording schema, returning a
+/// token that pins later writes to that same physical schema.
+pub async fn verify_recording_schema(
+    pool: &PgPool,
+) -> Result<ApprovalJudgeEvalRecordingSchema, ApprovalJudgeEvalRecordingError> {
     let mut connection = pool.acquire().await?;
-    let schema: String = sqlx::query_scalar("SELECT current_schema()")
-        .fetch_one(&mut *connection)
-        .await?;
+    // Pin the schema to the physical migration-owned sealing trigger. Catalog
+    // qualification makes this independent of the role's live search_path,
+    // and multiple matching identities fail closed instead of letting a
+    // shadow schema win.
+    let schemas = sqlx::query(
+        "SELECT namespace.nspname,
+                pg_catalog.quote_ident(namespace.nspname) AS quoted_name
+           FROM pg_catalog.pg_trigger AS installed_trigger
+           JOIN pg_catalog.pg_class AS call_table
+             ON call_table.oid = installed_trigger.tgrelid
+           JOIN pg_catalog.pg_namespace AS namespace
+             ON namespace.oid = call_table.relnamespace
+           JOIN pg_catalog.pg_proc AS trigger_function
+             ON trigger_function.oid = installed_trigger.tgfoid
+          WHERE NOT installed_trigger.tgisinternal
+            AND installed_trigger.tgname =
+                'approval_judge_eval_call_is_sealed_with_its_run'
+            AND call_table.relname = 'approval_judge_eval_call'
+            AND trigger_function.proname =
+                'reject_eval_call_outside_run_recording'
+            AND trigger_function.pronamespace = namespace.oid",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    let [schema] = schemas.as_slice() else {
+        return if schemas.is_empty() {
+            Err(ApprovalJudgeEvalRecordingError::TablesAbsent)
+        } else {
+            Err(ApprovalJudgeEvalRecordingError::SchemaAmbiguous)
+        };
+    };
+    let schema_name: String = schema.try_get("nspname")?;
+    let quoted_name: String = schema.try_get("quoted_name")?;
     let present: bool = sqlx::query_scalar(
-        "SELECT to_regclass(
-                    format('%I.%I', $1, 'approval_judge_eval_run')
+        "SELECT pg_catalog.to_regclass(
+                    pg_catalog.format('%I.%I', $1, 'approval_judge_eval_run')
                 ) IS NOT NULL
-            AND to_regclass(
-                    format('%I.%I', $1, 'approval_judge_eval_call')
+            AND pg_catalog.to_regclass(
+                    pg_catalog.format('%I.%I', $1, 'approval_judge_eval_call')
                 ) IS NOT NULL",
     )
-    .bind(schema.as_str())
+    .bind(schema_name.as_str())
     .fetch_one(&mut *connection)
     .await?;
     if !present {
         return Err(ApprovalJudgeEvalRecordingError::TablesAbsent);
     }
     let privileged: bool = sqlx::query_scalar(
-        "SELECT has_table_privilege(
-                    format('%I.%I', $1, 'approval_judge_eval_run'),
+        "SELECT pg_catalog.has_table_privilege(
+                    pg_catalog.format('%I.%I', $1, 'approval_judge_eval_run'),
                     'INSERT'
                 )
-            AND has_table_privilege(
-                    format('%I.%I', $1, 'approval_judge_eval_run'),
+            AND pg_catalog.has_table_privilege(
+                    pg_catalog.format('%I.%I', $1, 'approval_judge_eval_run'),
                     'SELECT'
                 )
-            AND has_table_privilege(
-                    format('%I.%I', $1, 'approval_judge_eval_call'),
+            AND pg_catalog.has_table_privilege(
+                    pg_catalog.format('%I.%I', $1, 'approval_judge_eval_call'),
                     'INSERT'
                 )",
     )
-    .bind(schema.as_str())
+    .bind(schema_name.as_str())
     .fetch_one(&mut *connection)
     .await?;
     if privileged {
-        Ok(())
+        Ok(ApprovalJudgeEvalRecordingSchema { quoted_name })
     } else {
         Err(ApprovalJudgeEvalRecordingError::TablesUnwritable)
     }
@@ -245,13 +289,7 @@ fn require_scorecard_verdict_agreement(
             .get("failed_calls")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| verdict_mismatch(name))?;
-        let failure_causes = case
-            .get("failure_causes")
-            .and_then(serde_json::Value::as_array);
-        if failed_calls > 0
-            && failure_causes.and_then(|causes| u64::try_from(causes.len()).ok())
-                != Some(failed_calls)
-        {
+        if !failure_causes_are_valid(failed_calls, case.get("failure_causes")) {
             return Err(verdict_mismatch(name));
         }
         let successful = u64::try_from(verdicts.len()).map_err(|_| verdict_mismatch(name))?;
@@ -285,6 +323,17 @@ fn require_scorecard_verdict_agreement(
     }
     require_scorecard_aggregate_summary_agreement(&run.scorecard, cases)?;
     Ok(())
+}
+
+fn failure_causes_are_valid(failed_calls: u64, failure_causes: Option<&serde_json::Value>) -> bool {
+    let failure_cause_count = failure_causes
+        .and_then(serde_json::Value::as_array)
+        .and_then(|causes| u64::try_from(causes.len()).ok());
+    if failed_calls == 0 {
+        failure_causes.is_none() || failure_cause_count == Some(0)
+    } else {
+        failure_cause_count == Some(failed_calls)
+    }
 }
 
 /// Requires one case's derived summaries to agree with its own verdicts.
@@ -500,6 +549,7 @@ fn verdict_mismatch(case: &str) -> ApprovalJudgeEvalRecordingError {
 /// every violation is rejected before anything commits.
 pub async fn record_eval_run(
     pool: &PgPool,
+    schema: &ApprovalJudgeEvalRecordingSchema,
     run: &ApprovalJudgeEvalRunRecord,
     calls: &[ApprovalJudgeEvalCallRecord],
 ) -> Result<(), ApprovalJudgeEvalRecordingError> {
@@ -511,9 +561,7 @@ pub async fn record_eval_run(
         }
     }
     let mut transaction = pool.begin().await?;
-    let schema: String = sqlx::query_scalar("SELECT quote_ident(current_schema())")
-        .fetch_one(&mut *transaction)
-        .await?;
+    let schema = schema.quoted_name.as_str();
     let insert_run = format!(
         "INSERT INTO {schema}.approval_judge_eval_run
             (eval_run_id, direct_model_selection_id,
@@ -578,6 +626,8 @@ pub enum ApprovalJudgeEvalRecordingError {
     TablesAbsent,
     /// The connected role lacks a table privilege eval recording exercises.
     TablesUnwritable,
+    /// Multiple database objects claim the migration-owned recording identity.
+    SchemaAmbiguous,
     /// A call's repeat ordinal falls outside the run's configured repeats.
     CallOutsideConfiguredRepeats,
     /// A scorecard header field disagrees with the typed column it duplicates.
@@ -630,6 +680,9 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
             Self::TablesUnwritable => formatter.write_str(
                 "eval recording tables refuse the connected role a required table privilege",
             ),
+            Self::SchemaAmbiguous => formatter.write_str(
+                "eval recording schema identity is ambiguous across database objects",
+            ),
             Self::CallOutsideConfiguredRepeats => formatter
                 .write_str("eval call repeat ordinal is outside the run's configured repeats"),
             Self::ScorecardHeaderMismatch { field } => write!(
@@ -658,6 +711,7 @@ impl Error for ApprovalJudgeEvalRecordingError {
             Self::Database { source, .. } => Some(source),
             Self::TablesAbsent
             | Self::TablesUnwritable
+            | Self::SchemaAmbiguous
             | Self::CallOutsideConfiguredRepeats
             | Self::ScorecardHeaderMismatch { .. }
             | Self::ScorecardVerdictMismatch { .. }
@@ -682,8 +736,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ApprovalJudgeEvalRecordingError, require_scorecard_aggregate_summary_agreement,
-        require_scorecard_case_summary_agreement,
+        ApprovalJudgeEvalRecordingError, failure_causes_are_valid,
+        require_scorecard_aggregate_summary_agreement, require_scorecard_case_summary_agreement,
     };
 
     #[test]
@@ -707,6 +761,8 @@ mod tests {
             .assert_eq(&ApprovalJudgeEvalRecordingError::TablesAbsent.to_string());
         expect!["eval recording tables refuse the connected role a required table privilege"]
             .assert_eq(&ApprovalJudgeEvalRecordingError::TablesUnwritable.to_string());
+        expect!["eval recording schema identity is ambiguous across database objects"]
+            .assert_eq(&ApprovalJudgeEvalRecordingError::SchemaAmbiguous.to_string());
         expect!["eval call repeat ordinal is outside the run's configured repeats"]
             .assert_eq(&ApprovalJudgeEvalRecordingError::CallOutsideConfiguredRepeats.to_string());
         expect!["eval scorecard header disagrees with the typed run record: repeats"].assert_eq(
@@ -727,6 +783,14 @@ mod tests {
                 }
                 .to_string(),
             );
+    }
+
+    #[test]
+    fn zero_failed_calls_accept_only_absent_or_empty_causes() {
+        assert!(failure_causes_are_valid(0, None));
+        assert!(failure_causes_are_valid(0, Some(&json!([]))));
+        assert!(!failure_causes_are_valid(0, Some(&json!(["unexpected"]))));
+        assert!(!failure_causes_are_valid(0, Some(&json!("malformed"))));
     }
 
     #[test]

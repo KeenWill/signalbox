@@ -16,7 +16,8 @@ use signalbox_domain::{
 use signalbox_persistence::{
     approval_judge_eval::{
         ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRecordingError, ApprovalJudgeEvalRunId,
-        ApprovalJudgeEvalRunRecord, record_eval_run, verify_recording_schema,
+        ApprovalJudgeEvalRunRecord, record_eval_run as record_eval_run_in_schema,
+        verify_recording_schema,
     },
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
@@ -80,7 +81,6 @@ const APPROVE_SPELLING: &str = "approve";
 const DENY_SPELLING: &str = "deny";
 const FOREIGN_RECOMMENDATION_SPELLING: &str = "maybe";
 const FAILURE_CAUSES: [&str; 2] = ["fixture timeout", "fixture transport failure"];
-const CONFIGURED_SCHEMA: &str = "configured_approval_judge_eval";
 
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -405,6 +405,15 @@ fn second_call() -> ApprovalJudgeEvalCallRecord {
     }
 }
 
+async fn record_eval_run(
+    pool: &PgPool,
+    run: &ApprovalJudgeEvalRunRecord,
+    calls: &[ApprovalJudgeEvalCallRecord],
+) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let schema = verify_recording_schema(pool).await?;
+    record_eval_run_in_schema(pool, &schema, run, calls).await
+}
+
 #[track_caller]
 fn constraint_name(error: &ApprovalJudgeEvalRecordingError) -> Option<String> {
     match error {
@@ -697,13 +706,31 @@ async fn recording_requires_the_daemon_applied_schema() -> Result<(), Box<dyn Er
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recording_uses_the_configured_migration_schema() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres_in_configured_schema().await?;
-    verify_recording_schema(&pool).await?;
+    sqlx::query("CREATE SCHEMA shadow_approval_judge_eval AUTHORIZATION signalbox")
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql(
+        "CREATE TABLE shadow_approval_judge_eval.approval_judge_eval_run
+             (LIKE configured_approval_judge_eval.approval_judge_eval_run INCLUDING ALL);
+         CREATE TABLE shadow_approval_judge_eval.approval_judge_eval_call
+             (LIKE configured_approval_judge_eval.approval_judge_eval_call INCLUDING ALL);
+         ALTER ROLE signalbox SET search_path TO shadow_approval_judge_eval",
+    )
+    .execute(&pool)
+    .await?;
+    let connection_options = pool.connect_options().clone();
+    pool.close().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(connection_options)
+        .await?;
+    let schema = verify_recording_schema(&pool).await?;
     let run = run_record_with(
         RUN_IDENTITY,
         &both_call_scorecard_cases(),
         both_partial_case_aggregates(),
     );
-    record_eval_run(&pool, &run, &[first_call(), second_call()]).await?;
+    record_eval_run_in_schema(&pool, &schema, &run, &[first_call(), second_call()]).await?;
 
     let current_schema: String = sqlx::query_scalar("SELECT current_schema()")
         .fetch_one(&pool)
@@ -716,8 +743,17 @@ async fn recording_uses_the_configured_migration_schema() -> Result<(), Box<dyn 
     .bind(run.run.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(current_schema, CONFIGURED_SCHEMA);
+    assert_eq!(current_schema, "shadow_approval_judge_eval");
     assert_eq!(stored, 1);
+    let shadow_stored: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM shadow_approval_judge_eval.approval_judge_eval_run
+          WHERE eval_run_id = $1",
+    )
+    .bind(run.run.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(shadow_stored, 0);
     Ok(())
 }
 
@@ -1050,11 +1086,6 @@ async fn unaccounted_attempts_are_rejected() -> Result<(), Box<dyn Error>> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn failed_calls_require_one_failure_cause_each() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let malformed_causes = [
-        serde_json::json!([]),
-        serde_json::json!(["only one cause"]),
-        serde_json::json!(["first", "second", "third"]),
-    ];
     let mut missing = run_record_with(
         RUN_IDENTITY,
         &[scorecard_case(
@@ -1078,27 +1109,67 @@ async fn failed_calls_require_one_failure_cause_each() -> Result<(), Box<dyn Err
         .expect_err("failed calls require failure causes");
     expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
 
-    for malformed in malformed_causes {
-        let mut run = run_record_with(
-            RUN_IDENTITY,
-            &[scorecard_case(
-                FIRST_CASE,
-                &[verdict_entry(VerdictFixture {
-                    recommendation: APPROVE_SPELLING,
-                    rationale: FIRST_RATIONALE,
-                })],
-                2,
-                &FAILURE_CAUSES,
-                first_partial_case_summary(),
-            )],
-            first_partial_case_aggregates(),
-        );
-        run.scorecard["cases"][0]["failure_causes"] = malformed;
-        let error = record_eval_run(&pool, &run, &[first_call()])
-            .await
-            .expect_err("failure causes must account for every failed call");
-        expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
-    }
+    let mut empty = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
+            2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
+        )],
+        first_partial_case_aggregates(),
+    );
+    empty.scorecard["cases"][0]["failure_causes"] = serde_json::json!([]);
+    let error = record_eval_run(&pool, &empty, &[first_call()])
+        .await
+        .expect_err("two failed calls cannot have no failure causes");
+    expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
+
+    let mut too_few = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
+            2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
+        )],
+        first_partial_case_aggregates(),
+    );
+    too_few.scorecard["cases"][0]["failure_causes"] =
+        serde_json::json!(["only one cause"]);
+    let error = record_eval_run(&pool, &too_few, &[first_call()])
+        .await
+        .expect_err("two failed calls cannot have only one failure cause");
+    expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
+
+    let mut too_many = run_record_with(
+        RUN_IDENTITY,
+        &[scorecard_case(
+            FIRST_CASE,
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
+            2,
+            &FAILURE_CAUSES,
+            first_partial_case_summary(),
+        )],
+        first_partial_case_aggregates(),
+    );
+    too_many.scorecard["cases"][0]["failure_causes"] =
+        serde_json::json!(["first", "second", "third"]);
+    let error = record_eval_run(&pool, &too_many, &[first_call()])
+        .await
+        .expect_err("two failed calls cannot have three failure causes");
+    expect_scorecard_verdict_mismatch(&error, FIRST_CASE);
     Ok(())
 }
 

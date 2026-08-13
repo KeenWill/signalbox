@@ -154,6 +154,7 @@ enum ParsedArguments {
 
 struct EvalRecording {
     pool: sqlx::PgPool,
+    schema: signalbox_persistence::approval_judge_eval::ApprovalJudgeEvalRecordingSchema,
     repeats: u32,
     usage_input_includes_cache_tokens: bool,
 }
@@ -413,11 +414,12 @@ async fn run(options: RunOptions) -> Result<(), String> {
             // The eval tables must already exist: schema application belongs
             // to the daemon, and a measurement tool never migrates a live
             // database out from under it.
-            verify_recording_schema(&pool)
+            let schema = verify_recording_schema(&pool)
                 .await
                 .map_err(|error| format!("database recording is unavailable: {error}"))?;
             Some(EvalRecording {
                 pool,
+                schema,
                 repeats,
                 usage_input_includes_cache_tokens: configuration
                     .cache_inclusive_input_targets()
@@ -791,7 +793,12 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "recording eval run {run_identity} holding {} calls",
             recorded_calls.len()
         );
-        record_eval_run(&recording.pool, &run, &recorded_calls)
+        record_eval_run(
+            &recording.pool,
+            &recording.schema,
+            &run,
+            &recorded_calls,
+        )
             .await
             .map_err(|error| {
                 format!("database recording failed for eval run {run_identity}: {error}")
