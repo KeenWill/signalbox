@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_and_null_text_are_rejected_without_rewriting() {
+    fn empty_text_is_rejected_without_rewriting() {
         let empty = String::new();
         let empty_error = NonEmptyUnicodeText::try_new(empty.clone())
             .expect_err("empty text is outside the baseline");
@@ -376,7 +376,10 @@ mod tests {
             empty_error.into_parts(),
             (empty, NonEmptyUnicodeTextFailure::Empty)
         );
+    }
 
+    #[test]
+    fn null_bearing_text_is_rejected_without_rewriting() {
         let with_null = String::from("before\0after");
         let null_error = NonEmptyUnicodeText::try_new(with_null.clone())
             .expect_err("text containing U+0000 is outside the baseline");
@@ -387,40 +390,59 @@ mod tests {
         );
     }
 
-    /// INV-005 / INV-012: content preserves exact scalars and order, while
-    /// attachment metadata participates in structural equality.
+    /// INV-005 / INV-012: content preserves exact scalar spellings.
     #[test]
-    fn inv005_inv012_parts_are_exact_ordered_and_structurally_equal() {
+    fn inv005_inv012_parts_preserve_exact_scalars() {
         let exact = String::from(" \tline one\r\ncafe\u{301}\n ");
-        let first = UserContent::try_parts(vec![
+        let parts = vec![
             UserContentPart::try_text(exact.clone()).expect("text is valid"),
             attachment(Some("chart.png")),
-        ])
-        .expect("the ordered fixture is valid");
-        let equal = UserContent::try_parts(vec![
-            UserContentPart::try_text(exact).expect("text is valid"),
-            attachment(Some("chart.png")),
-        ])
-        .expect("the equal fixture is valid");
-        let reordered = UserContent::try_parts(vec![
-            attachment(Some("chart.png")),
-            UserContentPart::try_text(String::from(" \tline one\r\ncafe\u{301}\n "))
-                .expect("text is valid"),
-        ])
-        .expect("the reordered fixture is structurally valid");
+        ];
+        let content = UserContent::try_parts(parts.clone()).expect("the ordered fixture is valid");
 
-        assert_eq!(first, equal);
+        assert_eq!(content.parts(), parts.as_slice());
+    }
+
+    /// INV-005 / INV-012: part order participates in structural equality.
+    #[test]
+    fn inv005_inv012_part_order_participates_in_equality() {
+        let text = UserContentPart::try_text(String::from("before")).expect("text is valid");
+        let first = UserContent::try_parts(vec![text.clone(), attachment(Some("chart.png"))])
+            .expect("the ordered fixture is valid");
+        let reordered = UserContent::try_parts(vec![attachment(Some("chart.png")), text])
+            .expect("the reordered fixture is structurally valid");
+
         assert_ne!(first, reordered);
-        assert_eq!(first.parts().len(), 2);
+    }
+
+    /// INV-005 / INV-012: attachment metadata participates in structural
+    /// equality.
+    #[test]
+    fn inv005_inv012_attachment_metadata_participates_in_equality() {
+        let first = UserContent::try_parts(vec![
+            UserContentPart::try_text(String::from("before")).expect("text is valid"),
+            attachment(Some("chart.png")),
+        ])
+        .expect("the first fixture is valid");
+        let different_filename = UserContent::try_parts(vec![
+            UserContentPart::try_text(String::from("before")).expect("text is valid"),
+            attachment(Some("diagram.png")),
+        ])
+        .expect("the differing metadata fixture is valid");
+
+        assert_ne!(first, different_filename);
     }
 
     #[test]
-    fn noncanonical_or_unbounded_part_sequences_are_rejected() {
+    fn empty_part_sequence_is_rejected() {
         assert_eq!(
             UserContent::try_parts(Vec::new()),
             Err(UserContentError::Empty)
         );
+    }
 
+    #[test]
+    fn adjacent_text_parts_are_rejected() {
         let adjacent = UserContent::try_parts(vec![
             UserContentPart::try_text(String::from("first")).expect("text is valid"),
             UserContentPart::try_text(String::from("second")).expect("text is valid"),
@@ -429,35 +451,52 @@ mod tests {
     }
 
     #[test]
-    fn attachment_metadata_is_exact_bounded_and_redacted() {
+    fn declared_media_type_rejects_nonvisible_ascii() {
         let media_error = DeclaredMediaType::try_new(String::from("image png"))
             .expect_err("space is not visible media-type data");
         assert_eq!(
             media_error.failure(),
             DeclaredMediaTypeFailure::NotVisibleAscii
         );
+    }
 
+    #[test]
+    fn attachment_display_filename_rejects_path_spelling() {
         let filename_error = AttachmentDisplayFilename::try_new(String::from("../chart.png"))
             .expect_err("a path spelling is not a display basename");
         assert_eq!(
             filename_error.failure(),
             AttachmentDisplayFilenameFailure::ContainsPathSeparator
         );
+    }
 
-        let filename = AttachmentDisplayFilename::try_new(String::from("chart.png"))
+    #[test]
+    fn attachment_display_filename_preserves_exact_basename() {
+        let basename = "chart.png";
+        let filename = AttachmentDisplayFilename::try_new(String::from(basename))
             .expect("a basename is valid");
-        assert_eq!(filename.as_str(), "chart.png");
-        assert!(!format!("{filename:?}").contains("chart.png"));
+
+        assert_eq!(filename.as_str(), basename);
+    }
+
+    #[test]
+    fn attachment_display_filename_debug_is_redacted() {
+        let basename = "chart.png";
+        let filename = AttachmentDisplayFilename::try_new(String::from(basename))
+            .expect("a basename is valid");
+
+        assert!(!format!("{filename:?}").contains(basename));
     }
 
     #[test]
     fn single_text_has_one_canonical_representation() {
+        let exact = " \t\r\n";
         let content =
-            UserContent::try_text(String::from(" \t\r\n")).expect("whitespace remains content");
+            UserContent::try_text(String::from(exact)).expect("whitespace remains content");
 
         assert_eq!(
             content.single_text().map(NonEmptyUnicodeText::as_str),
-            Some(" \t\r\n")
+            Some(exact)
         );
         assert_eq!(content.parts().len(), 1);
     }
