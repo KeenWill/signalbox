@@ -564,8 +564,12 @@ impl PostgresModelCallRepository {
                         .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
-                        let armed_user_overrides =
-                            load_armed_user_overrides(&mut transaction, session).await?;
+                        let armed_user_overrides = load_call_user_overrides(
+                            &mut transaction,
+                            session,
+                            current_call_id,
+                        )
+                        .await?;
                         Ok((
                             false,
                             PrepareInitialModelCallOutcome::Ready {
@@ -4579,6 +4583,7 @@ pub(crate) async fn insert_prepared_call(
     .bind(input_includes_cache_tokens)
     .execute(&mut *connection)
     .await?;
+    freeze_armed_user_overrides(connection, prepared.session(), call.id()).await?;
     outbox::append(
         connection,
         OutboxEvent::ModelCallTransition {
@@ -4766,33 +4771,56 @@ async fn load_call_credential_reference(
     Ok(ModelCallCredentialReference::new(reference))
 }
 
-/// Loads the session's armed, not-yet-consumed user overrides of delegate
-/// denials, frozen for the prepared call in the same transaction as the
-/// dangerous blanket posture.
+/// Freezes the session's armed, not-yet-consumed user overrides for one newly
+/// checkpointed model call.
 ///
 /// An override is consumed when a `tool_approval_decision` row names it, so
-/// the anti-join is the one-shot boundary. Ordering by denied-request
-/// identity keeps matching deterministic when several armed overrides name
-/// the same re-proposed command.
-async fn load_armed_user_overrides(
+/// the anti-join is the one-shot boundary.
+async fn freeze_armed_user_overrides(
     connection: &mut PgConnection,
     session: SessionId,
-) -> Result<Box<[signalbox_domain::ArmedUserOverride]>, ModelCallRepositoryError> {
-    let rows = sqlx::query(
-        "SELECT armed.command_id, armed.denied_request_id, armed.judge_model_call_id,
-                request.tool_name, request.arguments_kind, request.arguments_text
+    call: ModelCallId,
+) -> Result<(), ModelCallRepositoryError> {
+    sqlx::query(
+        "INSERT INTO model_call_user_override
+            (model_call_id, denied_request_id)
+         SELECT $2, armed.denied_request_id
            FROM tool_approval_user_override AS armed
-           JOIN tool_request AS request
-             ON request.request_id = armed.denied_request_id
           WHERE armed.session_id = $1
             AND NOT EXISTS (
                 SELECT 1
                   FROM tool_approval_decision AS consumed
                  WHERE consumed.override_denied_request_id = armed.denied_request_id
-            )
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Reloads exactly the override inventory frozen when this call was
+/// checkpointed, irrespective of overrides armed or consumed afterward.
+async fn load_call_user_overrides(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<Box<[signalbox_domain::ArmedUserOverride]>, ModelCallRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT armed.command_id, armed.denied_request_id, armed.judge_model_call_id,
+                request.tool_name, request.arguments_kind, request.arguments_text
+           FROM model_call_user_override AS frozen
+           JOIN tool_approval_user_override AS armed
+             ON armed.denied_request_id = frozen.denied_request_id
+           JOIN tool_request AS request
+             ON request.request_id = armed.denied_request_id
+          WHERE armed.session_id = $1
+            AND frozen.model_call_id = $2
           ORDER BY armed.denied_request_id",
     )
     .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
     .fetch_all(&mut *connection)
     .await?;
     rows.into_iter()

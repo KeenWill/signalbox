@@ -128,6 +128,31 @@ CREATE TRIGGER tool_approval_user_override_is_append_only
 BEFORE UPDATE OR DELETE ON tool_approval_user_override
 FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE INDEX tool_approval_user_override_session_request_idx
+    ON tool_approval_user_override (session_id, denied_request_id);
+
+-- The armed override inventory is part of a Prepared call's immutable input.
+-- Recording only the denial identity is sufficient because the armed row and
+-- denied request are themselves append-only authority records.
+CREATE TABLE model_call_user_override (
+    model_call_id uuid NOT NULL,
+    denied_request_id uuid NOT NULL,
+
+    PRIMARY KEY (model_call_id, denied_request_id),
+    CONSTRAINT model_call_user_override_call_fk
+        FOREIGN KEY (model_call_id)
+        REFERENCES model_call (model_call_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT model_call_user_override_armed_fk
+        FOREIGN KEY (denied_request_id)
+        REFERENCES tool_approval_user_override (denied_request_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
+CREATE TRIGGER model_call_user_override_is_append_only
+BEFORE UPDATE OR DELETE ON model_call_user_override
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+
 -- Arming authority: the named denial must be a terminal delegate denial by
 -- the exact judge call the row records, and the row must correlate with its
 -- applied command. The denied-result entry requirement is what makes the
@@ -349,9 +374,14 @@ BEGIN
           FROM tool_request AS request
           JOIN tool_approval_user_override AS armed
             ON armed.denied_request_id = NEW.override_denied_request_id
+          JOIN tool_request AS denied_request
+            ON denied_request.request_id = armed.denied_request_id
          WHERE request.request_id = NEW.request_id
            AND request.approval_posture = 'delegated'
-           AND armed.session_id = request.session_id;
+           AND armed.session_id = request.session_id
+           AND denied_request.tool_name = request.tool_name
+           AND denied_request.arguments_kind = request.arguments_kind
+           AND denied_request.arguments_text = request.arguments_text;
         IF matched <> 1 THEN
             RAISE EXCEPTION
                 'user override consumption lacks an armed override for a delegated request'
