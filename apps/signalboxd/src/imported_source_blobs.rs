@@ -261,7 +261,9 @@ async fn read_and_verify(
 
 fn map_store_error(error: signalbox_blob_store::BlobStoreError) -> ImportedRawBlobStorageError {
     match error.kind() {
-        BlobStoreFailureKind::Unavailable => ImportedRawBlobStorageError::Unavailable,
+        BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+            ImportedRawBlobStorageError::Unavailable
+        }
         BlobStoreFailureKind::NotFound | BlobStoreFailureKind::VerificationFailed => {
             ImportedRawBlobStorageError::Integrity
         }

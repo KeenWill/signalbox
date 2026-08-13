@@ -302,7 +302,9 @@ async fn verify_replica_candidates(
             Ok(Err(error)) => match error.kind() {
                 BlobStoreFailureKind::NotFound => saw_missing = true,
                 BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
-                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
+                BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true;
+                }
             },
             Err(_) => saw_unavailable = true,
         }
