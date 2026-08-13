@@ -17,7 +17,7 @@ use arguments::{
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{
-    ChildResultPresentation, ConversationRow, ImportedEntryRow, Output,
+    BlobUploadPresentation, ChildResultPresentation, ConversationRow, ImportedEntryRow, Output,
     SessionAwaitRegisteredPresentation, SessionMessageSentPresentation, SessionMetadataRow,
     SessionSpawnedPresentation, SnapshotSelection,
 };
@@ -816,7 +816,7 @@ async fn execute(
         | Command::Deny { .. } => None,
     };
     let prepared_blob = match &arguments.command {
-        Command::BlobUpload { source } => Some(open_import_source(source).await?),
+        Command::BlobUpload { source } => Some(open_blob_source(source)?),
         _ => None,
     };
     let system_prompt_text = match &arguments.command {
@@ -1116,6 +1116,27 @@ async fn open_import_source(path: &Path) -> Result<tokio::fs::File, ClientError>
         .map_err(ClientError::source_file)
 }
 
+fn open_blob_source(path: &Path) -> Result<tokio::fs::File, ClientError> {
+    let descriptor = openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .map_err(ClientError::blob_source_file)?;
+    let status = fstat(&descriptor)
+        .map_err(std::io::Error::from)
+        .map_err(ClientError::blob_source_file)?;
+    if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile {
+        return Err(ClientError::blob_source_file(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "blob upload source is not a regular file",
+        )));
+    }
+    Ok(tokio::fs::File::from_std(File::from(descriptor)))
+}
+
 async fn upload_blob(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -1124,7 +1145,7 @@ async fn upload_blob(
     let byte_length = file
         .metadata()
         .await
-        .map_err(ClientError::source_file)?
+        .map_err(ClientError::blob_source_file)?
         .len();
     if byte_length == 0 {
         return Err(ClientError::Input("blob source must be nonempty"));
@@ -1136,7 +1157,7 @@ async fn upload_blob(
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(ClientError::source_file)?;
+            .map_err(ClientError::blob_source_file)?;
         if read == 0 {
             break;
         }
@@ -1154,7 +1175,7 @@ async fn upload_blob(
     }
     file.seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(ClientError::source_file)?;
+        .map_err(ClientError::blob_source_file)?;
     let expected_digest = CanonicalBlobDigest::from_bytes(digest.finalize().into());
     let expected_length_bytes = CanonicalU64::new(byte_length);
     let mut connection = client
@@ -1168,7 +1189,11 @@ async fn upload_blob(
             digest,
             byte_length,
         } if digest == expected_digest && byte_length == expected_length_bytes => {
-            output.blob_uploaded(digest, byte_length.value(), true)?;
+            output.blob_uploaded(
+                digest,
+                byte_length.value(),
+                BlobUploadPresentation::AlreadyPresent,
+            )?;
             return Ok(());
         }
         BlobUploadResponse::Begun {
@@ -1194,7 +1219,7 @@ async fn upload_blob(
             .take(u64::try_from(MAX_BLOB_CHUNK_BYTES).unwrap_or(u64::MAX))
             .read_to_end(&mut chunk)
             .await
-            .map_err(ClientError::source_file)?;
+            .map_err(ClientError::blob_source_file)?;
         if chunk.is_empty() {
             break;
         }
@@ -1235,7 +1260,11 @@ async fn upload_blob(
             digest,
             byte_length,
         } if digest == expected_digest && byte_length == expected_length_bytes => {
-            output.blob_uploaded(digest, byte_length.value(), false)?;
+            output.blob_uploaded(
+                digest,
+                byte_length.value(),
+                BlobUploadPresentation::Committed,
+            )?;
             Ok(())
         }
         BlobUploadResponse::Error {
@@ -5607,18 +5636,19 @@ mod tests {
         DelegationReason, DelegationWaitMode, DescendantTerminationScope, EffectiveModelSettings,
         FastMode, FrameEncodeError, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
         ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
-        InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
-        ModelCallState, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-        ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
-        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewExternalObjectKind,
-        ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
-        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, RunnerConnectionHealth,
-        RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
-        RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
-        SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision,
-        TurnState, UserInputContent, decode_client_line, encode_server_line,
+        InputDelivery, MAX_BLOB_CHUNK_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES,
+        ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingSource,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion,
+        ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
+        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow,
+        RunnerConnectionHealth, RunnerPlacementRevision, RunnerProjection,
+        RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+        RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
+        SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision, TurnState,
+        UserInputContent, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -5679,7 +5709,7 @@ mod tests {
         await_turn_terminal, blocker_recovery_snapshot_state, collect_import_paths,
         continue_imported, conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
-        import_conversation_file, imported, model_call_recovery_transition,
+        import_conversation_file, imported, model_call_recovery_transition, open_blob_source,
         open_scanned_import_source, placement_update_receipt_matches,
         placement_update_rejection_matches, queued_turn_recovery, queued_turn_runner_recovery,
         read_blob_chunk, read_blob_metadata, read_delegation_content_file, read_goal_text_file,
@@ -7709,6 +7739,40 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn blob_upload_missing_source_reports_blob_specific_failure() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let absent = root.path().join("absent.bin");
+
+        let failure = open_blob_source(&absent).expect_err("an absent blob source must fail");
+
+        assert!(matches!(failure, ClientError::BlobSourceFile(_)));
+        assert_eq!(
+            failure.to_string(),
+            "the blob upload source file could not be read"
+        );
+        Ok(())
+    }
+
+    /// INV-060: opening a FIFO as an upload source is nonblocking and rejects
+    /// the descriptor before hashing.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn inv060_blob_upload_rejects_fifo_source_without_blocking() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("blob.fifo");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &source,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
+
+        let opened = open_blob_source(&source);
+
+        assert!(matches!(opened, Err(ClientError::BlobSourceFile(_))));
+        Ok(())
+    }
+
     /// INV-060: the terminal client prehashes one descriptor, streams bounded
     /// chunks in order, validates every echo, and reports the committed identity.
     #[tokio::test]
@@ -7716,10 +7780,14 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let source_path = directory.path().join("blob.bin");
-        let bytes = b"terminal blob bytes";
-        fs::write(&source_path, bytes)?;
-        let digest = CanonicalBlobDigest::from_digest(signalbox_domain::BlobDigest::digest(bytes));
+        let first_chunk = vec![b'a'; MAX_BLOB_CHUNK_BYTES];
+        let final_chunk = b"terminal blob tail";
+        let mut bytes = first_chunk.clone();
+        bytes.extend_from_slice(final_chunk);
+        fs::write(&source_path, &bytes)?;
+        let digest = CanonicalBlobDigest::from_digest(signalbox_domain::BlobDigest::digest(&bytes));
         let byte_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+        let first_length = CanonicalU64::new(u64::try_from(first_chunk.len())?);
         let listener = UnixListener::bind(&socket)?;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
@@ -7755,7 +7823,28 @@ mod tests {
             assert_eq!(
                 append.request(),
                 &ClientRequest::AppendBlobUpload {
-                    chunk: BlobChunk::new(bytes.to_vec()),
+                    chunk: BlobChunk::new(first_chunk),
+                }
+            );
+            let appended = ServerFrame::try_new_for_version(
+                append.version(),
+                append.request_id(),
+                ServerMessage::BlobUploadAppended {
+                    assembled_length_bytes: first_length,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&appended).map_err(io::Error::other)?)
+                .await?;
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).await?;
+            let append = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                append.request(),
+                &ClientRequest::AppendBlobUpload {
+                    chunk: BlobChunk::new(final_chunk.to_vec()),
                 }
             );
             let appended = ServerFrame::try_new_for_version(
