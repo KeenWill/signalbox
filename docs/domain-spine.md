@@ -9123,7 +9123,7 @@ impl RunnerLeaseCompletion {
 pub struct RunnerLease { /* private */ }
 impl RunnerLease {
     // accessors: correlation(), state(), generation(), attempt(), tool(),
-    //   credential_authorization(), session(), runner(), effect()
+    //   arguments(), credential_authorization(), session(), runner(), effect()
     pub fn claim(
         self,
         correlation: RunnerLeaseCorrelation,
@@ -9169,8 +9169,8 @@ pub enum RunnerLeaseRetryPreparation {
     Prepared,
 }
 pub struct RunnerLeaseReconstitutionInput {
-    /* public raw lease and execution-placement projection, independent fence,
-     * and retry preparation */
+    /* public raw lease, immutable normalized arguments, execution-placement
+     * projection, independent fence, and retry preparation */
 }
 pub struct RunnerLeaseLoss { /* private, produced only by checked RunnerLease transitions */ }
 impl RunnerLeaseLoss {

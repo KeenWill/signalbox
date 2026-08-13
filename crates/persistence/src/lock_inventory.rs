@@ -484,7 +484,9 @@ pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, 
                         AS canonical_dispatch_issuing_attempt,
                     attempt.request_id AS canonical_dispatch_request,
                     attempt.dispatch_generation
-                        AS canonical_dispatch_generation
+                        AS canonical_dispatch_generation,
+                    request.arguments_kind AS canonical_arguments_kind,
+                    request.arguments_text AS canonical_arguments_text
                FROM runner_current_lease_event AS current_event
                JOIN runner_lease_event AS event
                  ON event.lease_id = current_event.lease_id
@@ -495,6 +497,10 @@ pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, 
                 AND lease_generation.generation = current_event.generation
                JOIN tool_attempt AS attempt
                  ON attempt.attempt_id = lease_generation.attempt_id
+               JOIN tool_request AS request
+                 ON request.request_id = attempt.request_id
+                AND request.session_id = attempt.session_id
+                AND request.turn_id = attempt.turn_id
               WHERE current_event.lease_id = $1
                 AND current_event.generation = $2
               FOR UPDATE OF current_event";

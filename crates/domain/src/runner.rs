@@ -2137,6 +2137,7 @@ pub struct RunnerLease {
     working_directory: RunnerWorkingDirectory,
     sandbox: RunnerSandboxProfile,
     tool: ToolName,
+    arguments: NormalizedToolArguments,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
     generation: RunnerGeneration,
@@ -2154,6 +2155,7 @@ impl RunnerLease {
             working_directory: input.working_directory,
             sandbox: input.sandbox,
             tool: input.tool,
+            arguments: input.arguments,
             effect: input.effect,
             credential_authorization: input.credential_authorization,
             generation: input.generation,
@@ -2194,6 +2196,11 @@ impl RunnerLease {
     /// Returns the tool leased for runner execution.
     pub const fn tool(&self) -> &ToolName {
         &self.tool
+    }
+
+    /// Borrows the exact immutable normalized dispatch payload.
+    pub const fn arguments(&self) -> &NormalizedToolArguments {
+        &self.arguments
     }
 
     /// Returns the runner-bound credential authorization when required.
@@ -2420,6 +2427,7 @@ impl RunnerLease {
             working_directory: input.working_directory,
             sandbox: input.sandbox,
             tool: input.tool,
+            arguments: input.arguments,
             effect: input.effect,
             credential_authorization: input.credential_authorization,
             generation: input.generation,
@@ -2442,6 +2450,7 @@ impl RunnerLease {
         if lease.correlation() != input.recorded_correlation
             || lease.dispatch.session() != input.recorded_session
             || lease.effect != input.recorded_effect
+            || lease.arguments != input.recorded_arguments
             || lease.credential_authorization != input.recorded_credential_authorization
             || !credential_matches
             || !declaration_matches
@@ -2496,6 +2505,7 @@ struct ValidatedRunnerLeaseOffer {
     working_directory: RunnerWorkingDirectory,
     sandbox: RunnerSandboxProfile,
     tool: ToolName,
+    arguments: NormalizedToolArguments,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
     generation: RunnerGeneration,
@@ -2520,6 +2530,8 @@ pub struct RunnerLeaseReconstitutionInput {
     pub sandbox: RunnerSandboxProfile,
     /// The exact tool name.
     pub tool: ToolName,
+    /// The immutable normalized tool arguments joined through the physical attempt.
+    pub arguments: NormalizedToolArguments,
     /// The runner tool effect class checked against the registration.
     pub effect: RunnerToolEffectClass,
     /// The runner-bound credential authorization, when required.
@@ -2534,6 +2546,8 @@ pub struct RunnerLeaseReconstitutionInput {
     pub recorded_session: SessionId,
     /// The independently recorded effect used to cross-check the projection.
     pub recorded_effect: RunnerToolEffectClass,
+    /// The independently recorded normalized arguments used to cross-check the projection.
+    pub recorded_arguments: NormalizedToolArguments,
     /// The independently recorded credential authorization used to cross-check the projection.
     pub recorded_credential_authorization: Option<CredentialDispatchAuthorization>,
     /// The independently recorded state used to cross-check the projection.
@@ -3281,7 +3295,7 @@ impl SessionRunnerPlacement {
         offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError> {
         let dispatch = validate_dispatch(self, enrollment, registration, grant, &offer.tool)?;
-        let (attempt, retry_evidence) = validate_authorized_attempt(
+        let (attempt, arguments, retry_evidence) = validate_authorized_attempt(
             self.session,
             &offer.tool,
             dispatch.effect,
@@ -3300,6 +3314,7 @@ impl SessionRunnerPlacement {
             working_directory: dispatch.working_directory,
             sandbox: dispatch.sandbox,
             tool: offer.tool,
+            arguments,
             effect: dispatch.effect,
             credential_authorization: dispatch.credential_authorization,
             generation: RunnerGeneration::one(),
@@ -3333,13 +3348,16 @@ impl SessionRunnerPlacement {
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
-        let (attempt, retry_evidence) = validate_authorized_attempt(
+        let (attempt, arguments, retry_evidence) = validate_authorized_attempt(
             self.session,
             &lost.tool,
             dispatch.effect,
             dispatch.approval,
             authorization,
         )?;
+        if lost.arguments != arguments {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
         match (retry.claimed_attempt, retry_evidence) {
             (Some(claimed), _) if attempt.attempt() == claimed => {
                 return Err(RunnerDomainError::AttemptIdentityReuse);
@@ -3362,6 +3380,7 @@ impl SessionRunnerPlacement {
             working_directory: lost.working_directory,
             sandbox: lost.sandbox,
             tool: lost.tool,
+            arguments,
             effect: lost.effect,
             credential_authorization: lost.credential_authorization,
             generation: retry.generation,
@@ -4050,11 +4069,13 @@ fn validate_authorized_attempt(
 ) -> Result<
     (
         ToolAttemptDispatchCorrelation,
+        NormalizedToolArguments,
         Option<RunnerRetryAttemptEvidence>,
     ),
     RunnerDomainError,
 > {
     let (approved, authorized, retry_evidence) = authorization.into_parts();
+    let arguments = approved.request().arguments().clone();
     let (attempt, correlation) = authorized.into_parts();
     let expected_effect = tool_effect_class(effect);
     if approved.request().name() != tool
@@ -4070,7 +4091,7 @@ fn validate_authorized_attempt(
     {
         return Err(RunnerDomainError::CorrelationMismatch);
     }
-    Ok((correlation, retry_evidence))
+    Ok((correlation, arguments, retry_evidence))
 }
 
 const fn tool_effect_class(effect: RunnerToolEffectClass) -> ToolEffectClass {
@@ -4845,6 +4866,8 @@ mod tests {
     const WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x7f00;
     /// Arbitrary empty context-frontier identity for complete batch fixtures.
     const YIELDED_FRONTIER: u128 = 0x7a00;
+    /// Arbitrary issuing turn-attempt identity for tool-batch fixtures.
+    const TOOL_ISSUING_ATTEMPT: u128 = 0x7b00;
 
     fn class() -> RunnerCapabilityClass {
         RunnerCapabilityClass::try_new("linux.workspace".to_owned())
@@ -5460,6 +5483,7 @@ mod tests {
             working_directory: lease.working_directory.clone(),
             sandbox: lease.sandbox,
             tool: lease.tool.clone(),
+            arguments: lease.arguments.clone(),
             effect: lease.effect,
             credential_authorization: lease.credential_authorization.clone(),
             generation: lease.generation,
@@ -5467,6 +5491,7 @@ mod tests {
             recorded_correlation: lease.correlation(),
             recorded_session: lease.dispatch.session(),
             recorded_effect: lease.effect,
+            recorded_arguments: lease.arguments.clone(),
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
             retry_preparation: RunnerLeaseRetryPreparation::Available,
@@ -5483,6 +5508,7 @@ mod tests {
             working_directory: lease.working_directory.clone(),
             sandbox: lease.sandbox,
             tool: lease.tool.clone(),
+            arguments: lease.arguments.clone(),
             effect: lease.effect,
             credential_authorization: lease.credential_authorization.clone(),
             generation: lease.generation,
@@ -5490,6 +5516,7 @@ mod tests {
             recorded_correlation: lease.correlation(),
             recorded_session: lease.dispatch.session(),
             recorded_effect: lease.effect,
+            recorded_arguments: lease.arguments.clone(),
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
             retry_preparation: RunnerLeaseRetryPreparation::Available,
@@ -6562,6 +6589,84 @@ mod tests {
     }
 
     #[test]
+    fn s31_inv021_inv043_claimed_retry_rejects_changed_normalized_arguments() {
+        let (registration, placement, grant, offered) =
+            offered("inspect", tool_attempt_id(ATTEMPT));
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact first lease is claimed");
+        let loss = claimed.lose().expect("claimed pure work may be lost");
+        let canonical_request = request("inspect");
+        let changed_request = ToolRequestReconstitutionInput::new(
+            canonical_request.id(),
+            canonical_request.session(),
+            canonical_request.turn(),
+            canonical_request.producing_call(),
+            canonical_request.ordinal(),
+            canonical_request.name().clone(),
+            NormalizedToolArguments::try_from_provider_text(String::from(r#"{"changed":true}"#))
+                .expect("the changed fixture arguments are canonical"),
+        )
+        .into_request();
+        let changed_approval = ToolApprovalResolutionReconstitutionInput::user_fixture(
+            changed_request.id(),
+            ToolApprovalDecision::Approve,
+        )
+        .reconstitute()
+        .expect("the fixture registry policy approves");
+        let changed_approved =
+            ApprovedToolRequest::try_from_resolution(changed_request, changed_approval)
+                .expect("the changed fixture approval matches its request");
+        let changed_current = changed_approved
+            .prepare_attempt(
+                tool_attempt_id(ATTEMPT),
+                turn_attempt_id(TOOL_ISSUING_ATTEMPT),
+                ToolEffectClass::EffectFree,
+            )
+            .authorize()
+            .expect("the changed fixture source attempt authorizes")
+            .into_parts()
+            .0;
+        let changed_batch = ToolBatchReconstitutionInput::new(
+            session_id(SESSION),
+            turn_id(0x7800),
+            model_call_id(0x7900),
+            ResolvedContextFrontierSnapshot::try_from_candidate(
+                session_id(SESSION),
+                context_frontier_id(YIELDED_FRONTIER),
+                Vec::new(),
+            )
+            .expect("the empty changed fixture snapshot is valid"),
+            vec![changed_approved.request().clone()],
+            vec![changed_approved.approval().clone()],
+            vec![ReconstitutedToolAttempt::Current(changed_current)],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(TOOL_ISSUING_ATTEMPT),
+            },
+        )
+        .reconstitute()
+        .expect("the changed fixture batch is complete");
+        let prepared = loss
+            .retry()
+            .expect("the claimed loss carries retry authority")
+            .prepare_claimed_attempt(changed_batch, tool_attempt_id(RETRY_ATTEMPT))
+            .expect("the changed batch prepares its internally consistent replacement");
+        let (_, _, changed_authorization) = prepared.into_parts();
+
+        assert_eq!(
+            placement.offer_retry(
+                &enrollment_for_registration(&registration),
+                &registration,
+                grant.as_ref(),
+                loss,
+                changed_authorization,
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
     fn s31_inv043_claimed_retry_rejects_cross_wired_lost_lease_correlation() {
         let (registration, placement, grant, offered) =
             offered("inspect", tool_attempt_id(ATTEMPT));
@@ -6925,6 +7030,29 @@ mod tests {
         assert_eq!(
             offered.claim(stale),
             Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv021_inv043_lease_retains_the_authorized_normalized_arguments() {
+        let expected = request("inspect").arguments().clone();
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+
+        assert_eq!(offered.arguments(), &expected);
+    }
+
+    #[test]
+    fn s31_inv021_inv043_lease_reconstitution_rejects_cross_wired_arguments() {
+        let (registration, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(offered);
+        input.recorded_arguments = NormalizedToolArguments::try_from_provider_text(String::from(
+            r#"{"cross_wired":true}"#,
+        ))
+        .expect("the cross-wired fixture arguments are canonical");
+
+        assert_eq!(
+            RunnerLease::reconstitute(input, &registration),
+            Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 

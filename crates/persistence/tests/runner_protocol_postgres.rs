@@ -940,6 +940,7 @@ fn lease_with_correlation(
             working_directory: correlation.working_directory.clone(),
             sandbox: correlation.sandbox,
             tool: lease.tool().clone(),
+            arguments: lease.arguments().clone(),
             effect: lease.effect(),
             credential_authorization: authorization.clone(),
             generation: lease.generation(),
@@ -947,6 +948,7 @@ fn lease_with_correlation(
             recorded_correlation: correlation,
             recorded_session: lease.session(),
             recorded_effect: lease.effect(),
+            recorded_arguments: lease.arguments().clone(),
             recorded_credential_authorization: authorization,
             recorded_state: lease.state(),
             retry_preparation: RunnerLeaseRetryPreparation::Available,
@@ -991,6 +993,43 @@ fn lease_with_cross_wired_sandbox(
     lease_with_correlation(lease, registration, correlation)
 }
 
+fn lease_with_cross_wired_arguments(
+    lease: &RunnerLease,
+    registration: &ValidatedRunnerRegistration,
+) -> RunnerLease {
+    let correlation = lease.correlation();
+    let authorization = lease.credential_authorization().cloned();
+    let arguments =
+        NormalizedToolArguments::try_from_provider_text(String::from(r#"{"cross_wired":true}"#))
+            .expect("the cross-wired fixture arguments are canonical");
+    RunnerLease::reconstitute(
+        RunnerLeaseReconstitutionInput {
+            lease: correlation.lease,
+            dispatch: correlation.dispatch,
+            runner: lease.runner(),
+            registration_revision: correlation.registration_revision,
+            placement_revision: correlation.placement_revision,
+            working_directory: correlation.working_directory.clone(),
+            sandbox: correlation.sandbox,
+            tool: lease.tool().clone(),
+            arguments: arguments.clone(),
+            effect: lease.effect(),
+            credential_authorization: authorization.clone(),
+            generation: lease.generation(),
+            state: lease.state(),
+            recorded_correlation: correlation,
+            recorded_session: lease.session(),
+            recorded_effect: lease.effect(),
+            recorded_arguments: arguments,
+            recorded_credential_authorization: authorization,
+            recorded_state: lease.state(),
+            retry_preparation: RunnerLeaseRetryPreparation::Available,
+        },
+        registration,
+    )
+    .expect("the cross-wired arguments remain internally self-consistent")
+}
+
 fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistration) -> RunnerLease {
     let correlation = lease.correlation();
     let authorization = lease.credential_authorization().cloned();
@@ -1004,6 +1043,7 @@ fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistrati
             working_directory: correlation.working_directory.clone(),
             sandbox: correlation.sandbox,
             tool: lease.tool().clone(),
+            arguments: lease.arguments().clone(),
             effect: lease.effect(),
             credential_authorization: authorization.clone(),
             generation: lease.generation(),
@@ -1011,6 +1051,7 @@ fn duplicate_lease(lease: &RunnerLease, registration: &ValidatedRunnerRegistrati
             recorded_correlation: correlation,
             recorded_session: lease.session(),
             recorded_effect: lease.effect(),
+            recorded_arguments: lease.arguments().clone(),
             recorded_credential_authorization: authorization,
             recorded_state: lease.state(),
             retry_preparation: RunnerLeaseRetryPreparation::Available,
@@ -17893,6 +17934,25 @@ async fn s31_inv043_initial_lease_rejects_cross_wired_dispatch_fence() -> Result
     Ok(())
 }
 
+/// INV-021 / INV-043: the durable lease projection must use the immutable
+/// normalized arguments joined through its exact physical request.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv021_inv043_initial_lease_rejects_cross_wired_arguments()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let cross_wired = lease_with_cross_wired_arguments(&lease, registration.registration());
+    let rejected = store
+        .store_lease(&cross_wired)
+        .await
+        .expect_err("an offered lease must match the canonical normalized arguments");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-043: a pinned runner dispatch commits the physical attempt and offered
 /// lease together against the frozen registration locus.
 #[tokio::test]
@@ -17918,6 +17978,10 @@ async fn s31_inv043_pinned_dispatch_atomically_authorizes_attempt_and_lease()
         expected_enrollment.enrollment(),
         registration.registration().revision(),
     );
+    let expected_arguments = approved_request(PINNED_DISPATCH_PHYSICAL_ATTEMPT)
+        .request()
+        .arguments()
+        .clone();
     let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 5));
     let offered = store.authorize_pinned_dispatch(request, lease).await?;
     let loaded = store
@@ -17931,6 +17995,7 @@ async fn s31_inv043_pinned_dispatch_atomically_authorizes_attempt_and_lease()
             .await?;
 
     assert_eq!(offered.state(), RunnerLeaseState::Offered);
+    assert_eq!(offered.arguments(), &expected_arguments);
     assert_eq!(loaded, offered);
     assert_eq!(attempt_state, "in_flight");
     drop(pool);
@@ -22136,6 +22201,7 @@ async fn s31_inv043_adapter_rejects_caller_reconstituted_no_execution_proof()
             working_directory: correlation.working_directory.clone(),
             sandbox: correlation.sandbox,
             tool: correlation.tool.clone(),
+            arguments: pin.lease.arguments().clone(),
             effect: pin.lease.effect(),
             credential_authorization: credential_authorization.clone(),
             generation: correlation.generation,
@@ -22143,6 +22209,7 @@ async fn s31_inv043_adapter_rejects_caller_reconstituted_no_execution_proof()
             recorded_correlation: correlation.clone(),
             recorded_session: correlation.dispatch.session(),
             recorded_effect: pin.lease.effect(),
+            recorded_arguments: pin.lease.arguments().clone(),
             recorded_credential_authorization: credential_authorization,
             recorded_state: signalbox_domain::RunnerLeaseState::LostUnclaimed,
             retry_preparation: RunnerLeaseRetryPreparation::Available,
