@@ -162,8 +162,7 @@ use signalbox_process_protocol::{
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_BLOB_READ_BYTES,
-    MAX_FRAME_BYTES,
-    MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
+    MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
     ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
     ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
     ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
@@ -14816,10 +14815,9 @@ mod tests {
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, try_acquire_blob_read_permit,
         unavailable_protocol_error, wait_for_connection_loss, wire_goal_event,
-        wire_metadata_last_writer,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_delegation_port_error,
-        write_snapshot_spool_error, write_transcript_entry,
+        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -15576,8 +15574,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blob_read_disconnect_detection_survives_pipelined_input()
-    -> Result<(), Box<dyn Error>> {
+    async fn blob_read_disconnect_detection_survives_pipelined_input() -> Result<(), Box<dyn Error>>
+    {
         let (mut client, server) = UnixStream::pair()?;
         let (reader, _writer) = server.into_split();
         let mut reader = BufReader::new(reader);

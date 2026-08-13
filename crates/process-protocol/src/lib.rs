@@ -11092,9 +11092,7 @@ mod tests {
             offset_bytes: CanonicalU64::new(0),
             length_bytes: CanonicalU64::new(super::MAX_BLOB_READ_BYTES as u64 + 1),
         };
-        assert!(
-            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, zero).is_ok()
-        );
+        assert!(ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, zero).is_ok());
         assert!(
             ClientFrame::try_new_for_version(ProtocolVersion::One, request(2)?, oversized).is_ok()
         );
@@ -11103,13 +11101,11 @@ mod tests {
             ServerMessage::Error {
                 code: ErrorCode::InvalidRequest,
                 message: String::from("blob read was rejected"),
-                detail: ErrorDetail::invalid_request(
-                    RejectionDetail::BlobReadLengthOutOfRange {
-                        min_length_bytes: CanonicalU64::new(1),
-                        max_length_bytes: CanonicalU64::new(super::MAX_BLOB_READ_BYTES as u64),
-                        requested_length_bytes: CanonicalU64::new(0),
-                    },
-                ),
+                detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadLengthOutOfRange {
+                    min_length_bytes: CanonicalU64::new(1),
+                    max_length_bytes: CanonicalU64::new(super::MAX_BLOB_READ_BYTES as u64),
+                    requested_length_bytes: CanonicalU64::new(0),
+                }),
             },
             r#"{"type":"error","code":"invalid_request","message":"blob read was rejected","detail":{"type":"blob_read_length_out_of_range","min_length_bytes":"1","max_length_bytes":"4194304","requested_length_bytes":"0"}}"#,
         )?;
