@@ -632,6 +632,36 @@ impl RunnerStateRoot {
         Ok(())
     }
 
+    /// Atomically forgets one daemon-classified stale lease that never crossed
+    /// the execution-possible boundary.
+    pub(crate) fn fail_stale_unstarted_lease(
+        &mut self,
+        correlation: &LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match (
+            self.inventory.lease.as_ref(),
+            self.inventory.result.as_ref(),
+        ) {
+            (Some(lease), None)
+                if lease.correlation == *correlation
+                    && matches!(
+                        lease.phase,
+                        LeasePhaseKind::WaitingDispatch | LeasePhaseKind::DispatchReceived
+                    ) => {}
+            (Some(lease), None) if lease.correlation != *correlation => {
+                return Err(RunnerStateError::OperationCorrelationMismatch);
+            }
+            (Some(_), None) | (Some(_), Some(_)) | (None, Some(_)) | (None, None) => {
+                return Err(RunnerStateError::InvalidTransition);
+            }
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.lease = None;
+        write_operation_journal(&self.directory, &inventory)?;
+        self.inventory = inventory;
+        Ok(())
+    }
+
     /// Atomically retains one refused lease offer until its exact acknowledgement.
     pub fn record_lease_offer_failure(
         &mut self,
@@ -1215,6 +1245,70 @@ mod tests {
             reopened.reconnect_inventory(),
             &inventory_with_lease(received)
         );
+    }
+
+    /// INV-011 / INV-024: a daemon-classified stale lease that never crossed
+    /// the execution boundary is cleared durably by exact correlation.
+    #[test]
+    fn inv011_inv024_stale_unstarted_lease_clear_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        let correlation = lease_correlation();
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the waiting-dispatch predecessor is durable");
+        root.record_lease_phase(lease_phase(LeasePhaseKind::DispatchReceived))
+            .expect("the dispatch-received predecessor is durable");
+
+        root.fail_stale_unstarted_lease(&correlation)
+            .expect("the exact stale unstarted lease is cleared");
+        drop(root);
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &ReconnectInventory::default()
+        );
+    }
+
+    /// INV-011 / INV-024: stale classification cannot clear a lease after its
+    /// execution-possible boundary.
+    #[test]
+    fn inv011_inv024_stale_unstarted_clear_rejects_execution_possible_phase() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = started_root(&parent);
+        let correlation = lease_correlation();
+        let retained = root.reconnect_inventory().clone();
+
+        let error = root
+            .fail_stale_unstarted_lease(&correlation)
+            .expect_err("execution-possible authority is not an unstarted lease");
+
+        assert!(matches!(error, RunnerStateError::InvalidTransition));
+        assert_eq!(root.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024: stale classification names the complete retained
+    /// lease rather than freeing whichever serial slot is occupied.
+    #[test]
+    fn inv011_inv024_stale_unstarted_clear_rejects_foreign_correlation() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let waiting = lease_phase(LeasePhaseKind::WaitingDispatch);
+        root.record_lease_phase(waiting.clone())
+            .expect("the waiting-dispatch predecessor is durable");
+        let mut foreign = waiting.correlation.clone();
+        foreign.lease_id = CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_LEASE_UUID));
+
+        let error = root
+            .fail_stale_unstarted_lease(&foreign)
+            .expect_err("another lease cannot clear the occupied slot");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory(), &inventory_with_lease(waiting));
     }
 
     /// INV-011 / INV-024: the execution-possible boundary advances from the
