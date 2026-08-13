@@ -11,10 +11,10 @@ use std::{
 
 use rustix::process::geteuid;
 use signalbox_runner_wire::{
-    Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest, Enroll,
-    Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64,
-    ReconnectInventory, Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason,
-    ValueError, advertisement_digest, decode_line, encode_line,
+    Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest,
+    DirectiveAction, Enroll, Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message,
+    PositiveU64, ReconnectDirectives, ReconnectInventory, Registered, Rejected, RejectionCode,
+    Resume, Shutdown, ShutdownReason, ValueError, advertisement_digest, decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -563,7 +563,7 @@ where
                 (receipt, outcome, connection_epoch)
             }
             RunnerState::Enrolled { receipt } => {
-                let inventory = ReconnectInventory::default();
+                let inventory = state.reconnect_inventory().clone();
                 send_message(
                     &mut io,
                     Message::Resume(Box::new(Resume {
@@ -610,6 +610,7 @@ where
                     ));
                 }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
+                apply_resume_directives(state, &inventory, &resumed.directives)?;
                 (
                     receipt,
                     EnrollmentOutcome::Resumed,
@@ -1059,6 +1060,47 @@ where
         .map_err(RunnerConnectionError::Write)
 }
 
+fn apply_resume_directives(
+    state: &mut RunnerStateRoot,
+    inventory: &ReconnectInventory,
+    directives: &ReconnectDirectives,
+) -> Result<(), RunnerConnectionError> {
+    if inventory == &ReconnectInventory::default() {
+        return Ok(());
+    }
+    let (Some(lease), Some(result), Some(lease_directive), Some(result_directive)) = (
+        inventory.lease.as_ref(),
+        inventory.result.as_ref(),
+        directives.lease.as_ref(),
+        directives.result.as_ref(),
+    ) else {
+        return Err(RunnerConnectionError::Violation(
+            ProtocolViolation::ResumeDirectives,
+        ));
+    };
+    let action_supported = matches!(
+        (lease_directive.action, result_directive.action),
+        (
+            DirectiveAction::DiscardAsRecorded,
+            DirectiveAction::DiscardAsRecorded
+        ) | (DirectiveAction::FailStale, DirectiveAction::FailStale)
+    );
+    if !action_supported || lease.correlation != result.correlation {
+        return Err(RunnerConnectionError::Violation(
+            ProtocolViolation::ResumeDirectives,
+        ));
+    }
+    state
+        .acknowledge_terminal_result(&result.correlation)
+        .map_err(|error| match error {
+            RunnerStateError::InvalidTransition
+            | RunnerStateError::OperationCorrelationMismatch => {
+                RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+            }
+            other => RunnerConnectionError::State(other),
+        })
+}
+
 async fn receive_message<S>(io: &mut BufReader<S>) -> Result<Message, RunnerConnectionError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1169,11 +1211,21 @@ mod tests {
     }
 
     fn state_with_terminal_result(parent: &TempDir) -> RunnerStateRoot {
+        let mut state = enrolled_state(parent);
+        record_terminal_result_fixture(&mut state);
+        state
+    }
+
+    fn enrolled_state(parent: &TempDir) -> RunnerStateRoot {
         let mut state = state_root(parent);
         let receipt = issued_receipt(state.state().request_id());
         state
             .record_receipt(receipt)
             .expect("the issued receipt is journaled");
+        state
+    }
+
+    fn record_terminal_result_fixture(state: &mut RunnerStateRoot) {
         let correlation = retained_lease_correlation();
         state
             .record_lease_phase(LeasePhase {
@@ -1199,7 +1251,21 @@ mod tests {
                 result: TerminalResult::Ambiguous,
             })
             .expect("the terminal result is durable");
-        state
+    }
+
+    fn retained_result_directives(action: DirectiveAction) -> ReconnectDirectives {
+        let correlation = retained_lease_correlation();
+        ReconnectDirectives {
+            lease: Some(signalbox_runner_wire::Directive {
+                correlation: correlation.clone(),
+                action,
+            }),
+            result: Some(signalbox_runner_wire::Directive {
+                correlation,
+                action,
+            }),
+            ..ReconnectDirectives::default()
+        }
     }
 
     fn state_root(parent: &TempDir) -> RunnerStateRoot {
@@ -1382,12 +1448,150 @@ mod tests {
         );
     }
 
+    /// INV-011 / INV-024 / INV-043: resume sends the exact retained terminal
+    /// pair and atomically clears it only after matching recorded directives.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_resume_discards_recorded_terminal_pair() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_terminal_result(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture is enrolled")
+            .clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let observed = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_result_directives(DirectiveAction::DiscardAsRecorded),
+                })),
+            )
+            .await;
+            observed
+        };
+        let (connection, observed) = tokio::join!(runner, hub);
+        let expected = Message::Resume(Box::new(Resume {
+            request_id: receipt.request_id(),
+            digest_version: DIGEST_VERSION,
+            enrollment_id: receipt.enrollment_id(),
+            runner_id: receipt.runner_id(),
+            authentication_id: receipt.authentication_id(),
+            advertisement: advertisement.clone(),
+            prior_registration_revision: receipt.registration_revision(),
+            inventory: retained,
+        }));
+
+        assert_eq!(
+            connection
+                .expect("the recorded recovery directives establish the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(observed, expected);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024 / INV-043: stale terminal directives consume only the
+    /// exact pair the runner presented and allow its receipt resume to finish.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_resume_clears_exact_stale_terminal_pair() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_terminal_result(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture is enrolled")
+            .clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let observed = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_result_directives(DirectiveAction::FailStale),
+                })),
+            )
+            .await;
+            observed
+        };
+        let (connection, observed) = tokio::join!(runner, hub);
+        let expected = Message::Resume(Box::new(Resume {
+            request_id: receipt.request_id(),
+            digest_version: DIGEST_VERSION,
+            enrollment_id: receipt.enrollment_id(),
+            runner_id: receipt.runner_id(),
+            authentication_id: receipt.authentication_id(),
+            advertisement: advertisement.clone(),
+            prior_registration_revision: receipt.registration_revision(),
+            inventory: retained,
+        }));
+
+        assert_eq!(
+            connection
+                .expect("the stale recovery directives establish the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(observed, expected);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024 / INV-043: an unsupported recovery action cannot
+    /// discard either member of the runner's exact retained terminal pair.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_resume_rejects_unsupported_terminal_action() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_terminal_result(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_result_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+        };
+        let (rejected, ()) = tokio::join!(runner, hub);
+        let rejected = rejected.err().expect("the unsupported action fails closed");
+
+        assert!(matches!(
+            rejected,
+            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
     /// INV-011 / INV-024: heartbeat progress repeats the exact fsynced lease
     /// phase instead of inventing process-local execution state.
     #[tokio::test]
     async fn inv011_inv024_heartbeat_reports_the_current_durable_lease_phase() {
         let parent = TempDir::new().expect("a temporary parent is available");
-        let mut state = state_with_terminal_result(&parent);
+        let mut state = enrolled_state(&parent);
         let advertisement = empty_advertisement();
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
@@ -1396,6 +1600,7 @@ mod tests {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
                 .expect("resume completes before heartbeat");
+            record_terminal_result_fixture(&mut state);
             connection
                 .serve_one(&mut state)
                 .await
@@ -1442,16 +1647,8 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_rejects_a_lease_phase_from_another_registration() {
         let parent = TempDir::new().expect("a temporary parent is available");
-        let mut state = state_with_terminal_result(&parent);
-        let retained = state.reconnect_inventory().clone();
+        let mut state = enrolled_state(&parent);
         let advertisement = empty_advertisement();
-        state
-            .record_registration(
-                positive(NEXT_REGISTRATION_REVISION),
-                advertisement_digest(&advertisement)
-                    .expect("the explicit empty advertisement has a digest"),
-            )
-            .expect("the successor registration receipt is durable");
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
 
@@ -1459,6 +1656,11 @@ mod tests {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
                 .expect("resume completes before heartbeat");
+            record_terminal_result_fixture(&mut state);
+            connection
+                .register_advertisement(&mut state, advertisement.clone())
+                .await
+                .expect("the successor registration is accepted");
             connection
                 .serve_one(&mut state)
                 .await
@@ -1469,10 +1671,20 @@ mod tests {
             send_hub_message(
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
-                    registration_revision: positive(NEXT_REGISTRATION_REVISION),
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
                     connection_epoch: positive(CONNECTION_EPOCH),
                     directives: ReconnectDirectives::default(),
                 })),
+            )
+            .await;
+            let _advertise = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Registered(Registered {
+                    registration_revision: positive(NEXT_REGISTRATION_REVISION),
+                    advertisement_digest: advertisement_digest(&advertisement)
+                        .expect("the explicit empty advertisement has a digest"),
+                }),
             )
             .await;
             send_hub_message(
@@ -1490,7 +1702,13 @@ mod tests {
             error,
             RunnerConnectionError::Violation(ProtocolViolation::ConnectionCorrelationMismatch)
         ));
-        assert_eq!(state.reconnect_inventory(), &retained);
+        assert_eq!(
+            state.reconnect_inventory().result,
+            Some(RetainedResult {
+                correlation: retained_lease_correlation(),
+                result: TerminalResult::Ambiguous,
+            })
+        );
     }
 
     /// INV-011 / INV-024: an exact durable result acknowledgement frees the
@@ -1498,7 +1716,7 @@ mod tests {
     #[tokio::test]
     async fn inv011_inv024_exact_result_acknowledgement_clears_retained_slots() {
         let parent = TempDir::new().expect("a temporary parent is available");
-        let mut state = state_with_terminal_result(&parent);
+        let mut state = enrolled_state(&parent);
         let advertisement = empty_advertisement();
         let correlation = retained_lease_correlation();
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
@@ -1508,6 +1726,7 @@ mod tests {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
                 .expect("resume completes before the acknowledgement");
+            record_terminal_result_fixture(&mut state);
             connection
                 .serve_one(&mut state)
                 .await
@@ -1539,8 +1758,7 @@ mod tests {
     #[tokio::test]
     async fn another_lease_result_acknowledgement_preserves_retained_slots() {
         let parent = TempDir::new().expect("a temporary parent is available");
-        let mut state = state_with_terminal_result(&parent);
-        let retained = state.reconnect_inventory().clone();
+        let mut state = enrolled_state(&parent);
         let advertisement = empty_advertisement();
         let mut foreign = retained_lease_correlation();
         foreign.lease_id = identity(ARBITRARY_OTHER_LEASE_UUID);
@@ -1551,6 +1769,7 @@ mod tests {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
                 .expect("resume completes before the acknowledgement");
+            record_terminal_result_fixture(&mut state);
             connection
                 .serve_one(&mut state)
                 .await
@@ -1581,7 +1800,13 @@ mod tests {
             error,
             RunnerConnectionError::Violation(ProtocolViolation::ResultAcknowledgementMismatch)
         ));
-        assert_eq!(state.reconnect_inventory(), &retained);
+        assert_eq!(
+            state.reconnect_inventory().result,
+            Some(RetainedResult {
+                correlation: retained_lease_correlation(),
+                result: TerminalResult::Ambiguous,
+            })
+        );
     }
 
     #[tokio::test]

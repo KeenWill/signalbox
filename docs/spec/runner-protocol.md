@@ -53,9 +53,11 @@ re-verified through this PR (`agent/runner-result-acknowledgement`). Exact
 heartbeat projection of the current journaled lease phase is re-verified through
 this PR (`agent/runner-heartbeat-lease-phase`). Daemon pre-resume admission of
 the exact execution-possible lease and retained terminal-result pair is
-re-verified through this PR (`agent/daemon-retained-result-resume-runtime`). The
-placement loss-source, pre-pin replacement and abandonment state shapes, and
-append-only reconstitution-history contract are re-verified through this PR
+re-verified through this PR (`agent/daemon-retained-result-resume-runtime`);
+runner transmission and checked directive consumption are re-verified through
+this PR (`agent/runner-retained-result-resume`). The placement loss-source,
+pre-pin replacement and abandonment state shapes, and append-only
+reconstitution-history contract are re-verified through this PR
 (`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, the independent
 session-composition axes, session placement and affinity, credential-profile
@@ -119,10 +121,10 @@ registration, the `signalbox-runner` binary, explicit credential/repository
 availability, and heartbeat liveness exchange with durable connection epochs,
 shutdown, suspect, and loss facts. Its fatal stale-shutdown close, complete
 rejection correlations, and lifecycle observability are re-verified through PR
-#382 (`agent/runner-honesty`). The daemon admits the narrow retained-result
-recovery inventory described below; runner-originated nonempty inventory,
-workspaces, execution, and model calls remain unimplemented as labeled below.
-Remote transport and dynamic policy stay under [Open edges](#open-edges).
+#382 (`agent/runner-honesty`). The daemon and runner exchange the narrow
+retained-result recovery inventory described below; workspaces, execution, and
+model calls remain unimplemented as labeled below. Remote transport and dynamic
+policy stay under [Open edges](#open-edges).
 
 The additive persisted `AlwaysConfirm` declaration vocabulary is verified
 through PR #366 (`agent/exec-tools`). The runner workstation-registry
@@ -675,26 +677,28 @@ one matching bounded terminal envelope only after execution may have started. An
 exact `result_recorded` acknowledgement atomically frees both slots. The root
 rejects the remaining unsupported inventory slots, cross-wired correlations, and
 journals belonging to another enrolled runner. The live serving loop consumes
-that exact acknowledgement for an already-retained result; no live protocol path
-populates or sends this stored inventory.
+that exact acknowledgement for a result produced on the current connection. On
+resume the runner sends the complete stored inventory, accepts only matching
+paired `discard_as_recorded` or paired `fail_stale` directives for retained
+terminal evidence, and atomically frees both slots. Unsupported actions preserve
+the journal and fail closed. No live execution path populates this inventory.
 
-**Committed unimplemented functionality.** No present runner sends a nonempty
-reconnect inventory. Future execution support repeats resume and advertisement,
-then exchanges a bounded inventory containing at most the one serial outstanding
-lease, its fsynced local phase, and retained terminal evidence.
-`waiting_dispatch`, `dispatch_received`, and `execution_may_have_started` retain
-the complete lease and dispatch correlation. The first two prove only that the
-journaled executor invocation had not started; the last carries ordinary
-effect-class ambiguity. Canonical durable state decides whether the daemon
-resends a claim acknowledgement, dispatch, or result acknowledgement;
-advertisement and connection memory never recreate authority. When no claim
-acknowledgement was issued, the daemon may commit the exact no-execution proof
-before re-leasing. A complete reconnect inventory that omits a daemon-recorded
-claimed lease cannot strand or repeat it: the daemon durably marks that lease
-lost and applies its effect-class ambiguity law. A claimed lease reported
-without a terminal envelope likewise follows its fsynced phase. Rejected
-duplicate or stale frames are retained only as bounded operator classification,
-never as domain evidence.
+**Committed unimplemented functionality.** Future execution support populates
+the bounded inventory that resume already exchanges, containing at most the one
+serial outstanding lease, its fsynced local phase, and retained terminal
+evidence. `waiting_dispatch`, `dispatch_received`, and
+`execution_may_have_started` retain the complete lease and dispatch correlation.
+The first two prove only that the journaled executor invocation had not started;
+the last carries ordinary effect-class ambiguity. Canonical durable state
+decides whether the daemon resends a claim acknowledgement, dispatch, or result
+acknowledgement; advertisement and connection memory never recreate authority.
+When no claim acknowledgement was issued, the daemon may commit the exact
+no-execution proof before re-leasing. A complete reconnect inventory that omits
+a daemon-recorded claimed lease cannot strand or repeat it: the daemon durably
+marks that lease lost and applies its effect-class ambiguity law. A claimed
+lease reported without a terminal envelope likewise follows its fsynced phase.
+Rejected duplicate or stale frames are retained only as bounded operator
+classification, never as domain evidence.
 
 ## Identity, enrollment, and registration
 
@@ -825,7 +829,7 @@ transaction remains open across runner I/O.
 
 Later connections send `resume` with the request identity, all three issued
 identities, prior registration revision, complete advertisement, and reconnect
-inventory. The present runner sends empty inventory. The daemon also admits the
+inventory. The runner sends its exact fsynced inventory. The daemon admits the
 exact pair of an `execution_may_have_started` lease phase and matching retained
 terminal result: it authenticates and commits terminal evidence before any
 registration mutation, then directs both items to `discard_as_recorded`.
