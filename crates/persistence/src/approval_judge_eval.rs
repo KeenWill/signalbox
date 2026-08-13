@@ -230,6 +230,7 @@ fn require_scorecard_verdict_agreement(
         if successful.saturating_add(failed_calls) != u64::from(run.repeats) {
             return Err(verdict_mismatch(name));
         }
+        require_scorecard_case_summary_agreement(case, name, run.repeats, &verdicts)?;
         if stated.insert(name, verdicts).is_some() {
             return Err(verdict_mismatch(name));
         }
@@ -252,6 +253,45 @@ fn require_scorecard_verdict_agreement(
     for (name, verdicts) in &stated {
         if !verdicts.is_empty() && !recorded.contains_key(name) {
             return Err(verdict_mismatch(name));
+        }
+    }
+    Ok(())
+}
+
+/// Requires one case's derived summaries to agree with its own verdicts.
+fn require_scorecard_case_summary_agreement(
+    case: &serde_json::Value,
+    name: &str,
+    configured_repeats: u32,
+    verdicts: &[(&str, &str)],
+) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+    for &(recommendation, _) in verdicts {
+        *counts.entry(recommendation).or_default() += 1;
+    }
+    let majority = counts
+        .iter()
+        .find(|(_, count)| **count * 2 > u64::from(configured_repeats))
+        .map(|(recommendation, _)| *recommendation);
+    let measured = !verdicts.is_empty();
+    let complete = u64::try_from(verdicts.len()).ok() == Some(u64::from(configured_repeats));
+    let stable = (configured_repeats >= 2 && complete).then_some(counts.len() == 1);
+    let leading = counts.values().max().copied().unwrap_or(0);
+    let tied = measured && counts.values().filter(|count| **count == leading).count() > 1;
+    let expected = [
+        ("verdict_counts", serde_json::json!(counts)),
+        ("majority", serde_json::json!(majority)),
+        ("measured", serde_json::json!(measured)),
+        ("complete", serde_json::json!(complete)),
+        ("stable", serde_json::json!(stable)),
+        ("tied", serde_json::json!(tied)),
+    ];
+    for (field, expected) in expected {
+        if case.get(field) != Some(&expected) {
+            return Err(ApprovalJudgeEvalRecordingError::ScorecardSummaryMismatch {
+                case: String::from(name),
+                field,
+            });
         }
     }
     Ok(())
@@ -359,6 +399,13 @@ pub enum ApprovalJudgeEvalRecordingError {
         /// The case whose verdicts diverged, or the structural key at fault.
         case: String,
     },
+    /// A scorecard's per-case derived summary disagrees with its verdicts.
+    ScorecardSummaryMismatch {
+        /// The case whose summary diverged.
+        case: String,
+        /// The derived field that diverged or was absent.
+        field: &'static str,
+    },
 }
 
 impl ApprovalJudgeEvalRecordingError {
@@ -397,6 +444,10 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
                 formatter,
                 "eval scorecard verdicts disagree with the call records: {case}"
             ),
+            Self::ScorecardSummaryMismatch { case, field } => write!(
+                formatter,
+                "eval scorecard case summary disagrees with its verdicts: {case}.{field}"
+            ),
         }
     }
 }
@@ -409,7 +460,8 @@ impl Error for ApprovalJudgeEvalRecordingError {
             | Self::TablesUnwritable
             | Self::CallOutsideConfiguredRepeats
             | Self::ScorecardHeaderMismatch { .. }
-            | Self::ScorecardVerdictMismatch { .. } => None,
+            | Self::ScorecardVerdictMismatch { .. }
+            | Self::ScorecardSummaryMismatch { .. } => None,
         }
     }
 }
@@ -426,8 +478,9 @@ impl From<sqlx::Error> for ApprovalJudgeEvalRecordingError {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use serde_json::json;
 
-    use super::ApprovalJudgeEvalRecordingError;
+    use super::{ApprovalJudgeEvalRecordingError, require_scorecard_case_summary_agreement};
 
     #[test]
     fn recording_errors_distinguish_commit_ambiguity() {
@@ -462,5 +515,52 @@ mod tests {
             }
             .to_string(),
         );
+        expect!["eval scorecard case summary disagrees with its verdicts: fixture-case.majority"]
+            .assert_eq(
+                &ApprovalJudgeEvalRecordingError::ScorecardSummaryMismatch {
+                    case: String::from("fixture-case"),
+                    field: "majority",
+                }
+                .to_string(),
+            );
+    }
+
+    #[test]
+    fn scorecard_case_summaries_must_match_their_verdicts() {
+        let verdicts = [("approve", "first"), ("approve", "second")];
+        let valid = json!({
+            "verdict_counts": {"approve": 2},
+            "majority": "approve",
+            "measured": true,
+            "complete": true,
+            "stable": true,
+            "tied": false,
+        });
+        require_scorecard_case_summary_agreement(&valid, "fixture-case", 2, &verdicts)
+            .expect("derived summaries agree");
+
+        for field in [
+            "verdict_counts",
+            "majority",
+            "measured",
+            "complete",
+            "stable",
+            "tied",
+        ] {
+            let mut contradictory = valid.clone();
+            contradictory[field] = json!(null);
+            assert!(matches!(
+                require_scorecard_case_summary_agreement(
+                    &contradictory,
+                    "fixture-case",
+                    2,
+                    &verdicts
+                ),
+                Err(ApprovalJudgeEvalRecordingError::ScorecardSummaryMismatch {
+                    field: mismatched,
+                    ..
+                }) if mismatched == field
+            ));
+        }
     }
 }

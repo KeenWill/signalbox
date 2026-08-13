@@ -605,7 +605,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
     for (case, eval_case) in cases.iter().zip(&eval_cases) {
         let mut verdicts: Vec<ApprovalJudgeEvalVerdict> = Vec::new();
         let mut failures = 0_usize;
-// Counts every attempt, so a failed call leaves a gap in the recorded
+        // Counts every attempt, so a failed call leaves a gap in the recorded
         // ordinals rather than shifting later verdicts onto its position.
         let mut attempt_ordinal = 0_u32;
         let mut failure_causes: Vec<String> = Vec::new();
