@@ -2761,7 +2761,7 @@ mod tests {
     // Public provider identities from the deferred-refresh reproduction. The
     // surrounding actors and content stay synthetic test data.
     const DEFERRED_REVIEW_IDS: [u64; 3] = [4_922_903_072, 4_922_910_037, 4_922_938_791];
-    const DEFERRED_OWNER_REVIEWER: &str = "watch-owner";
+    const DEFERRED_USER_REVIEWER: &str = "watch-user";
     const DEFERRED_APPROVING_REVIEWER: &str = "review-agent-one[bot]";
     const DEFERRED_COMMENTING_REVIEWER: &str = "review-agent-two[bot]";
     const REVIEW_THREADS: [&str; 2] = [REVIEW_THREAD, RESOLVED_REVIEW_THREAD];
@@ -3021,7 +3021,7 @@ mod tests {
             },
             {
                 "id": DEFERRED_REVIEW_IDS[0],
-                "user": { "login": DEFERRED_OWNER_REVIEWER },
+                "user": { "login": DEFERRED_USER_REVIEWER },
                 "state": "COMMENTED",
                 "commit_id": HEAD_SHA
             },
@@ -4774,7 +4774,7 @@ mod tests {
         assert_eq!(
             events[0].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_OWNER_REVIEWER))
+                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_USER_REVIEWER))
                     .expect("fixture reviewer is valid"),
                 state: ReviewState::Commented,
                 commit: CommitSha::try_new(String::from(HEAD_SHA))
