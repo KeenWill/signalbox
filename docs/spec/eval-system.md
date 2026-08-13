@@ -49,9 +49,14 @@ repository of the user's, an artifact by digest, or rows — never as bulk data
 committed to this repository. The digest is storage-form-independent: SHA-256 in
 lowercase hexadecimal over the corpus's logical cases, each serialized to
 canonical JSON (object keys sorted bytewise, no insignificant whitespace,
-numbers in their shortest round-trip form), ordered by case identifier bytewise,
-and framed exactly as the [program substrate](program-substrate.md) frames
-digest preimages — so the same logical corpus computes the same identity whether
+numbers in their shortest round-trip form) and ordered by case identifier
+bytewise. The exact digest preimage is the UTF-8 bytes
+`signalbox-eval-corpus-v1` followed by one zero byte, the case count as an
+unsigned 64-bit big-endian integer, and then, for each case in that order, its
+canonical-JSON byte length as an unsigned 64-bit big-endian integer followed by
+those bytes. Lengths count bytes, not characters. This aggregate framing is
+owned by this page rather than inferred from the program substrate's single-file
+preimages, so the same logical corpus computes the same identity whether
 loaded from repository files, an artifact, or rows, and a run verifies its
 corpus after the content moves between admitted storage forms. The
 judge-evaluation corpus presently in-tree stays only until its evaluation runs
@@ -87,11 +92,15 @@ check kind, its target, the expected value or threshold as resolved from the
 corpus, the measured value, and the check's own outcome from the same closed
 status set. The check-outcome rows are what make the promised views derivable
 without reopening external corpus content; the trial's case projection makes
-slice membership derivable under the same constraint. Both are resolved from
-the digest-verified corpus and committed with the trial before scoring begins,
-so a later corpus move cannot change grouping. A stage mixing measured and
-missing-reference checks is represented check by check, and its single stage
-status summarizes without substituting. Durable cost is recorded per model call
+slice membership derivable under the same constraint. The trial's case
+projection is resolved from the digest-verified corpus and committed with the
+trial before scoring begins, so a later corpus move cannot change grouping. A
+scoring stage commits each check-outcome row only after scoring has produced
+that row's measured value and outcome; in the same transaction it records the
+check kind, target, and resolved expectation from the already digest-verified
+case. Thus no pre-scoring placeholder check-outcome row exists. A stage mixing
+measured and missing-reference checks is represented check by check, and its
+single stage status summarizes without substituting. Durable cost is recorded per model call
 with the model and rate version that priced that call — an evaluation may score
 with one model and judge with another, and the configured rate catalog versions
 each model's rates independently, so no single run-level rate version exists;
