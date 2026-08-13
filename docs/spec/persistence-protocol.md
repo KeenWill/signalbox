@@ -6,8 +6,10 @@ and its byte-precise checks — was verified against this PR
 
 The runner connection authority head, durable loss epoch, and lease offer/claim
 fences were verified against the parent slice (`agent/runner-loss-epoch`).
-Placement-relative lease-offer fencing was verified against this PR
-(`agent/runner-loss-propagation`).
+Placement-relative lease-offer fencing was verified against the parent slice
+(`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
+and ordered page read were verified against this PR
+(`agent/runner-loss-session-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -143,7 +145,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-three files, `202607180001` through
+`crates/persistence/migrations/` — seventy-five files, `202607180001` through
 `202608110015` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -352,6 +354,26 @@ Representation rules, all enforced in the schema:
   connections until a checked replacement installs a fresh baseline. This is the
   implemented not-yet-projected placement fence; bounded session propagation
   remains the committed unimplemented transaction described below.
+- Migration `202608110006` gives every new durable connection-loss epoch a
+  pending propagation cursor in the same transaction. Migration backfill marks a
+  loss completed only when no affected current placement remains: losses already
+  absorbed into `202608110005`'s compatibility baseline complete, while a loss
+  committed after that migration with an older placement baseline stays pending.
+  A repeatable-read page authenticates the exact loss source and returns at most
+  64 current pinned or exact-identity unpinned placements whose baselines
+  precede that loss, ordered strictly after the durable session-identity cursor.
+  An exact-identity selection stored before enrollment remains affected by a
+  later loss for its selected runner despite having no enrollment baseline; the
+  page and both cursor guards associate it through the runner identity. Cursor
+  advancement is monotonic, cannot pass an affected current placement, and
+  cannot complete while one remains. Enrollment insertion, exact-identity
+  placement baseline derivation, and cursor completion share a transaction-level
+  runner-identity fence. An insertion that observes enrollment absence therefore
+  becomes visible before that enrollment can create and complete a loss cursor;
+  a completion that wins the fence becomes visible before a later insertion
+  derives its baseline. The cursor and ordered page are implemented; the
+  per-session transaction that changes placement, lease, turn, release, and
+  runner-event state remains the committed unimplemented propagation step below.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -680,7 +702,11 @@ statements live in the schema instead:
 - the placement-loss baseline trigger in migration `202608110005` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
-  deriving the immutable baseline and before the placement row becomes visible.
+  deriving the immutable baseline and before the placement row becomes visible;
+  migration `202608110006` adds a transaction-level runner-identity advisory
+  lock between the scheduler and enrollment locks, and enrollment insertion and
+  loss-cursor completion take that same identity lock before they can publish
+  the competing fact.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here

@@ -48,10 +48,11 @@ use crate::lock_inventory::{
     RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
-    ToolAttemptDispositionStorageKind, runner_placement_loss_source_from_str,
-    runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
-    tool_attempt_disposition_to_str, tool_permission_default_from_str,
-    tool_permission_default_to_str,
+    RunnerLossPropagationStateStorageKind, ToolAttemptDispositionStorageKind,
+    runner_loss_propagation_state_from_str, runner_loss_propagation_state_to_str,
+    runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
+    runner_sandbox_from_str, runner_sandbox_to_str, tool_attempt_disposition_to_str,
+    tool_permission_default_from_str, tool_permission_default_to_str,
 };
 use crate::outbox::{
     self, DispatchedRunnerState, OutboxEvent, RunnerConnectionOutboxSource, RunnerStateOutboxEvent,
@@ -204,6 +205,37 @@ pub struct RunnerConnectionLossSnapshot {
     loss_epoch: RunnerConnectionLossEpoch,
     connection_epoch: RunnerConnectionEpoch,
     connection_event_ordinal: NonZeroU64,
+}
+
+/// One bounded restart page for an enrollment's durable connection loss.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerConnectionLossPropagationPage {
+    loss: RunnerConnectionLossSnapshot,
+    propagated_through: Option<SessionId>,
+    sessions: Vec<SessionId>,
+    complete: bool,
+}
+
+impl RunnerConnectionLossPropagationPage {
+    /// Returns the exact durable loss whose cursor produced this page.
+    pub const fn loss(&self) -> RunnerConnectionLossSnapshot {
+        self.loss
+    }
+
+    /// Returns the last session atomically committed before this page.
+    pub const fn propagated_through(&self) -> Option<SessionId> {
+        self.propagated_through
+    }
+
+    /// Returns at most 64 affected session identities in canonical order.
+    pub fn sessions(&self) -> &[SessionId] {
+        &self.sessions
+    }
+
+    /// Reports that this loss cursor has durably completed.
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
 }
 
 impl RunnerConnectionLossSnapshot {
@@ -955,6 +987,106 @@ impl RunnerProtocolStore {
             })
         })
         .transpose()
+    }
+
+    /// Loads the next bounded, ordered session page for one durable loss cursor.
+    pub async fn load_connection_loss_propagation_page(
+        &self,
+        loss: RunnerConnectionLossSnapshot,
+    ) -> Result<RunnerConnectionLossPropagationPage, RunnerProtocolStoreError> {
+        const PAGE_LIMIT: i64 = 64;
+
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let cursor = sqlx::query(
+            "SELECT propagation.propagated_through_session_id,
+                    propagation.state_kind,
+                    loss.connection_epoch, loss.connection_event_ordinal
+               FROM runner_connection_loss_propagation AS propagation
+               JOIN runner_connection_loss_epoch AS loss
+                 ON loss.enrollment_id = propagation.enrollment_id
+                AND loss.loss_epoch = propagation.loss_epoch
+              WHERE propagation.enrollment_id = $1
+                AND propagation.loss_epoch = $2",
+        )
+        .bind(loss.enrollment().into_uuid())
+        .bind(Decimal::from(loss.loss_epoch().get()))
+        .fetch_optional(transaction.as_mut())
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+        let stored_connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            cursor.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let stored_connection_event_ordinal =
+            decode_u64(cursor.decode_column("connection_event_ordinal")?)?;
+        if stored_connection_epoch != loss.connection_epoch()
+            || stored_connection_event_ordinal != loss.connection_event_ordinal()
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let propagated_through = cursor
+            .decode_column::<Option<Uuid>>("propagated_through_session_id")?
+            .map(session_id);
+        let state: String = cursor.decode_column("state_kind")?;
+        let complete = match runner_loss_propagation_state_from_str(&state)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+        {
+            RunnerLossPropagationStateStorageKind::Pending => false,
+            RunnerLossPropagationStateStorageKind::Completed => true,
+        };
+        let sessions = if complete {
+            Vec::new()
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT placement.session_id
+                   FROM runner_current_session_placement AS current_placement
+                   JOIN runner_session_placement_record AS placement
+                     ON placement.session_id = current_placement.session_id
+                    AND placement.event_ordinal = current_placement.event_ordinal
+                   JOIN runner_enrollment AS lost_enrollment
+                     ON lost_enrollment.enrollment_id = $1
+                  WHERE (
+                        placement.loss_fence_enrollment_id = $1
+                        OR (
+                            placement.loss_fence_enrollment_id IS NULL
+                            AND placement.state_kind = 'unpinned'
+                            AND placement.selector_kind = 'identity'
+                            AND placement.selector_runner_id =
+                                lost_enrollment.runner_id
+                        )
+                    )
+                    AND (
+                        placement.observed_runner_loss_epoch IS NULL
+                        OR placement.observed_runner_loss_epoch < $2
+                    )
+                    AND (
+                        placement.state_kind = 'pinned'
+                        OR (
+                            placement.state_kind = 'unpinned'
+                            AND placement.selector_kind = 'identity'
+                        )
+                    )
+                    AND ($3::uuid IS NULL OR placement.session_id > $3)
+                  ORDER BY placement.session_id
+                  LIMIT $4",
+            )
+            .bind(loss.enrollment().into_uuid())
+            .bind(Decimal::from(loss.loss_epoch().get()))
+            .bind(propagated_through.map(SessionId::into_uuid))
+            .bind(PAGE_LIMIT)
+            .fetch_all(transaction.as_mut())
+            .await?
+            .into_iter()
+            .map(session_id)
+            .collect()
+        };
+        transaction.commit().await?;
+        Ok(RunnerConnectionLossPropagationPage {
+            loss,
+            propagated_through,
+            sessions,
+            complete,
+        })
     }
 
     /// Loads every current nonterminal connection head for startup reconciliation.
@@ -2782,6 +2914,19 @@ async fn append_runner_connection_loss_epoch(
     .bind(Decimal::from(loss_epoch.get()))
     .bind(Decimal::from(snapshot.epoch().get()))
     .bind(Decimal::from(snapshot.event_ordinal()))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_loss_propagation
+            (enrollment_id, loss_epoch, propagated_through_session_id,
+             state_kind)
+         VALUES ($1, $2, NULL, $3)",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(loss_epoch.get()))
+    .bind(runner_loss_propagation_state_to_str(
+        RunnerLossPropagationStateStorageKind::Pending,
+    ))
     .execute(&mut *connection)
     .await?;
     sqlx::query(head_statement)
@@ -6873,6 +7018,8 @@ pub enum RunnerProtocolCorruption {
     MissingCanonicalRegistration,
     /// Canonical physical connection state is absent.
     MissingCanonicalConnection,
+    /// Canonical connection-loss state or its propagation cursor is absent.
+    MissingCanonicalLoss,
     /// Canonical placement state is absent.
     MissingCanonicalPlacement,
     /// Canonical credential-grant state is absent.
@@ -6905,6 +7052,9 @@ impl fmt::Display for RunnerProtocolCorruption {
             }
             Self::MissingCanonicalConnection => {
                 formatter.write_str("canonical runner connection is missing")
+            }
+            Self::MissingCanonicalLoss => {
+                formatter.write_str("canonical runner connection loss is missing")
             }
             Self::MissingCanonicalPlacement => {
                 formatter.write_str("canonical runner placement is missing")
