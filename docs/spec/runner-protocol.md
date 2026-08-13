@@ -661,14 +661,14 @@ produced this loss permanently unrecoverable.
 
 The domain transition for that replacement is implemented. It admits the same
 runner only when the supplied loss-causing registration actually invalidates the
-retained pin, the current registration is no older, both registrations retain
-the exact enrollment, runner, and authentication-reference lineage, and the
-current registration satisfies the complete successor request. The ordinary
-replacement transition still refuses the same runner, so a reconstituted
-registration-loss label alone is not recovery authority. **Committed
-unimplemented functionality.** No persistence transaction or daemon adapter yet
-supplies those checked registrations or installs the resulting pinned
-replacement.
+retained pin, the current registration is either the exact same snapshot at the
+loss revision or a genuinely newer registration, both registrations retain the
+exact enrollment, runner, and authentication-reference lineage, and the current
+registration satisfies the complete successor request. The ordinary replacement
+transition still refuses the same runner, so a reconstituted registration-loss
+label alone is not recovery authority. **Committed unimplemented
+functionality.** No persistence transaction or daemon adapter yet supplies those
+checked registrations or installs the resulting pinned replacement.
 
 A pending successor may also be promoted with no lost session placement
 involved. The implemented `promote_pending_runner` transaction is the
