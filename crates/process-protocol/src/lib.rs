@@ -82,7 +82,7 @@ pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum replica count representable by the version-one deployment catalog.
-pub const MAX_BLOB_REPLICA_COUNT: u64 = 32;
+pub const MAX_BLOB_REPLICA_COUNT: u64 = signalbox_blob_store::MAX_BLOB_STORES as u64;
 
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
@@ -11139,7 +11139,6 @@ mod tests {
     /// INV-060: an out-of-bounds read is one typed invalid request.
     #[test]
     fn inv060_blob_read_out_of_bounds_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
-        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::Error {

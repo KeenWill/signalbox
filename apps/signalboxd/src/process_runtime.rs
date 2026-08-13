@@ -204,7 +204,7 @@ use tokio::{
         AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
         BufReader,
     },
-    net::UnixStream,
+    net::{UnixStream, unix::OwnedReadHalf},
     sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
     task::{JoinError, JoinSet},
     time::{Instant, sleep, sleep_until},
@@ -1409,8 +1409,8 @@ struct PendingConversationImport {
     clippy::too_many_arguments,
     reason = "request execution keeps connection I/O and durable correlation explicit"
 )]
-async fn handle_request<Reader, Writer>(
-    reader: &mut Reader,
+async fn handle_request<Writer>(
+    reader: &mut BufReader<OwnedReadHalf>,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -1420,7 +1420,6 @@ async fn handle_request<Reader, Writer>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
-    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
@@ -5657,8 +5656,8 @@ where
     clippy::too_many_arguments,
     reason = "the wire boundary keeps correlation and exact range facts explicit"
 )]
-async fn handle_read_blob_chunk<Reader, Writer>(
-    reader: &mut Reader,
+async fn handle_read_blob_chunk<Writer>(
+    reader: &BufReader<OwnedReadHalf>,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -5669,7 +5668,6 @@ async fn handle_read_blob_chunk<Reader, Writer>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
-    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
@@ -5742,15 +5740,15 @@ where
     }
 }
 
-async fn wait_for_connection_loss<Reader>(reader: &mut Reader)
-where
-    Reader: AsyncBufRead + Unpin,
-{
-    match reader.fill_buf().await {
-        Ok(available) if available.is_empty() => {}
-        Err(_) => {}
-        Ok(_) => std::future::pending().await,
-    }
+async fn wait_for_connection_loss(reader: &BufReader<OwnedReadHalf>) {
+    std::future::poll_fn(|context| match reader.get_ref().poll_read_ready(context) {
+        std::task::Poll::Ready(Ok(readiness)) if readiness.is_read_closed() => {
+            std::task::Poll::Ready(())
+        }
+        std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(Ok(_)) | std::task::Poll::Pending => std::task::Poll::Pending,
+    })
+    .await;
 }
 
 async fn write_blob_read_error<Writer>(
@@ -14780,7 +14778,8 @@ mod tests {
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, duplex},
+        net::UnixStream,
         sync::{Semaphore, watch},
         time::{Duration, Instant, timeout},
     };
@@ -14815,7 +14814,8 @@ mod tests {
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, try_acquire_blob_read_permit,
-        unavailable_protocol_error, wire_goal_event, wire_metadata_last_writer,
+        unavailable_protocol_error, wait_for_connection_loss, wire_goal_event,
+        wire_metadata_last_writer,
         wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_delegation_port_error,
         write_snapshot_spool_error, write_transcript_entry,
@@ -15571,6 +15571,21 @@ mod tests {
         assert!(try_acquire_blob_read_permit(Arc::clone(&budget)).is_none());
         drop(held);
         assert_eq!(budget.available_permits(), MAX_CONCURRENT_BLOB_READS);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_read_disconnect_detection_survives_pipelined_input()
+    -> Result<(), Box<dyn Error>> {
+        let (mut client, server) = UnixStream::pair()?;
+        let (reader, _writer) = server.into_split();
+        let mut reader = BufReader::new(reader);
+        client.write_all(b"pipelined request").await?;
+        assert_eq!(reader.fill_buf().await?, b"pipelined request");
+        drop(client);
+
+        timeout(Duration::from_secs(1), wait_for_connection_loss(&reader)).await?;
+        assert_eq!(reader.buffer(), b"pipelined request");
         Ok(())
     }
 

@@ -877,6 +877,10 @@ impl CommittedBlobReadFixture {
             .join(BlobObjectKey::for_digest(self.digest).as_str())
     }
 
+    fn expected_replica_count(&self) -> CanonicalU64 {
+        CanonicalU64::new(1)
+    }
+
     async fn stop(self) -> Result<(), Box<dyn Error>> {
         drop(self.connection);
         self.runtime.stop().await
@@ -1025,7 +1029,7 @@ async fn inv060_blob_metadata_reports_exact_catalog_facts() -> Result<(), Box<dy
         &ServerMessage::BlobMetadata {
             digest: fixture.wire_digest,
             byte_length: fixture.expected_length,
-            replica_count: CanonicalU64::new(1),
+            replica_count: fixture.expected_replica_count(),
         }
     );
 
