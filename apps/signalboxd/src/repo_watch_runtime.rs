@@ -397,6 +397,7 @@ impl RepositoryWatchTask {
             }
             RepoWatchRuleEvaluationOutcome::NotMatched
             | RepoWatchRuleEvaluationOutcome::Inactive
+            | RepoWatchRuleEvaluationOutcome::SelfCaused
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
@@ -577,10 +578,12 @@ fn event_payload_json(kind: &RepoWatchEventKindV1) -> serde_json::Value {
             "conclusion": check_conclusion_name(*conclusion),
         }),
         RepoWatchEventKindV1::ReviewSubmitted {
+            id,
             reviewer,
             state,
             commit,
         } => serde_json::json!({
+            "id": id.get(),
             "reviewer": reviewer.as_str(),
             "state": review_state_name(*state),
             "commit": commit.as_str(),
@@ -4587,6 +4590,7 @@ mod tests {
         assert_eq!(
             events[0].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
+                id: object_id(DEFERRED_REVIEW_IDS[0]).expect("fixture review id is valid"),
                 reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_USER_REVIEWER))
                     .expect("fixture reviewer is valid"),
                 state: ReviewState::Commented,
@@ -4597,6 +4601,7 @@ mod tests {
         assert_eq!(
             events[1].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
+                id: object_id(DEFERRED_REVIEW_IDS[1]).expect("fixture review id is valid"),
                 reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_APPROVING_REVIEWER,))
                     .expect("fixture reviewer is valid"),
                 state: ReviewState::Approved,
@@ -4607,6 +4612,7 @@ mod tests {
         assert_eq!(
             events[2].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
+                id: object_id(DEFERRED_REVIEW_IDS[2]).expect("fixture review id is valid"),
                 reviewer: RepoWatchAuthorLogin::try_new(
                     String::from(DEFERRED_COMMENTING_REVIEWER,)
                 )

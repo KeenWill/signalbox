@@ -495,19 +495,36 @@ impl ReviewThreadsResult {
 /// Typed result of `change_request_thread_reply`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadReplyResult {
-    id: String,
+    comment_node_id: String,
+    comment_id: u64,
+    review_id: u64,
     url: CodeHostUrl,
 }
 
 impl ThreadReplyResult {
-    /// Validates the created reply identity and URL.
-    pub fn try_new(id: String, url: String) -> Option<Self> {
+    /// Validates the created reply identities and URL.
+    pub fn try_new(
+        comment_node_id: String,
+        comment_id: u64,
+        review_id: u64,
+        url: String,
+    ) -> Option<Self> {
         let url = CodeHostUrl::try_new(url)?;
-        valid_opaque_id(&id).then_some(Self { id, url })
+        (valid_opaque_id(&comment_node_id) && comment_id > 0 && review_id > 0).then_some(Self {
+            comment_node_id,
+            comment_id,
+            review_id,
+            url,
+        })
     }
 
     fn into_value(self) -> Value {
-        json!({"id": self.id, "url": self.url.into_string()})
+        json!({
+            "comment_id": self.comment_id,
+            "comment_node_id": self.comment_node_id,
+            "review_id": self.review_id,
+            "url": self.url.into_string(),
+        })
     }
 }
 

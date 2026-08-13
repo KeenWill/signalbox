@@ -6959,6 +6959,7 @@ pub enum RepoWatchRuleEvaluation {
 pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
+    SelfCaused,
     Occupied,
     Cooldown,
     Dispatched {
@@ -9259,6 +9260,7 @@ pub enum RepoWatchEventKindV1 {
         conclusion: CheckConclusion,
     },
     ReviewSubmitted {
+        id: GitHubObjectId,
         reviewer: RepoWatchAuthorLogin,
         state: ReviewState,
         commit: CommitSha,

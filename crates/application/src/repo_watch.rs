@@ -838,6 +838,7 @@ fn derive_review_events(
                 repository,
                 current.context(),
                 RepoWatchEventKindV1::ReviewSubmitted {
+                    id: review.id(),
                     reviewer: review.reviewer().clone(),
                     state,
                     commit: review.commit().clone(),
@@ -1294,6 +1295,7 @@ pub enum RepoWatchRuleEvaluation {
 pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
+    SelfCaused,
     Occupied,
     Cooldown,
     Dispatched {
@@ -2527,6 +2529,7 @@ mod tests {
         assert_eq!(
             events[0].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
+                id: current_review.id(),
                 reviewer: current_review.reviewer().clone(),
                 state: ReviewState::ChangesRequested,
                 commit: current_review.commit().clone(),

@@ -19,6 +19,7 @@ mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
 mod outbox_dispatch_and_process_read;
+mod repo_watch_self_cause;
 mod restart_recovery_and_submit;
 mod session_creation_and_submit;
 mod session_plan;

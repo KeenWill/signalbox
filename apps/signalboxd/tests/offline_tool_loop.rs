@@ -1787,6 +1787,8 @@ fn thread_reply_result() -> CodeHostResult {
     CodeHostResult::ThreadReply(
         ThreadReplyResult::try_new(
             String::from("PRRC_reply"),
+            7_002,
+            8_002,
             String::from("https://github.example/comment/7002"),
         )
         .expect("fixture reply result is bounded"),

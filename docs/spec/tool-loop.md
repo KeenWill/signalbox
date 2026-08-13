@@ -22,6 +22,9 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture â
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The exact provider receipt returned by review-thread replies is verified against
+this PR (`agent/repo-watch-self-cause`).
+
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
 child stack.
@@ -1014,7 +1017,8 @@ The declarations and compact result objects are:
   carries opaque id, resolution and outdated posture, path, optional line,
   comments, and `comments_truncated`; the outer result carries `truncated`.
 - `change_request_thread_reply` accepts an opaque `thread_id` and nonempty
-  `body`; it returns the created comment node id and URL.
+  `body`; it returns the created comment's opaque node id and numeric database
+  id, its parent review's numeric database id, and the comment URL.
 - `change_request_thread_resolve` accepts one opaque `thread_id`; it returns
   that identity and the acknowledged resolution posture.
 - `change_request_ci_job_log` accepts `repository` and a positive `job_id`; it

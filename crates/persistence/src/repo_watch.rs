@@ -1192,6 +1192,7 @@ struct EncodedEvent {
     workflow_name: Option<String>,
     review_reviewer: Option<String>,
     review_state: Option<&'static str>,
+    review_id: Option<Decimal>,
     review_commit: Option<String>,
     thread_id: Option<String>,
     label_name: Option<String>,
@@ -1236,6 +1237,7 @@ impl EncodedEvent {
             workflow_name: None,
             review_reviewer: None,
             review_state: None,
+            review_id: None,
             review_commit: None,
             thread_id: None,
             label_name: None,
@@ -1295,10 +1297,12 @@ impl EncodedEvent {
                 encoded.conclusion = Some(repo_watch_check_conclusion_to_str(*conclusion));
             }
             RepoWatchEventKindV1::ReviewSubmitted {
+                id,
                 reviewer,
                 state,
                 commit,
             } => {
+                encoded.review_id = Some(Decimal::from(id.get()));
                 encoded.review_reviewer = Some(reviewer.as_str().to_owned());
                 encoded.review_state = Some(repo_watch_review_state_to_str(*state));
                 encoded.review_commit = Some(commit.as_str().to_owned());
@@ -1337,6 +1341,7 @@ async fn insert_events(
     generation: RepoWatchCursorGeneration,
     events: &[RepoWatchEvent],
 ) -> Result<(), RepoWatchStoreError> {
+    record_github_write_observations(transaction, repository, generation).await?;
     for (index, event) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
@@ -1349,7 +1354,7 @@ async fn insert_events(
                 head_branch, title, body, labels, draft, author,
                 previous_sha, current_sha, mergeable_state, checks_outcome,
                 check_run_name, conclusion, workflow_branch, workflow_name,
-                review_reviewer, review_state, review_commit, thread_id,
+                review_reviewer, review_state, review_id, review_commit, thread_id,
                 label_name, advanced_branch, reaction_subject_kind,
                 reaction_subject_id, reaction_reactor, reaction_content,
                 reaction_change
@@ -1357,7 +1362,7 @@ async fn insert_events(
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-                $28, $29, $30, $31, $32, $33, $34, $35, $36
+                $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
              )",
         )
         .bind(encoded.event_id)
@@ -1387,6 +1392,7 @@ async fn insert_events(
         .bind(encoded.workflow_name)
         .bind(encoded.review_reviewer)
         .bind(encoded.review_state)
+        .bind(encoded.review_id)
         .bind(encoded.review_commit)
         .bind(encoded.thread_id)
         .bind(encoded.label_name)
@@ -1398,7 +1404,127 @@ async fn insert_events(
         .bind(encoded.reaction_change)
         .execute(&mut **transaction)
         .await?;
+        record_event_self_cause(transaction, event, generation).await?;
     }
+    Ok(())
+}
+
+async fn record_github_write_observations(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    generation: RepoWatchCursorGeneration,
+) -> Result<(), RepoWatchStoreError> {
+    sqlx::query(
+        "WITH pull_requests AS (
+             SELECT pull_request.value AS document
+               FROM repo_watch_cursor AS cursor_record
+               CROSS JOIN LATERAL jsonb_array_elements(
+                   cursor_record.cursor_payload -> 'state' -> 'pull_requests'
+               ) AS pull_request(value)
+              WHERE cursor_record.repository = $1
+                AND cursor_record.generation = $2
+         )
+         INSERT INTO repo_watch_github_write_observation (
+             tool_attempt_id, repository, cursor_generation
+         )
+         SELECT receipt.tool_attempt_id, $1, $2
+           FROM repo_watch_github_write_receipt AS receipt
+          WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_github_write_observation AS observed
+                     WHERE observed.tool_attempt_id = receipt.tool_attempt_id
+                )
+            AND EXISTS (
+                SELECT 1
+                  FROM pull_requests AS pull_request
+                 WHERE (
+                    receipt.operation_kind = 'publish_review'
+                    AND receipt.repository = $1
+                    AND (pull_request.document ->> 'number')::numeric
+                        = receipt.pull_request_number
+                    AND EXISTS (
+                        SELECT 1
+                          FROM jsonb_array_elements(
+                              pull_request.document -> 'reviews'
+                          ) AS review(value)
+                         WHERE (review.value ->> 'id')::numeric = receipt.review_id
+                    )
+                 ) OR (
+                    receipt.operation_kind = 'thread_reply'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM jsonb_array_elements(
+                              pull_request.document -> 'reviews'
+                          ) AS review(value)
+                         WHERE (review.value ->> 'id')::numeric = receipt.review_id
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM jsonb_array_elements(
+                              pull_request.document -> 'threads'
+                          ) AS thread(value)
+                         WHERE thread.value ->> 'thread' = receipt.thread_id
+                    )
+                 ) OR (
+                    receipt.operation_kind = 'thread_resolve'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM jsonb_array_elements(
+                              pull_request.document -> 'threads'
+                          ) AS thread(value)
+                         WHERE thread.value ->> 'thread' = receipt.thread_id
+                           AND thread.value ->> 'state' = 'resolved'
+                    )
+                 )
+            )
+         ON CONFLICT (tool_attempt_id) DO NOTHING",
+    )
+    .bind(repository.as_str())
+    .bind(generation_to_i64(generation))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn record_event_self_cause(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+    generation: RepoWatchCursorGeneration,
+) -> Result<(), RepoWatchStoreError> {
+    let encoded = EncodedEvent::from_event(event);
+    sqlx::query(
+        "INSERT INTO repo_watch_event_self_cause (
+             event_id, tool_attempt_id, cause_kind
+         )
+         SELECT $1, receipt.tool_attempt_id,
+                CASE receipt.operation_kind
+                    WHEN 'thread_reply' THEN 'thread_reply'
+                    WHEN 'thread_resolve' THEN 'thread_resolve'
+                    ELSE 'review_write'
+                END
+           FROM repo_watch_github_write_observation AS observed
+           JOIN repo_watch_github_write_receipt AS receipt
+             ON receipt.tool_attempt_id = observed.tool_attempt_id
+          WHERE observed.repository = $2
+            AND observed.cursor_generation = $3
+            AND (
+                ($4 = 'review_submitted' AND receipt.review_id = $5)
+                OR ($4 = 'thread_opened' AND receipt.operation_kind = 'thread_reply'
+                    AND receipt.thread_id = $6)
+                OR ($4 = 'thread_resolved' AND receipt.operation_kind = 'thread_resolve'
+                    AND receipt.thread_id = $6)
+            )
+          ORDER BY receipt.tool_attempt_id
+          LIMIT 1",
+    )
+    .bind(event.id().as_uuid())
+    .bind(event.repository().as_str())
+    .bind(generation_to_i64(generation))
+    .bind(encoded.event_kind)
+    .bind(encoded.review_id)
+    .bind(encoded.thread_id)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -1431,6 +1557,7 @@ struct EventRow {
     workflow_name: Option<String>,
     review_reviewer: Option<String>,
     review_state: Option<String>,
+    review_id: Option<Decimal>,
     review_commit: Option<String>,
     thread_id: Option<String>,
     label_name: Option<String>,
@@ -1449,7 +1576,7 @@ const EVENT_PAGE_SQL: &str = "SELECT event_id, repository, cursor_generation, ev
         head_branch, title, body, labels, draft, author,
         previous_sha, current_sha, mergeable_state, checks_outcome,
         check_run_name, conclusion, workflow_branch, workflow_name,
-        review_reviewer, review_state, review_commit, thread_id,
+        review_reviewer, review_state, review_id, review_commit, thread_id,
         label_name, advanced_branch, reaction_subject_kind,
         reaction_subject_id, reaction_reactor, reaction_content,
         reaction_change
@@ -1470,7 +1597,7 @@ const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generati
         head_branch, title, body, labels, draft, author,
         previous_sha, current_sha, mergeable_state, checks_outcome,
         check_run_name, conclusion, workflow_branch, workflow_name,
-        review_reviewer, review_state, review_commit, thread_id,
+        review_reviewer, review_state, review_id, review_commit, thread_id,
         label_name, advanced_branch, reaction_subject_kind,
         reaction_subject_id, reaction_reactor, reaction_content,
         reaction_change
@@ -1485,7 +1612,7 @@ const EVENT_BY_ID_SQL: &str = "SELECT event_id, repository, cursor_generation, e
         head_branch, title, body, labels, draft, author,
         previous_sha, current_sha, mergeable_state, checks_outcome,
         check_run_name, conclusion, workflow_branch, workflow_name,
-        review_reviewer, review_state, review_commit, thread_id,
+        review_reviewer, review_state, review_id, review_commit, thread_id,
         label_name, advanced_branch, reaction_subject_kind,
         reaction_subject_id, reaction_reactor, reaction_content,
         reaction_change
@@ -1671,6 +1798,11 @@ fn decode_event_kind(
             Err(RepoWatchPersistenceCorruption::EventShapeMismatch.into())
         }
         RepoWatchEventKindNameV1::ReviewSubmitted => Ok(RepoWatchEventKindV1::ReviewSubmitted {
+            id: github_object_id(
+                positive_u64_from_numeric(required(row.review_id, "review_id")?)
+                    .map_err(|_| RepoWatchPersistenceCorruption::InvalidEventField("review_id"))?,
+                "review_id",
+            )?,
             reviewer: RepoWatchAuthorLogin::try_new(required(
                 row.review_reviewer.clone(),
                 "review_reviewer",
@@ -1773,6 +1905,7 @@ fn event_row_matches_encoded(row: &EventRow, encoded: &EncodedEvent) -> bool {
         && row.workflow_name == encoded.workflow_name
         && row.review_reviewer == encoded.review_reviewer
         && row.review_state.as_deref() == encoded.review_state
+        && row.review_id == encoded.review_id
         && row.review_commit == encoded.review_commit
         && row.thread_id == encoded.thread_id
         && row.label_name == encoded.label_name

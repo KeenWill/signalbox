@@ -203,7 +203,12 @@ query StackChildren(
 const THREAD_REPLY_MUTATION: &str = r#"
 mutation ThreadReply($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, body: $body}) {
-    comment { id url }
+    comment {
+      id
+      fullDatabaseId
+      url
+      pullRequestReview { fullDatabaseId }
+    }
   }
 }
 "#;
@@ -1268,19 +1273,12 @@ impl GitHubCodeHostTransport {
             .mutation_json_response(response, StatusCode::OK)
             .await?;
         reject_graphql_mutation_errors(&value)?;
-        let result = (|| {
-            let comment = nested(
-                &value,
-                &["data", "addPullRequestReviewThreadReply", "comment"],
-            )?;
-            let object = required_object(comment)?;
-            ThreadReplyResult::try_new(
-                required_string(object, "id")?,
-                required_string(object, "url")?,
-            )
-            .ok_or(CodeHostTransportFailure::InvalidResponse)
-        })()
-        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
+        let comment = nested(
+            &value,
+            &["data", "addPullRequestReviewThreadReply", "comment"],
+        )?;
+        let result = parse_thread_reply_result(comment)
+            .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
         Ok(CodeHostResult::ThreadReply(result))
     }
 
@@ -2218,6 +2216,20 @@ fn parse_review_thread_comment(
     .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
+fn parse_thread_reply_result(
+    value: &serde_json::Value,
+) -> Result<ThreadReplyResult, CodeHostTransportFailure> {
+    let object = required_object(value)?;
+    let review = required_object(required(object, "pullRequestReview")?)?;
+    ThreadReplyResult::try_new(
+        required_string(object, "id")?,
+        required_positive_decimal_id(object, "fullDatabaseId")?,
+        required_positive_decimal_id(review, "fullDatabaseId")?,
+        required_string(object, "url")?,
+    )
+    .ok_or(CodeHostTransportFailure::InvalidResponse)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ParsedSlogThread {
     identity: ReviewThreadIdentity,
@@ -2660,6 +2672,19 @@ fn required_u64(
         .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
+fn required_positive_decimal_id(
+    object: &serde_json::Map<String, serde_json::Value>,
+    member: &str,
+) -> Result<u64, CodeHostTransportFailure> {
+    let encoded = required_string(object, member)?;
+    let value = encoded
+        .parse::<u64>()
+        .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    (value > 0 && value.to_string() == encoded)
+        .then_some(value)
+        .ok_or(CodeHostTransportFailure::InvalidResponse)
+}
+
 fn optional_u64(
     object: &serde_json::Map<String, serde_json::Value>,
     member: &str,
@@ -2731,6 +2756,44 @@ mod tests {
     fn repository() -> CodeHostRepository {
         CodeHostRepository::try_new(String::from("owner/repository"))
             .expect("fixture repository is admitted")
+    }
+
+    #[test]
+    fn thread_reply_parser_preserves_both_numeric_database_identities() {
+        let value = serde_json::json!({
+            "id": "PRRC_fixture_reply",
+            "fullDatabaseId": "70011",
+            "url": "https://github.example/comment/70011",
+            "pullRequestReview": {"fullDatabaseId": "80021"}
+        });
+
+        let result =
+            parse_thread_reply_result(&value).expect("complete reply acknowledgement is admitted");
+
+        assert_eq!(
+            CodeHostResult::ThreadReply(result).into_json_value(),
+            serde_json::json!({
+                "comment_id": 70_011,
+                "comment_node_id": "PRRC_fixture_reply",
+                "review_id": 80_021,
+                "url": "https://github.example/comment/70011",
+            })
+        );
+    }
+
+    #[test]
+    fn thread_reply_parser_rejects_a_non_decimal_database_identity() {
+        let value = serde_json::json!({
+            "id": "PRRC_fixture_reply",
+            "fullDatabaseId": "database-id",
+            "url": "https://github.example/comment/70011",
+            "pullRequestReview": {"fullDatabaseId": "80021"}
+        });
+
+        assert_eq!(
+            parse_thread_reply_result(&value),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
     }
 
     fn gate_stack_state() -> StackStateResult {

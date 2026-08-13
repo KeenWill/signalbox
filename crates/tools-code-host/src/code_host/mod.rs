@@ -2251,6 +2251,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn thread_reply_result_carries_the_exact_provider_receipt() {
+        let result = ThreadReplyResult::try_new(
+            String::from("PRRC_fixture_reply"),
+            70_011,
+            80_021,
+            String::from("https://github.example/comment/70011"),
+        )
+        .expect("fixture reply acknowledgement is valid");
+
+        assert_eq!(
+            CodeHostResult::ThreadReply(result).into_json_value(),
+            serde_json::json!({
+                "comment_id": 70_011,
+                "comment_node_id": "PRRC_fixture_reply",
+                "review_id": 80_021,
+                "url": "https://github.example/comment/70011",
+            })
+        );
+    }
+
     /// A returned node identity the argument side would refuse never enters
     /// durable evidence, so every identity a result offers can be passed back.
     #[test]
@@ -2274,6 +2295,8 @@ mod tests {
         });
         let reply = ThreadReplyResult::try_new(
             oversized.clone(),
+            70_011,
+            80_021,
             String::from("https://github.example/comment/7002"),
         );
 

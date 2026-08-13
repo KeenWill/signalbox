@@ -23,7 +23,9 @@ the poller adopts as check-suite and check-run completion generations are
 verified against PR #541 (`fix/check-run-updated-at`). The goal a dispatch
 commissions with its session, and the binding of the dispatched work turn to
 that goal's generation, are verified against this PR
-(`agent/commission-binding`).
+(`agent/commission-binding`). Exact-object correlation between session GitHub
+writes and watcher events is verified against this PR
+(`agent/repo-watch-self-cause`).
 
 ## Configuration and credential boundary
 
@@ -255,7 +257,8 @@ repository event history in cursor-generation and event-ordinal order.
 - `CheckRunCompleted { name, conclusion }`
 - `BranchWorkflowRunCompleted { branch, workflow, conclusion }`, a branch-level
   event rather than a PR event, including when the watched branch is `main`
-- `ReviewSubmitted { reviewer, state, commit }`
+- `ReviewSubmitted { id, reviewer, state, commit }`, where `id` is GitHub's
+  immutable numeric review identity
 - `ThreadOpened { thread }`
 - `ThreadResolved { thread }`
 - `Labeled { label }`
@@ -503,6 +506,16 @@ permanent configuration failure. A deactivated rule identity and version cannot
 be configured again; either kind of replacement uses a new identity so no events
 can be evaluated under semantics different from the activation that admitted
 them.
+
+**Implemented behavior.** Completed session mutations record the exact GitHub
+review, comment, or review-thread identity acknowledged by the provider. The
+first repository-watch cursor that observes a matching review write, thread
+reply, or thread resolution durably links every resulting event to the creating
+tool attempt. A matching rule records `self_caused` and creates no dispatch
+batch or session. Mutable thread writes are consumed by that first observation,
+so a later owner transition of the same thread remains dispatchable. Correlation
+uses provider object identity, never author login: a distinct owner-created
+review remains eligible even when the session token and owner share one login.
 
 ## First live rule
 

@@ -549,6 +549,7 @@ pub enum RepoWatchEventKindV1 {
         conclusion: CheckConclusion,
     },
     ReviewSubmitted {
+        id: GitHubObjectId,
         reviewer: RepoWatchAuthorLogin,
         state: ReviewState,
         commit: CommitSha,

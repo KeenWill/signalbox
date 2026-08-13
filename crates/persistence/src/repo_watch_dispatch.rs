@@ -384,6 +384,19 @@ impl PostgresRepoWatchDispatchStore {
                     transaction.rollback().await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
                 }
+                if event_is_self_caused(&mut transaction, event.id()).await? {
+                    insert_evaluation(
+                        &mut transaction,
+                        &event,
+                        &rule_id,
+                        rule_version,
+                        "self_caused",
+                        None,
+                    )
+                    .await?;
+                    commit(transaction).await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::SelfCaused);
+                }
                 if singleton_is_occupied(&mut transaction, &rule_id, rule_version, &singleton)
                     .await?
                 {
@@ -812,6 +825,7 @@ async fn load_recorded_evaluation(
     let outcome: String = first.try_get("outcome_kind")?;
     match outcome.as_str() {
         "not_matched" => Ok(Some(RepoWatchRuleEvaluationOutcome::NotMatched)),
+        "self_caused" => Ok(Some(RepoWatchRuleEvaluationOutcome::SelfCaused)),
         "occupied" => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
         "cooldown" => Ok(Some(RepoWatchRuleEvaluationOutcome::Cooldown)),
         "dispatched" => {
@@ -834,6 +848,22 @@ async fn load_recorded_evaluation(
             "evaluation outcome is unsupported",
         )),
     }
+}
+
+async fn event_is_self_caused(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: signalbox_domain::RepoWatchEventId,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_event_self_cause
+              WHERE event_id = $1
+         )",
+    )
+    .bind(event.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await?)
 }
 
 async fn singleton_is_occupied(

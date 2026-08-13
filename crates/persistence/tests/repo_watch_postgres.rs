@@ -72,6 +72,7 @@ const CHECK_SUITE_ID: u64 = 51;
 const CHECK_RUN_ID: u64 = 52;
 const ISSUE_COMMENT_ID: u64 = 61;
 const REVIEW_COMMENT_ID: u64 = 62;
+const REVIEW_ID: u64 = 63;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -1477,6 +1478,7 @@ async fn every_event_kind_survives_a_commit_and_load_round_trip() -> Result<(), 
     let review_submitted = unlabeled_event(
         &mut ids,
         RepoWatchEventKindV1::ReviewSubmitted {
+            id: GitHubObjectId::new(REVIEW_ID.try_into()?),
             reviewer: RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
             state: ReviewState::ChangesRequested,
             commit: CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
