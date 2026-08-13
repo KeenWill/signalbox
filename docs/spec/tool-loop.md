@@ -24,7 +24,9 @@ bind is verified against this PR (`agent/per-session-workspaces`).
 
 The application handoff from a runner-selected prepared attempt to its durable
 offer boundary is re-verified through this PR
-(`agent/tool-loop-runner-offer-handoff`).
+(`agent/tool-loop-runner-offer-handoff`). The production exact-runner adapter
+from that boundary through durable offer dispatch is re-verified through this PR
+(`agent/daemon-runner-tool-offer-adapter`).
 
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
@@ -484,7 +486,11 @@ same request plus the committed lease. A mismatched receipt fails closed. A
 committed offer yields the stage; a later pass that observes the runner-owned
 attempt already `InFlight` yields it to the lease state machine instead of
 classifying local-executor crash loss. Compositions that do not install this
-port use the fail-closed unavailable implementation.
+port use the fail-closed unavailable implementation. The production daemon
+installs the port for an exact-runner locus and authenticates the returned lease
+against the frozen runner and registration revision. Capability-class selection
+remains a separate committed boundary; until it exists, that locus fails closed
+instead of choosing a runner here.
 
 If the authorization commit acknowledgement is ambiguous, execution does not
 begin from the returned error. While retaining the dispatch gate and exact
