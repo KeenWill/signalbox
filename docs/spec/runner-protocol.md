@@ -74,8 +74,10 @@ canonical claim and dispatch replay is re-verified through this PR
 (`agent/runner-claimed-dispatch-replay`). Runner execution-phase journaling,
 heartbeat-safe execution, terminal retention, and generic exec-family restricted
 sandbox composition are re-verified through this PR
-(`agent/runner-sandboxed-dispatch-execution`). The placement loss-source,
-pre-pin replacement and abandonment state shapes, and append-only
+(`agent/runner-sandboxed-dispatch-execution`). Live offer admission, exact claim
+emission, and post-acknowledgement lease journaling for that generic slice are
+re-verified through this PR (`agent/runner-live-lease-admission`). The placement
+loss-source, pre-pin replacement and abandonment state shapes, and append-only
 reconstitution-history contract are re-verified through this PR
 (`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, the independent
@@ -316,11 +318,17 @@ read-only paths. Invalid arguments and unavailable construction become closed
 known failures. The shipped production catalog remains empty, so no production
 registration can advertise or newly receive this tool yet.
 
-The runner and daemon implement the execution and result half of the following
-lease/dispatch state machine for an already claimed dispatch. Live offer
-admission remains unimplemented on the runner, and the production catalog
-remains empty. The remaining surfaces stay compatible with the complete state
-machine:
+The runner and daemon implement the complete transport state machine below for
+the narrow generic exec-family slice. The runner admits an offer only when the
+advertised tool is `sandboxed_exec`, the profile is `WorkspaceRestricted`, the
+effect is side-effecting, no credential or grant is present, arguments decode
+under the existing closed contract, and the exact working directory is a
+canonical directory. It retains the offer in process memory before sending the
+claim, journals nothing before the canonical acknowledgement, then fsyncs
+`waiting_dispatch` before accepting the exact dispatch and its unchanged
+arguments. Every refusal is a bounded `lease_admission_refused` operation
+failure. The shipped production catalog remains empty, so this machinery still
+does not select a production inventory:
 
 1. The daemon sends `lease_offer` with the complete lease correlation and
    immutable dispatch payload. The runner admits the exact tool, sandbox
