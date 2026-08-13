@@ -316,12 +316,14 @@ mod tests {
         assert!(
             context.contains("-----BEGIN UNTRUSTED SESSION CONTEXT: session_goal-----\n(absent)\n")
         );
-        assert!(context.contains(
-            absent
-                .system_prompt
-                .as_deref()
-                .expect("fixture sets system prompt")
-        ));
+        assert!(
+            context.contains(
+                absent
+                    .system_prompt
+                    .as_deref()
+                    .expect("fixture sets system prompt")
+            )
+        );
     }
 
     #[test]
