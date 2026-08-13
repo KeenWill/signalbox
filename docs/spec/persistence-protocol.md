@@ -47,7 +47,9 @@ retained terminal evidence is verified against this PR
 through every lease's exact tool request are verified against this PR
 (`agent/runner-lease-argument-binding`). The closed selected executable locus on
 every durable tool request is verified against this PR
-(`agent/tool-request-execution-locus`).
+(`agent/tool-request-execution-locus`). The profileless lease insertion guard's
+placement-policy approval derivation is verified against this PR
+(`agent/runner-profileless-lease-approval`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR

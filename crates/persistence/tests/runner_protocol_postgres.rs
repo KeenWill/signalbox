@@ -18293,6 +18293,81 @@ async fn s32_inv044_current_placement_head_rejects_truncate() -> Result<(), Box<
     Ok(())
 }
 
+/// S31 / INV-035 / INV-045: a profileless WorkspaceRestricted placement
+/// resolves even a Confirm declaration to policy-auto, and that exact durable
+/// provenance admits its runner lease without inventing a credential grant.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv035_inv045_profileless_restricted_confirm_lease_accepts_policy_auto()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), confirm_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::Exact(
+                RunnerWorkingDirectory::try_new("/workspace/restricted".to_owned())
+                    .expect("the fixture exact working directory is valid"),
+            ),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/restricted".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
+            offer_request(),
+        )
+        .expect("the restricted profileless placement pins its runner");
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source)
+         VALUES ($1, 'approve', 'policy_auto')",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    store.store_pin(&pin, &registration).await?;
+    let admitted: Decimal = sqlx::query_scalar(
+        "SELECT generation
+           FROM runner_lease_generation
+          WHERE lease_id = $1",
+    )
+    .bind(uuid(LEASE))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(admitted, Decimal::from(pin.lease.generation().get()));
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_appended_placement_must_advance_current_head() -> Result<(), Box<dyn Error>> {
