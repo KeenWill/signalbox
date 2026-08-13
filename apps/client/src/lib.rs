@@ -150,6 +150,11 @@ enum PreparedImport {
     Scan(PreparedImportScan),
 }
 
+struct PreparedBlobSource {
+    path: PathBuf,
+    file: tokio::fs::File,
+}
+
 struct PreparedImportScan {
     root: OwnedFd,
     paths: Vec<ScannedImportPath>,
@@ -1028,8 +1033,8 @@ async fn execute(
             }
         }
         Command::BlobUpload { .. } => {
-            let file = prepared_blob.ok_or(ClientError::Input("blob source was not prepared"))?;
-            upload_blob(&mut client, &mut output, file).await
+            let source = prepared_blob.ok_or(ClientError::Input("blob source was not prepared"))?;
+            upload_blob(&mut client, &mut output, source).await
         }
         Command::BlobMetadata { digest } => {
             read_blob_metadata(&mut client, &mut output, digest).await
@@ -1118,7 +1123,7 @@ async fn open_import_source(path: &Path) -> Result<tokio::fs::File, ClientError>
         .map_err(ClientError::source_file)
 }
 
-fn open_blob_source(path: &Path) -> Result<tokio::fs::File, ClientError> {
+fn open_blob_source(path: &Path) -> Result<PreparedBlobSource, ClientError> {
     let descriptor = openat(
         CWD,
         path,
@@ -1126,28 +1131,35 @@ fn open_blob_source(path: &Path) -> Result<tokio::fs::File, ClientError> {
         Mode::empty(),
     )
     .map_err(std::io::Error::from)
-    .map_err(ClientError::blob_source_file)?;
+    .map_err(|source| ClientError::blob_source_file(path, source))?;
     let status = fstat(&descriptor)
         .map_err(std::io::Error::from)
-        .map_err(ClientError::blob_source_file)?;
+        .map_err(|source| ClientError::blob_source_file(path, source))?;
     if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile {
-        return Err(ClientError::blob_source_file(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "blob upload source is not a regular file",
-        )));
+        return Err(ClientError::blob_source_file(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "blob upload source is not a regular file",
+            ),
+        ));
     }
-    Ok(tokio::fs::File::from_std(File::from(descriptor)))
+    Ok(PreparedBlobSource {
+        path: path.to_path_buf(),
+        file: tokio::fs::File::from_std(File::from(descriptor)),
+    })
 }
 
 async fn upload_blob(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
-    mut file: tokio::fs::File,
+    source: PreparedBlobSource,
 ) -> Result<(), ClientError> {
+    let PreparedBlobSource { path, mut file } = source;
     let byte_length = file
         .metadata()
         .await
-        .map_err(ClientError::blob_source_file)?
+        .map_err(|source| ClientError::blob_source_file(&path, source))?
         .len();
     if byte_length == 0 {
         return Err(ClientError::Input("blob source must be nonempty"));
@@ -1159,7 +1171,7 @@ async fn upload_blob(
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(ClientError::blob_source_file)?;
+            .map_err(|source| ClientError::blob_source_file(&path, source))?;
         if read == 0 {
             break;
         }
@@ -1177,7 +1189,7 @@ async fn upload_blob(
     }
     file.seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(ClientError::blob_source_file)?;
+        .map_err(|source| ClientError::blob_source_file(&path, source))?;
     let expected_digest = CanonicalBlobDigest::from_bytes(digest.finalize().into());
     let expected_length_bytes = CanonicalU64::new(byte_length);
     let mut connection = client
@@ -1221,7 +1233,7 @@ async fn upload_blob(
             .take(u64::try_from(MAX_BLOB_CHUNK_BYTES).unwrap_or(u64::MAX))
             .read_to_end(&mut chunk)
             .await
-            .map_err(ClientError::blob_source_file)?;
+            .map_err(|source| ClientError::blob_source_file(&path, source))?;
         if chunk.is_empty() {
             break;
         }
@@ -5705,10 +5717,10 @@ mod tests {
         ConversationImportOutcome, ConversationsPageRequest, DelegationRejectionExpectation,
         DelegationRejectionOperation, GoalHistoryReplay, MAX_CONTENT_FRAGMENT_BYTES,
         MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES,
-        MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ModelSystemPromptChoice, ProcessClient,
-        ReviewCommand, ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest,
-        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal,
-        await_turn_terminal, blocker_recovery_snapshot_state, collect_import_paths,
+        MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ModelSystemPromptChoice, PreparedBlobSource,
+        ProcessClient, ReviewCommand, ReviewConcernsFile, ReviewFindingsFile,
+        SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument,
+        TurnTerminal, await_turn_terminal, blocker_recovery_snapshot_state, collect_import_paths,
         continue_imported, conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
         import_conversation_file, imported, model_call_recovery_transition, open_blob_source,
@@ -7742,18 +7754,37 @@ mod tests {
     }
 
     #[test]
-    fn blob_upload_missing_source_reports_blob_specific_failure() -> Result<(), Box<dyn Error>> {
+    fn blob_upload_missing_source_retains_path_and_os_failure() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let absent = root.path().join("absent.bin");
 
-        let failure = open_blob_source(&absent).expect_err("an absent blob source must fail");
+        let Err(failure) = open_blob_source(&absent) else {
+            panic!("an absent blob source must fail")
+        };
+        let ClientError::BlobSourceFile { path, source } = failure else {
+            panic!("an absent blob source must retain its path and OS failure")
+        };
 
-        assert!(matches!(failure, ClientError::BlobSourceFile(_)));
+        assert_eq!(path, absent);
+        assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        Ok(())
+    }
+
+    #[test]
+    fn blob_upload_source_failure_display_names_path_and_cause() {
+        let path = PathBuf::from("fixture.bin");
+        let failure = ClientError::blob_source_file(
+            &path,
+            io::Error::new(io::ErrorKind::PermissionDenied, "fixture denied"),
+        );
+
         assert_eq!(
             failure.to_string(),
-            "the blob upload source file could not be read"
+            format!(
+                "the blob upload source file '{}' could not be read: fixture denied",
+                path.display()
+            )
         );
-        Ok(())
     }
 
     /// INV-060: opening a FIFO as an upload source is nonblocking and rejects
@@ -7771,7 +7802,10 @@ mod tests {
 
         let opened = open_blob_source(&source);
 
-        assert!(matches!(opened, Err(ClientError::BlobSourceFile(_))));
+        let Err(ClientError::BlobSourceFile { path, .. }) = opened else {
+            panic!("a FIFO source must retain its rejected path")
+        };
+        assert_eq!(path, source);
         Ok(())
     }
 
@@ -7880,12 +7914,20 @@ mod tests {
             Ok::<(), io::Error>(())
         });
         let mut client = ProcessClient::new(socket);
-        let file = tokio::fs::File::open(source_path).await?;
+        let file = tokio::fs::File::open(&source_path).await?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut output = Output::new(&mut stdout, &mut stderr, false);
 
-        upload_blob(&mut client, &mut output, file).await?;
+        upload_blob(
+            &mut client,
+            &mut output,
+            PreparedBlobSource {
+                path: source_path,
+                file,
+            },
+        )
+        .await?;
 
         assert_eq!(
             String::from_utf8(stdout)?,
