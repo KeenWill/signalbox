@@ -163,72 +163,113 @@ fn scorecard_case(
         "complete": complete,
         "stable": stable,
         "tied": tied,
+        "correct": measured && majority == Some(expected),
     })
 }
 
-// The scorecard restates the run headers and per-case verdicts exactly as
-// the binary prints them; record_eval_run rejects a scorecard that disagrees
-// with the typed representations, so fixtures derive both from the same
-// constants.
-fn scorecard_with_cases(cases: &[serde_json::Value]) -> serde_json::Value {
-    let mut categories = std::collections::BTreeMap::new();
-    let mut correct_majorities = 0_u64;
-    let mut unstable_cases = 0_u64;
-    let mut stability_unmeasured_cases = 0_u64;
-    let mut partial_cases = 0_u64;
-    let mut unmeasured_cases = 0_u64;
-    for case in cases {
-        let category = case["category"]
-            .as_str()
-            .expect("fixture category is text");
-        let expected = case["expected"]
-            .as_str()
-            .expect("fixture expected verdict is text");
-        let majority = case["majority"].as_str();
-        let measured = case["measured"]
-            .as_bool()
-            .expect("fixture measured flag is boolean");
-        let complete = case["complete"]
-            .as_bool()
-            .expect("fixture complete flag is boolean");
-        let unstable = case["verdict_counts"]
-            .as_object()
-            .expect("fixture verdict counts are an object")
-            .len()
-            > 1;
-        let stability_unmeasured = measured && case["stable"].is_null();
-        let failed_calls = case["failed_calls"]
-            .as_u64()
-            .expect("fixture failed-call count is unsigned");
-        let category_score = categories.entry(category).or_insert([0_u64; 7]);
-        category_score[0] += 1;
-        category_score[1] += u64::from(measured && majority == Some(expected));
-        category_score[2] += u64::from(unstable);
-        category_score[3] += u64::from(stability_unmeasured);
-        category_score[4] += u64::from(measured && !complete);
-        category_score[5] += u64::from(!measured);
-        category_score[6] += failed_calls;
-        correct_majorities += u64::from(measured && majority == Some(expected));
-        unstable_cases += u64::from(unstable);
-        stability_unmeasured_cases += u64::from(stability_unmeasured);
-        partial_cases += u64::from(measured && !complete);
-        unmeasured_cases += u64::from(!measured);
+struct AggregateExpectations {
+    total_cases: u64,
+    correct_majorities: u64,
+    unstable_cases: u64,
+    stability_unmeasured_cases: u64,
+    partial_cases: u64,
+    unmeasured_cases: u64,
+    categories: Vec<serde_json::Value>,
+}
+
+fn no_case_aggregates() -> AggregateExpectations {
+    AggregateExpectations {
+        total_cases: 0,
+        correct_majorities: 0,
+        unstable_cases: 0,
+        stability_unmeasured_cases: 0,
+        partial_cases: 0,
+        unmeasured_cases: 0,
+        categories: vec![],
     }
-    let categories = categories
-        .into_iter()
-        .map(|(category, score)| {
+}
+
+fn first_partial_case_aggregates() -> AggregateExpectations {
+    AggregateExpectations {
+        total_cases: 1,
+        correct_majorities: 0,
+        unstable_cases: 0,
+        stability_unmeasured_cases: 1,
+        partial_cases: 1,
+        unmeasured_cases: 0,
+        categories: vec![serde_json::json!({
+            "category": "git_push",
+            "cases": 1,
+            "correct_majorities": 0,
+            "unstable_cases": 0,
+            "stability_unmeasured_cases": 1,
+            "partial_cases": 1,
+            "unmeasured_cases": 0,
+            "failed_calls": 2,
+        })],
+    }
+}
+
+fn second_partial_case_aggregates() -> AggregateExpectations {
+    AggregateExpectations {
+        total_cases: 1,
+        correct_majorities: 0,
+        unstable_cases: 0,
+        stability_unmeasured_cases: 1,
+        partial_cases: 1,
+        unmeasured_cases: 0,
+        categories: vec![serde_json::json!({
+            "category": "credential_access",
+            "cases": 1,
+            "correct_majorities": 0,
+            "unstable_cases": 0,
+            "stability_unmeasured_cases": 1,
+            "partial_cases": 1,
+            "unmeasured_cases": 0,
+            "failed_calls": 2,
+        })],
+    }
+}
+
+fn both_partial_case_aggregates() -> AggregateExpectations {
+    AggregateExpectations {
+        total_cases: 2,
+        correct_majorities: 0,
+        unstable_cases: 0,
+        stability_unmeasured_cases: 2,
+        partial_cases: 2,
+        unmeasured_cases: 0,
+        categories: vec![
             serde_json::json!({
-                "category": category,
-                "cases": score[0],
-                "correct_majorities": score[1],
-                "unstable_cases": score[2],
-                "stability_unmeasured_cases": score[3],
-                "partial_cases": score[4],
-                "unmeasured_cases": score[5],
-                "failed_calls": score[6],
-            })
-        })
-        .collect::<Vec<_>>();
+                "category": "credential_access",
+                "cases": 1,
+                "correct_majorities": 0,
+                "unstable_cases": 0,
+                "stability_unmeasured_cases": 1,
+                "partial_cases": 1,
+                "unmeasured_cases": 0,
+                "failed_calls": 2,
+            }),
+            serde_json::json!({
+                "category": "git_push",
+                "cases": 1,
+                "correct_majorities": 0,
+                "unstable_cases": 0,
+                "stability_unmeasured_cases": 1,
+                "partial_cases": 1,
+                "unmeasured_cases": 0,
+                "failed_calls": 2,
+            }),
+        ],
+    }
+}
+
+// The scorecard restates run headers and verdicts from the fixture constants,
+// while each scenario supplies its aggregate expectations as explicit values.
+fn scorecard_with_cases(
+    cases: &[serde_json::Value],
+    aggregates: AggregateExpectations,
+) -> serde_json::Value {
     serde_json::json!({
         "judge_selection": Uuid::from_u128(SELECTION_IDENTITY).to_string(),
         "provider_model": PROVIDER_MODEL,
@@ -236,19 +277,19 @@ fn scorecard_with_cases(cases: &[serde_json::Value]) -> serde_json::Value {
         "contract_digest": CONTRACT_DIGEST,
         "rendered_digest": RENDERED_DIGEST,
         "repeats": REPEATS,
-        "total_cases": cases.len(),
-        "correct_majorities": correct_majorities,
-        "unstable_cases": unstable_cases,
-        "stability_unmeasured_cases": stability_unmeasured_cases,
-        "partial_cases": partial_cases,
-        "unmeasured_cases": unmeasured_cases,
+        "total_cases": aggregates.total_cases,
+        "correct_majorities": aggregates.correct_majorities,
+        "unstable_cases": aggregates.unstable_cases,
+        "stability_unmeasured_cases": aggregates.stability_unmeasured_cases,
+        "partial_cases": aggregates.partial_cases,
+        "unmeasured_cases": aggregates.unmeasured_cases,
         "escalation_calibration": {
             "expected_cases": 0,
             "observed_majorities": 0,
             "missed": 0,
             "excess": 0,
         },
-        "categories": categories,
+        "categories": aggregates.categories,
         "cases": cases,
     })
 }
@@ -274,7 +315,11 @@ fn both_call_scorecard_cases() -> Vec<serde_json::Value> {
     ]
 }
 
-fn run_record_with(id: u128, cases: &[serde_json::Value]) -> ApprovalJudgeEvalRunRecord {
+fn run_record_with(
+    id: u128,
+    cases: &[serde_json::Value],
+    aggregates: AggregateExpectations,
+) -> ApprovalJudgeEvalRunRecord {
     ApprovalJudgeEvalRunRecord {
         run: ApprovalJudgeEvalRunId::from_uuid(Uuid::from_u128(id)),
         selection: DirectModelSelection::from_uuid(Uuid::from_u128(SELECTION_IDENTITY)),
@@ -288,7 +333,7 @@ fn run_record_with(id: u128, cases: &[serde_json::Value]) -> ApprovalJudgeEvalRu
         contract_digest: String::from(CONTRACT_DIGEST),
         rendered_digest: String::from(RENDERED_DIGEST),
         repeats: REPEATS,
-        scorecard: scorecard_with_cases(cases),
+        scorecard: scorecard_with_cases(cases, aggregates),
     }
 }
 
@@ -388,7 +433,11 @@ fn raw_error_code(error: &sqlx::Error) -> Option<String> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recorded_run_and_calls_reread_exactly() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let run = run_record_with(RUN_IDENTITY, &both_call_scorecard_cases());
+    let run = run_record_with(
+        RUN_IDENTITY,
+        &both_call_scorecard_cases(),
+        both_partial_case_aggregates(),
+    );
     record_eval_run(&pool, &run, &[first_call(), second_call()]).await?;
 
     let stored_run = sqlx::query(
@@ -537,6 +586,7 @@ async fn an_inadmissible_call_row_leaves_no_run_row() -> Result<(), Box<dyn Erro
             })],
             2,
         )],
+        first_partial_case_aggregates(),
     );
     let mut broken = first_call();
     broken.rationale = String::new();
@@ -611,6 +661,7 @@ async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<
             })],
             2,
         )],
+        first_partial_case_aggregates(),
     );
     let mut overflowing = first_call();
     overflowing.repeat_ordinal = OVERFLOWING_ORDINAL;
@@ -685,7 +736,7 @@ async fn recording_requires_insert_privileges() -> Result<(), Box<dyn Error>> {
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn contradictory_scorecard_headers_are_rejected() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let mut run = run_record_with(RUN_IDENTITY, &[]);
+    let mut run = run_record_with(RUN_IDENTITY, &[], no_case_aggregates());
     run.scorecard["provider_model"] = serde_json::json!(FOREIGN_PROVIDER_MODEL);
     let error = record_eval_run(&pool, &run, &[])
         .await
@@ -714,6 +765,7 @@ async fn recorded_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
             })],
             2,
         )],
+        first_partial_case_aggregates(),
     );
     record_eval_run(&pool, &run, &[first_call()]).await?;
 
@@ -790,7 +842,7 @@ async fn foreign_recommendation_spellings_are_rejected() -> Result<(), Box<dyn E
     // The sealing trigger admits call rows only in the run's own recording
     // transaction, so reaching the recommendation constraint requires
     // inserting the run row and the bad call in one raw transaction.
-    let run = run_record_with(RUN_IDENTITY, &[]);
+    let run = run_record_with(RUN_IDENTITY, &[], no_case_aggregates());
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO approval_judge_eval_run
@@ -841,7 +893,7 @@ async fn foreign_recommendation_spellings_are_rejected() -> Result<(), Box<dyn E
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn run_rows_pin_their_recording_transaction() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let run = run_record_with(RUN_IDENTITY, &[]);
+    let run = run_record_with(RUN_IDENTITY, &[], no_case_aggregates());
     let mut transaction = pool.begin().await?;
     // The insert names a foreign transaction identity outright; the stamping
     // trigger must replace it with the inserting transaction's own.
@@ -896,6 +948,7 @@ async fn unaccounted_attempts_are_rejected() -> Result<(), Box<dyn Error>> {
             })],
             2,
         )],
+        first_partial_case_aggregates(),
     );
     // One verdict plus zero failures leaves two configured attempts
     // unaccounted for.
@@ -927,6 +980,7 @@ async fn late_call_rows_are_rejected_after_the_run_commits() -> Result<(), Box<d
             })],
             2,
         )],
+        first_partial_case_aggregates(),
     );
     record_eval_run(&pool, &run, &[first_call()]).await?;
     let late = first_call();
@@ -971,6 +1025,7 @@ async fn contradictory_scorecard_verdicts_are_rejected() -> Result<(), Box<dyn E
             })],
             2,
         )],
+        first_partial_case_aggregates(),
     );
     let error = record_eval_run(&pool, &run, &[])
         .await
@@ -1002,6 +1057,7 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
             })],
             2,
         )],
+        first_partial_case_aggregates(),
     );
     record_eval_run(&pool, &run, &[at_bound]).await?;
 
@@ -1018,6 +1074,7 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
             })],
             2,
         )],
+        second_partial_case_aggregates(),
     );
     let error = record_eval_run(&pool, &second_run, &[past_bound])
         .await

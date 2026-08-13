@@ -100,8 +100,8 @@ pub struct ApprovalJudgeEvalCallRecord {
 /// while admitting each call row.
 pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeEvalRecordingError> {
     let present: bool = sqlx::query_scalar(
-        "SELECT to_regclass('approval_judge_eval_run') IS NOT NULL
-            AND to_regclass('approval_judge_eval_call') IS NOT NULL",
+        "SELECT to_regclass('public.approval_judge_eval_run') IS NOT NULL
+            AND to_regclass('public.approval_judge_eval_call') IS NOT NULL",
     )
     .fetch_one(pool)
     .await?;
@@ -109,9 +109,9 @@ pub async fn verify_recording_schema(pool: &PgPool) -> Result<(), ApprovalJudgeE
         return Err(ApprovalJudgeEvalRecordingError::TablesAbsent);
     }
     let privileged: bool = sqlx::query_scalar(
-        "SELECT has_table_privilege('approval_judge_eval_run', 'INSERT')
-            AND has_table_privilege('approval_judge_eval_run', 'SELECT')
-            AND has_table_privilege('approval_judge_eval_call', 'INSERT')",
+        "SELECT has_table_privilege('public.approval_judge_eval_run', 'INSERT')
+            AND has_table_privilege('public.approval_judge_eval_run', 'SELECT')
+            AND has_table_privilege('public.approval_judge_eval_call', 'INSERT')",
     )
     .fetch_one(pool)
     .await?;
@@ -279,6 +279,11 @@ fn require_scorecard_case_summary_agreement(
     let stable = (configured_repeats >= 2 && complete).then_some(counts.len() == 1);
     let leading = counts.values().max().copied().unwrap_or(0);
     let tied = measured && counts.values().filter(|count| **count == leading).count() > 1;
+    let correct = measured
+        && majority
+            == case
+                .get("expected")
+                .and_then(serde_json::Value::as_str);
     let expected = [
         ("verdict_counts", serde_json::json!(counts)),
         ("majority", serde_json::json!(majority)),
@@ -286,6 +291,7 @@ fn require_scorecard_case_summary_agreement(
         ("complete", serde_json::json!(complete)),
         ("stable", serde_json::json!(stable)),
         ("tied", serde_json::json!(tied)),
+        ("correct", serde_json::json!(correct)),
     ];
     for (field, expected) in expected {
         if case.get(field) != Some(&expected) {
@@ -478,7 +484,7 @@ pub async fn record_eval_run(
     }
     let mut transaction = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO approval_judge_eval_run
+        "INSERT INTO public.approval_judge_eval_run
             (eval_run_id, direct_model_selection_id,
              resolved_provider_model_identity_id, provider_model,
              credential_reference, usage_input_includes_cache_tokens,
@@ -501,7 +507,7 @@ pub async fn record_eval_run(
     .await?;
     for call in calls {
         sqlx::query(
-            "INSERT INTO approval_judge_eval_call
+            "INSERT INTO public.approval_judge_eval_call
                 (eval_run_id, case_name, repeat_ordinal, recommendation_kind,
                  rationale, input_tokens, output_tokens,
                  cache_creation_input_tokens, cache_read_input_tokens)
@@ -694,12 +700,14 @@ mod tests {
     fn scorecard_case_summaries_must_match_their_verdicts() {
         let verdicts = [("approve", "first"), ("approve", "second")];
         let valid = json!({
+            "expected": "approve",
             "verdict_counts": {"approve": 2},
             "majority": "approve",
             "measured": true,
             "complete": true,
             "stable": true,
             "tied": false,
+            "correct": true,
         });
         require_scorecard_case_summary_agreement(&valid, "fixture-case", 2, &verdicts)
             .expect("derived summaries agree");
@@ -727,6 +735,10 @@ mod tests {
         let mut contradictory = valid.clone();
         contradictory["tied"] = json!(null);
         assert_summary_mismatch(&contradictory, &verdicts, "tied");
+
+        let mut contradictory = valid;
+        contradictory["correct"] = json!(false);
+        assert_summary_mismatch(&contradictory, &verdicts, "correct");
     }
 
     #[test]
