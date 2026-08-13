@@ -379,15 +379,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv062_missing_and_corrupt_replica_sets_remain_distinct() {
+    async fn inv062_missing_replica_set_is_typed_missing() {
         let expected = ExpectedBlob::new(digest(1), NonZeroU64::MIN);
         let deadline = Instant::now() + Duration::from_secs(1);
         let missing = [(
             Arc::new(FakeStore(StoreOutcome::Missing)) as Arc<dyn BlobStore>,
-            key(),
-        )];
-        let corrupt = [(
-            Arc::new(FakeStore(StoreOutcome::Corrupt)) as Arc<dyn BlobStore>,
             key(),
         )];
 
@@ -395,6 +391,17 @@ mod tests {
             verify_replica_candidates(expected, &missing, deadline).await,
             ReplicaVerification::Missing
         );
+    }
+
+    #[tokio::test]
+    async fn inv062_corrupt_replica_set_is_typed_corrupt() {
+        let expected = ExpectedBlob::new(digest(1), NonZeroU64::MIN);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let corrupt = [(
+            Arc::new(FakeStore(StoreOutcome::Corrupt)) as Arc<dyn BlobStore>,
+            key(),
+        )];
+
         assert_eq!(
             verify_replica_candidates(expected, &corrupt, deadline).await,
             ReplicaVerification::Corrupt
@@ -402,10 +409,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv062_empty_replica_set_is_missing_and_unavailable_takes_precedence() {
+    async fn inv062_empty_replica_set_is_typed_missing() {
         let expected = ExpectedBlob::new(digest(1), NonZeroU64::MIN);
         let deadline = Instant::now() + Duration::from_secs(1);
         let empty: [(Arc<dyn BlobStore>, BlobObjectKey); 0] = [];
+
+        assert_eq!(
+            verify_replica_candidates(expected, &empty, deadline).await,
+            ReplicaVerification::Missing
+        );
+    }
+
+    #[tokio::test]
+    async fn inv062_unavailable_replica_takes_precedence_over_corrupt() {
+        let expected = ExpectedBlob::new(digest(1), NonZeroU64::MIN);
+        let deadline = Instant::now() + Duration::from_secs(1);
         let mixed = [
             (
                 Arc::new(FakeStore(StoreOutcome::Corrupt)) as Arc<dyn BlobStore>,
@@ -417,10 +435,6 @@ mod tests {
             ),
         ];
 
-        assert_eq!(
-            verify_replica_candidates(expected, &empty, deadline).await,
-            ReplicaVerification::Missing
-        );
         assert_eq!(
             verify_replica_candidates(expected, &mixed, deadline).await,
             ReplicaVerification::Unavailable
