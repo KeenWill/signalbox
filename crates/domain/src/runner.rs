@@ -2012,6 +2012,11 @@ impl RunnerToolAttemptAuthorization {
         self.approved.request().name()
     }
 
+    /// Returns the exact physical-attempt dispatch correlation.
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
+        self.authorized.correlation()
+    }
+
     fn into_parts(
         self,
     ) -> (
