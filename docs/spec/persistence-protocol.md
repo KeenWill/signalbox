@@ -1154,12 +1154,13 @@ Locks per transaction, in acquisition order:
   revision against the current advertisement. It then invokes that same result
   boundary before any later registration change or availability reconciliation
   can consume the attempt. An exact completed-result replay is read-only. No
-  present daemon resume path invokes this retained-result transaction. The
-  generic lease-projection writer refuses to originate a claimed or completed
-  state. **Committed unimplemented functionality.** No present transaction
-  performs an initial dispatch that consumes a runner-default-directory or
-  workspace receipt. That extension must store pin, grant, `InFlight` attempt,
-  and offered lease together under the same lock order.
+  daemon resume path invokes this retained-result transaction before processing
+  a later registration change. The generic lease-projection writer refuses to
+  originate a claimed or completed state. **Committed unimplemented
+  functionality.** No present transaction performs an initial dispatch that
+  consumes a runner-default-directory or workspace receipt. That extension must
+  store pin, grant, `InFlight` attempt, and offered lease together under the
+  same lock order.
 
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
