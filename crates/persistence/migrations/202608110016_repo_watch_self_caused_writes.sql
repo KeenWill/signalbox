@@ -143,6 +143,11 @@ CREATE INDEX repo_watch_github_write_receipt_thread
     ON repo_watch_github_write_receipt(thread_id)
     WHERE thread_id IS NOT NULL;
 
+CREATE INDEX repo_watch_pending_github_write_attempt
+    ON tool_attempt(request_id)
+    WHERE state_kind <> 'terminal'
+       OR terminal_disposition_kind = 'ambiguous';
+
 CREATE FUNCTION record_repo_watch_github_write_receipt(candidate uuid)
 RETURNS void
 LANGUAGE plpgsql

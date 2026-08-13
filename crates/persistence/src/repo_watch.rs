@@ -437,7 +437,15 @@ impl PostgresRepoWatchStore {
         {
             if request.events().is_empty() {
                 let cursor = current.clone();
-                transaction.rollback().await?;
+                record_github_write_observations(&mut transaction, repository, cursor.generation())
+                    .await?;
+                transaction.commit().await.map_err(|error| {
+                    if commit_failure_is_ambiguous(&error) {
+                        RepoWatchStoreError::CommitAmbiguous(error)
+                    } else {
+                        RepoWatchStoreError::Database(error)
+                    }
+                })?;
                 return Ok(RepoWatchCommitOutcome::Unchanged(cursor));
             }
             transaction.rollback().await?;
@@ -1435,13 +1443,10 @@ async fn record_github_write_observations(
          )
          SELECT receipt.tool_attempt_id, $1, $2
            FROM repo_watch_github_write_receipt AS receipt
-          WHERE (
-                receipt.operation_kind = 'publish_review'
-                OR NOT EXISTS (
-                    SELECT 1
-                      FROM repo_watch_github_write_observation AS observed
-                     WHERE observed.tool_attempt_id = receipt.tool_attempt_id
-                )
+          WHERE NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_github_write_observation AS observed
+                 WHERE observed.tool_attempt_id = receipt.tool_attempt_id
             )
             AND EXISTS (
                 SELECT 1
@@ -1510,11 +1515,17 @@ async fn record_event_self_cause(
                     WHEN 'thread_resolve' THEN 'thread_resolve'
                     ELSE 'review_write'
                 END
-           FROM repo_watch_github_write_observation AS observed
-           JOIN repo_watch_github_write_receipt AS receipt
-             ON receipt.tool_attempt_id = observed.tool_attempt_id
-          WHERE observed.repository = $2
-            AND observed.cursor_generation = $3
+           FROM repo_watch_github_write_receipt AS receipt
+          WHERE (
+                receipt.operation_kind = 'publish_review'
+                OR EXISTS (
+                    SELECT 1
+                      FROM repo_watch_github_write_observation AS observed
+                     WHERE observed.tool_attempt_id = receipt.tool_attempt_id
+                       AND observed.repository = $2
+                       AND observed.cursor_generation = $3
+                )
+            )
             AND (
                 ($4 = 'review_submitted' AND receipt.review_id = $5)
                 OR ($4 = 'thread_opened' AND receipt.operation_kind = 'publish_review'

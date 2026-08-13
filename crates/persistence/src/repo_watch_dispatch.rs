@@ -397,6 +397,10 @@ impl PostgresRepoWatchDispatchStore {
                     commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::SelfCaused);
                 }
+                if event_has_pending_github_write(&mut transaction, event.id()).await? {
+                    transaction.rollback().await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::PendingSelfCause);
+                }
                 if singleton_is_occupied(&mut transaction, &rule_id, rule_version, &singleton)
                     .await?
                 {
@@ -854,11 +858,132 @@ async fn event_is_self_caused(
     transaction: &mut Transaction<'_, Postgres>,
     event: signalbox_domain::RepoWatchEventId,
 ) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    sqlx::query(
+        "INSERT INTO repo_watch_event_self_cause (
+             event_id, tool_attempt_id, cause_kind
+         )
+         SELECT event.event_id, receipt.tool_attempt_id,
+                CASE receipt.operation_kind
+                    WHEN 'thread_reply' THEN 'thread_reply'
+                    WHEN 'thread_resolve' THEN 'thread_resolve'
+                    ELSE 'review_write'
+                END
+           FROM repo_watch_event AS event
+           JOIN repo_watch_github_write_receipt AS receipt ON (
+                event.event_kind = 'review_submitted'
+                AND receipt.review_id = event.review_id
+           ) OR (
+                event.event_kind = 'thread_opened'
+                AND receipt.operation_kind = 'publish_review'
+                AND EXISTS (
+                    SELECT 1
+                      FROM repo_watch_cursor AS cursor_record
+                      CROSS JOIN LATERAL jsonb_array_elements(
+                          cursor_record.cursor_payload -> 'state' -> 'pull_requests'
+                      ) AS pull_request(value)
+                      CROSS JOIN LATERAL jsonb_array_elements(
+                          pull_request.value -> 'threads'
+                      ) AS thread(value)
+                     WHERE cursor_record.repository = event.repository
+                       AND cursor_record.generation = event.cursor_generation
+                       AND thread.value ->> 'thread' = event.thread_id
+                       AND (thread.value ->> 'originating_review_id')::numeric
+                           = receipt.review_id
+                )
+           ) OR (
+                event.event_kind = 'thread_opened'
+                AND receipt.operation_kind = 'thread_reply'
+                AND receipt.thread_id = event.thread_id
+                AND receipt.tool_attempt_id < event.event_id
+                AND event.recorded_at <= receipt.recorded_at
+           ) OR (
+                event.event_kind = 'thread_resolved'
+                AND receipt.operation_kind = 'thread_resolve'
+                AND receipt.thread_id = event.thread_id
+                AND receipt.tool_attempt_id < event.event_id
+                AND event.recorded_at <= receipt.recorded_at
+           )
+          WHERE event.event_id = $1
+          ORDER BY receipt.tool_attempt_id
+          LIMIT 1
+         ON CONFLICT (event_id) DO NOTHING",
+    )
+    .bind(event.as_uuid())
+    .execute(&mut **transaction)
+    .await?;
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
                FROM repo_watch_event_self_cause
               WHERE event_id = $1
+         )",
+    )
+    .bind(event.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await?)
+}
+
+async fn event_has_pending_github_write(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: signalbox_domain::RepoWatchEventId,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_event AS event
+               JOIN tool_request AS request ON request.tool_name IN (
+                    'github_pull_request_publish_review',
+                    'change_request_thread_reply',
+                    'change_request_thread_resolve'
+               )
+               JOIN tool_attempt AS attempt ON attempt.request_id = request.request_id
+              WHERE event.event_id = $1
+                AND (
+                    attempt.state_kind <> 'terminal'
+                    OR attempt.terminal_disposition_kind = 'ambiguous'
+                )
+                AND (
+                    (
+                        request.tool_name = 'github_pull_request_publish_review'
+                        AND event.event_kind IN ('review_submitted', 'thread_opened')
+                        AND request.arguments_text::jsonb ->> 'repository'
+                            = event.repository
+                        AND (request.arguments_text::jsonb ->> 'number')::numeric
+                            = event.pull_request_number
+                    )
+                    OR (
+                        request.tool_name = 'change_request_thread_reply'
+                        AND event.event_kind = 'thread_opened'
+                        AND request.arguments_text::jsonb ->> 'thread_id'
+                            = event.thread_id
+                    )
+                    OR (
+                        request.tool_name = 'change_request_thread_reply'
+                        AND event.event_kind = 'review_submitted'
+                        AND EXISTS (
+                            SELECT 1
+                              FROM repo_watch_cursor AS cursor_record
+                              CROSS JOIN LATERAL jsonb_array_elements(
+                                  cursor_record.cursor_payload -> 'state' -> 'pull_requests'
+                              ) AS pull_request(value)
+                              CROSS JOIN LATERAL jsonb_array_elements(
+                                  pull_request.value -> 'threads'
+                              ) AS thread(value)
+                             WHERE cursor_record.repository = event.repository
+                               AND cursor_record.generation = event.cursor_generation
+                               AND (pull_request.value ->> 'number')::numeric
+                                   = event.pull_request_number
+                               AND thread.value ->> 'thread'
+                                   = request.arguments_text::jsonb ->> 'thread_id'
+                        )
+                    )
+                    OR (
+                        request.tool_name = 'change_request_thread_resolve'
+                        AND event.event_kind = 'thread_resolved'
+                        AND request.arguments_text::jsonb ->> 'thread_id'
+                            = event.thread_id
+                    )
+                )
          )",
     )
     .bind(event.as_uuid())

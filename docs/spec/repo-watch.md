@@ -511,16 +511,22 @@ them.
 review, comment, or review-thread identity acknowledged by the provider. A
 repository-watch cursor that observes a matching review write, thread reply, or
 thread resolution durably links every resulting event to the creating tool
-attempt. For a published review, the poller retains the immutable parent review
-identity of every created thread; its receipt remains correlatable until each
-exact child thread appears, so the review and delayed inline-thread events carry
-the same exact cause once each. A matching rule records `self_caused` and
-creates no dispatch batch or session. Mutable thread writes are consumed by the
-first cursor containing that exact thread, whether or not the requested
-transition is still visible, so a later user transition of the same thread
-remains dispatchable. Correlation uses provider object identity, never author
-login: a distinct user-created review remains eligible even when the session
-token and user share one login.
+attempt. Each receipt records its first matching cursor once. A published
+review's immutable receipt remains directly correlatable to each exact child
+thread without recurring per-generation observation rows, so the review and a
+delayed inline-thread event carry the same cause once each. An unchanged poll
+still consumes a mutable thread receipt when it is the first cursor containing
+that exact thread, whether or not the requested transition remains visible, so a
+later user transition remains dispatchable.
+
+Evaluation defers an event without recording an outcome while a potentially
+matching GitHub mutation is still in flight or commit-ambiguous. If provider
+visibility preceded persistence of the successful mutation result, evaluation
+after completion reconciles the exact review or thread identity to an event
+recorded between the tool attempt and its receipt. The retried matching rule
+then records `self_caused` and creates no dispatch batch or session. Correlation
+uses provider object identity, never author login: a distinct user-created
+review remains eligible even when the session token and user share one login.
 
 ## First live rule
 

@@ -387,7 +387,12 @@ impl RepositoryWatchTask {
                     )
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                let pending_self_cause =
+                    matches!(outcome, RepoWatchRuleEvaluationOutcome::PendingSelfCause);
                 self.nudge_dispatched_sessions(&outcome);
+                if pending_self_cause {
+                    break;
+                }
             }
         }
         Ok(())
@@ -404,6 +409,7 @@ impl RepositoryWatchTask {
             RepoWatchRuleEvaluationOutcome::NotMatched
             | RepoWatchRuleEvaluationOutcome::Inactive
             | RepoWatchRuleEvaluationOutcome::SelfCaused
+            | RepoWatchRuleEvaluationOutcome::PendingSelfCause
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }

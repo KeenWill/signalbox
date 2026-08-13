@@ -390,6 +390,13 @@ fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGener
     cursor.generation()
 }
 
+fn unchanged_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
+    let RepoWatchCommitOutcome::Unchanged(cursor) = outcome else {
+        panic!("fixture cursor commit is unchanged")
+    };
+    cursor.generation()
+}
+
 #[track_caller]
 fn assert_dispatched(outcome: RepoWatchRuleEvaluationOutcome) {
     let RepoWatchRuleEvaluationOutcome::Dispatched { .. } = outcome else {
@@ -571,9 +578,16 @@ async fn published_review_inline_thread_is_self_caused() -> Result<(), Box<dyn E
             .await?;
 
     assert_eq!(thread_outcome, RepoWatchRuleEvaluationOutcome::SelfCaused);
+    let observation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_github_write_observation",
+    )
+    .fetch_one(&pool)
+    .await?;
     let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_action")
         .fetch_one(&pool)
         .await?;
+    assert_eq!(observation_count, 1);
     assert_eq!(sessions, 0);
     Ok(())
 }
@@ -584,7 +598,6 @@ async fn published_review_inline_thread_is_self_caused() -> Result<(), Box<dyn E
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
-    complete_thread_resolve(&pool, 0x90_100).await?;
     let repository = repository()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
     let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
@@ -605,6 +618,18 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
             )
             .await?,
     );
+    complete_thread_resolve(&pool, 0x90_100).await?;
+    let unchanged = event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(reopened.clone()),
+                Vec::new(),
+            ),
+        )
+        .await?;
+    assert_eq!(unchanged_generation(unchanged), first_generation);
     let user_resolved = thread_observation(RepoWatchThreadState::Resolved)?;
     let events = derive_repo_watch_events(
         &repository,
@@ -637,6 +662,127 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
         .await?;
 
     assert_dispatched(outcome);
+    Ok(())
+}
+
+/// Dispatch waits while an exact mutation is in flight, then reconciles the
+/// completed receipt to the already-stored provider events.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_event_before_tool_completion_is_reconciled_before_dispatch()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let rule = rule()?;
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let before = observation_without_threads()?;
+    let first_generation = committed_generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(before.clone()),
+                    Vec::new(),
+                ),
+            )
+            .await?,
+    );
+
+    let arguments = format!(r#"{{"body":"synthetic reply","thread_id":"{THREAD}"}}"#);
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, 0x90_500, "change_request_thread_reply", &arguments)
+            .await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x90_521)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(0x90_522)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(0x90_523));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+
+    let self_caused = observation(&[SELF_REVIEW_ID])?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(&before),
+        &self_caused,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(self_caused.clone()),
+                events,
+            ),
+        )
+        .await?;
+    let event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the matching review event is pending");
+    let pending =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                event.clone(),
+                &rule,
+                &self_caused,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    assert_eq!(pending, RepoWatchRuleEvaluationOutcome::PendingSelfCause);
+
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(format!(
+                            r#"{{"comment_id":70011,"comment_node_id":"PRRC_fixture_reply","review_id":{SELF_REVIEW_ID},"url":"https://github.example/comment/70011"}}"#
+                        ))
+                        .expect("fixture tool result is bounded"),
+                    ),
+                }),
+        )
+        .await?;
+    let reconciled =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                event,
+                &rule,
+                &self_caused,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    assert_eq!(reconciled, RepoWatchRuleEvaluationOutcome::SelfCaused);
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_action")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(sessions, 0);
     Ok(())
 }
 

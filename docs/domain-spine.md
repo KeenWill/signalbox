@@ -6964,6 +6964,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
     SelfCaused,
+    PendingSelfCause,
     Occupied,
     Cooldown,
     Dispatched {
