@@ -3235,8 +3235,11 @@ impl SessionRunnerPlacement {
             return Err(RunnerDomainError::RegistrationChanged);
         }
         if registration.runner == before.runner {
-            let SameRunnerReplacement::RegistrationLoss(loss_registration) = same_runner else {
-                return Err(RunnerDomainError::CorrelationMismatch);
+            let loss_registration = match same_runner {
+                SameRunnerReplacement::Refuse => {
+                    return Err(RunnerDomainError::CorrelationMismatch);
+                }
+                SameRunnerReplacement::RegistrationLoss(loss_registration) => loss_registration,
             };
             if lost.source != RunnerPlacementLossSource::Registration
                 || lost
@@ -3252,8 +3255,13 @@ impl SessionRunnerPlacement {
             {
                 return Err(RunnerDomainError::CorrelationMismatch);
             }
-        } else if matches!(same_runner, SameRunnerReplacement::RegistrationLoss(_)) {
-            return Err(RunnerDomainError::CorrelationMismatch);
+        } else {
+            match same_runner {
+                SameRunnerReplacement::Refuse => {}
+                SameRunnerReplacement::RegistrationLoss(_) => {
+                    return Err(RunnerDomainError::CorrelationMismatch);
+                }
+            }
         }
         let revision = self
             .revision
