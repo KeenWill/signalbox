@@ -1260,13 +1260,24 @@ async fn s28_inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), B
     Ok(())
 }
 
-/// S28 / INV-038: exact reingestion resolves the immutable winner, raw blobs
-/// deduplicate by content hash, and restart loading reconstructs every
-/// addressable imported-conversation frontier.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result<(), Box<dyn Error>>
-{
+struct ImportRoundTripFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    database_url: String,
+    winner: ImportedConversationId,
+    inserted: ImportConversationOutcome,
+    replayed: ImportConversationOutcome,
+    stored: ImportedConversation,
+}
+
+impl ImportRoundTripFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn import_round_trip_fixture() -> Result<ImportRoundTripFixture, Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let source_result_kind = "future-result-kind";
     let source = concat!(
@@ -1284,23 +1295,59 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
         repository,
     );
 
-    assert_eq!(
-        service.execute(source.as_bytes()).await?,
-        ImportConversationOutcome::Inserted {
-            conversation: winner
-        }
-    );
-    assert_eq!(
-        service.execute(source.as_bytes()).await?,
-        ImportConversationOutcome::AlreadyImported {
-            conversation: winner
-        }
-    );
+    let inserted = service.execute(source.as_bytes()).await?;
+    let replayed = service.execute(source.as_bytes()).await?;
     let (_, _, repository) = service.into_parts();
     let stored = repository
         .load(winner)
         .await?
         .expect("inserted imported conversation must load");
+
+    Ok(ImportRoundTripFixture {
+        container,
+        pool,
+        database_url,
+        winner,
+        inserted,
+        replayed,
+        stored,
+    })
+}
+
+/// S28 / INV-038: exact reingestion resolves the immutable imported winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn Error>>
+{
+    let fixture = import_round_trip_fixture().await?;
+
+    assert_eq!(
+        fixture.inserted,
+        ImportConversationOutcome::Inserted {
+            conversation: fixture.winner
+        }
+    );
+    assert_eq!(
+        fixture.replayed,
+        ImportConversationOutcome::AlreadyImported {
+            conversation: fixture.winner
+        }
+    );
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// S28 / INV-038: imported raw bytes deduplicate by content identity while
+/// every ordered occurrence and semantic frontier reconstitutes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_imported_raw_blobs_deduplicate_and_reconstitute() -> Result<(), Box<dyn Error>>
+{
+    let fixture = import_round_trip_fixture().await?;
+    let source_result_kind = "future-result-kind";
+
+    let stored = &fixture.stored;
     assert_eq!(stored.raw_records().len(), 2);
     assert_eq!(stored.entries().len(), 2);
     assert_eq!(stored.frontiers().count(), 2);
@@ -1317,40 +1364,63 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
             (SELECT count(*) FROM imported_conversation_raw_record),
             (SELECT count(*) FROM imported_transcript_entry)",
     )
-    .fetch_one(&pool)
+    .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(counts, (1, 1, 2, 2));
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-038: the final imported raw-record and entry relations remain
+/// append-only after blob convergence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv038_converged_import_relations_remain_append_only() -> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+
     assert!(
         sqlx::query(
             "UPDATE imported_raw_source_record
                 SET content_hash = content_hash",
         )
-        .execute(&pool)
+        .execute(&fixture.pool)
         .await
         .is_err(),
         "raw source records must reject updates"
     );
     assert!(
         sqlx::query("TRUNCATE TABLE imported_transcript_entry")
-            .execute(&pool)
+            .execute(&fixture.pool)
             .await
             .is_err(),
         "imported entries must reject statement-level truncate"
     );
 
-    pool.close().await;
+    fixture.finish().await;
+    Ok(())
+}
+
+/// S28 / INV-038: restart loading reconstructs the exact imported aggregate
+/// from catalogued raw blobs.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_imported_blob_round_trip_survives_pool_restart() -> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+
+    fixture.pool.close().await;
     let restarted_pool = PgPoolOptions::new()
         .max_connections(2)
-        .connect_with(local_test_connection_options(&database_url)?)
+        .connect_with(local_test_connection_options(&fixture.database_url)?)
         .await?;
     let restarted = ImportedConversationRepository::new(restarted_pool.clone())
-        .load(winner)
+        .load(fixture.winner)
         .await?
         .expect("durable imported conversation must survive pool restart");
-    assert_eq!(restarted, stored);
+    assert_eq!(restarted, fixture.stored);
 
     restarted_pool.close().await;
-    drop(container);
+    drop(fixture.container);
     Ok(())
 }
 
