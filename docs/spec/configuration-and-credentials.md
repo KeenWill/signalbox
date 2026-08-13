@@ -19,6 +19,9 @@ The execution family's permission defaults and the confinement its bubblewrap
 profile does and does not provide are verified against this PR
 (`agent/exec-sandbox-net-fence`).
 
+The runner's configured execution-program identities and startup pinning are
+verified against this PR (`agent/runner-exec-program-configuration`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
@@ -411,6 +414,8 @@ The root contains:
 - `daemon_socket_path`, the exact dedicated runner socket;
 - `runner_root`, one absolute runner-owned directory used for enrollment state,
   result spool, `sessions/`, staging, and `trash/`;
+- `exec_supervisor_executable`, one absolute executable path naming the
+  separately packaged `signalbox-exec-supervisor`;
 - `bubblewrap_path`, one absolute executable path;
 - `read_only_paths`, a bounded nonempty list of absolute toolchain or cache
   paths admitted read-only to `workspace-restricted`;
@@ -453,15 +458,17 @@ field or daemon path that supplies one.
 
 Startup opens or creates `runner_root` as an effective-user-owned real `0700`
 directory without following its final component, retains its identity, takes the
-exclusive lock through that root, checks socket and bubblewrap prerequisites,
-and loads only non-secret structure. The bubblewrap path must resolve to an
-executable regular file. Git author fields reject empty or padded text, control
-characters, and angle-bracket delimiters. An existing credential path whose
-final component is a symlink fails startup before containment checks; a missing
-credential path remains admissible. Startup never reads credential bytes and
-never logs configuration paths, repository URLs, or values. The enrollment
-request identity and daemon-issued receipt are atomically fsynced runtime state
-below the root, not operator-authored configuration.
+exclusive lock through that root, checks socket and execution-program
+prerequisites, and loads only non-secret structure. The supervisor and
+bubblewrap paths must resolve to executable regular files; the process layer
+opens and pins both executable identities before connecting to the daemon. Git
+author fields reject empty or padded text, control characters, and angle-bracket
+delimiters. An existing credential path whose final component is a symlink fails
+startup before containment checks; a missing credential path remains admissible.
+Startup never reads credential bytes and never logs configuration paths,
+repository URLs, or values. The enrollment request identity and daemon-issued
+receipt are atomically fsynced runtime state below the root, not
+operator-authored configuration.
 
 ## The static model, alias, and web-fetch catalog
 

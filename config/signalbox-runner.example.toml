@@ -1,4 +1,4 @@
-# Signalbox registration-only runner configuration, version 1.
+# Signalbox runner configuration, version 1.
 #
 # Replace paths with absolute paths owned by the runner's effective user. The
 # runner reads credential structure at startup but does not read secret bytes
@@ -6,6 +6,7 @@
 version = 1
 daemon_socket_path = "/run/user/1000/signalbox-runner.sock"
 runner_root = "/var/lib/signalbox-runner"
+exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"
 bubblewrap_path = "/usr/bin/bwrap"
 read_only_paths = ["/usr"]
 allowed_network_hosts = ["github.com"]
