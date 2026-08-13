@@ -4316,17 +4316,22 @@ mod tests {
 
     #[test]
     fn blob_upload_maps_one_explicit_source_file() {
-        let parsed = parse(["blob", "upload", "attachment.bin"].map(Into::into))
-            .expect("the grouped blob upload command parses");
+        let source = Path::new("attachment.bin");
+        let parsed = parse([
+            OsString::from("blob"),
+            OsString::from("upload"),
+            source.as_os_str().to_owned(),
+        ])
+        .expect("the grouped blob upload command parses");
         let ParseOutcome::Run(Arguments {
-            command: Command::BlobUpload { source },
+            command: Command::BlobUpload { source: observed },
             ..
         }) = parsed
         else {
             panic!("blob upload must map to its closed command")
         };
 
-        assert_eq!(source, Path::new("attachment.bin"));
+        assert_eq!(observed, source);
     }
 
     #[test]
