@@ -408,9 +408,31 @@ pub struct ToolRequest {
     name: ToolName,
     arguments: NormalizedToolArguments,
     approval_posture: ToolApprovalPosture,
+    execution_locus: SelectedToolExecutionLocus,
+}
+
+/// Frozen executable locus selected from the producing model operation.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum SelectedToolExecutionLocus {
+    /// Execute through the daemon-local executor policy.
+    Daemon,
+    /// Execute on one exact runner registration.
+    ExactRunner {
+        /// Selected runner identity.
+        runner: crate::RunnerId,
+        /// Registration revision that made the tool advertisable.
+        registration_revision: crate::RunnerGeneration,
+    },
+    /// Select a current runner satisfying this frozen capability class at the
+    /// first dispatch boundary.
+    RunnerCapabilityClass {
+        /// Capability class selected during model preparation.
+        class: crate::RunnerCapabilityClass,
+    },
 }
 
 impl ToolRequest {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_model_proposal(
         id: ToolRequestId,
         session: SessionId,
@@ -419,6 +441,7 @@ impl ToolRequest {
         ordinal: ToolRequestOrdinal,
         proposal: ToolCallProposal,
         approval: InitialToolApproval,
+        execution_locus: SelectedToolExecutionLocus,
     ) -> Self {
         Self {
             id,
@@ -429,6 +452,7 @@ impl ToolRequest {
             name: proposal.name,
             arguments: proposal.arguments,
             approval_posture: approval.posture(),
+            execution_locus,
         }
     }
 
@@ -471,6 +495,11 @@ impl ToolRequest {
     pub const fn approval_posture(&self) -> ToolApprovalPosture {
         self.approval_posture
     }
+
+    /// Borrows the executable locus frozen by the producing model operation.
+    pub const fn execution_locus(&self) -> &SelectedToolExecutionLocus {
+        &self.execution_locus
+    }
 }
 
 /// Complete independently stored facts for one logical request.
@@ -501,6 +530,7 @@ impl ToolRequestReconstitutionInput {
                 name,
                 arguments,
                 approval_posture: ToolApprovalPosture::Human,
+                execution_locus: SelectedToolExecutionLocus::Daemon,
             },
         }
     }
@@ -508,6 +538,12 @@ impl ToolRequestReconstitutionInput {
     /// Supplies the exact stored posture selected when this request landed.
     pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
         self.request.approval_posture = posture;
+        self
+    }
+
+    /// Supplies the exact stored executable locus selected for this request.
+    pub fn with_execution_locus(mut self, locus: SelectedToolExecutionLocus) -> Self {
+        self.request.execution_locus = locus;
         self
     }
 
@@ -1466,7 +1502,9 @@ mod tests {
     use super::*;
     use crate::{
         DirectModelSelection,
-        test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id},
+        test_support::{
+            command_id, model_call_id, runner_id, session_id, tool_request_id, turn_id,
+        },
     };
 
     fn request(id: u128) -> ToolRequest {
@@ -1481,6 +1519,63 @@ mod tests {
                 .expect("canonical arguments are valid"),
         )
         .into_request()
+    }
+
+    #[test]
+    fn s31_inv043_tool_request_reconstitution_defaults_to_daemon_locus() {
+        let request = request(7);
+
+        assert_eq!(
+            request.execution_locus(),
+            &SelectedToolExecutionLocus::Daemon
+        );
+    }
+
+    #[test]
+    fn s31_inv043_tool_request_reconstitution_retains_exact_runner_locus() {
+        let locus = SelectedToolExecutionLocus::ExactRunner {
+            runner: runner_id(8),
+            registration_revision: crate::RunnerGeneration::try_from_u64(9)
+                .expect("fixture revision is positive"),
+        };
+        let request = ToolRequestReconstitutionInput::new(
+            tool_request_id(7),
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("sandboxed_exec"))
+                .expect("canonical tool name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("canonical arguments are valid"),
+        )
+        .with_execution_locus(locus.clone())
+        .into_request();
+
+        assert_eq!(request.execution_locus(), &locus);
+    }
+
+    #[test]
+    fn s31_inv043_tool_request_reconstitution_retains_capability_class_locus() {
+        let locus = SelectedToolExecutionLocus::RunnerCapabilityClass {
+            class: crate::RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                .expect("fixture class is valid"),
+        };
+        let request = ToolRequestReconstitutionInput::new(
+            tool_request_id(7),
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("sandboxed_exec"))
+                .expect("canonical tool name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("canonical arguments are valid"),
+        )
+        .with_execution_locus(locus.clone())
+        .into_request();
+
+        assert_eq!(request.execution_locus(), &locus);
     }
 
     fn tool_response_parts(count: usize) -> Vec<AssistantResponsePart> {

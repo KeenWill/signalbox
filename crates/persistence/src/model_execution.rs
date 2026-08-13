@@ -79,6 +79,7 @@ pub struct ProspectiveModelCall {
     system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
     tool_entries: Box<[ResolvedToolConversationEntry]>,
     runner_placement_entries: Box<[ResolvedRunnerPlacementConversationEntry]>,
+    dangerous_tool_auto_approval: signalbox_domain::DangerousToolAutoApproval,
 }
 
 impl ProspectiveModelCall {
@@ -94,7 +95,17 @@ impl ProspectiveModelCall {
             self.request,
             self.credential_reference,
             self.system_prompt,
-            tools,
+            tools
+                .into_vec()
+                .into_iter()
+                .map(|definition| {
+                    signalbox_application::ExecutableToolSnapshotEntry::daemon(
+                        definition,
+                        self.dangerous_tool_auto_approval,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             &self.tool_entries,
             &self.runner_placement_entries,
         )
@@ -462,6 +473,11 @@ impl PostgresModelCallRepository {
             system_prompt,
             tool_entries,
             runner_placement_entries,
+            dangerous_tool_auto_approval: preview
+                .turn()
+                .configuration()
+                .effective()
+                .dangerous_tool_auto_approval(),
         })
     }
 
@@ -5847,11 +5863,33 @@ async fn persist_tool_round_authority(
             signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
         };
         let approval_posture = tool_approval_posture_to_str(request.approval_posture());
+        let (
+            execution_locus_kind,
+            execution_runner_id,
+            execution_registration_revision,
+            execution_capability_class,
+        ) = match request.execution_locus() {
+            signalbox_domain::SelectedToolExecutionLocus::Daemon => ("daemon", None, None, None),
+            signalbox_domain::SelectedToolExecutionLocus::ExactRunner {
+                runner,
+                registration_revision,
+            } => (
+                "exact_runner",
+                Some(runner.into_uuid()),
+                Some(Decimal::from(registration_revision.get())),
+                None,
+            ),
+            signalbox_domain::SelectedToolExecutionLocus::RunnerCapabilityClass { class } => {
+                ("runner_capability_class", None, None, Some(class.as_str()))
+            }
+        };
         sqlx::query(
             "INSERT INTO tool_request
                 (request_id, session_id, turn_id, producing_model_call_id,
-                 request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture,
+                 execution_locus_kind, execution_runner_id,
+                 execution_registration_revision, execution_capability_class)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(tool_request_id_to_uuid(request.id()))
         .bind(session_id_to_uuid(request.session()))
@@ -5862,6 +5900,10 @@ async fn persist_tool_round_authority(
         .bind(arguments_kind)
         .bind(request.arguments().as_str())
         .bind(approval_posture)
+        .bind(execution_locus_kind)
+        .bind(execution_runner_id)
+        .bind(execution_registration_revision)
+        .bind(execution_capability_class)
         .execute(&mut *connection)
         .await?;
     }

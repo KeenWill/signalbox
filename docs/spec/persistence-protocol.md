@@ -38,7 +38,9 @@ verified against this PR (`agent/runner-lease-claim-transaction`). Atomic
 claimed-lease and physical-attempt result admission is verified against this PR
 (`agent/runner-lease-result-transaction`). Canonical normalized arguments joined
 through every lease's exact tool request are verified against this PR
-(`agent/runner-lease-argument-binding`).
+(`agent/runner-lease-argument-binding`). The closed selected executable locus on
+every durable tool request is verified against this PR
+(`agent/tool-request-execution-locus`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -273,6 +275,13 @@ Implemented table families (across the forward-only migrations):
   namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
   recommendation, and rationale;
+- migration `202608110019` freezes one closed execution locus on each tool
+  request. Daemon rows carry no runner facts; exact-runner rows carry one runner
+  and positive historical registration revision backed by the append-only
+  registration relation; capability-class rows carry only one checked catalog
+  class. Existing rows and compatibility writers that omit the additive columns
+  receive the daemon locus; production model-call persistence writes every
+  selected locus explicitly;
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly
