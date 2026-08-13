@@ -20,7 +20,10 @@ atomicity is re-verified through this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch request's
 execution authority is re-verified against its frozen runner identity and
 registration revision through this PR (`agent/runner-offer-locus-binding`).
-Durable lease-claim admission is re-verified through this PR
+Workspace-free exact-directory initial-pin atomicity, together with runner-lease
+admission against the durable request's selected locus, is re-verified through
+this PR (`agent/runner-initial-dispatch-transaction`). Durable lease-claim
+admission is re-verified through this PR
 (`agent/runner-lease-claim-transaction`). The atomic claimed-lease and
 physical-attempt result boundary is re-verified through this PR
 (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
@@ -1304,23 +1307,30 @@ repository and no model-selected tool. The runner rejects an unknown credential
 profile before accepting the authorization and returns one
 `ProvisionedWorkspace` receipt whose manifest facts match every correlation.
 
-Dispatch through an existing pin consumes the exact tool-attempt authorization,
-revalidates the frozen enrollment and current registration revision, and stores
-the `InFlight` attempt and offered lease atomically. A crash therefore leaves
-both facts or neither. **Committed unimplemented functionality.** No present
-transaction performs the first dispatch boundary. Its future implementation must
-atomically consume the workspace authorization and receipt when present,
-validate the placement request against the same current registration, install
-`Pinned` state, create any initial credential grant, mark the exact attempt in
-flight, and store the offered lease. A crash may then leave either retryable
-provisioning evidence or the complete pin/grant/lease boundary, never an
-in-flight tool attempt without its lease. The pinned state contains the runner,
-selected working directory, credential-profile selection, tool inventory,
-runner-required tool inventory, provisioned workspace, sandbox profile, and
-exact permission overrides. Ordinary attachment and lease creation accept only
-that exact runner and current grant. Re-registration or reconnect changes none
-of these facts, and there is no automatic migration or class-based rescheduling
-(INV-044, INV-045).
+Every runner lease consumes the exact tool-attempt authorization and rejects a
+durable tool request whose selected locus is daemon execution or does not match
+the authorizing runner registration. Dispatch through an existing pin also
+revalidates the frozen enrollment and current registration revision and stores
+the `InFlight` attempt and offered lease atomically. A workspace-free placement
+with an exact working-directory selection performs its first dispatch in one
+transaction: it validates the placement against the selected current
+registration, installs `Pinned` state and any initial credential grant, marks
+the exact attempt in flight, stores the offered lease, and appends the `Pinned`
+runner-state event. A crash therefore leaves the complete
+pin/grant/attempt/lease boundary or none of it.
+
+**Committed unimplemented functionality.** No present initial-dispatch
+transaction admits `RunnerDefault` or a repository workspace. A future extension
+must consume the authenticated working-directory or workspace receipt when
+present and preserve the same atomic boundary. A crash may then leave either
+retryable provisioning evidence or the complete pin/grant/lease boundary, never
+an in-flight tool attempt without its lease. The pinned state contains the
+runner, selected working directory, credential-profile selection, tool
+inventory, runner-required tool inventory, provisioned workspace, sandbox
+profile, and exact permission overrides. Ordinary attachment and lease creation
+accept only that exact runner and current grant. Re-registration or reconnect
+changes none of these facts, and there is no automatic migration or class-based
+rescheduling (INV-044, INV-045).
 
 For `RepositoryWorktree`, the provisioned workspace's working directory is the
 selected execution directory. Attachment and reconstitution reject a provisioned

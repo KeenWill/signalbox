@@ -80,6 +80,7 @@ pub use model_execution::{
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use pinned_runner_dispatch::{
+    InitialRunnerDispatchRequest, InitialRunnerDispatchService, InitialRunnerDispatchTransaction,
     PinnedRunnerDispatchRequest, PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction,
     PinnedRunnerLeaseOffer, RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
 };
