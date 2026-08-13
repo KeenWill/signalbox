@@ -4058,6 +4058,8 @@ pub enum ErrorCode {
     ResyncRequired,
     /// Infrastructure prevented completion.
     Unavailable,
+    /// A remote store may have accepted a deterministic publication.
+    PublicationAmbiguous,
     /// Infrastructure obscured whether a requested mutation committed.
     CommitAmbiguous,
     /// Fail-closed corruption or a hub defect stopped the request.
@@ -9963,6 +9965,27 @@ mod tests {
             encoded
                 .windows(br#""code":"commit_ambiguous""#.len())
                 .any(|window| window == br#""code":"commit_ambiguous""#)
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn inv060_publication_ambiguity_has_one_stable_error_code()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::PublicationAmbiguous,
+                message: "ambiguous publication".to_owned(),
+                detail: ErrorDetail::none(),
+            },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+        assert!(
+            encoded
+                .windows(br#""code":"publication_ambiguous""#.len())
+                .any(|window| window == br#""code":"publication_ambiguous""#)
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())

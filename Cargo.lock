@@ -3192,6 +3192,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
