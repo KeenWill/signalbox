@@ -11,6 +11,14 @@ publish.workspace = true
 name = "signalbox-runner"
 path = "src/main.rs"
 
+# The runner process integration archive must carry the separately packaged
+# supervisor whose executable identity the runner pins before connecting.
+[[bin]]
+name = "signalbox-exec-supervisor"
+path = "src/bin/signalbox-exec-supervisor.rs"
+required-features = ["runner-execution-proof"]
+doc = false
+
 [[test]]
 name = "runner_process_postgres"
 path = "tests/runner_process_postgres.rs"

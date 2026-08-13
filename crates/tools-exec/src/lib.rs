@@ -46,6 +46,7 @@
 //! --test bwrap`.
 
 mod diagnostics;
+mod exec_supervisor;
 mod process;
 #[cfg(target_os = "linux")]
 mod supervisor_protocol;
@@ -66,3 +67,9 @@ pub use process::{
     ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
     TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
+
+/// Runs the separately packaged process-tree supervisor entrypoint.
+#[doc(hidden)]
+pub fn exec_supervisor_entrypoint() -> std::process::ExitCode {
+    exec_supervisor::entrypoint()
+}

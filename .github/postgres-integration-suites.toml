@@ -67,9 +67,10 @@ include_binaries = ["runner_protocol_postgres"]
 name = "runner-process"
 package = "signalbox-runner"
 features = ["runner-execution-proof"]
-# This archive includes the actual runner executable and only the spawned
-# process integration target; the proof feature exposes only the existing
-# generic sandboxed-exec slice and is absent from ordinary runner builds.
+# This archive includes the actual runner and exec supervisor executables and
+# only the spawned process integration target; the proof feature exposes only
+# the existing generic sandboxed-exec slice and is absent from ordinary runner
+# builds.
 shards = 1
 skip = []
 include_binaries = ["runner_process_postgres"]
