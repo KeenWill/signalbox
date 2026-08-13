@@ -296,10 +296,11 @@ mod tests {
 
     #[test]
     fn rendered_case_quotes_session_context_beside_the_request() {
-        let rendered = render_eval_case(&case()).expect("fixture case renders");
+        let case = case();
+        let rendered = render_eval_case(&case).expect("fixture case renders");
         assert!(rendered.contains("session_context"));
-        assert!(rendered.contains("unsandboxed_exec"));
-        assert!(rendered.contains("review-response"));
+        assert!(rendered.contains(&case.tool));
+        assert!(rendered.contains(case.template.as_deref().expect("fixture sets template")));
     }
 
     #[test]

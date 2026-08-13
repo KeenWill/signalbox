@@ -16,6 +16,7 @@ use std::{
 use serde::Deserialize;
 use signalbox_domain::DelegateApprovalRecommendation;
 use signalbox_domain::ToolApprovalPosture;
+use signalbox_domain::ToolName;
 use signalbox_model_provider_runtime::{
     RuntimeApprovalJudgeModel, approval_judge_output_contract_text,
 };
@@ -23,7 +24,8 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use signalboxd::{
-    FileCredentialAccess, HubModelConfiguration, ModelAdapter,
+    DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess, HubModelConfiguration,
+    ModelAdapter,
     approval_judge_eval::{
         ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalVerdict, judge_eval_case,
         judge_system_prompt, render_eval_case,
@@ -402,7 +404,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
     // shape deployment never routes to it. Those cases still score — the
     // corpus measures decision quality, not routing — but the scorecard names
     // them so deployed-path accuracy can be read with them excluded.
-    let configured_postures: std::collections::BTreeMap<String, &'static str> = configuration
+    let configured_postures: BTreeMap<String, &'static str> = configuration
         .tool_approval_postures()
         .map(|(name, posture)| {
             (
@@ -415,11 +417,31 @@ async fn run(options: RunOptions) -> Result<(), String> {
             )
         })
         .collect();
+    // A posture of "delegated" is reachable only when daemon startup would
+    // also accept it: `DaemonToolCatalog::validate_approval_postures_for_composition`
+    // rejects a name absent from the statically selected composition before
+    // the daemon ever assembles its tool dependencies, exactly as
+    // `main.rs` calls it. A tool assigned `delegated` but absent from that
+    // composition can never be routed to the judge in deployment, so it
+    // must count as speculative here too, not just an untagged posture.
+    let tool_composition = match configuration.daemon_tools() {
+        Some(_) => DaemonToolComposition::WithMappedFamilies,
+        None => DaemonToolComposition::Base,
+    };
     let speculative_tools = cases
         .iter()
         .map(|case| case.tool.as_str())
-        .filter(|tool| configured_postures.get(*tool).copied() != Some("delegated"))
-        .collect::<std::collections::BTreeSet<_>>()
+        .filter(|tool| {
+            configured_postures.get(*tool).copied() != Some("delegated")
+                || !ToolName::try_new((*tool).to_owned()).is_ok_and(|name| {
+                    DaemonToolCatalog::validate_approval_postures_for_composition(
+                        [(name, ToolApprovalPosture::Auto)],
+                        tool_composition,
+                    )
+                    .is_ok()
+                })
+        })
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .map(String::from)
         .collect::<Vec<_>>();
