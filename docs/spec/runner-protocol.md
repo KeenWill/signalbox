@@ -69,7 +69,9 @@ replay are re-verified through this PR
 bubblewrap request profile is re-verified through this PR
 (`agent/runner-strict-sandbox-profile`). Runner consumption of the exact
 lease-only resume directive is re-verified through this PR
-(`agent/runner-claimed-resume-client`). The placement loss-source, pre-pin
+(`agent/runner-claimed-resume-client`). Runner ingestion of the daemon's
+canonical claim and dispatch replay is re-verified through this PR
+(`agent/runner-claimed-dispatch-replay`). The placement loss-source, pre-pin
 replacement and abandonment state shapes, and append-only reconstitution-history
 contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
 It owns logical runner enrollment, daemon-authoritative catalog validation,
@@ -290,7 +292,16 @@ remain unimplemented and fail closed. Inbound `lease_claim` and `result` instead
 take the durable boundaries described under
 [runner leases](#effect-classes-and-runner-leases).
 
-**Committed unimplemented functionality.** No runner surface serves the
+The runner serves one recovery-only prefix of the lease/dispatch state machine.
+After an exact lease-only `await` directive, it admits the daemon's repeated
+`lease_claimed` only against the same retained execution-impossible correlation,
+requires that capability on the current connection before accepting `dispatch`,
+fsyncs `dispatch_received`, and returns one sealed dispatch-ready handoff. A
+cross-wired acknowledgement, dispatch without its acknowledgement, or an
+execution-possible journal fails closed. The production binary currently refuses
+that handoff because no executor is composed.
+
+**Committed unimplemented functionality.** No runner surface completes the
 following lease/dispatch state machine. The established daemon connection does
 already implement the durable claim and result boundaries in steps 2 and 4. The
 daemon also accepts the pre-execution reconnect phases described below. The
@@ -744,7 +755,9 @@ consumes it. The runner consumes the exact lease-only `await` directive for
 and consumes `fail_stale` by atomically clearing only either of those
 execution-impossible phases. It rejects every other action and never clears an
 `execution_may_have_started` lease through this path. It does not yet consume
-either replayed operation frame, so this daemon recovery path cannot yet produce
+the dispatch-ready handoff: it accepts the canonical replay frames and advances
+the durable phase through `dispatch_received`, but the binary fails typed before
+the executor gate. This daemon recovery path therefore cannot yet produce
 execution.
 
 ## Identity, enrollment, and registration

@@ -120,6 +120,9 @@ async fn run(
             Ok(ServeOutcome::ShutdownReady) => {
                 return shutdown_with_timeout(&mut connection).await;
             }
+            Ok(ServeOutcome::DispatchReady(_)) => {
+                return Err(RunnerDaemonError::ExecutionUnavailable);
+            }
             Err(error) if error.is_reconnectable() => {
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Serving, &error, delay);
@@ -265,6 +268,7 @@ enum RunnerDaemonError {
     Argument(ArgumentError),
     Configuration(RunnerConfigurationError),
     ExecutionPrograms,
+    ExecutionUnavailable,
     State(RunnerStateError),
     Socket(SocketConnectError),
     Connection(RunnerConnectionError),
@@ -279,6 +283,7 @@ impl fmt::Display for RunnerDaemonError {
             Self::Argument(_) => "runner arguments are invalid",
             Self::Configuration(_) => "runner configuration is invalid",
             Self::ExecutionPrograms => "runner execution programs are unavailable",
+            Self::ExecutionUnavailable => "runner executor is not yet composed",
             Self::State(_) => "runner durable state is unavailable",
             Self::Socket(_) => "runner socket is unavailable",
             Self::Connection(_) => "runner connection failed",
@@ -298,7 +303,10 @@ impl Error for RunnerDaemonError {
             Self::Socket(error) => Some(error),
             Self::Connection(error) => Some(error),
             Self::Signal(error) => Some(error),
-            Self::ExecutionPrograms | Self::ShutdownTimeout | Self::StaleConnectionRejected => None,
+            Self::ExecutionPrograms
+            | Self::ExecutionUnavailable
+            | Self::ShutdownTimeout
+            | Self::StaleConnectionRejected => None,
         }
     }
 }
