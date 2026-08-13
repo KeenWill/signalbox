@@ -11161,27 +11161,17 @@ mod tests {
         Ok(())
     }
 
-    /// INV-060: direct metadata and range reads have exact closed request and
-    /// response shapes with canonical decimal bounds.
+    /// INV-060: a direct metadata read has exact closed request and response
+    /// shapes with canonical decimal facts.
     #[test]
-    fn inv060_blob_read_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv060_blob_metadata_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let metadata = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(1)?,
             ClientRequest::ReadBlobMetadata { digest },
         )?;
-        let chunk = ClientFrame::try_new_for_version(
-            ProtocolVersion::One,
-            request(2)?,
-            ClientRequest::ReadBlobChunk {
-                digest,
-                offset_bytes: CanonicalU64::new(7),
-                length_bytes: CanonicalU64::new(2),
-            },
-        )?;
         let encoded_metadata = encode_client_line(&metadata)?;
-        let encoded_chunk = encode_client_line(&chunk)?;
 
         assert_eq!(
             String::from_utf8(encoded_metadata.clone())?,
@@ -11189,16 +11179,9 @@ mod tests {
                 "{{\"version\":1,\"request_id\":\"1\",\"request\":{{\"type\":\"read_blob_metadata\",\"digest\":\"{digest}\"}}}}\n"
             )
         );
-        assert_eq!(
-            String::from_utf8(encoded_chunk.clone())?,
-            format!(
-                "{{\"version\":1,\"request_id\":\"2\",\"request\":{{\"type\":\"read_blob_chunk\",\"digest\":\"{digest}\",\"offset_bytes\":\"7\",\"length_bytes\":\"2\"}}}}\n"
-            )
-        );
         assert_eq!(decode_client_line(&encoded_metadata)?, metadata);
-        assert_eq!(decode_client_line(&encoded_chunk)?, chunk);
         assert_server_message_round_trip(
-            request(3)?,
+            request(2)?,
             ServerMessage::BlobMetadata {
                 digest,
                 byte_length: CanonicalU64::new(9),
@@ -11208,24 +11191,54 @@ mod tests {
                 "{{\"type\":\"blob_metadata\",\"digest\":\"{digest}\",\"byte_length\":\"9\",\"replica_count\":\"1\"}}"
             ),
         )?;
+        Ok(())
+    }
+
+    /// INV-060: a direct range read has exact closed request and response
+    /// shapes with canonical decimal bounds.
+    #[test]
+    fn inv060_blob_range_wire_shapes_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let offset = 7_u64;
+        let length = 2_u64;
+        let offset_bytes = CanonicalU64::new(offset);
+        let length_bytes = CanonicalU64::new(length);
+        let chunk = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(1)?,
+            ClientRequest::ReadBlobChunk {
+                digest,
+                offset_bytes,
+                length_bytes,
+            },
+        )?;
+        let encoded_chunk = encode_client_line(&chunk)?;
+
+        assert_eq!(
+            String::from_utf8(encoded_chunk.clone())?,
+            format!(
+                "{{\"version\":1,\"request_id\":\"1\",\"request\":{{\"type\":\"read_blob_chunk\",\"digest\":\"{digest}\",\"offset_bytes\":\"{offset}\",\"length_bytes\":\"{length}\"}}}}\n"
+            )
+        );
+        assert_eq!(decode_client_line(&encoded_chunk)?, chunk);
         assert_server_message_round_trip(
-            request(4)?,
+            request(2)?,
             ServerMessage::BlobChunkRead {
                 digest,
-                offset_bytes: CanonicalU64::new(7),
+                offset_bytes,
                 bytes: BlobChunk::new(vec![0, 255]),
             },
             &format!(
-                "{{\"type\":\"blob_chunk_read\",\"digest\":\"{digest}\",\"offset_bytes\":\"7\",\"bytes\":\"AP8=\"}}"
+                "{{\"type\":\"blob_chunk_read\",\"digest\":\"{digest}\",\"offset_bytes\":\"{offset}\",\"bytes\":\"AP8=\"}}"
             ),
         )?;
         Ok(())
     }
 
-    /// INV-060: direct range length is bounded before transport and an exact
-    /// maximum response remains inside the unchanged frame ceiling.
+    /// INV-060: zero and oversized direct range lengths are rejected before
+    /// transport.
     #[test]
-    fn inv060_blob_read_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv060_blob_read_length_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let zero = ClientRequest::ReadBlobChunk {
             digest,
@@ -11237,6 +11250,23 @@ mod tests {
             offset_bytes: CanonicalU64::new(0),
             length_bytes: CanonicalU64::new(super::MAX_BLOB_READ_BYTES as u64 + 1),
         };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, zero),
+            Err(FrameValidationError::BlobReadShape)
+        );
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(2)?, oversized),
+            Err(FrameValidationError::BlobReadShape)
+        );
+        Ok(())
+    }
+
+    /// INV-060: an exact maximum direct range response remains inside the
+    /// unchanged frame ceiling.
+    #[test]
+    fn inv060_maximum_blob_read_response_fits_one_frame() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         let maximum = ServerFrame::try_new_for_version(
             ProtocolVersion::One,
             RequestId::try_new(u64::MAX)?,
@@ -11247,22 +11277,13 @@ mod tests {
             },
         )?;
 
-        assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, zero),
-            Err(FrameValidationError::BlobReadShape)
-        );
-        assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::One, request(2)?, oversized),
-            Err(FrameValidationError::BlobReadShape)
-        );
         assert!(encode_server_line(&maximum)?.len() <= super::MAX_FRAME_BYTES);
         Ok(())
     }
 
-    /// INV-060: an out-of-bounds read is a typed invalid request and closed
-    /// replica exhaustion has distinct content-silent codes.
+    /// INV-060: an out-of-bounds read is one typed invalid request.
     #[test]
-    fn inv060_blob_read_failures_are_typed() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv060_blob_read_out_of_bounds_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         assert_server_message_round_trip(
             request(1)?,
@@ -11280,8 +11301,14 @@ mod tests {
                 "{{\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"blob read was rejected\",\"detail\":{{\"type\":\"blob_read_range_out_of_bounds\",\"digest\":\"{digest}\",\"offset_bytes\":\"18446744073709551615\",\"length_bytes\":\"1\",\"blob_length_bytes\":\"9\"}}}}"
             ),
         )?;
+        Ok(())
+    }
+
+    /// INV-060: exhausting absent replicas has a content-silent missing code.
+    #[test]
+    fn inv060_blob_missing_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
-            request(2)?,
+            request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::BlobMissing,
                 message: String::from("all recorded blob replicas are missing"),
@@ -11289,8 +11316,15 @@ mod tests {
             },
             r#"{"type":"error","code":"blob_missing","message":"all recorded blob replicas are missing"}"#,
         )?;
+        Ok(())
+    }
+
+    /// INV-060: exhausting corrupt replicas has a content-silent corruption
+    /// code.
+    #[test]
+    fn inv060_blob_corrupt_failure_is_typed() -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
-            request(3)?,
+            request(1)?,
             ServerMessage::Error {
                 code: ErrorCode::BlobCorrupt,
                 message: String::from("all usable blob replicas are corrupt"),
