@@ -202,7 +202,7 @@ use sqlx::{PgPool, Row};
 use tokio::{
     io::{
         AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
-        BufReader,
+        BufReader, Interest,
     },
     net::{UnixStream, unix::OwnedReadHalf},
     sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
@@ -5741,14 +5741,15 @@ where
 }
 
 async fn wait_for_connection_loss(reader: &BufReader<OwnedReadHalf>) {
-    std::future::poll_fn(|context| match reader.get_ref().poll_read_ready(context) {
-        std::task::Poll::Ready(Ok(readiness)) if readiness.is_read_closed() => {
-            std::task::Poll::Ready(())
+    loop {
+        let Ok(readiness) = reader.get_ref().ready(Interest::READABLE).await else {
+            return;
+        };
+        if readiness.is_read_closed() {
+            return;
         }
-        std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(()),
-        std::task::Poll::Ready(Ok(_)) | std::task::Poll::Pending => std::task::Poll::Pending,
-    })
-    .await;
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn write_blob_read_error<Writer>(
