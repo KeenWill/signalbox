@@ -403,51 +403,54 @@ impl RepositoryWatchTask {
     }
 
     async fn poll_and_commit(&mut self) -> Result<(), RepositoryWatchAttemptError> {
-        let cursor = self
-            .store
-            .load_cursor(&self.repository)
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        let previous = cursor
-            .as_ref()
-            .map(|cursor| cursor.candidate().observation());
-        let observation = self.poller.poll(previous).await?;
-        let events = derive_repo_watch_events(
-            &self.repository,
-            previous,
-            &observation,
-            &mut UuidV7RepoWatchEventIdGenerator,
-        )
-        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
-        let outcome = self
-            .store
-            .commit(
+        let result = async {
+            let cursor = self
+                .store
+                .load_cursor(&self.repository)
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            let previous = cursor
+                .as_ref()
+                .map(|cursor| cursor.candidate().observation());
+            let observation = self.poller.poll(previous).await?;
+            let events = derive_repo_watch_events(
                 &self.repository,
-                RepoWatchCommitRequest::new(
-                    cursor.as_ref().map(|cursor| cursor.generation()),
-                    RepoWatchCursorCandidate::new(observation),
-                    events,
-                ),
+                previous,
+                &observation,
+                &mut UuidV7RepoWatchEventIdGenerator,
             )
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        match outcome {
-            RepoWatchCommitOutcome::Committed(_)
-            | RepoWatchCommitOutcome::Replayed(_)
-            | RepoWatchCommitOutcome::Unchanged(_) => {
-                self.poller.publish_freshness();
-                Ok(())
-            }
-            RepoWatchCommitOutcome::Conflict { current: _ } => {
-                // A competing watcher owns the durable cursor now, and a
-                // reused entry never resets its published flag, so the
-                // freshness map no longer describes the baseline the next
-                // attempt will load. Invalidate it rather than let stale
-                // settled metadata authorize reuse of the competitor's state.
-                self.poller.invalidate_freshness();
-                Err(RepositoryWatchAttemptError::Persistence)
+            .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+            let outcome = self
+                .store
+                .commit(
+                    &self.repository,
+                    RepoWatchCommitRequest::new(
+                        cursor.as_ref().map(|cursor| cursor.generation()),
+                        RepoWatchCursorCandidate::new(observation),
+                        events,
+                    ),
+                )
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            match outcome {
+                RepoWatchCommitOutcome::Committed(_)
+                | RepoWatchCommitOutcome::Replayed(_)
+                | RepoWatchCommitOutcome::Unchanged(_) => {
+                    self.poller.publish_freshness();
+                    Ok(())
+                }
+                RepoWatchCommitOutcome::Conflict { current: _ } => {
+                    Err(RepositoryWatchAttemptError::Persistence)
+                }
             }
         }
+        .await;
+        if result.is_err() {
+            // Any failed poll may leave published entries tied to the cursor
+            // loaded for this attempt while a competing watcher advances it.
+            self.poller.invalidate_freshness();
+        }
+        result
     }
 }
 
@@ -1032,12 +1035,9 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    /// Drops every freshness entry, published or not. After a commit conflict
-    /// the durable cursor carries a competing watcher's baseline, so entries
-    /// recorded against this process's superseded baseline no longer describe
-    /// what the next attempt will load as its previous observation; kept in
-    /// place, a published entry could authorize reusing the competitor's
-    /// state under stale settled and skip metadata.
+    /// Drops every freshness entry, published or not. After a failed attempt,
+    /// a competing watcher may advance the durable cursor, so entries recorded
+    /// against this process's prior baseline must authorize no further reuse.
     fn invalidate_freshness(&self) {
         self.freshness().clear();
     }
