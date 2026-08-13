@@ -4596,8 +4596,7 @@ async fn s31_inv009_inv043_inv044_runner_loss_finds_lease_before_profile_replace
             [tool("inspect")],
         )
         .expect("the active predecessor permits profile replacement");
-    let replacement_grant =
-        duplicate_grant(&replacement.grant.grant, registration.registration());
+    let replacement_grant = duplicate_grant(&replacement.grant.grant, registration.registration());
     store
         .store_placement(
             &replacement.placement,
