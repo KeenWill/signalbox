@@ -708,6 +708,8 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ConversationImportAlreadyImported { .. }
         | ServerMessage::ConversationImportAborted {}
         | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::BlobMetadata { .. }
+        | ServerMessage::BlobChunkRead { .. }
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
@@ -916,6 +918,8 @@ async fn execute(
         | Command::Stop { .. }
         | Command::Approve { .. }
         | Command::Deny { .. }
+        | Command::BlobMetadata { .. }
+        | Command::BlobRead { .. }
         | Command::Import { .. } => None,
     };
     let system_prompt_text = match &arguments.command {
