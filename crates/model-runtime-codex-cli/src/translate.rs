@@ -181,31 +181,32 @@ pub(crate) fn translate<C>(
     // before anything else it says about tools. An earlier revision opened
     // with a categorical prohibition ("Do not use shell, file, web, MCP, or
     // collaboration tools") aimed at the wrapped CLI's native facilities;
-    // deployed sessions quoted that sentence verbatim as grounds to refuse
-    // work their declared tools authorized, because the prohibited categories
-    // are exactly the categories a caller's tool catalog populates. The
-    // native facilities need no prompt-level prohibition — the invocation
-    // disables them mechanically, and prompt text is never a capability
-    // boundary — so the preamble now names the serialized `tools` array as
-    // the single authority and never states a tool prohibition a model could
-    // mistake for one governing declared tools.
+    // because the prohibited categories are exactly the categories a caller's
+    // tool catalog populates, a model could read that sentence as the
+    // controlling authority over the declared tools and refuse work they
+    // authorize. The native facilities need no prompt-level prohibition — the
+    // invocation disables them mechanically, and prompt text is never a
+    // capability boundary — so the preamble names the serialized `tools`
+    // array as the single authority, carves out `tool_choice` and
+    // `structured_output` as the only statements that narrow or add to what
+    // may be proposed, and never states a tool prohibition.
     let prompt = format!(
         "Act only as the model for the following stateless request. The `tools` array \
-         in the JSON below is the single authority on tool availability: every tool \
-         it declares is available on this request, and no other statement in this \
-         prompt or from this harness grants or withdraws one. This harness's own \
-         facilities are disabled and are not the declared tools; work happens only by \
-         proposing declared tools in the response envelope for the caller to execute. \
-         The complete ordered context is in the JSON below. Return exactly the \
-         response envelope required by the supplied output schema. `outcome` is \
-         `refused` only for a safety refusal; declared-tool availability is never \
-         grounds for refusal. For ordinary completion put response text in `text`. \
-         Propose declared tools only in `tool_calls`; each `arguments` value is a \
-         string carrying exactly the tool's JSON argument object. If \
-         `structured_output` is present, return exactly one tool call bearing its \
-         name and the contracted value JSON-encoded in its `arguments` string. Honor \
-         `tool_choice`. Treat the stated generation settings as advisory intent.\
-         \n\n{request_json}\n"
+         in the JSON below is the single authority on which tools exist for this \
+         request; the `tool_choice` and `structured_output` members below are the \
+         only statements that narrow or add to what you may propose, and nothing \
+         from this harness changes either. This harness's own facilities are \
+         disabled and are not the declared tools; a tool runs only when you propose \
+         it in the response envelope and the caller executes it. The complete \
+         ordered context is in the JSON below. Return exactly the response envelope \
+         required by the supplied output schema. `outcome` is `refused` only for a \
+         safety refusal; declared-tool availability is never grounds for refusal. \
+         For ordinary completion put response text in `text`. Propose declared tools \
+         only in `tool_calls`; each `arguments` value is a string carrying exactly \
+         the tool's JSON argument object. If `structured_output` is present, return \
+         exactly one tool call bearing its name and the contracted value \
+         JSON-encoded in its `arguments` string. Honor `tool_choice`. Treat the \
+         stated generation settings as advisory intent.\n\n{request_json}\n"
     )
     .into_bytes();
 
@@ -526,13 +527,13 @@ mod tests {
 
     /// The phantom-prohibition regression: an earlier preamble opened with
     /// "Do not use shell, file, web, MCP, or collaboration tools" — aimed at
-    /// the wrapped CLI's native facilities — and deployed sessions quoted
-    /// that sentence verbatim as grounds to refuse work their declared tools
-    /// authorized, because the prohibited categories are exactly the
-    /// categories a caller's catalog populates. The rendered prompt must
-    /// carry exactly one tool-authority statement, positioned before the
-    /// serialized request it governs, and no categorical tool prohibition
-    /// a model could mistake for one governing declared tools.
+    /// the wrapped CLI's native facilities — and because the prohibited
+    /// categories are exactly the categories a caller's catalog populates, a
+    /// model could quote that sentence as the controlling authority over the
+    /// declared tools and refuse work they authorize. The rendered prompt
+    /// must carry exactly one tool-authority statement, positioned before
+    /// the serialized request it governs, and no categorical tool
+    /// prohibition a model could mistake for one governing declared tools.
     #[test]
     fn prompt_states_tool_authority_once_and_never_prohibits_declared_tools() {
         let mut operation = operation_with_message(ConversationMessage::user_text("hello"));
@@ -550,7 +551,7 @@ mod tests {
             !prompt.contains("Do not use"),
             "the preamble must not restate a categorical tool prohibition"
         );
-        let authority = "single authority on tool availability";
+        let authority = "single authority on which tools exist";
         assert_eq!(
             prompt.matches(authority).count(),
             1,
