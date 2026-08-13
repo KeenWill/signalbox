@@ -41,7 +41,7 @@ use signalbox_domain::{
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
-    RepoWatchCursorCandidate,
+    RepoWatchCursorCandidate, RepoWatchCursorGeneration,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
@@ -412,7 +412,11 @@ impl RepositoryWatchTask {
             let previous = cursor
                 .as_ref()
                 .map(|cursor| cursor.candidate().observation());
-            let observation = self.poller.poll(previous).await?;
+            let cursor_generation = cursor.as_ref().map(|cursor| cursor.generation());
+            let observation = self
+                .poller
+                .poll_against_cursor(previous, cursor_generation)
+                .await?;
             let events = derive_repo_watch_events(
                 &self.repository,
                 previous,
@@ -425,7 +429,7 @@ impl RepositoryWatchTask {
                 .commit(
                     &self.repository,
                     RepoWatchCommitRequest::new(
-                        cursor.as_ref().map(|cursor| cursor.generation()),
+                        cursor_generation,
                         RepoWatchCursorCandidate::new(observation),
                         events,
                     ),
@@ -433,10 +437,10 @@ impl RepositoryWatchTask {
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
             match outcome {
-                RepoWatchCommitOutcome::Committed(_)
-                | RepoWatchCommitOutcome::Replayed(_)
-                | RepoWatchCommitOutcome::Unchanged(_) => {
-                    self.poller.publish_freshness();
+                RepoWatchCommitOutcome::Committed(cursor)
+                | RepoWatchCommitOutcome::Replayed(cursor)
+                | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                    self.poller.publish_freshness(cursor.generation());
                     Ok(())
                 }
                 RepoWatchCommitOutcome::Conflict { current: _ } => {
@@ -753,7 +757,7 @@ struct PullRequestFreshness {
     // observation and skip the very changes that failed to commit. Reuse
     // therefore consults published entries only, so a forgotten publication
     // costs the optimization rather than an observation.
-    published: bool,
+    published_generation: Option<RepoWatchCursorGeneration>,
 }
 
 struct FetchedPullRequest {
@@ -819,12 +823,22 @@ impl GitHubRepositoryPoller {
         self.cache.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    #[cfg(test)]
     async fn poll(
         self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+        self.poll_against_cursor(previous, Some(RepoWatchCursorGeneration::INITIAL))
+            .await
+    }
+
+    async fn poll_against_cursor(
+        self: &Arc<Self>,
+        previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
         self.cache().begin_poll();
-        let result = self.poll_complete(previous).await;
+        let result = self.poll_complete(previous, cursor_generation).await;
         if result.is_ok() {
             self.cache().complete_poll();
         }
@@ -834,6 +848,7 @@ impl GitHubRepositoryPoller {
     async fn poll_complete(
         self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
         let listed = self.fetch_open_pull_numbers().await?;
         let mut pull_numbers: BTreeSet<u64> = listed.keys().copied().collect();
@@ -845,7 +860,7 @@ impl GitHubRepositoryPoller {
             }
         }
         let pull_requests = self
-            .fetch_pull_requests(pull_numbers, &listed, previous)
+            .fetch_pull_requests(pull_numbers, &listed, previous, cursor_generation)
             .await?;
         let branch_heads = self.fetch_branch_heads().await?;
         let workflows = self.fetch_workflows().await?;
@@ -876,6 +891,7 @@ impl GitHubRepositoryPoller {
         pull_numbers: BTreeSet<u64>,
         listed: &BTreeMap<u64, String>,
         previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
         self.forget_unlisted_freshness(&pull_numbers);
         let mut fetches = self.fetches.lock().await;
@@ -885,7 +901,13 @@ impl GitHubRepositoryPoller {
         // earlier attempt can interleave with this one.
         fetches.shutdown().await;
         let collected = self
-            .collect_pull_request_fetches(pull_numbers, listed, previous, &mut fetches)
+            .collect_pull_request_fetches(
+                pull_numbers,
+                listed,
+                previous,
+                cursor_generation,
+                &mut fetches,
+            )
             .await;
         // Dropping the set aborts the siblings but does not wait for them.
         // An aborted task only stops at its next await, so it can still charge
@@ -911,6 +933,7 @@ impl GitHubRepositoryPoller {
         pull_numbers: BTreeSet<u64>,
         listed: &BTreeMap<u64, String>,
         previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
         fetches: &mut JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>,
     ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
         let mut pull_requests = Vec::with_capacity(pull_numbers.len());
@@ -931,6 +954,7 @@ impl GitHubRepositoryPoller {
                             number,
                             listed_updated_at.as_deref(),
                             previous_pull_request.as_ref(),
+                            cursor_generation,
                         )
                         .await
                 });
@@ -979,10 +1003,11 @@ impl GitHubRepositoryPoller {
         number: u64,
         listed_updated_at: Option<&str>,
         previous_pull_request: Option<&RepoWatchPullRequestState>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
         if let (Some(listed_updated_at), Some(previous)) =
             (listed_updated_at, previous_pull_request)
-            && self.pull_request_is_unchanged(number, listed_updated_at)
+            && self.pull_request_is_unchanged(number, listed_updated_at, cursor_generation)
         {
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
@@ -1002,9 +1027,15 @@ impl GitHubRepositoryPoller {
         Ok(fetched.state)
     }
 
-    fn pull_request_is_unchanged(&self, number: u64, listed_updated_at: &str) -> bool {
+    fn pull_request_is_unchanged(
+        &self,
+        number: u64,
+        listed_updated_at: &str,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+    ) -> bool {
         self.freshness().get(&number).is_some_and(|freshness| {
-            freshness.published
+            freshness.published_generation == cursor_generation
+                && cursor_generation.is_some()
                 && freshness.updated_at == listed_updated_at
                 && freshness.settled
                 && freshness.skipped_polls < MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS
@@ -1024,14 +1055,14 @@ impl GitHubRepositoryPoller {
                 updated_at: updated_at.to_owned(),
                 settled,
                 skipped_polls: 0,
-                published: false,
+                published_generation: None,
             },
         );
     }
 
-    fn publish_freshness(&self) {
+    fn publish_freshness(&self, generation: RepoWatchCursorGeneration) {
         for freshness in self.freshness().values_mut() {
-            freshness.published = true;
+            freshness.published_generation = Some(generation);
         }
     }
 
@@ -2549,7 +2580,7 @@ mod tests {
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
         MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_POLL_WIRE_BYTES,
         MergeableState, PAGE_SIZE, PollCache, PollCycleTiming, PullResponse, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
@@ -4436,7 +4467,9 @@ mod tests {
             .poll(None)
             .await
             .expect("first poll succeeds");
-        fixture.poller.publish_freshness();
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
         let second = fixture
             .poller
             .poll(Some(&first))
@@ -4461,7 +4494,9 @@ mod tests {
             .poll(None)
             .await
             .expect("first poll succeeds");
-        fixture.poller.publish_freshness();
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
         let second = fixture
             .poller
             .poll(Some(&first))
@@ -4510,7 +4545,9 @@ mod tests {
             .poll(None)
             .await
             .expect("first poll succeeds");
-        fixture.poller.publish_freshness();
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
         let second = fixture
             .poller
             .poll(Some(&first))
@@ -4536,7 +4573,12 @@ mod tests {
 
         let pull_requests = fixture
             .poller
-            .fetch_pull_requests(numbers, &listed, None)
+            .fetch_pull_requests(
+                numbers,
+                &listed,
+                None,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            )
             .await
             .expect("every open pull request is fetched");
         let peak_in_flight = server.finish().await;
@@ -4587,7 +4629,12 @@ mod tests {
         let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
         let fetch = tokio::spawn(async move {
             poller
-                .fetch_pull_requests(BTreeSet::from([CANCELLED_FETCH_PULL_NUMBER]), &listed, None)
+                .fetch_pull_requests(
+                    BTreeSet::from([CANCELLED_FETCH_PULL_NUMBER]),
+                    &listed,
+                    None,
+                    Some(RepoWatchCursorGeneration::INITIAL),
+                )
                 .await
         });
         server.request_in_flight().await;
@@ -4628,20 +4675,32 @@ mod tests {
         fixture
             .poller
             .record_fetched_pull_request(number, PULL_UPDATED_AT, true);
-        fixture.poller.publish_freshness();
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
         assert!(
-            fixture
+            fixture.poller.pull_request_is_unchanged(
+                number,
+                PULL_UPDATED_AT,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            ),
+            "a published settled entry authorizes reuse against its cursor generation"
+        );
+        assert!(
+            !fixture
                 .poller
-                .pull_request_is_unchanged(number, PULL_UPDATED_AT),
-            "a published settled entry authorizes reuse"
+                .pull_request_is_unchanged(number, PULL_UPDATED_AT, None),
+            "a different loaded cursor generation authorizes no reuse"
         );
 
         fixture.poller.invalidate_freshness();
 
         assert!(
-            !fixture
-                .poller
-                .pull_request_is_unchanged(number, PULL_UPDATED_AT),
+            !fixture.poller.pull_request_is_unchanged(
+                number,
+                PULL_UPDATED_AT,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            ),
             "an invalidated record authorizes nothing"
         );
     }
