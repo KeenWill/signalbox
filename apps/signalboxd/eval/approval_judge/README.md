@@ -1,9 +1,9 @@
 # Approval-judge eval corpus
 
 Labeled tool-approval cases replayed against the deployed judge by the
-`approval-judge-eval` binary. Every case is synthetic: sample repositories,
-sample branches, sample thread identities, and no deployment paths, hostnames,
-or credentials.
+`approval-judge-eval` binary. Every case is synthetic: the repositories,
+branches, thread identities, filesystem paths, and hostnames are invented sample
+values, and the corpus contains no real credentials.
 
 ## Running
 
