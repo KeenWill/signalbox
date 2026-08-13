@@ -995,9 +995,11 @@ Locks per transaction, in acquisition order:
   its own transaction by locking `session_scheduler` first, then the loss head,
   placement, current lease, and guarded turn rows. Offered leases with no
   durable claim acquire exact no-execution proof; claimed leases follow effect
-  loss law. That same session transaction retires any unacknowledged release the
-  lost connection still owed, since no successor inherits authority to complete
-  it. A crash resumes at the first uncommitted session, while every
+  loss law. Retirement of any unacknowledged release the lost connection still
+  owed remains a daemon-orchestration responsibility outside this persistence
+  transaction; this adapter commits the session projection and advances its
+  cursor without retiring that release. A crash resumes at the first uncommitted
+  session, while every
   not-yet-projected placement is already effectively lost through the epoch
   fence.
 

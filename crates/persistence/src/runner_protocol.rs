@@ -1132,7 +1132,15 @@ impl RunnerProtocolStore {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
-        let affected = placement_is_affected_by_loss(&prior, loss)?;
+        let lost_runner: Uuid = sqlx::query_scalar(
+            "SELECT runner_id
+               FROM runner_enrollment
+              WHERE enrollment_id = $1",
+        )
+        .bind(loss.enrollment().into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let affected = placement_is_affected_by_loss(&prior, loss, lost_runner)?;
         if !affected {
             advance_runner_loss_cursor(&mut transaction, loss, session).await?;
             commit_mutation(transaction).await?;
@@ -1145,7 +1153,7 @@ impl RunnerProtocolStore {
         let (prior_event_ordinal, placement, registration, _grant, _prior_interrupted_tool_attempt) =
             stored.into_parts();
         let current_lease = self
-            .load_current_loss_lease_in(&mut transaction, session, prior_event_ordinal)
+            .load_current_loss_lease_in(&mut transaction, session)
             .await?;
         let interrupted_tool_attempt = current_lease.as_ref().map(RunnerLease::attempt);
         let selected_runner = placement_loss_fence_runner(&placement)
@@ -2502,7 +2510,6 @@ impl RunnerProtocolStore {
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         session: SessionId,
-        placement_event_ordinal: u64,
     ) -> Result<Option<RunnerLease>, RunnerProtocolStoreError> {
         let candidates = sqlx::query(
             "SELECT generation.lease_id, generation.generation
@@ -2517,13 +2524,11 @@ impl RunnerProtocolStore {
                JOIN runner_current_tool_attempt AS current_attempt
                  ON current_attempt.attempt_id = generation.attempt_id
               WHERE generation.session_id = $1
-                AND generation.placement_event_ordinal = $2
                 AND event.state_kind IN ('offered', 'claimed')
               ORDER BY generation.lease_id, generation.generation
               LIMIT 2",
         )
         .bind(session.into_uuid())
-        .bind(Decimal::from(placement_event_ordinal))
         .fetch_all(&mut **transaction)
         .await?;
         let [candidate] = candidates.as_slice() else {
@@ -3168,6 +3173,7 @@ async fn lock_runner_loss_propagation(
 fn placement_is_affected_by_loss(
     placement: &PgRow,
     loss: RunnerConnectionLossSnapshot,
+    lost_runner: Uuid,
 ) -> Result<bool, RunnerProtocolStoreError> {
     let enrollment = placement.decode_column::<Option<Uuid>>("loss_fence_enrollment_id")?;
     let observed = placement
@@ -3176,7 +3182,13 @@ fn placement_is_affected_by_loss(
         .transpose()?;
     let state: String = placement.decode_column("state_kind")?;
     let selector: String = placement.decode_column("selector_kind")?;
-    Ok(enrollment == Some(loss.enrollment().into_uuid())
+    let selector_runner = placement.decode_column::<Option<Uuid>>("selector_runner_id")?;
+    let enrollment_matches = enrollment == Some(loss.enrollment().into_uuid())
+        || (enrollment.is_none()
+            && state == "unpinned"
+            && selector == "identity"
+            && selector_runner == Some(lost_runner));
+    Ok(enrollment_matches
         && observed.is_none_or(|epoch| epoch < loss.loss_epoch().get())
         && (state == "pinned" || (state == "unpinned" && selector == "identity")))
 }

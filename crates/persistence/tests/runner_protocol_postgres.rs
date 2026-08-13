@@ -4349,6 +4349,60 @@ async fn s32_inv032_inv044_runner_loss_transaction_projects_exact_unpinned_sessi
     Ok(())
 }
 
+/// INV-032 / INV-044: an exact-runner placement stored before enrollment uses
+/// the same runner-identity fallback during projection that selected its page.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_loss_transaction_projects_pre_enrollment_session()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the exact runner loss owns its propagation cursor");
+
+    assert_eq!(
+        store
+            .propagate_connection_loss_session(loss, session)
+            .await?,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLostBeforePin,
+            interrupted_tool_attempt: None,
+        }
+    );
+    assert!(matches!(
+        store
+            .load_placement(session)
+            .await?
+            .expect("the loss projection remains readable")
+            .placement()
+            .state(),
+        SessionRunnerPlacementState::RunnerLostBeforePin(_)
+    ));
+    drop(pool);
+    Ok(())
+}
+
 /// INV-044: a placement change serialized after paging makes the old loss
 /// subject superseded and advances the cursor without a second projection.
 #[tokio::test]
@@ -4510,6 +4564,86 @@ async fn s31_inv009_inv043_inv044_runner_loss_transaction_retires_offered_lease(
     );
     assert_eq!(wait.interrupted_tool_attempt(), Some(attempt));
     assert_eq!(attempt_state, "in_flight");
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-043 / INV-044: profile replacement does not hide the live
+/// lease offered against its pinned predecessor from later loss propagation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv043_inv044_runner_loss_finds_lease_before_profile_replacement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    let replacement_grant =
+        duplicate_grant(&replacement.grant.grant, registration.registration());
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement_grant),
+        )
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the offered lease loss owns its exact cursor");
+    let attempt = pin.lease.attempt();
+
+    assert_eq!(
+        store
+            .propagate_connection_loss_session(loss, pin.placement.session())
+            .await?,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLost,
+            interrupted_tool_attempt: Some(attempt),
+        }
+    );
+    assert_eq!(
+        store
+            .load_lease_loss(pin.lease.correlation().lease, pin.lease.generation())
+            .await?
+            .expect("the predecessor lease is classified by the loss")
+            .lost()
+            .state(),
+        signalbox_domain::RunnerLeaseState::LostUnclaimed
+    );
+    assert_eq!(
+        store
+            .load_runner_recovery_wait(pin.placement.session())
+            .await?
+            .expect("the active turn moves to runner recovery")
+            .interrupted_tool_attempt(),
+        Some(attempt)
+    );
     drop(pool);
     Ok(())
 }
