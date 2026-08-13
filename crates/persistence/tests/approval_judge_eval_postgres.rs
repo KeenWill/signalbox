@@ -107,8 +107,16 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
     Ok((container, pool))
 }
 
-fn verdict_entry(recommendation: &str, rationale: &str) -> serde_json::Value {
-    serde_json::json!({"recommendation": recommendation, "rationale": rationale})
+struct VerdictFixture<'a> {
+    recommendation: &'a str,
+    rationale: &'a str,
+}
+
+fn verdict_entry(fixture: VerdictFixture<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "recommendation": fixture.recommendation,
+        "rationale": fixture.rationale,
+    })
 }
 
 fn scorecard_case(
@@ -116,7 +124,46 @@ fn scorecard_case(
     repeats: &[serde_json::Value],
     failed_calls: u32,
 ) -> serde_json::Value {
-    serde_json::json!({"name": name, "repeats": repeats, "failed_calls": failed_calls})
+    let (category, expected) = match name {
+        FIRST_CASE => ("git_push", APPROVE_SPELLING),
+        SECOND_CASE => ("credential_access", DENY_SPELLING),
+        other => panic!("unknown scorecard case fixture: {other}"),
+    };
+    let mut verdict_counts = std::collections::BTreeMap::new();
+    for repeat in repeats {
+        let recommendation = repeat["recommendation"]
+            .as_str()
+            .expect("fixture recommendation is text");
+        *verdict_counts.entry(recommendation).or_insert(0_u64) += 1;
+    }
+    let majority = verdict_counts
+        .iter()
+        .find(|(_, count)| **count * 2 > u64::from(REPEATS))
+        .map(|(recommendation, _)| *recommendation);
+    let measured = !repeats.is_empty();
+    let complete = repeats.len()
+        == usize::try_from(REPEATS).expect("configured repeats fit in usize");
+    let stable = (REPEATS >= 2 && complete).then_some(verdict_counts.len() == 1);
+    let leading = verdict_counts.values().max().copied().unwrap_or(0);
+    let tied = measured
+        && verdict_counts
+            .values()
+            .filter(|count| **count == leading)
+            .count()
+            > 1;
+    serde_json::json!({
+        "name": name,
+        "category": category,
+        "expected": expected,
+        "repeats": repeats,
+        "failed_calls": failed_calls,
+        "verdict_counts": verdict_counts,
+        "majority": majority,
+        "measured": measured,
+        "complete": complete,
+        "stable": stable,
+        "tied": tied,
+    })
 }
 
 // The scorecard restates the run headers and per-case verdicts exactly as
@@ -124,6 +171,64 @@ fn scorecard_case(
 // with the typed representations, so fixtures derive both from the same
 // constants.
 fn scorecard_with_cases(cases: &[serde_json::Value]) -> serde_json::Value {
+    let mut categories = std::collections::BTreeMap::new();
+    let mut correct_majorities = 0_u64;
+    let mut unstable_cases = 0_u64;
+    let mut stability_unmeasured_cases = 0_u64;
+    let mut partial_cases = 0_u64;
+    let mut unmeasured_cases = 0_u64;
+    for case in cases {
+        let category = case["category"]
+            .as_str()
+            .expect("fixture category is text");
+        let expected = case["expected"]
+            .as_str()
+            .expect("fixture expected verdict is text");
+        let majority = case["majority"].as_str();
+        let measured = case["measured"]
+            .as_bool()
+            .expect("fixture measured flag is boolean");
+        let complete = case["complete"]
+            .as_bool()
+            .expect("fixture complete flag is boolean");
+        let unstable = case["verdict_counts"]
+            .as_object()
+            .expect("fixture verdict counts are an object")
+            .len()
+            > 1;
+        let stability_unmeasured = measured && case["stable"].is_null();
+        let failed_calls = case["failed_calls"]
+            .as_u64()
+            .expect("fixture failed-call count is unsigned");
+        let category_score = categories.entry(category).or_insert([0_u64; 7]);
+        category_score[0] += 1;
+        category_score[1] += u64::from(measured && majority == Some(expected));
+        category_score[2] += u64::from(unstable);
+        category_score[3] += u64::from(stability_unmeasured);
+        category_score[4] += u64::from(measured && !complete);
+        category_score[5] += u64::from(!measured);
+        category_score[6] += failed_calls;
+        correct_majorities += u64::from(measured && majority == Some(expected));
+        unstable_cases += u64::from(unstable);
+        stability_unmeasured_cases += u64::from(stability_unmeasured);
+        partial_cases += u64::from(measured && !complete);
+        unmeasured_cases += u64::from(!measured);
+    }
+    let categories = categories
+        .into_iter()
+        .map(|(category, score)| {
+            serde_json::json!({
+                "category": category,
+                "cases": score[0],
+                "correct_majorities": score[1],
+                "unstable_cases": score[2],
+                "stability_unmeasured_cases": score[3],
+                "partial_cases": score[4],
+                "unmeasured_cases": score[5],
+                "failed_calls": score[6],
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "judge_selection": Uuid::from_u128(SELECTION_IDENTITY).to_string(),
         "provider_model": PROVIDER_MODEL,
@@ -131,8 +236,19 @@ fn scorecard_with_cases(cases: &[serde_json::Value]) -> serde_json::Value {
         "contract_digest": CONTRACT_DIGEST,
         "rendered_digest": RENDERED_DIGEST,
         "repeats": REPEATS,
-        "total_cases": 2,
-        "correct_majorities": 1,
+        "total_cases": cases.len(),
+        "correct_majorities": correct_majorities,
+        "unstable_cases": unstable_cases,
+        "stability_unmeasured_cases": stability_unmeasured_cases,
+        "partial_cases": partial_cases,
+        "unmeasured_cases": unmeasured_cases,
+        "escalation_calibration": {
+            "expected_cases": 0,
+            "observed_majorities": 0,
+            "missed": 0,
+            "excess": 0,
+        },
+        "categories": categories,
         "cases": cases,
     })
 }
@@ -141,12 +257,18 @@ fn both_call_scorecard_cases() -> Vec<serde_json::Value> {
     vec![
         scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
             2,
         ),
         scorecard_case(
             SECOND_CASE,
-            &[verdict_entry(DENY_SPELLING, SECOND_RATIONALE)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: DENY_SPELLING,
+                rationale: SECOND_RATIONALE,
+            })],
             2,
         ),
     ]
@@ -409,7 +531,10 @@ async fn an_inadmissible_call_row_leaves_no_run_row() -> Result<(), Box<dyn Erro
         RUN_IDENTITY,
         &[scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, "")],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: "",
+            })],
             2,
         )],
     );
@@ -480,7 +605,10 @@ async fn call_ordinals_outside_the_run_repeats_are_rejected() -> Result<(), Box<
         RUN_IDENTITY,
         &[scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
             2,
         )],
     );
@@ -580,7 +708,10 @@ async fn recorded_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
         RUN_IDENTITY,
         &[scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
             2,
         )],
     );
@@ -759,7 +890,10 @@ async fn unaccounted_attempts_are_rejected() -> Result<(), Box<dyn Error>> {
         RUN_IDENTITY,
         &[scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
             2,
         )],
     );
@@ -787,7 +921,10 @@ async fn late_call_rows_are_rejected_after_the_run_commits() -> Result<(), Box<d
         RUN_IDENTITY,
         &[scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
             2,
         )],
     );
@@ -828,7 +965,10 @@ async fn contradictory_scorecard_verdicts_are_rejected() -> Result<(), Box<dyn E
         RUN_IDENTITY,
         &[scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, FIRST_RATIONALE)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: FIRST_RATIONALE,
+            })],
             2,
         )],
     );
@@ -856,7 +996,10 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
         RUN_IDENTITY,
         &[scorecard_case(
             FIRST_CASE,
-            &[verdict_entry(APPROVE_SPELLING, &widest)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: APPROVE_SPELLING,
+                rationale: &widest,
+            })],
             2,
         )],
     );
@@ -869,7 +1012,10 @@ async fn rationale_bound_follows_the_domain_constant() -> Result<(), Box<dyn Err
         SECOND_RUN_IDENTITY,
         &[scorecard_case(
             SECOND_CASE,
-            &[verdict_entry(DENY_SPELLING, &overlong)],
+            &[verdict_entry(VerdictFixture {
+                recommendation: DENY_SPELLING,
+                rationale: &overlong,
+            })],
             2,
         )],
     );

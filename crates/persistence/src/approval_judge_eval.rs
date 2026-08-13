@@ -255,6 +255,7 @@ fn require_scorecard_verdict_agreement(
             return Err(verdict_mismatch(name));
         }
     }
+    require_scorecard_aggregate_summary_agreement(&run.scorecard, cases)?;
     Ok(())
 }
 
@@ -295,6 +296,157 @@ fn require_scorecard_case_summary_agreement(
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct ScorecardAggregate {
+    cases: u64,
+    correct_majorities: u64,
+    unstable_cases: u64,
+    stability_unmeasured_cases: u64,
+    partial_cases: u64,
+    unmeasured_cases: u64,
+    failed_calls: u64,
+}
+
+/// Requires the scorecard's aggregate summaries to agree with its cases.
+fn require_scorecard_aggregate_summary_agreement(
+    scorecard: &serde_json::Value,
+    cases: &[serde_json::Value],
+) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let mut categories: BTreeMap<&str, ScorecardAggregate> = BTreeMap::new();
+    let mut totals = ScorecardAggregate::default();
+    let mut expected_escalations = 0_u64;
+    let mut observed_escalation_majorities = 0_u64;
+    let mut missed_escalations = 0_u64;
+    let mut excess_escalations = 0_u64;
+
+    for case in cases {
+        let category = case
+            .get("category")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| aggregate_mismatch("categories"))?;
+        let expected = case
+            .get("expected")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| aggregate_mismatch("correct_majorities"))?;
+        let majority = match case.get("majority") {
+            Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| aggregate_mismatch("correct_majorities"))?,
+            ),
+            None => return Err(aggregate_mismatch("correct_majorities")),
+        };
+        let measured = case
+            .get("measured")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| aggregate_mismatch("unmeasured_cases"))?;
+        let complete = case
+            .get("complete")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| aggregate_mismatch("partial_cases"))?;
+        let stable = case
+            .get("stable")
+            .ok_or_else(|| aggregate_mismatch("stability_unmeasured_cases"))?;
+        let unstable = case
+            .get("verdict_counts")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|counts| counts.len() > 1);
+        let failed_calls = case
+            .get("failed_calls")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| aggregate_mismatch("categories"))?;
+        let correct = measured && majority == Some(expected);
+        let escalation_expected = expected == "escalate_to_human";
+        let escalation_majority = majority == Some("escalate_to_human");
+        let update = |aggregate: &mut ScorecardAggregate| {
+            aggregate.cases += 1;
+            aggregate.correct_majorities += u64::from(correct);
+            aggregate.unstable_cases += u64::from(unstable);
+            aggregate.stability_unmeasured_cases += u64::from(measured && stable.is_null());
+            aggregate.partial_cases += u64::from(measured && !complete);
+            aggregate.unmeasured_cases += u64::from(!measured);
+            aggregate.failed_calls += failed_calls;
+        };
+        update(&mut totals);
+        update(categories.entry(category).or_default());
+        expected_escalations += u64::from(escalation_expected);
+        observed_escalation_majorities += u64::from(escalation_majority);
+        missed_escalations +=
+            u64::from(escalation_expected && majority.is_some() && !escalation_majority);
+        excess_escalations += u64::from(!escalation_expected && escalation_majority);
+    }
+
+    require_aggregate_field(scorecard, "total_cases", totals.cases)?;
+    require_aggregate_field(scorecard, "correct_majorities", totals.correct_majorities)?;
+    require_aggregate_field(scorecard, "unstable_cases", totals.unstable_cases)?;
+    require_aggregate_field(
+        scorecard,
+        "stability_unmeasured_cases",
+        totals.stability_unmeasured_cases,
+    )?;
+    require_aggregate_field(scorecard, "partial_cases", totals.partial_cases)?;
+    require_aggregate_field(scorecard, "unmeasured_cases", totals.unmeasured_cases)?;
+
+    let expected_escalation = serde_json::json!({
+        "expected_cases": expected_escalations,
+        "observed_majorities": observed_escalation_majorities,
+        "missed": missed_escalations,
+        "excess": excess_escalations,
+    });
+    if scorecard.get("escalation_calibration") != Some(&expected_escalation) {
+        return Err(aggregate_mismatch("escalation_calibration"));
+    }
+
+    let stated_categories = scorecard
+        .get("categories")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| aggregate_mismatch("categories"))?;
+    if stated_categories.len() != categories.len() {
+        return Err(aggregate_mismatch("categories"));
+    }
+    let mut seen_categories = BTreeMap::new();
+    for stated in stated_categories {
+        let category = stated
+            .get("category")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| aggregate_mismatch("categories"))?;
+        let expected = categories
+            .get(category)
+            .ok_or_else(|| aggregate_mismatch("categories"))?;
+        let expected = serde_json::json!({
+            "category": category,
+            "cases": expected.cases,
+            "correct_majorities": expected.correct_majorities,
+            "unstable_cases": expected.unstable_cases,
+            "stability_unmeasured_cases": expected.stability_unmeasured_cases,
+            "partial_cases": expected.partial_cases,
+            "unmeasured_cases": expected.unmeasured_cases,
+            "failed_calls": expected.failed_calls,
+        });
+        if stated != &expected || seen_categories.insert(category, ()).is_some() {
+            return Err(aggregate_mismatch("categories"));
+        }
+    }
+    Ok(())
+}
+
+fn require_aggregate_field(
+    scorecard: &serde_json::Value,
+    field: &'static str,
+    expected: u64,
+) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    if scorecard.get(field).and_then(serde_json::Value::as_u64) == Some(expected) {
+        Ok(())
+    } else {
+        Err(aggregate_mismatch(field))
+    }
+}
+
+const fn aggregate_mismatch(field: &'static str) -> ApprovalJudgeEvalRecordingError {
+    ApprovalJudgeEvalRecordingError::ScorecardAggregateMismatch { field }
 }
 
 fn verdict_mismatch(case: &str) -> ApprovalJudgeEvalRecordingError {
@@ -406,6 +558,11 @@ pub enum ApprovalJudgeEvalRecordingError {
         /// The derived field that diverged or was absent.
         field: &'static str,
     },
+    /// A scorecard aggregate disagrees with its per-case data.
+    ScorecardAggregateMismatch {
+        /// The aggregate field or section that diverged or was absent.
+        field: &'static str,
+    },
 }
 
 impl ApprovalJudgeEvalRecordingError {
@@ -448,6 +605,10 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
                 formatter,
                 "eval scorecard case summary disagrees with its verdicts: {case}.{field}"
             ),
+            Self::ScorecardAggregateMismatch { field } => write!(
+                formatter,
+                "eval scorecard aggregate disagrees with its cases: {field}"
+            ),
         }
     }
 }
@@ -461,7 +622,8 @@ impl Error for ApprovalJudgeEvalRecordingError {
             | Self::CallOutsideConfiguredRepeats
             | Self::ScorecardHeaderMismatch { .. }
             | Self::ScorecardVerdictMismatch { .. }
-            | Self::ScorecardSummaryMismatch { .. } => None,
+            | Self::ScorecardSummaryMismatch { .. }
+            | Self::ScorecardAggregateMismatch { .. } => None,
         }
     }
 }
@@ -480,7 +642,10 @@ mod tests {
     use expect_test::expect;
     use serde_json::json;
 
-    use super::{ApprovalJudgeEvalRecordingError, require_scorecard_case_summary_agreement};
+    use super::{
+        ApprovalJudgeEvalRecordingError, require_scorecard_aggregate_summary_agreement,
+        require_scorecard_case_summary_agreement,
+    };
 
     #[test]
     fn recording_errors_distinguish_commit_ambiguity() {
@@ -539,28 +704,92 @@ mod tests {
         require_scorecard_case_summary_agreement(&valid, "fixture-case", 2, &verdicts)
             .expect("derived summaries agree");
 
-        for field in [
-            "verdict_counts",
-            "majority",
-            "measured",
-            "complete",
-            "stable",
-            "tied",
-        ] {
-            let mut contradictory = valid.clone();
-            contradictory[field] = json!(null);
-            assert!(matches!(
-                require_scorecard_case_summary_agreement(
-                    &contradictory,
-                    "fixture-case",
-                    2,
-                    &verdicts
-                ),
-                Err(ApprovalJudgeEvalRecordingError::ScorecardSummaryMismatch {
-                    field: mismatched,
-                    ..
-                }) if mismatched == field
-            ));
-        }
+        let mut contradictory = valid.clone();
+        contradictory["verdict_counts"] = json!(null);
+        assert_summary_mismatch(&contradictory, &verdicts, "verdict_counts");
+
+        let mut contradictory = valid.clone();
+        contradictory["majority"] = json!(null);
+        assert_summary_mismatch(&contradictory, &verdicts, "majority");
+
+        let mut contradictory = valid.clone();
+        contradictory["measured"] = json!(null);
+        assert_summary_mismatch(&contradictory, &verdicts, "measured");
+
+        let mut contradictory = valid.clone();
+        contradictory["complete"] = json!(null);
+        assert_summary_mismatch(&contradictory, &verdicts, "complete");
+
+        let mut contradictory = valid.clone();
+        contradictory["stable"] = json!(null);
+        assert_summary_mismatch(&contradictory, &verdicts, "stable");
+
+        let mut contradictory = valid.clone();
+        contradictory["tied"] = json!(null);
+        assert_summary_mismatch(&contradictory, &verdicts, "tied");
+    }
+
+    #[test]
+    fn scorecard_aggregate_summaries_must_match_their_cases() {
+        let cases = vec![json!({
+            "category": "git_push",
+            "expected": "approve",
+            "verdict_counts": {"approve": 2},
+            "majority": "approve",
+            "measured": true,
+            "complete": false,
+            "stable": null,
+            "failed_calls": 1,
+        })];
+        let valid = json!({
+            "total_cases": 1,
+            "correct_majorities": 1,
+            "unstable_cases": 0,
+            "stability_unmeasured_cases": 1,
+            "partial_cases": 1,
+            "unmeasured_cases": 0,
+            "escalation_calibration": {
+                "expected_cases": 0,
+                "observed_majorities": 0,
+                "missed": 0,
+                "excess": 0,
+            },
+            "categories": [{
+                "category": "git_push",
+                "cases": 1,
+                "correct_majorities": 1,
+                "unstable_cases": 0,
+                "stability_unmeasured_cases": 1,
+                "partial_cases": 1,
+                "unmeasured_cases": 0,
+                "failed_calls": 1,
+            }],
+        });
+        require_scorecard_aggregate_summary_agreement(&valid, &cases)
+            .expect("aggregate summaries agree");
+
+        let mut contradictory = valid;
+        contradictory["total_cases"] = json!(2);
+        assert!(matches!(
+            require_scorecard_aggregate_summary_agreement(&contradictory, &cases),
+            Err(ApprovalJudgeEvalRecordingError::ScorecardAggregateMismatch {
+                field: "total_cases"
+            })
+        ));
+    }
+
+    #[track_caller]
+    fn assert_summary_mismatch(
+        case: &serde_json::Value,
+        verdicts: &[(&str, &str)],
+        expected_field: &'static str,
+    ) {
+        assert!(matches!(
+            require_scorecard_case_summary_agreement(case, "fixture-case", 2, verdicts),
+            Err(ApprovalJudgeEvalRecordingError::ScorecardSummaryMismatch {
+                field,
+                ..
+            }) if field == expected_field
+        ));
     }
 }
