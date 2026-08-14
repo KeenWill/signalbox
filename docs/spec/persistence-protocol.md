@@ -767,12 +767,13 @@ Representation rules, all enforced in the schema:
   and prior registration, and directs the runner to resend the full ready frame;
   a mismatch receives `fail_stale`. The same live transaction then commits or
   exactly replays the resent payload before acknowledgement. The runner state
-  root retains the complete validated ready frame beside that correlation.
-- **Committed unimplemented functionality.** No present runner protocol path
-  resends the retained frame or consumes its directive or acknowledgement, no
-  heartbeat path reconciles provisioning progress, and no present transaction
-  maps the runner-relative manifest path into execution placement facts or
-  consumes the receipt to terminalize the repository-backed replacement.
+  root retains the complete validated ready frame beside that correlation,
+  resends it exactly while retaining it, consumes the exact recorded
+  acknowledgement, and retires a daemon-classified stale item atomically.
+- **Committed unimplemented functionality.** No heartbeat path reconciles
+  provisioning progress, and no present transaction maps the runner-relative
+  manifest path into execution placement facts or consumes the receipt to
+  terminalize the repository-backed replacement.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
