@@ -179,12 +179,9 @@ without editing shared files. An absent allow-list means no bundle is eligible,
 never every discovered bundle.
 
 A session allow-list names registered bundle identities. A template predates the
-workspace registrations, so it instead names exact `TemplateInstructionSelector`
-values: a root reference, root-relative source path, bundle kind, and expected
-source hash. The root reference is exactly `workspace`, or `configured` plus the
-configured root's stable `ConfiguredInstructionRootId` defined by the
-[configuration contract](configuration-and-credentials.md#workspace-instruction-roots).
-Session creation copies the selectors as unresolved eligibility input; it does
+workspace registrations, so it instead names the exact selectors owned by the
+[static-template grammar](configuration-and-credentials.md#the-static-session-template-catalog).
+Session creation copies those selectors as unresolved eligibility input; it does
 not scan an unbound workspace or invent bundle identities.
 
 A session-specific allow-list replacement may name a configured-root bundle from
@@ -200,12 +197,13 @@ resolves its configured-root selectors and, when a workspace selector is
 present, establishes the session's workspace binding through the owning
 [pre-activation binding contract](configuration-and-credentials.md#derived-session-workspace-roots).
 It scans and registers only after that binding is fixed, then resolves every
-selector to exactly one identity and installs the initial session allow-list. A
-missing, stale, or ambiguous selector grants nothing and is recorded as a typed
-resolution finding; it never degrades to a path glob or newest-content match.
-The initial resolution and allow-list installation complete before activation
-may acquire the eligibility snapshot. Runner-workspace selectors remain
-unresolved until the runner discovery protocol exists.
+selector to exactly one identity. The owning binding contract persists the
+binding correlation and makes initial installation crash-atomic with first-turn
+activation; restart never reuses identities under an uncorrelated workspace or
+blindly rescans them. A missing, stale, or ambiguous selector grants nothing and
+is recorded as a typed resolution finding; it never degrades to a path glob or
+newest-content match. Runner-workspace selectors remain unresolved until the
+runner discovery protocol exists.
 
 The effective eligibility snapshot is immutable for one turn. The owning
 [activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
