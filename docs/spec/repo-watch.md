@@ -18,7 +18,7 @@ four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
 (`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against this PR (`agent/repo-watch-poll-performance-2`). The provider members
+against this PR (`agent/repo-watch-review-reliability`). The provider members
 the poller adopts as check-suite and check-run completion generations are
 verified against PR #541 (`fix/check-run-updated-at`). The goal a dispatch
 commissions with its session, and the binding of the dispatched work turn to
@@ -118,28 +118,28 @@ MiB of response bytes; what one poller retains between attempts is bounded
 separately and lower, because retention is per watched repository and therefore
 multiplies by the configured repository count.
 
-**Implemented behavior.** An attempt reuses the committed baseline for an open
-pull request instead of re-fetching its detail, check suites, check runs,
-reviews, and threads, but only when every one of the following holds: the open
-pull request listing reports an `updated_at` identical to the one recorded when
-that baseline was fetched; the recorded fetch reached the durable cursor, so an
-attempt that failed before committing cannot authorize reuse of the stale
-baseline it never replaced; that fetch observed every check suite and check run
-in a terminal state and a known mergeable state, because neither a check
-completion nor the provider's background mergeability calculation moves
-`updated_at`; and the pull request has been reused fewer than four consecutive
-attempts, which bounds how long any other fact that never moves `updated_at` can
-go unobserved. Reactions are re-fetched on every attempt and are never reused,
-because a reaction does not move `updated_at` at all and a signal-reviewer
-reaction is a dispatch trigger; with no configured signal reviewer there is
-nothing a reaction can trigger, so the poller issues no reaction request at all.
-A pull request absent from the open listing is never reused. Reuse carries the
-prior baseline forward unchanged, so no event class becomes unobservable: a
-reused pull request's accumulated changes all appear in the comparison that
-follows its next fetch. Cached resources survive the same bounded number of
-untouched attempts, so reuse does not discard the validators that keep the
-following fetch conditional. The freshness record is process-local, like the
-conditional-request cache, so a restarted daemon re-fetches every pull request.
+**Implemented behavior.** An attempt may reuse the committed detail and settled
+check baseline for an open pull request, but only when every one of the
+following holds: the open pull request listing reports both an `updated_at`
+identical to the one recorded when that baseline was fetched and a head SHA
+identical to the committed pull-request context; the recorded fetch reached the
+durable cursor, so an attempt that failed before committing cannot authorize
+reuse of the stale baseline it never replaced; that fetch observed every check
+suite and check run in a terminal state and a known mergeable state, because
+neither a check completion nor the provider's background mergeability
+calculation moves `updated_at`; and the pull request has been reused fewer than
+four consecutive attempts, which bounds how long another check or detail fact
+that never moves either listing member can go unobserved. Reviews and threads
+are re-fetched on every attempt and replace their prior projections before
+comparison, so a delayed detail/check refresh cannot absorb or defer review
+dispatch signals. Reactions are likewise re-fetched on every attempt because a
+reaction does not move `updated_at` at all; with no configured signal reviewer
+there is nothing a reaction can trigger, so the poller issues no reaction
+request. A pull request absent from the open listing is never reused. Cached
+resources survive the same bounded number of untouched attempts, so reuse does
+not discard the validators that keep the following full fetch conditional. The
+freshness record is process-local, like the conditional-request cache, so a
+restarted daemon re-fetches every pull request.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Check runs are enumerated through
