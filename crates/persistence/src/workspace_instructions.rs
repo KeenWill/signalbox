@@ -94,11 +94,19 @@ impl WorkspaceInstructionRepository {
         NextBundleId: FnMut() -> InstructionBundleId,
     {
         let mut transaction = self.pool.begin().await?;
+        let scheduler =
+            sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
+                .bind(manifest.session().into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if scheduler.is_none() {
+            transaction.rollback().await?;
+            return Ok(RecordTurnInstructionSnapshotOutcome::TurnUnavailable);
+        }
         let state = sqlx::query_scalar::<_, String>(
             "SELECT state_kind
                FROM turn_lifecycle
-              WHERE session_id = $1 AND turn_id = $2
-              FOR UPDATE",
+              WHERE session_id = $1 AND turn_id = $2",
         )
         .bind(manifest.session().into_uuid())
         .bind(manifest.turn().into_uuid())

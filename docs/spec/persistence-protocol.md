@@ -772,6 +772,17 @@ Locks per transaction, in acquisition order:
   commands commit without firing the trigger, and exact user-command replay
   takes no row lock.
 
+- **Empty turn-instruction manifest recording**: the `session_scheduler` row
+  `FOR UPDATE` is the only explicit lock. Recording runs after activation and
+  before model work; holding the scheduler lock while rechecking the exact
+  active `turn_lifecycle` row keeps lifecycle writers out until its discovery,
+  registrations, and empty manifest commit atomically. This temporary
+  post-activation boundary is sound only while eligibility is the one immutable
+  empty value. The committed nonempty eligibility surface moves the manifest
+  into activation under this same scheduler lock, as
+  [the activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+  requires.
+
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
   (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
   explicit lock (session existence is checked with a bare `EXISTS`). The session
