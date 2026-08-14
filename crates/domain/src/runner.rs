@@ -208,6 +208,77 @@ pub enum ReplaceLostRunnerBeforePinResult {
     Rejected(ReplaceLostRunnerBeforePinRejection),
 }
 
+/// Exact pinned successor installed by a completed lost-runner replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplacedPinnedRunner {
+    session: SessionId,
+    prior_runner: RunnerId,
+    new_runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    working_directory: RunnerWorkingDirectory,
+    sandbox: RunnerSandboxProfile,
+}
+
+impl ReplacedPinnedRunner {
+    /// Constructs the complete terminal command receipt.
+    pub fn new(
+        session: SessionId,
+        prior_runner: RunnerId,
+        new_runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        working_directory: RunnerWorkingDirectory,
+        sandbox: RunnerSandboxProfile,
+    ) -> Self {
+        Self {
+            session,
+            prior_runner,
+            new_runner,
+            placement_revision,
+            working_directory,
+            sandbox,
+        }
+    }
+
+    /// Returns the relocated session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact lost runner consumed by replacement.
+    pub const fn prior_runner(&self) -> RunnerId {
+        self.prior_runner
+    }
+
+    /// Returns the exact successor runner installed by replacement.
+    pub const fn new_runner(&self) -> RunnerId {
+        self.new_runner
+    }
+
+    /// Returns the successor placement revision.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the concrete successor execution directory.
+    pub const fn working_directory(&self) -> &RunnerWorkingDirectory {
+        &self.working_directory
+    }
+
+    /// Returns the retained sandbox policy.
+    pub const fn sandbox(&self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+}
+
+/// Terminal durable result of a pinned lost-runner replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PinnedRunnerReplacementResult {
+    /// The exact lost pinned placement advanced to its successor.
+    Applied(ReplacedPinnedRunner),
+    /// Current typed state refused the command.
+    Rejected(RunnerReplacementProvisioningRejection),
+}
+
 /// Closed durable refusal while preparing a pinned replacement workspace.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerReplacementProvisioningRejection {
@@ -5712,6 +5783,32 @@ mod tests {
 
     fn pending_enrollment_request(seed: u128) -> RunnerEnrollmentRequestId {
         RunnerEnrollmentRequestId::from_uuid(uuid::Uuid::from_u128(seed))
+    }
+
+    #[test]
+    fn pinned_replacement_receipt_preserves_complete_execution_location() {
+        let session = session_id(SESSION);
+        let prior_runner = runner_id(RUNNER);
+        let new_runner = runner_id(REPLACEMENT_RUNNER);
+        let revision =
+            RunnerGeneration::try_from_u64(7).expect("the fixture placement revision is positive");
+        let directory = RunnerWorkingDirectory::try_new(String::from("/workspace/session"))
+            .expect("the fixture directory is absolute");
+        let receipt = ReplacedPinnedRunner::new(
+            session,
+            prior_runner,
+            new_runner,
+            revision,
+            directory.clone(),
+            RunnerSandboxProfile::WorkspaceRestricted,
+        );
+
+        assert_eq!(receipt.session(), session);
+        assert_eq!(receipt.prior_runner(), prior_runner);
+        assert_eq!(receipt.new_runner(), new_runner);
+        assert_eq!(receipt.placement_revision(), revision);
+        assert_eq!(receipt.working_directory(), &directory);
+        assert_eq!(receipt.sandbox(), RunnerSandboxProfile::WorkspaceRestricted);
     }
 
     #[test]

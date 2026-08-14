@@ -13,6 +13,7 @@ mod load_session;
 mod model_execution;
 mod operator_failure;
 mod pinned_runner_dispatch;
+mod pinned_runner_replacement;
 mod promote_pending_runner;
 mod replace_lost_runner_before_pin;
 mod replace_session_defaults;
@@ -86,6 +87,11 @@ pub use pinned_runner_dispatch::{
     PinnedRunnerDispatchRequest, PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction,
     PinnedRunnerLeaseOffer, RunnerDispatchRequest, RunnerDispatchService, RunnerLeaseIdGenerator,
     UuidV7RunnerLeaseIdGenerator,
+};
+pub use pinned_runner_replacement::{
+    PinnedRunnerReplacementIdGenerator, PinnedRunnerReplacementIdentities,
+    PinnedRunnerReplacementOutcome, PinnedRunnerReplacementRequest, PinnedRunnerReplacementService,
+    PinnedRunnerReplacementTransaction, UuidV7PinnedRunnerReplacementIdGenerator,
 };
 pub use promote_pending_runner::{
     PromotePendingRunnerOutcome, PromotePendingRunnerRequest, PromotePendingRunnerService,
