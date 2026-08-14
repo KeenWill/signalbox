@@ -23,9 +23,10 @@ use signalbox_application::{
     PinnedRunnerReplacementIdentities, PinnedRunnerReplacementOutcome,
     PinnedRunnerReplacementTransaction, ReplaceLostRunnerBeforePinOutcome,
     ReplaceLostRunnerBeforePinTransaction, RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction,
-    RunnerLeaseResultRequest, RunnerLeaseResultTransaction, RunnerReplacementProvisioningOutcome,
-    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction, ToolCatalog,
-    ToolDefinition, ToolInputSchema,
+    RunnerLeaseResultRequest, RunnerLeaseResultTransaction, RunnerReadyManifestDigest,
+    RunnerReplacementProvisioningOutcome, RunnerReplacementProvisioningStage,
+    RunnerReplacementProvisioningTransaction, RunnerWorkspaceReadyReceipt,
+    RunnerWorkspaceReadyTransaction, ToolCatalog, ToolDefinition, ToolInputSchema,
 };
 #[cfg(feature = "postgres-integration")]
 use signalbox_domain::RunnerWorkspaceReleaseCandidate;
@@ -3341,6 +3342,154 @@ impl RunnerProtocolStore {
             relative_path,
             recovery,
         }))
+    }
+
+    /// Atomically admits or exactly replays one replacement workspace receipt.
+    pub async fn record_workspace_ready_receipt(
+        &self,
+        receipt: RunnerWorkspaceReadyReceipt,
+    ) -> Result<RunnerWorkspaceReadyReceipt, RunnerProtocolStoreError> {
+        if let Some(stored) = self
+            .load_workspace_provisioning_receipt(receipt.authorization())
+            .await?
+        {
+            return exact_workspace_ready_replay(receipt, stored);
+        }
+        let authority = self
+            .load_workspace_provisioning_authorization(receipt.authorization())
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ))?;
+        validate_workspace_ready_receipt(&receipt, &authority)?;
+
+        let mut transaction = self.pool.begin().await?;
+        let scheduler = sqlx::query(REPLACE_LOST_RUNNER_SCHEDULER)
+            .bind(receipt.session().into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let session_exists: bool = scheduler.decode_column("session_exists")?;
+        let scheduler_session: Option<Uuid> = scheduler.decode_column("scheduler_session_id")?;
+        if !session_exists || scheduler_session != Some(receipt.session().into_uuid()) {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+
+        if let Some(stored) = self
+            .load_workspace_provisioning_receipt(receipt.authorization())
+            .await?
+        {
+            transaction.rollback().await?;
+            return exact_workspace_ready_replay(receipt, stored);
+        }
+
+        let enrollment_locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(authority.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if enrollment_locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        let enrollment = load_enrollment_in(transaction.as_mut(), authority.enrollment())
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        let target_kind: String = sqlx::query_scalar(
+            "SELECT target_kind
+               FROM replace_lost_runner_command
+              WHERE command_id = $1",
+        )
+        .bind(authority.command().into_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        let enrollment_is_current = match target_kind.as_str() {
+            "runner" | "same_runner_reenrollment" => {
+                enrollment.state() == RunnerEnrollmentState::Active
+            }
+            "pending_enrollment" => enrollment.state() == RunnerEnrollmentState::Pending,
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        };
+        if !enrollment_is_current || enrollment.runner() != receipt.runner() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+
+        let connection = sqlx::query(PROMOTE_PENDING_RUNNER_CONNECTION)
+            .bind(authority.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+        let connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            connection.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let connection_event_ordinal =
+            decode_u64(connection.decode_column("connection_event_ordinal")?)?;
+        let connection_state: String = connection.decode_column("state_kind")?;
+        if connection_epoch != authority.connection_epoch()
+            || connection_event_ordinal != authority.connection_event_ordinal()
+            || connection_state != "connected"
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CURRENT_LOSS)
+            .bind(authority.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+
+        let current_registration: Decimal = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(authority.enrollment().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        if decode_registration_revision(current_registration)?.get()
+            != authority.registration_revision().get()
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::RegistrationChanged,
+            ));
+        }
+
+        let placement = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(receipt.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let placement_event_ordinal = decode_u64(placement.decode_column("event_ordinal")?)?;
+        let placement_revision =
+            decode_runner_generation(placement.decode_column("placement_revision")?)?;
+        let placement_state: String = placement.decode_column("state_kind")?;
+        if placement_event_ordinal != authority.lost_placement_event_ordinal()
+            || placement_revision != authority.lost_placement_revision()
+            || placement_state != "runner_lost"
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        let terminal_result_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM replace_lost_runner_result
+                  WHERE command_id = $1
+             )",
+        )
+        .bind(authority.command().into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if terminal_result_exists {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+
+        insert_workspace_ready_receipt(transaction.as_mut(), &receipt).await?;
+        commit_mutation(transaction).await?;
+        Ok(receipt)
     }
 
     /// Stores one already-authenticated receipt projection for integration tests.
@@ -7524,6 +7673,17 @@ impl RunnerReplacementProvisioningTransaction for RunnerProtocolStore {
     }
 }
 
+impl RunnerWorkspaceReadyTransaction for RunnerProtocolStore {
+    type Error = RunnerProtocolStoreError;
+
+    async fn record(
+        &mut self,
+        receipt: RunnerWorkspaceReadyReceipt,
+    ) -> Result<RunnerWorkspaceReadyReceipt, Self::Error> {
+        self.record_workspace_ready_receipt(receipt).await
+    }
+}
+
 impl PinnedRunnerReplacementTransaction for RunnerProtocolStore {
     type Error = RunnerProtocolStoreError;
 
@@ -7581,6 +7741,100 @@ impl RunnerLeaseResultTransaction for RunnerProtocolStore {
     ) -> Result<RunnerLeaseCompletion, Self::Error> {
         self.commit_lease_result(request).await
     }
+}
+
+fn validate_workspace_ready_receipt(
+    receipt: &RunnerWorkspaceReadyReceipt,
+    authority: &StoredWorkspaceProvisioningAuthorization,
+) -> Result<(), RunnerProtocolStoreError> {
+    let expected_relative_path = format!(
+        "sessions/{}/{}/repo",
+        receipt.session().as_uuid(),
+        receipt.placement_revision().get()
+    );
+    if receipt.session() != authority.session()
+        || receipt.placement_revision() != authority.successor_placement_revision()
+        || receipt.runner() != authority.runner()
+        || receipt.repository() != authority.repository()
+        || receipt.credential_profile() != authority.credential_profile()
+        || receipt.sandbox() != authority.sandbox()
+        || receipt.relative_path().as_str() != expected_relative_path
+    {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ));
+    }
+    Ok(())
+}
+
+fn exact_workspace_ready_replay(
+    supplied: RunnerWorkspaceReadyReceipt,
+    stored: StoredWorkspaceProvisioningReceipt,
+) -> Result<RunnerWorkspaceReadyReceipt, RunnerProtocolStoreError> {
+    let recorded = RunnerWorkspaceReadyReceipt::new(
+        stored.authorization,
+        stored.session,
+        stored.placement_revision,
+        stored.runner,
+        stored.manifest,
+        RunnerReadyManifestDigest::try_new(stored.manifest_digest)
+            .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?,
+        stored.repository,
+        stored.canonical_clone_url_digest,
+        stored.credential_profile,
+        stored.sandbox,
+        stored.relative_path,
+        stored.recovery,
+    );
+    if supplied != recorded {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ));
+    }
+    Ok(recorded)
+}
+
+async fn insert_workspace_ready_receipt(
+    connection: &mut PgConnection,
+    receipt: &RunnerWorkspaceReadyReceipt,
+) -> Result<(), RunnerProtocolStoreError> {
+    let (recovery_kind, branch_name, revision) = match receipt.recovery() {
+        WorkspaceRecovery::Commit { revision } => ("commit", None, revision.as_str()),
+        WorkspaceRecovery::Branch { name, revision } => {
+            ("branch", Some(name.as_str()), revision.as_str())
+        }
+    };
+    sqlx::query(
+        "INSERT INTO runner_replacement_workspace_receipt
+            (authorization_id, session_id, placement_revision, runner_id,
+             manifest_id, manifest_digest, repository_key,
+             canonical_clone_url_digest, credential_profile_name,
+             sandbox_profile, relative_path, recovery_kind, branch_name,
+             revision)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                 $12, $13, $14)",
+    )
+    .bind(receipt.authorization().into_uuid())
+    .bind(receipt.session().into_uuid())
+    .bind(Decimal::from(receipt.placement_revision().get()))
+    .bind(receipt.runner().into_uuid())
+    .bind(receipt.manifest_id().into_uuid())
+    .bind(receipt.manifest_digest().as_str())
+    .bind(receipt.repository().as_str())
+    .bind(receipt.canonical_clone_url_digest().as_str())
+    .bind(
+        receipt
+            .credential_profile()
+            .map(CredentialProfileName::as_str),
+    )
+    .bind(runner_sandbox_to_str(receipt.sandbox()))
+    .bind(receipt.relative_path().as_str())
+    .bind(recovery_kind)
+    .bind(branch_name)
+    .bind(revision)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 fn map_runner_tool_loop_error(

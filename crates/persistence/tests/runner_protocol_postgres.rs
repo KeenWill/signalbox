@@ -16,7 +16,8 @@ use signalbox_application::{
     PinnedRunnerDispatchRequest, PinnedRunnerReplacementIdentities, PinnedRunnerReplacementOutcome,
     PinnedRunnerReplacementTransaction, PromotePendingRunnerOutcome,
     ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
-    RunnerReplacementProvisioningOutcome, ToolDefinition, ToolInputSchema,
+    RunnerReadyManifestDigest, RunnerReplacementProvisioningOutcome, RunnerWorkspaceReadyReceipt,
+    ToolDefinition, ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -1884,6 +1885,64 @@ async fn workspace_receipt_projection_from_authorization(
         enrollment: fixture.enrollment,
         connection_epoch: fixture.connection_epoch,
     })
+}
+
+fn workspace_ready_receipt(
+    fixture: &WorkspaceReceiptProjectionFixture,
+) -> RunnerWorkspaceReadyReceipt {
+    let repository = fixture
+        .workspace
+        .repository
+        .as_ref()
+        .expect("the ready receipt fixture names its repository")
+        .clone();
+    let clone_url_digest = fixture
+        .workspace
+        .canonical_clone_url_digest
+        .as_ref()
+        .expect("the ready receipt fixture names its clone URL digest")
+        .clone();
+    let recovery = fixture
+        .workspace
+        .recovery
+        .as_ref()
+        .expect("the ready receipt fixture names its recovery facts")
+        .clone();
+    RunnerWorkspaceReadyReceipt::new(
+        fixture.authorization,
+        fixture.workspace.session,
+        fixture.workspace.placement_revision,
+        fixture.workspace.runner,
+        fixture.workspace.manifest_id,
+        RunnerReadyManifestDigest::try_new(fixture.manifest_digest.clone())
+            .expect("the ready receipt fixture manifest digest is canonical"),
+        repository,
+        clone_url_digest,
+        fixture.workspace.credential_profile.clone(),
+        fixture.workspace.sandbox,
+        fixture.workspace.relative_path.clone(),
+        recovery,
+    )
+}
+
+fn conflicting_workspace_ready_receipt(
+    fixture: &WorkspaceReceiptProjectionFixture,
+) -> RunnerWorkspaceReadyReceipt {
+    let receipt = workspace_ready_receipt(fixture);
+    RunnerWorkspaceReadyReceipt::new(
+        receipt.authorization(),
+        receipt.session(),
+        receipt.placement_revision(),
+        receipt.runner(),
+        WorkspaceManifestId::from_uuid(uuid(0x9392)),
+        receipt.manifest_digest().clone(),
+        receipt.repository().clone(),
+        receipt.canonical_clone_url_digest().clone(),
+        receipt.credential_profile().cloned(),
+        receipt.sandbox(),
+        receipt.relative_path().clone(),
+        receipt.recovery().clone(),
+    )
 }
 
 async fn same_runner_workspace_provisioning_authorization_fixture(
@@ -23078,6 +23137,71 @@ async fn s32_inv044_replacement_workspace_receipt_round_trips() -> Result<(), Bo
     Ok(())
 }
 
+/// S32 / INV-012 / INV-044: the production admission boundary commits the
+/// authenticated receipt once and returns the same canonical receipt on replay.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_inv044_workspace_ready_admission_replays_the_exact_receipt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    let receipt = workspace_ready_receipt(&fixture);
+    let applied = fixture
+        .store
+        .record_workspace_ready_receipt(receipt.clone())
+        .await?;
+    let replayed = fixture
+        .store
+        .record_workspace_ready_receipt(receipt.clone())
+        .await?;
+    let receipt_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_replacement_workspace_receipt
+          WHERE authorization_id = $1",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(applied, receipt);
+    assert_eq!(replayed, receipt);
+    assert_eq!(receipt_count, 1);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012: one authorization cannot be replayed with another stable
+/// manifest identity after its exact receipt is durable.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_workspace_ready_admission_rejects_conflicting_reuse()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .record_workspace_ready_receipt(workspace_ready_receipt(&fixture))
+        .await?;
+    let rejected = fixture
+        .store
+        .record_workspace_ready_receipt(conflicting_workspace_ready_receipt(&fixture))
+        .await
+        .expect_err("another manifest cannot reuse the recorded authorization");
+    let receipt_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_replacement_workspace_receipt
+          WHERE authorization_id = $1",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    assert_eq!(receipt_count, 1);
+    drop(pool);
+    Ok(())
+}
+
 /// S32 / INV-044: the branch recovery arm survives the same receipt write and
 /// independent typed readback as the commit recovery arm.
 #[tokio::test]
@@ -23120,22 +23244,13 @@ async fn s32_inv044_same_runner_replacement_workspace_receipt_round_trips()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = same_runner_workspace_receipt_projection_fixture(&pool).await?;
-    fixture
-        .store
-        .store_workspace_provisioning_receipt_projection_for_test(
-            fixture.authorization,
-            &fixture.workspace,
-            &fixture.manifest_digest,
-        )
-        .await?;
+    let receipt = workspace_ready_receipt(&fixture);
     let loaded = fixture
         .store
-        .load_workspace_provisioning_receipt(fixture.authorization)
-        .await?
-        .expect("the same-runner ready receipt reads back");
+        .record_workspace_ready_receipt(receipt.clone())
+        .await?;
 
-    assert_eq!(loaded.runner(), fixture.workspace.runner);
-    assert_eq!(loaded.manifest_id(), fixture.workspace.manifest_id);
+    assert_eq!(loaded, receipt);
     drop(pool);
     Ok(())
 }
@@ -23192,6 +23307,42 @@ async fn s32_inv044_replacement_workspace_receipt_rejects_a_lost_connection()
         .expect_err("a lost connection cannot submit its workspace receipt");
 
     assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: production admission rechecks the selected connection under
+/// the runner lock order and refuses a receipt after that authority is lost.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_ready_admission_rejects_a_lost_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let rejected = fixture
+        .store
+        .record_workspace_ready_receipt(workspace_ready_receipt(&fixture))
+        .await
+        .expect_err("a lost connection cannot admit its ready receipt");
+    let receipt_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_replacement_workspace_receipt
+          WHERE authorization_id = $1",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    assert_eq!(receipt_count, 0);
     drop(pool);
     Ok(())
 }
@@ -23671,14 +23822,44 @@ async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provision
         .stage_runner_replacement_provisioning(command, authorization)
         .await
         .expect("the pending successor stages its repository workspace");
-    let loaded_pending = store
-        .load_pending_enrollment(pending.receipt().request())
-        .await?
-        .expect("the staged candidate remains pending");
     let loaded_authorization = store
         .load_workspace_provisioning_authorization(authorization)
         .await?
         .expect("the pending successor authorization reads back");
+    let successor_revision = RunnerGeneration::try_from_u64(2)
+        .expect("the pending successor placement revision is positive");
+    let ready = RunnerWorkspaceReadyReceipt::new(
+        authorization,
+        session,
+        successor_revision,
+        pending_enrollment.runner(),
+        WorkspaceManifestId::from_uuid(uuid(0x9382)),
+        RunnerReadyManifestDigest::try_new("c".repeat(64))
+            .expect("the pending ready-manifest digest is canonical"),
+        repository.clone(),
+        CanonicalCloneUrlDigest::try_new("d".repeat(64))
+            .expect("the pending clone-URL digest is canonical"),
+        None,
+        sandbox,
+        WorkspaceRelativePath::try_new(format!(
+            "sessions/{}/{}/repo",
+            session.as_uuid(),
+            successor_revision.get()
+        ))
+        .expect("the pending ready-manifest path is relative"),
+        WorkspaceRecovery::Commit {
+            revision: WorkspaceRevision::try_new("e".repeat(40))
+                .expect("the pending ready-manifest revision is canonical"),
+        },
+    );
+    let recorded = store
+        .record_workspace_ready_receipt(ready.clone())
+        .await
+        .expect("the pending successor ready receipt records");
+    let loaded_pending = store
+        .load_pending_enrollment(pending.receipt().request())
+        .await?
+        .expect("the ready candidate remains pending");
 
     assert_eq!(
         staged,
@@ -23686,8 +23867,7 @@ async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provision
             signalbox_application::RunnerReplacementProvisioningStage::from_stored(
                 authorization,
                 session,
-                RunnerGeneration::try_from_u64(2)
-                    .expect("the pending successor placement revision is positive"),
+                successor_revision,
                 pending_enrollment.enrollment(),
                 pending_enrollment.runner(),
                 RunnerGeneration::try_from_u64(pending.receipt().registration().revision().get(),)
@@ -23702,6 +23882,7 @@ async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provision
     assert_eq!(loaded_authorization.command(), command_id);
     assert_eq!(loaded_authorization.runner(), pending_enrollment.runner());
     assert_eq!(loaded_authorization.repository(), &repository);
+    assert_eq!(recorded, ready);
     drop(pool);
     Ok(())
 }

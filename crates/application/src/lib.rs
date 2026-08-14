@@ -23,6 +23,7 @@ mod review_workflow;
 mod runner_lease_claim;
 mod runner_lease_result;
 mod runner_replacement_provisioning;
+mod runner_workspace_ready;
 mod scheduler;
 mod session_delegation;
 mod session_metadata;
@@ -149,6 +150,10 @@ pub use runner_replacement_provisioning::{
     RunnerReplacementProvisioningRequest, RunnerReplacementProvisioningService,
     RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
     UuidV7RunnerReplacementProvisioningIdGenerator,
+};
+pub use runner_workspace_ready::{
+    InvalidRunnerReadyManifestDigest, RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt,
+    RunnerWorkspaceReadyService, RunnerWorkspaceReadyTransaction,
 };
 pub use scheduler::{
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,
