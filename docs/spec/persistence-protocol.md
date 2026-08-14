@@ -225,7 +225,9 @@ Implemented table families (across the forward-only migrations):
   append-only discovery, registration, and exact turn-start provenance are owned
   by [workspace-instructions](workspace-instructions.md) (INV-061). Migration
   `202608140001` backfills the empty manifest for existing turns and makes every
-  `model_call` name the manifest for its own session and turn;
+  `model_call` name the manifest for its own session and turn. Its synthetic
+  discovery has no roots, candidates, or findings and is complete evidence for
+  the empty instruction projection those historical calls used;
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned

@@ -238,7 +238,9 @@ CREATE TRIGGER turn_instruction_manifest_is_append_only
 BEFORE UPDATE OR DELETE ON turn_instruction_manifest
 FOR EACH ROW EXECUTE FUNCTION reject_instruction_evidence_change();
 
--- Existing pre-alpha turns receive the same empty evidence new turns record.
+-- Existing pre-alpha turns ran with no instruction projection. Their synthetic
+-- discoveries therefore have no roots, candidates, or findings and are
+-- complete evidence for the empty manifest each historical model call used.
 INSERT INTO instruction_discovery (
     instruction_discovery_id,
     session_id,
@@ -250,7 +252,7 @@ INSERT INTO instruction_discovery (
     elapsed_millis,
     scan_complete
 )
-SELECT turn_id, session_id, turn_id, 1, 0, 0, 0, 0, false
+SELECT turn_id, session_id, turn_id, 1, 0, 0, 0, 0, true
   FROM turn_lifecycle;
 
 INSERT INTO turn_instruction_manifest (

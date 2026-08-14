@@ -13,22 +13,24 @@ use std::{
 
 use signalbox_application::{
     AuthorizeModelCallOutcome, ModelCallCredentialReference, StartEligibleTurnOutcome,
+    discover_workspace_instructions,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AssistantResponsePart,
     CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, CurrentToolAttempt,
     CurrentToolAttemptState, DecideToolRequest, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
-    PerInputConfigurationChoices, ProviderModelIdentity, ReconstitutedToolAttempt,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass,
-    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    FailedModelCallTurnIdentities, InitialToolApproval, InstructionBundleId,
+    InstructionDiscoveryId, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
+    ProviderModelIdentity, ReconstitutedToolAttempt, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision, ToolAttemptEnd,
+    ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass, ToolName,
+    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
     ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnId, UserContent,
+    TurnId, TurnInstructionManifest, TurnInstructionManifestId, UserContent,
 };
 use signalbox_persistence::{
     DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS,
@@ -39,6 +41,9 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
     tool_loop::PostgresToolLoopRepository,
+    workspace_instructions::{
+        RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepository,
+    },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -452,6 +457,9 @@ enum IdentityRole {
     ToolDecisionCommand = 150,
     ToolDecisionTurnAttempt = 151,
     ToolAttempt = 152,
+    InstructionDiscovery = 153,
+    InstructionManifest = 154,
+    InstructionBundle = 155,
 }
 
 const CANCELLED_TOOL_ENTRY_OFFSET: u128 = 64;
@@ -828,6 +836,32 @@ async fn activate_turn(pool: &PgPool, ids: OperationIds, flow: TurnFlow) -> Harn
 async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
     let flow = create_and_submit_turn(pool, ids).await?;
     activate_turn(pool, ids, flow).await?;
+    let instruction_manifest_id =
+        TurnInstructionManifestId::from_uuid(ids.uuid(IdentityRole::InstructionManifest));
+    let instruction_outcome = WorkspaceInstructionRepository::new(pool.clone())
+        .record_turn_start(
+            InstructionDiscoveryId::from_uuid(ids.uuid(IdentityRole::InstructionDiscovery)),
+            TurnInstructionManifest::empty_turn_start(
+                instruction_manifest_id,
+                flow.session,
+                flow.turn,
+            ),
+            &discover_workspace_instructions(Vec::new()),
+            || InstructionBundleId::from_uuid(ids.uuid(IdentityRole::InstructionBundle)),
+        )
+        .await?;
+    match instruction_outcome {
+        RecordTurnInstructionSnapshotOutcome::Recorded(recorded)
+            if recorded == instruction_manifest_id => {}
+        RecordTurnInstructionSnapshotOutcome::Recorded(_) => {
+            return Err(error("instruction preparation recorded another manifest"));
+        }
+        RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_)
+        | RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete
+        | RecordTurnInstructionSnapshotOutcome::TurnUnavailable => {
+            return Err(error("instruction preparation did not record the manifest"));
+        }
+    }
 
     let provider = ProviderModelIdentity::from_uuid(ids.uuid(IdentityRole::ProviderModel));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(

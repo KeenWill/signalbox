@@ -30,8 +30,6 @@ pub enum TurnInstructionManifestPreflight {
     Absent,
     /// One complete canonical manifest is already bound to this turn.
     Available(TurnInstructionManifestId),
-    /// A pre-alpha migration manifest names an incomplete discovery.
-    DiscoveryIncomplete(TurnInstructionManifestId),
     /// The turn is absent or no longer in the required lifecycle state.
     TurnUnavailable,
 }
@@ -39,14 +37,17 @@ pub enum TurnInstructionManifestPreflight {
 /// Storage or authentication failure at the instruction boundary.
 #[derive(Debug)]
 pub enum WorkspaceInstructionRepositoryError {
-    Database(sqlx::Error),
+    Database {
+        source: sqlx::Error,
+        commit_ambiguous: bool,
+    },
     Corruption(&'static str),
 }
 
 impl fmt::Display for WorkspaceInstructionRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Database(error) => error.fmt(formatter),
+            Self::Database { source, .. } => source.fmt(formatter),
             Self::Corruption(reason) => {
                 write!(formatter, "workspace instruction corruption: {reason}")
             }
@@ -57,7 +58,7 @@ impl fmt::Display for WorkspaceInstructionRepositoryError {
 impl Error for WorkspaceInstructionRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database { source, .. } => Some(source),
             Self::Corruption(_) => None,
         }
     }
@@ -65,15 +66,29 @@ impl Error for WorkspaceInstructionRepositoryError {
 
 impl From<sqlx::Error> for WorkspaceInstructionRepositoryError {
     fn from(value: sqlx::Error) -> Self {
-        Self::Database(value)
+        Self::Database {
+            source: value,
+            commit_ambiguous: false,
+        }
+    }
+}
+
+impl WorkspaceInstructionRepositoryError {
+    fn ambiguous_commit(source: sqlx::Error) -> Self {
+        Self::Database {
+            source,
+            commit_ambiguous: true,
+        }
     }
 }
 
 impl ClassifyOperatorFailure for WorkspaceInstructionRepositoryError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::Database(_) => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true,
+            Self::Database {
+                commit_ambiguous, ..
+            } => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: *commit_ambiguous,
             },
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
         }
@@ -285,7 +300,10 @@ impl WorkspaceInstructionRepository {
             .await?;
         }
         if !snapshot.is_complete() {
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(WorkspaceInstructionRepositoryError::ambiguous_commit)?;
             return Ok(RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete);
         }
         sqlx::query(
@@ -304,7 +322,10 @@ impl WorkspaceInstructionRepository {
         .bind(manifest.manifest_hash().as_bytes().as_slice())
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(WorkspaceInstructionRepositoryError::ambiguous_commit)?;
         Ok(RecordTurnInstructionSnapshotOutcome::Recorded(
             manifest.id(),
         ))
@@ -323,13 +344,15 @@ impl WorkspaceInstructionRepository {
         }
         let existing = load_manifest(&mut transaction, session, turn).await?;
         transaction.rollback().await?;
-        Ok(match existing {
-            Some((manifest, true)) => TurnInstructionManifestPreflight::Available(manifest.id()),
-            Some((manifest, false)) => {
-                TurnInstructionManifestPreflight::DiscoveryIncomplete(manifest.id())
+        match existing {
+            Some((manifest, true)) => {
+                Ok(TurnInstructionManifestPreflight::Available(manifest.id()))
             }
-            None => TurnInstructionManifestPreflight::Absent,
-        })
+            Some((_manifest, false)) => Err(WorkspaceInstructionRepositoryError::Corruption(
+                "manifest discovery incomplete",
+            )),
+            None => Ok(TurnInstructionManifestPreflight::Absent),
+        }
     }
 }
 
@@ -432,5 +455,34 @@ const fn finding_kind(kind: InstructionDiscoveryFindingKind) -> &'static str {
             InstructionDiscoveryLimitKind::CandidateSourceBytes => "limit_candidate_source_bytes",
             InstructionDiscoveryLimitKind::ElapsedTime => "limit_elapsed_time",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_commit_database_failure_is_not_commit_ambiguous() {
+        let error = WorkspaceInstructionRepositoryError::from(sqlx::Error::RowNotFound);
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        );
+    }
+
+    #[test]
+    fn commit_failure_is_commit_ambiguous() {
+        let error = WorkspaceInstructionRepositoryError::ambiguous_commit(sqlx::Error::RowNotFound);
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        );
     }
 }
