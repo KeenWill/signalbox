@@ -195,8 +195,12 @@ impl WorkspaceInstructionRepository {
         Ok(sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
-                   FROM runner_current_session_placement
-                  WHERE session_id = $1
+                   FROM runner_current_session_placement AS current_placement
+                   JOIN runner_session_placement_record AS placement
+                     ON placement.session_id = current_placement.session_id
+                    AND placement.event_ordinal = current_placement.event_ordinal
+                  WHERE current_placement.session_id = $1
+                    AND placement.state_kind <> 'runner_abandoned'
              )",
         )
         .bind(session.into_uuid())
