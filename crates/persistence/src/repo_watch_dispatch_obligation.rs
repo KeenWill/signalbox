@@ -264,18 +264,13 @@ pub(crate) async fn load_obligation_admission(
     obligation: Uuid,
     event: RepoWatchEventId,
 ) -> Result<ObligationAdmission, RepoWatchDispatchRepositoryError> {
-    let row = sqlx::query(
-        "SELECT latest_event_id, settled_kind, settled_dispatch_id
-           FROM repo_watch_dispatch_obligation
-          WHERE obligation_id = $1
-            FOR UPDATE",
-    )
-    .bind(obligation)
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(RepoWatchDispatchRepositoryError::Corruption(
-        "repository-watch obligation disappeared",
-    ))?;
+    let row = sqlx::query(crate::lock_inventory::REPO_WATCH_DISPATCH_OBLIGATION)
+        .bind(obligation)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+            "repository-watch obligation disappeared",
+        ))?;
     let latest_event: Uuid = row.try_get("latest_event_id")?;
     if latest_event != *event.as_uuid() {
         return Ok(ObligationAdmission::Superseded);
