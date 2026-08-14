@@ -218,6 +218,84 @@ struct CategoryScore {
     excess_escalations: usize,
 }
 
+struct ScorecardMetadata {
+    judge_selection: String,
+    provider_model: String,
+    corpus_digest: String,
+    contract_digest: String,
+    rendered_digest: String,
+    repeats: usize,
+    speculative_tools: Vec<String>,
+}
+
+fn render_scorecard(
+    metadata: ScorecardMetadata,
+    scores: &BTreeMap<CaseCategory, CategoryScore>,
+    case_reports: Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let categories = scores
+        .iter()
+        .map(|(category, score)| {
+            serde_json::json!({
+                "category": category.as_str(),
+                "cases": score.cases,
+                "correct_majorities": score.correct_majorities,
+                "unstable_cases": score.unstable_cases,
+                "stability_unmeasured_cases": score.stability_unmeasured_cases,
+                "partial_cases": score.partial_cases,
+                "unmeasured_cases": score.unmeasured_cases,
+                "failed_calls": score.failed_calls,
+            })
+        })
+        .collect::<Vec<_>>();
+    let escalation = serde_json::json!({
+        "expected_cases": scores.values().map(|score| score.expected_escalations).sum::<usize>(),
+        "observed_majorities": scores
+            .values()
+            .map(|score| score.observed_escalation_majorities)
+            .sum::<usize>(),
+        "missed": scores.values().map(|score| score.missed_escalations).sum::<usize>(),
+        "excess": scores.values().map(|score| score.excess_escalations).sum::<usize>(),
+    });
+    let scorecard = serde_json::json!({
+        "judge_selection": metadata.judge_selection,
+        "provider_model": metadata.provider_model,
+        "corpus_digest": metadata.corpus_digest,
+        "contract_digest": metadata.contract_digest,
+        "rendered_digest": metadata.rendered_digest,
+        "repeats": metadata.repeats,
+        "speculative_tools": metadata.speculative_tools,
+        "total_cases": scores.values().map(|score| score.cases).sum::<usize>(),
+        "correct_majorities": scores
+            .values()
+            .map(|score| score.correct_majorities)
+            .sum::<usize>(),
+        "unstable_cases": scores
+            .values()
+            .map(|score| score.unstable_cases)
+            .sum::<usize>(),
+        "stability_unmeasured_cases": scores
+            .values()
+            .map(|score| score.stability_unmeasured_cases)
+            .sum::<usize>(),
+        "partial_cases": scores
+            .values()
+            .map(|score| score.partial_cases)
+            .sum::<usize>(),
+        "unmeasured_cases": scores
+            .values()
+            .map(|score| score.unmeasured_cases)
+            .sum::<usize>(),
+        "failed_calls": scores.values().map(|score| score.failed_calls).sum::<usize>(),
+        "escalation_calibration": escalation,
+        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
+        "categories": categories,
+        "cases": case_reports,
+    });
+    serde_json::to_string_pretty(&scorecard)
+        .map_err(|error| format!("scorecard rendering failed: {error}"))
+}
+
 /// Stable FNV-1a digest, so two scorecards are comparable exactly when the
 /// digested bytes — corpus, judge prompt, or rendered payloads — are
 /// identical.
@@ -626,60 +704,19 @@ async fn run(options: RunOptions) -> Result<(), String> {
         }));
     }
 
-    let categories = scores
-        .iter()
-        .map(|(category, score)| {
-            serde_json::json!({
-                "category": category.as_str(),
-                "cases": score.cases,
-                "correct_majorities": score.correct_majorities,
-                "unstable_cases": score.unstable_cases,
-                "stability_unmeasured_cases": score.stability_unmeasured_cases,
-                "partial_cases": score.partial_cases,
-                "unmeasured_cases": score.unmeasured_cases,
-                "failed_calls": score.failed_calls,
-            })
-        })
-        .collect::<Vec<_>>();
-    let total_cases: usize = scores.values().map(|score| score.cases).sum();
-    let total_stability_unmeasured: usize = scores
-        .values()
-        .map(|score| score.stability_unmeasured_cases)
-        .sum();
-    let escalation = serde_json::json!({
-        "expected_cases": scores.values().map(|score| score.expected_escalations).sum::<usize>(),
-        "observed_majorities": scores
-            .values()
-            .map(|score| score.observed_escalation_majorities)
-            .sum::<usize>(),
-        "missed": scores.values().map(|score| score.missed_escalations).sum::<usize>(),
-        "excess": scores.values().map(|score| score.excess_escalations).sum::<usize>(),
-    });
-    let total_correct: usize = scores.values().map(|score| score.correct_majorities).sum();
-    let total_unstable: usize = scores.values().map(|score| score.unstable_cases).sum();
-    let total_unmeasured: usize = scores.values().map(|score| score.unmeasured_cases).sum();
-    let total_partial: usize = scores.values().map(|score| score.partial_cases).sum();
-    let scorecard = serde_json::json!({
-        "judge_selection": selection.into_uuid().to_string(),
-        "provider_model": provider_model,
-        "corpus_digest": digest,
-        "contract_digest": contract_digest,
-        "rendered_digest": rendered_digest,
-        "repeats": options.repeats,
-        "speculative_tools": speculative_tools,
-        "total_cases": total_cases,
-        "correct_majorities": total_correct,
-        "unstable_cases": total_unstable,
-        "stability_unmeasured_cases": total_stability_unmeasured,
-        "partial_cases": total_partial,
-        "unmeasured_cases": total_unmeasured,
-        "escalation_calibration": escalation,
-        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
-        "categories": categories,
-        "cases": case_reports,
-    });
-    let rendered = serde_json::to_string_pretty(&scorecard)
-        .map_err(|error| format!("scorecard rendering failed: {error}"))?;
+    let rendered = render_scorecard(
+        ScorecardMetadata {
+            judge_selection: selection.into_uuid().to_string(),
+            provider_model,
+            corpus_digest: digest,
+            contract_digest,
+            rendered_digest,
+            repeats: options.repeats,
+            speculative_tools,
+        },
+        &scores,
+        case_reports,
+    )?;
     println!("{rendered}");
     Ok(())
 }
