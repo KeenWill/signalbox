@@ -34,6 +34,12 @@ while :; do
 	if pgrep -x -- "$process_name" >/dev/null; then
 		sleep "$poll_seconds"
 		continue
+	else
+		pgrep_status=$?
+	fi
+	if [ "$pgrep_status" -ne 1 ]; then
+		echo "supervise-lifecycle: process lookup failed with status $pgrep_status" >&2
+		exit "$pgrep_status"
 	fi
 
 	echo "supervise-lifecycle: $process_name is absent; invoking lifecycle boot" >&2

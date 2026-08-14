@@ -66,6 +66,13 @@ class SuperviseLifecycleTests(unittest.TestCase):
         self.assertEqual(run.lifecycle_calls, "")
         self.assertEqual(run.result.stderr, "")
 
+    def test_process_lookup_error_does_not_boot(self) -> None:
+        run = run_watchdog(pgrep_status=2, sleep_status=0)
+
+        self.assertEqual(run.result.returncode, 2)
+        self.assertEqual(run.lifecycle_calls, "")
+        self.assertIn("process lookup failed with status 2", run.result.stderr)
+
     def test_zero_poll_interval_is_rejected(self) -> None:
         result = subprocess.run(
             [str(SCRIPT), "/bin/true", PROCESS_NAME, "0"],
