@@ -148,9 +148,7 @@ async fn inv065_nondeterminism_fault_round_trips_both_frames() -> Result<(), Box
     let divergence = replay
         .submit_request(observed.clone())
         .expect_err("different canonical request bytes must diverge");
-    let fault = repository
-        .append_nondeterminism_fault(run, divergence)
-        .await?;
+    let fault = repository.append_nondeterminism_fault(divergence).await?;
 
     let reloaded = repository
         .load(run)
@@ -191,6 +189,75 @@ async fn inv066_journal_frames_are_append_only() -> Result<(), Box<dyn Error>> {
     .await;
 
     assert!(update.is_err());
+
+    let delete = sqlx::query(
+        "DELETE FROM program_run_journal_entry
+          WHERE run_id = $1 AND request_ordinal = $2",
+    )
+    .bind(run.into_uuid())
+    .bind(rust_decimal::Decimal::from(request.ordinal().as_u64()))
+    .execute(&pool)
+    .await;
+
+    assert!(delete.is_err());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn sequence_state_row_cannot_be_deleted() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+
+    let delete = sqlx::query(
+        "DELETE FROM program_run_journal_sequence_state
+          WHERE run_id = $1",
+    )
+    .bind(run.into_uuid())
+    .execute(&pool)
+    .await;
+
+    assert!(delete.is_err());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn nondeterminism_evidence_cannot_attach_to_request() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let request = repository
+        .append_request(run, None, RequestKind::Now(payload(b"ordinary-request")))
+        .await?;
+
+    let insert = sqlx::query(
+        "INSERT INTO program_run_journal_nondeterminism (
+             run_id, journal_position,
+             expected_request_ordinal, expected_kind, expected_payload_inline,
+             observed_request_ordinal, observed_kind, observed_payload_inline
+         )
+         SELECT run_id, journal_position,
+                request_ordinal, frame_kind, payload_inline,
+                request_ordinal, frame_kind, payload_inline
+           FROM program_run_journal_entry
+          WHERE run_id = $1 AND request_ordinal = $2",
+    )
+    .bind(run.into_uuid())
+    .bind(rust_decimal::Decimal::from(request.ordinal().as_u64()))
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
 
     pool.close().await;
     drop(container);

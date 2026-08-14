@@ -246,9 +246,9 @@ impl ProgramJournalRepository {
     /// Persists the typed divergence produced by the replay seam as a fault.
     pub async fn append_nondeterminism_fault(
         &self,
-        run: ProgramRunId,
         failure: NondeterminismError,
     ) -> Result<DeliveryFrame, ProgramJournalRepositoryError> {
+        let run = failure.run();
         self.append_delivery(run, DeliveryKind::Fault(failure.into_fault()))
             .await
     }

@@ -312,7 +312,7 @@ pub enum ReplayedRequest {
 pub struct NondeterminismError { /* private */ }
 impl NondeterminismError {
     pub fn into_fault(self) -> ProgramFault;
-    // accessors: expected(), observed()
+    // accessors: run(), expected(), observed()
 }
 
 pub struct ReplayCursor { /* private */ }

@@ -473,11 +473,16 @@ pub enum ReplayedRequest {
 /// Typed nondeterminism failure retaining both complete frames.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NondeterminismError {
+    run: ProgramRunId,
     expected: Box<RequestFrame>,
     observed: Box<RequestFrame>,
 }
 
 impl NondeterminismError {
+    pub const fn run(&self) -> ProgramRunId {
+        self.run
+    }
+
     pub const fn expected(&self) -> &RequestFrame {
         &self.expected
     }
@@ -516,6 +521,7 @@ impl Error for NondeterminismError {}
 /// `Live` is returned the cursor never consults history again.
 #[derive(Clone, Debug)]
 pub struct ReplayCursor {
+    run: ProgramRunId,
     entries: Box<[JournalEntry]>,
     next: usize,
     live: bool,
@@ -524,6 +530,7 @@ pub struct ReplayCursor {
 impl ReplayCursor {
     pub fn new(journal: ProgramJournal) -> Self {
         Self {
+            run: journal.run,
             entries: journal.entries,
             next: 0,
             live: false,
@@ -565,6 +572,7 @@ impl ReplayCursor {
         };
         if expected != &observed {
             return Err(NondeterminismError {
+                run: self.run,
                 expected: Box::new(expected.clone()),
                 observed: Box::new(observed),
             });
@@ -681,6 +689,10 @@ mod tests {
             .submit_request(observed.clone())
             .expect_err("different canonical request bytes must diverge");
 
+        assert_eq!(
+            error.run(),
+            ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID))
+        );
         assert_eq!(error.expected(), &expected);
         assert_eq!(error.observed(), &observed);
         assert_eq!(

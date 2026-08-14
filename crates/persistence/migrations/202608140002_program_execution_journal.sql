@@ -423,7 +423,7 @@ BEGIN
      WHERE run_id = NEW.run_id
        AND journal_position = NEW.journal_position;
 
-    IF (cause = 'nondeterminism') <> (evidence_count = 1) THEN
+    IF (cause IS NOT DISTINCT FROM 'nondeterminism') <> (evidence_count = 1) THEN
         RAISE EXCEPTION
             'nondeterminism fault and its complete twin frames must commit together'
             USING ERRCODE = '23514';
@@ -471,6 +471,11 @@ EXECUTE FUNCTION reject_program_journal_invalid_resolution();
 
 CREATE TRIGGER program_run_journal_stream_is_append_only
 BEFORE UPDATE OR DELETE ON program_run_journal_stream
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER program_run_journal_sequence_state_cannot_be_deleted
+BEFORE DELETE ON program_run_journal_sequence_state
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
