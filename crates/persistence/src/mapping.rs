@@ -837,6 +837,38 @@ pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommand
     }
 }
 
+/// Closed repository-watch singleton scopes stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchSingletonScopeStorageKind {
+    PullRequest,
+    Stack,
+    Rule,
+    Repository,
+}
+
+pub(crate) const fn repo_watch_singleton_scope_to_str(
+    value: RepoWatchSingletonScopeStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchSingletonScopeStorageKind::PullRequest => "pull_request",
+        RepoWatchSingletonScopeStorageKind::Stack => "stack",
+        RepoWatchSingletonScopeStorageKind::Rule => "rule",
+        RepoWatchSingletonScopeStorageKind::Repository => "repo",
+    }
+}
+
+pub(crate) fn repo_watch_singleton_scope_from_str(
+    value: &str,
+) -> Option<RepoWatchSingletonScopeStorageKind> {
+    match value {
+        "pull_request" => Some(RepoWatchSingletonScopeStorageKind::PullRequest),
+        "stack" => Some(RepoWatchSingletonScopeStorageKind::Stack),
+        "rule" => Some(RepoWatchSingletonScopeStorageKind::Rule),
+        "repo" => Some(RepoWatchSingletonScopeStorageKind::Repository),
+        _ => None,
+    }
+}
+
 /// Stored target shape for one repository-watch event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventTargetStorageKind {

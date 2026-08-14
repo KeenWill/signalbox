@@ -19,7 +19,11 @@ use signalbox_domain::{
 use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
 
 use crate::{
-    commit_failure_is_ambiguous, create_session::insert_fresh_prepared, mapping::session_id_to_uuid,
+    commit_failure_is_ambiguous,
+    create_session::insert_fresh_prepared,
+    mapping::{
+        RepoWatchSingletonScopeStorageKind, repo_watch_singleton_scope_to_str, session_id_to_uuid,
+    },
 };
 
 const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
@@ -121,6 +125,10 @@ impl PostgresRepoWatchDispatchStore {
             pool,
             credential_pin,
         }
+    }
+
+    pub(crate) const fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Deactivates rules belonging to repositories absent from configuration.
@@ -347,15 +355,57 @@ impl PostgresRepoWatchDispatchStore {
     where
         SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
     {
+        self.handle_repo_watch_evaluation_with_admission(
+            evaluation,
+            select_definition,
+            EvaluationAdmission::Fresh,
+        )
+        .await
+    }
+
+    /// Applies one collapsed obligation after its singleton and cooldown are free.
+    pub async fn handle_repo_watch_obligation_with_alias_resolver<SelectDefinition>(
+        &self,
+        obligation: crate::repo_watch_dispatch_obligation::RepoWatchDispatchObligation,
+        evaluation: RepoWatchRuleEvaluation,
+        select_definition: SelectDefinition,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
+    where
+        SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
+    {
+        self.handle_repo_watch_evaluation_with_admission(
+            evaluation,
+            select_definition,
+            EvaluationAdmission::Obligation(Box::new(obligation)),
+        )
+        .await
+    }
+
+    async fn handle_repo_watch_evaluation_with_admission<SelectDefinition>(
+        &self,
+        evaluation: RepoWatchRuleEvaluation,
+        select_definition: SelectDefinition,
+        admission: EvaluationAdmission,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
+    where
+        SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
+    {
         match evaluation {
             RepoWatchRuleEvaluation::NotMatched {
                 event,
                 rule_id,
                 rule_version,
-            } => {
-                self.record_simple_outcome(&event, &rule_id, rule_version, "not_matched")
-                    .await
-            }
+            } => match admission {
+                EvaluationAdmission::Fresh => {
+                    self.record_simple_outcome(&event, &rule_id, rule_version, "not_matched")
+                        .await
+                }
+                EvaluationAdmission::Obligation(_) => {
+                    Err(RepoWatchDispatchRepositoryError::Corruption(
+                        "owed repository-watch event no longer matches its activated rule",
+                    ))
+                }
+            },
             RepoWatchRuleEvaluation::Matched {
                 dispatch_id,
                 event,
@@ -366,25 +416,74 @@ impl PostgresRepoWatchDispatchStore {
                 actions,
             } => {
                 let mut transaction = self.pool.begin().await?;
-                let singleton = StoredSingletonKey::from_domain(&singleton);
+                let (singleton, matched_admission) = match admission {
+                    EvaluationAdmission::Fresh => (
+                        StoredSingletonKey::from_domain(&singleton),
+                        MatchedAdmission::Fresh,
+                    ),
+                    EvaluationAdmission::Obligation(obligation) => {
+                        let (obligation_id, owed_event, singleton) = obligation.into_parts();
+                        if owed_event != event {
+                            transaction.rollback().await?;
+                            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                                "repository-watch obligation and evaluation disagree",
+                            ));
+                        }
+                        (singleton, MatchedAdmission::Obligation { obligation_id })
+                    }
+                };
                 lock_text(&mut transaction, event.repository().as_str()).await?;
                 lock_text(
                     &mut transaction,
                     &singleton.lock_key(&rule_id, rule_version),
                 )
                 .await?;
-                if let Some(outcome) =
-                    load_recorded_evaluation(&mut transaction, event.id(), &rule_id, rule_version)
+                match matched_admission {
+                    MatchedAdmission::Fresh => {
+                        if let Some(outcome) = load_recorded_evaluation(
+                            &mut transaction,
+                            event.id(),
+                            &rule_id,
+                            rule_version,
+                        )
                         .await?
-                {
-                    transaction.rollback().await?;
-                    return Ok(outcome);
+                        {
+                            transaction.rollback().await?;
+                            return Ok(outcome);
+                        }
+                    }
+                    MatchedAdmission::Obligation { obligation_id } => {
+                        use crate::repo_watch_dispatch_obligation::ObligationAdmission;
+                        match crate::repo_watch_dispatch_obligation::load_obligation_admission(
+                            &mut transaction,
+                            obligation_id,
+                            event.id(),
+                        )
+                        .await?
+                        {
+                            ObligationAdmission::Pending => {}
+                            ObligationAdmission::Superseded => {
+                                transaction.rollback().await?;
+                                return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
+                            }
+                            ObligationAdmission::Settled(outcome) => {
+                                transaction.rollback().await?;
+                                return Ok(outcome);
+                            }
+                        }
+                    }
                 }
                 if !rule_is_active(&mut transaction, &event, &rule_id, rule_version).await? {
                     transaction.rollback().await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
                 }
-                if singleton_is_occupied(&mut transaction, &rule_id, rule_version, &singleton)
+                if matched_admission == MatchedAdmission::Fresh
+                    && crate::repo_watch_dispatch_obligation::active_obligation_exists(
+                        &mut transaction,
+                        &rule_id,
+                        rule_version,
+                        &singleton,
+                    )
                     .await?
                 {
                     insert_evaluation(
@@ -392,26 +491,69 @@ impl PostgresRepoWatchDispatchStore {
                         &event,
                         &rule_id,
                         rule_version,
-                        "occupied",
+                        "coalesced",
                         None,
+                    )
+                    .await?;
+                    crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
+                        &mut transaction,
+                        dispatch_id,
+                        None,
+                        &event,
+                        &rule_id,
+                        rule_version,
+                        &singleton,
                     )
                     .await?;
                     commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
                 }
+                if let Some(blocking_dispatch) =
+                    occupying_dispatch(&mut transaction, &rule_id, rule_version, &singleton).await?
+                {
+                    if matched_admission == MatchedAdmission::Fresh {
+                        insert_evaluation(
+                            &mut transaction,
+                            &event,
+                            &rule_id,
+                            rule_version,
+                            "occupied",
+                            None,
+                        )
+                        .await?;
+                        crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
+                            &mut transaction,
+                            dispatch_id,
+                            Some(blocking_dispatch),
+                            &event,
+                            &rule_id,
+                            rule_version,
+                            &singleton,
+                        )
+                        .await?;
+                        commit(transaction).await?;
+                    } else {
+                        transaction.rollback().await?;
+                    }
+                    return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
+                }
                 if singleton_is_cooling_down(&mut transaction, &rule_id, rule_version, &singleton)
                     .await?
                 {
-                    insert_evaluation(
-                        &mut transaction,
-                        &event,
-                        &rule_id,
-                        rule_version,
-                        "cooldown",
-                        None,
-                    )
-                    .await?;
-                    commit(transaction).await?;
+                    if matched_admission == MatchedAdmission::Fresh {
+                        insert_evaluation(
+                            &mut transaction,
+                            &event,
+                            &rule_id,
+                            rule_version,
+                            "cooldown",
+                            None,
+                        )
+                        .await?;
+                        commit(transaction).await?;
+                    } else {
+                        transaction.rollback().await?;
+                    }
                     return Ok(RepoWatchRuleEvaluationOutcome::Cooldown);
                 }
                 let action_count = i32::try_from(actions.len()).map_err(|_| {
@@ -546,15 +688,28 @@ impl PostgresRepoWatchDispatchStore {
                     .map_err(RepoWatchDispatchRepositoryError::GoalCommission)?;
                     sessions.push(session);
                 }
-                insert_evaluation(
-                    &mut transaction,
-                    &event,
-                    &rule_id,
-                    rule_version,
-                    "dispatched",
-                    Some(dispatch_id),
-                )
-                .await?;
+                match matched_admission {
+                    MatchedAdmission::Fresh => {
+                        insert_evaluation(
+                            &mut transaction,
+                            &event,
+                            &rule_id,
+                            rule_version,
+                            "dispatched",
+                            Some(dispatch_id),
+                        )
+                        .await?;
+                    }
+                    MatchedAdmission::Obligation { obligation_id } => {
+                        crate::repo_watch_dispatch_obligation::settle_dispatch_obligation(
+                            &mut transaction,
+                            obligation_id,
+                            event.id(),
+                            dispatch_id,
+                        )
+                        .await?;
+                    }
+                }
                 commit(transaction).await?;
                 Ok(RepoWatchRuleEvaluationOutcome::Dispatched {
                     dispatch_id,
@@ -563,6 +718,17 @@ impl PostgresRepoWatchDispatchStore {
             }
         }
     }
+}
+
+enum EvaluationAdmission {
+    Fresh,
+    Obligation(Box<crate::repo_watch_dispatch_obligation::RepoWatchDispatchObligation>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MatchedAdmission {
+    Fresh,
+    Obligation { obligation_id: Uuid },
 }
 
 impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
@@ -612,18 +778,18 @@ impl PostgresRepoWatchDispatchStore {
 }
 
 #[derive(Clone, Debug)]
-struct StoredSingletonKey {
-    scope: &'static str,
-    repository: Option<String>,
-    pull_request: Option<Decimal>,
-    stack_root_pull_request: Option<Decimal>,
+pub(crate) struct StoredSingletonKey {
+    pub(crate) scope: RepoWatchSingletonScopeStorageKind,
+    pub(crate) repository: Option<String>,
+    pub(crate) pull_request: Option<Decimal>,
+    pub(crate) stack_root_pull_request: Option<Decimal>,
 }
 
 impl StoredSingletonKey {
     fn from_domain(key: &RepoWatchSingletonKey) -> Self {
         match key {
             RepoWatchSingletonKey::PullRequest { repository, number } => Self {
-                scope: "pull_request",
+                scope: RepoWatchSingletonScopeStorageKind::PullRequest,
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: Some(Decimal::from(number.get())),
                 stack_root_pull_request: None,
@@ -632,19 +798,19 @@ impl StoredSingletonKey {
                 repository,
                 root_pull_request,
             } => Self {
-                scope: "stack",
+                scope: RepoWatchSingletonScopeStorageKind::Stack,
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: None,
                 stack_root_pull_request: Some(Decimal::from(root_pull_request.get())),
             },
             RepoWatchSingletonKey::Rule => Self {
-                scope: "rule",
+                scope: RepoWatchSingletonScopeStorageKind::Rule,
                 repository: None,
                 pull_request: None,
                 stack_root_pull_request: None,
             },
             RepoWatchSingletonKey::Repository { repository } => Self {
-                scope: "repo",
+                scope: RepoWatchSingletonScopeStorageKind::Repository,
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: None,
                 stack_root_pull_request: None,
@@ -657,7 +823,7 @@ impl StoredSingletonKey {
             "repo-watch\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             rule_id.as_str(),
             version.get(),
-            self.scope,
+            repo_watch_singleton_scope_to_str(self.scope),
             self.repository.as_deref().unwrap_or(""),
             self.pull_request
                 .map_or(String::new(), |value| value.to_string()),
@@ -705,7 +871,7 @@ async fn insert_batch(
     .bind(i64::try_from(batch.rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(batch.singleton.scope)
+    .bind(repo_watch_singleton_scope_to_str(batch.singleton.scope))
     .bind(batch.singleton.repository.as_deref())
     .bind(batch.singleton.pull_request)
     .bind(batch.singleton.stack_root_pull_request)
@@ -812,7 +978,7 @@ async fn load_recorded_evaluation(
     let outcome: String = first.try_get("outcome_kind")?;
     match outcome.as_str() {
         "not_matched" => Ok(Some(RepoWatchRuleEvaluationOutcome::NotMatched)),
-        "occupied" => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
+        "occupied" | "coalesced" => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
         "cooldown" => Ok(Some(RepoWatchRuleEvaluationOutcome::Cooldown)),
         "dispatched" => {
             let dispatch_id: Uuid = first.try_get("dispatch_id")?;
@@ -836,16 +1002,15 @@ async fn load_recorded_evaluation(
     }
 }
 
-async fn singleton_is_occupied(
+async fn occupying_dispatch(
     transaction: &mut Transaction<'_, Postgres>,
     rule_id: &RepoWatchRuleId,
     rule_version: RepoWatchRuleVersion,
     key: &StoredSingletonKey,
-) -> Result<bool, RepoWatchDispatchRepositoryError> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM repo_watch_dispatch_batch AS batch
+) -> Result<Option<RepoWatchDispatchId>, RepoWatchDispatchRepositoryError> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT batch.dispatch_id
+           FROM repo_watch_dispatch_batch AS batch
              WHERE batch.rule_id = $1
                AND batch.rule_version = $2
                AND batch.singleton_scope = $3
@@ -856,18 +1021,20 @@ async fn singleton_is_occupied(
                     SELECT 1 FROM repo_watch_dispatch_release AS released
                      WHERE released.dispatch_id = batch.dispatch_id
                )
-        )",
+          ORDER BY batch.admitted_at
+          LIMIT 1",
     )
     .bind(rule_id.as_str())
     .bind(i64::try_from(rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(key.scope)
+    .bind(repo_watch_singleton_scope_to_str(key.scope))
     .bind(key.repository.as_deref())
     .bind(key.pull_request)
     .bind(key.stack_root_pull_request)
-    .fetch_one(&mut **transaction)
-    .await?)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .map(RepoWatchDispatchId::from_uuid))
 }
 
 async fn singleton_is_cooling_down(
@@ -896,7 +1063,7 @@ async fn singleton_is_cooling_down(
     .bind(i64::try_from(rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(key.scope)
+    .bind(repo_watch_singleton_scope_to_str(key.scope))
     .bind(key.repository.as_deref())
     .bind(key.pull_request)
     .bind(key.stack_root_pull_request)
@@ -916,7 +1083,7 @@ async fn commit(
     })
 }
 
-fn stored_rule_version(
+pub(crate) fn stored_rule_version(
     version: RepoWatchRuleVersion,
 ) -> Result<i64, RepoWatchDispatchRepositoryError> {
     i64::try_from(version.get())
