@@ -252,11 +252,26 @@ fn walk_root(
             );
         }
     };
-    let mut pending = vec![(root_descriptor, root_path, true)];
-    while let Some((directory_descriptor, directory, is_root)) = pending.pop() {
+    let mut pending = vec![(PathBuf::new(), root_path, true)];
+    while let Some((relative_directory, directory, is_root)) = pending.pop() {
         if !check_elapsed(root.path(), findings, state) {
             return false;
         }
+        let directory_descriptor =
+            match open_directory_beneath(&root_descriptor, &relative_directory) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    let kind = if is_root {
+                        InstructionDiscoveryFindingKind::RootUnavailable
+                    } else {
+                        InstructionDiscoveryFindingKind::EntryUnreadable
+                    };
+                    if !push_path_finding(&directory, root.path(), kind, findings, state) {
+                        return false;
+                    }
+                    continue;
+                }
+            };
         let mut directory_entries = match rustix::fs::Dir::read_from(&directory_descriptor) {
             Ok(entries) => entries,
             Err(_) => {
@@ -334,20 +349,11 @@ fn walk_root(
             }
             if classified_entry.file_type == rustix::fs::FileType::Directory {
                 let child_path = directory.join(&classified_entry.name);
-                match open_directory_at_no_follow(&directory_descriptor, &classified_entry.name) {
-                    Ok(descriptor) => pending.push((descriptor, child_path, false)),
-                    Err(_) => {
-                        if !push_path_finding(
-                            &child_path,
-                            root.path(),
-                            InstructionDiscoveryFindingKind::EntryUnreadable,
-                            findings,
-                            state,
-                        ) {
-                            return false;
-                        }
-                    }
-                }
+                pending.push((
+                    relative_directory.join(&classified_entry.name),
+                    child_path,
+                    false,
+                ));
             }
         }
     }
@@ -587,13 +593,34 @@ fn read_candidate_from(
 fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
     use rustix::fs::{CWD, Mode, OFlags, openat};
 
-    openat(
+    let mut descriptor = openat(
         CWD,
-        source,
+        std::path::Path::new("/"),
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
-    )
-    .map_err(io::Error::from)
+    )?;
+    for component in source.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => {
+                descriptor = open_directory_at_no_follow(&descriptor, name)?;
+            }
+            _ => return Err(io::Error::other("instruction root is not canonical")),
+        }
+    }
+    Ok(descriptor)
+}
+
+#[cfg(unix)]
+fn open_directory_beneath(root: &OwnedFd, relative: &std::path::Path) -> io::Result<OwnedFd> {
+    let mut descriptor = rustix::io::dup(root)?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::other("instruction path is not relative"));
+        };
+        descriptor = open_directory_at_no_follow(&descriptor, name)?;
+    }
+    Ok(descriptor)
 }
 
 #[cfg(unix)]
@@ -625,7 +652,7 @@ fn open_candidate_at_no_follow(directory: &OwnedFd, name: &OsStr) -> io::Result<
     let descriptor = openat(
         directory,
         name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )?;
     let file = fs::File::from(descriptor);
@@ -897,6 +924,36 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn root_open_refuses_an_intermediate_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let outside = tempfile::tempdir().expect("outside root exists");
+        let outside_root = outside.path().join("workspace");
+        fs::create_dir(&outside_root).expect("outside workspace exists");
+        fs::write(outside_root.join("AGENTS.md"), "outside instructions")
+            .expect("outside source exists");
+        let linked_parent = temporary.path().join("linked-parent");
+        symlink(outside.path(), &linked_parent).expect("intermediate link exists");
+        let linked_root = linked_parent.join("workspace");
+        let root = InstructionDiscoveryRoot::new(
+            InstructionDiscoveryRootKind::Workspace,
+            InstructionPath::try_new(linked_root.to_string_lossy().into_owned())
+                .expect("linked path has canonical spelling"),
+        );
+
+        let snapshot = discover_workspace_instructions(vec![root]);
+
+        assert!(snapshot.bundles().is_empty());
+        assert_eq!(snapshot.findings().len(), 1);
+        assert_eq!(
+            snapshot.findings()[0].kind(),
+            InstructionDiscoveryFindingKind::RootUnavailable
+        );
+    }
+
     #[test]
     fn overlapping_roots_emit_one_registration_for_the_same_source() {
         let source = "---\nname: review-rust\ndescription: Review Rust changes.\n---\n# Review\n";
@@ -1052,6 +1109,20 @@ mod tests {
             findings[0].kind(),
             InstructionDiscoveryFindingKind::EntryUnreadable
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_descriptor_is_nonblocking_before_type_validation() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        fs::write(temporary.path().join("AGENTS.md"), "instructions").expect("candidate exists");
+        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+
+        let candidate = open_candidate_at_no_follow(&descriptor, OsStr::new("AGENTS.md"))
+            .expect("regular candidate opens");
+        let flags = rustix::fs::fcntl_getfl(&candidate).expect("candidate flags are readable");
+
+        assert!(flags.contains(rustix::fs::OFlags::NONBLOCK));
     }
 
     #[cfg(unix)]
