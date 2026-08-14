@@ -1952,7 +1952,7 @@ mod tests {
     use super::*;
     use signalbox_domain::{
         ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest, DelegationEvent,
-        DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode,
+        DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode, DurableCommandId,
         ResolvedContextFrontierReconstitutionInput, SessionDelegationReconstitutionInput,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
         ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
