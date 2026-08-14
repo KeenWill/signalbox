@@ -1,5 +1,10 @@
 # Workspace instructions and skills
 
+The comparative evidence and foundation-proposal boundary on this page were
+verified against PR #796 (`agent/agent-docs-skills-spec`). Its
+implemented-behavior statements become verified with the first implementing
+child.
+
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
 eligibility, admission, model-input projection, and per-turn provenance for
