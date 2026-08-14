@@ -18,12 +18,12 @@ four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
 (`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against this PR (`agent/repo-watch-review-reliability`). The provider members
-the poller adopts as check-suite and check-run completion generations are
-verified against PR #541 (`fix/check-run-updated-at`). The goal a dispatch
-commissions with its session, and the binding of the dispatched work turn to
-that goal's generation, are verified against this PR
-(`agent/commission-binding`).
+against PR #614 (`agent/repo-watch-review-reliability`; via PR #826
+`agent/daemon-ops-overnight`). The provider members the poller adopts as
+check-suite and check-run completion generations are verified against PR #541
+(`fix/check-run-updated-at`). The goal a dispatch commissions with its session,
+and the binding of the dispatched work turn to that goal's generation, are
+verified against this PR (`agent/commission-binding`).
 
 ## Configuration and credential boundary
 
@@ -111,7 +111,7 @@ has no webhook fallback and no speculative second polling transport.
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
 the fetched pull requests are ordered by number before comparison, so
-concurrency cannot reorder a baseline. A single attempt may transfer up to 512
+concurrency cannot reorder a baseline. A single attempt may transfer up to 768
 MiB of response bytes; what one poller retains between attempts is bounded
 separately and lower, because retention is per watched repository and therefore
 multiplies by the configured repository count.

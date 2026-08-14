@@ -76,7 +76,7 @@ const MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS: usize = 4;
 // One polling attempt may transfer this many response bytes. The dogfooded
 // repository exceeds 64 MiB in a single attempt, and the bound fails the
 // attempt rather than shedding, so it has to clear real event volume.
-const MAX_POLL_WIRE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // What one poller may retain between attempts, which is per watched repository
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
