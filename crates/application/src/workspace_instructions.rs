@@ -1,6 +1,10 @@
 //! Deterministic filesystem discovery and registration validation.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+};
 
 use serde::Deserialize;
 use signalbox_domain::{
@@ -87,6 +91,14 @@ pub fn discover_workspace_instructions(
     for root in &roots {
         walk_root(root, &mut bundles, &mut findings);
     }
+    let mut seen_sources = BTreeSet::new();
+    bundles.retain(|bundle| {
+        seen_sources.insert((
+            bundle.source_path().clone(),
+            bundle.kind(),
+            bundle.source_hash(),
+        ))
+    });
     InstructionDiscoverySnapshot {
         roots: roots.into_boxed_slice(),
         bundles: bundles.into_boxed_slice(),
@@ -380,5 +392,43 @@ mod tests {
         let snapshot = discover_workspace_instructions(vec![root]);
 
         assert!(snapshot.bundles().is_empty());
+    }
+
+    #[test]
+    fn overlapping_roots_emit_one_registration_for_the_same_source() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let skills = temporary.path().join(".agents/skills/review-rust");
+        fs::create_dir_all(&skills).expect("nested skill directory exists");
+        fs::write(
+            skills.join("SKILL.md"),
+            "---\nname: review-rust\ndescription: Review Rust changes.\n---\n# Review\n",
+        )
+        .expect("skill is written");
+        let workspace = temporary.path().canonicalize().expect("root canonicalizes");
+        let configured = temporary
+            .path()
+            .join(".agents/skills")
+            .canonicalize()
+            .expect("configured root canonicalizes");
+
+        let snapshot = discover_workspace_instructions(vec![
+            InstructionDiscoveryRoot::new(
+                InstructionDiscoveryRootKind::Configured,
+                InstructionPath::try_new(configured.to_string_lossy().into_owned())
+                    .expect("configured path is valid"),
+            ),
+            InstructionDiscoveryRoot::new(
+                InstructionDiscoveryRootKind::Workspace,
+                InstructionPath::try_new(workspace.to_string_lossy().into_owned())
+                    .expect("workspace path is valid"),
+            ),
+        ]);
+
+        assert_eq!(snapshot.roots().len(), 2);
+        assert_eq!(snapshot.bundles().len(), 1);
+        assert_eq!(
+            snapshot.bundles()[0].root_kind(),
+            InstructionDiscoveryRootKind::Workspace
+        );
     }
 }

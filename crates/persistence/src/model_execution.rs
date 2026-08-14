@@ -1001,14 +1001,22 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_session(&mut transaction, session).await?;
             let stored = sqlx::query(
-                "SELECT model_call_id, turn_id, turn_attempt_id,
-                        selection_kind, direct_model_selection_id,
-                        frozen_model_alias_id, frozen_alias_selected_direct_id,
-                        resolved_provider_model_identity_id, context_frontier_id,
-                        state_kind, terminal_disposition_kind
-                   FROM model_call
-                  WHERE session_id = $1
-                    AND model_call_id = $2",
+                "SELECT call.model_call_id, call.turn_id, call.turn_attempt_id,
+                        call.selection_kind, call.direct_model_selection_id,
+                        call.frozen_model_alias_id, call.frozen_alias_selected_direct_id,
+                        call.resolved_provider_model_identity_id, call.context_frontier_id,
+                        call.state_kind, call.terminal_disposition_kind,
+                        manifest.turn_instruction_manifest_id,
+                        manifest.boundary_kind AS instruction_manifest_boundary_kind,
+                        manifest.eligibility_hash AS instruction_eligibility_hash,
+                        manifest.manifest_hash AS instruction_manifest_hash
+                   FROM model_call AS call
+              LEFT JOIN turn_instruction_manifest AS manifest
+                     ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
+                    AND manifest.session_id = call.session_id
+                    AND manifest.turn_id = call.turn_id
+                  WHERE call.session_id = $1
+                    AND call.model_call_id = $2",
             )
             .bind(session_id_to_uuid(session))
             .bind(prepared.call().id().into_uuid())
@@ -1017,7 +1025,7 @@ impl PostgresModelCallRepository {
             .ok_or(ModelCallCorruption::Missing(
                 "ambiguous authorization model call",
             ))?;
-            let stored = decode_model_call(stored)?;
+            let stored = decode_model_call(stored, session)?;
             if stored.state()
                 == ModelCallReconstitutionState::Terminal(ModelCallDisposition::Cancelled)
             {
@@ -4339,19 +4347,27 @@ async fn load_live_turn_calls(
     });
     let recovery_call: Option<Uuid> = lifecycle.try_get("recovery_model_call_id")?;
     let rows = sqlx::query(
-        "SELECT model_call_id, turn_id, turn_attempt_id,
-                selection_kind, direct_model_selection_id,
-                frozen_model_alias_id, frozen_alias_selected_direct_id,
-                resolved_provider_model_identity_id, context_frontier_id,
-                state_kind, terminal_disposition_kind
-           FROM model_call
-         WHERE session_id = $1
-            AND turn_id = $2
+        "SELECT call.model_call_id, call.turn_id, call.turn_attempt_id,
+                call.selection_kind, call.direct_model_selection_id,
+                call.frozen_model_alias_id, call.frozen_alias_selected_direct_id,
+                call.resolved_provider_model_identity_id, call.context_frontier_id,
+                call.state_kind, call.terminal_disposition_kind,
+                manifest.turn_instruction_manifest_id,
+                manifest.boundary_kind AS instruction_manifest_boundary_kind,
+                manifest.eligibility_hash AS instruction_eligibility_hash,
+                manifest.manifest_hash AS instruction_manifest_hash
+           FROM model_call AS call
+      LEFT JOIN turn_instruction_manifest AS manifest
+             ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
+            AND manifest.session_id = call.session_id
+            AND manifest.turn_id = call.turn_id
+         WHERE call.session_id = $1
+            AND call.turn_id = $2
             AND (
-                state_kind <> 'terminal'
-                OR model_call_id = $3
+                call.state_kind <> 'terminal'
+                OR call.model_call_id = $3
             )
-          ORDER BY model_call_id",
+          ORDER BY call.model_call_id",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
@@ -4361,12 +4377,17 @@ async fn load_live_turn_calls(
     Ok((
         pinned_target,
         rows.into_iter()
-            .map(decode_model_call)
+            .map(|row| decode_model_call(row, session))
             .collect::<Result<_, _>>()?,
     ))
 }
 
-fn decode_model_call(row: PgRow) -> Result<ModelCallReconstitutionInput, ModelCallRepositoryError> {
+fn decode_model_call(
+    row: PgRow,
+    session: SessionId,
+) -> Result<ModelCallReconstitutionInput, ModelCallRepositoryError> {
+    let turn = TurnId::from_uuid(required(&row, "turn_id")?);
+    authenticate_model_call_instruction_manifest(&row, session, turn)?;
     let state_kind: String = required(&row, "state_kind")?;
     let terminal: Option<String> = row.try_get("terminal_disposition_kind")?;
     let state = match (state_kind.as_str(), terminal.as_deref()) {
@@ -4389,7 +4410,7 @@ fn decode_model_call(row: PgRow) -> Result<ModelCallReconstitutionInput, ModelCa
     };
     Ok(ModelCallReconstitutionInput::new(
         ModelCallId::from_uuid(required(&row, "model_call_id")?),
-        TurnId::from_uuid(required(&row, "turn_id")?),
+        turn,
         signalbox_domain::TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?),
         decode_selection(
             required(&row, "selection_kind")?,
@@ -4404,6 +4425,38 @@ fn decode_model_call(row: PgRow) -> Result<ModelCallReconstitutionInput, ModelCa
         signalbox_domain::ContextFrontierId::from_uuid(required(&row, "context_frontier_id")?),
         state,
     ))
+}
+
+fn authenticate_model_call_instruction_manifest(
+    row: &PgRow,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    let manifest_id =
+        TurnInstructionManifestId::from_uuid(required(row, "turn_instruction_manifest_id")?);
+    let boundary_kind: String = required(row, "instruction_manifest_boundary_kind")?;
+    if boundary_kind != "turn_start" {
+        return Err(ModelCallCorruption::Inconsistent("turn instruction manifest boundary").into());
+    }
+    let eligibility_hash: Vec<u8> = required(row, "instruction_eligibility_hash")?;
+    let manifest_hash: Vec<u8> = required(row, "instruction_manifest_hash")?;
+    let eligibility_hash: [u8; 32] = eligibility_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction eligibility hash"))?;
+    let manifest_hash: [u8; 32] = manifest_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction manifest hash"))?;
+    TurnInstructionManifest::reconstitute_empty_turn_start(
+        manifest_id,
+        session,
+        turn,
+        InstructionDigest::from_sha256(eligibility_hash),
+        InstructionDigest::from_sha256(manifest_hash),
+    )
+    .ok_or(ModelCallCorruption::Inconsistent(
+        "turn instruction manifest authentication",
+    ))?;
+    Ok(())
 }
 
 fn decode_selection(

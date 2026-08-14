@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The workspace-instruction discovery, registration, empty turn-start manifest,
+and model-call correlation were verified against PR #798
+(`agent/agent-docs-skills-foundation`).
+
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
 (`agent/judge-denial-reason`).
