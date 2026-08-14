@@ -5525,6 +5525,83 @@ impl WorkspaceRecord {
 }
 ```
 
+## domain: workspace_instruction
+
+```rust
+pub struct InstructionDiscoveryId(Uuid);
+pub struct InstructionBundleId(Uuid);
+pub struct TurnInstructionManifestId(Uuid);
+
+pub struct InstructionDigest([u8; 32]);
+impl InstructionDigest {
+    pub fn sha256(bytes: &[u8]) -> Self;
+    pub const fn from_sha256(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
+pub struct InstructionPath { /* private */ }
+impl InstructionPath {
+    pub fn try_new(value: String) -> Result<Self, InstructionPathError>;
+    pub fn as_str(&self) -> &str;
+}
+pub enum InstructionPathError {
+    Empty,
+    ContainsNull,
+    TooLong,
+    NotAbsolute,
+    NotCanonical,
+}
+pub enum InstructionDiscoveryRootKind { Workspace, Configured }
+pub enum InstructionBundleKind { AgentDocument, AgentSkill }
+
+pub struct InstructionSkillMetadata { /* private */ }
+impl InstructionSkillMetadata {
+    pub fn try_new(
+        name: String,
+        description: String,
+        parent_directory: &str,
+    ) -> Result<Self, InstructionSkillMetadataError>;
+    // accessors: name(), description()
+}
+pub enum InstructionSkillMetadataError {
+    InvalidName,
+    InvalidDescription,
+    ParentMismatch,
+}
+
+pub struct InstructionBundleRegistration { /* private */ }
+impl InstructionBundleRegistration {
+    pub fn new(
+        kind: InstructionBundleKind,
+        root_kind: InstructionDiscoveryRootKind,
+        root_path: InstructionPath,
+        source_path: InstructionPath,
+        source_bytes: u64,
+        source_hash: InstructionDigest,
+        skill: Option<InstructionSkillMetadata>,
+    ) -> Option<Self>;
+    // accessors: kind(), root_kind(), root_path(), source_path(), source_bytes(),
+    // source_hash(), skill()
+}
+
+pub struct TurnInstructionManifest { /* private */ }
+impl TurnInstructionManifest {
+    pub fn empty_turn_start(
+        id: TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Self;
+    pub fn reconstitute_empty_turn_start(
+        id: TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+        eligibility_hash: InstructionDigest,
+        manifest_hash: InstructionDigest,
+    ) -> Option<Self>;
+    // accessors: id(), session(), turn(), eligibility_hash(), manifest_hash()
+}
+```
+
 ## application: approval_judge
 
 ```rust
@@ -7653,6 +7730,33 @@ impl<Lister: SessionMetadataLister> ListSessionMetadataService<Lister> {
         query: SessionMetadataListQuery,
     ) -> Result<Lister::Page, Lister::Error>;
 }
+```
+
+## application: workspace_instructions
+
+```rust
+pub struct InstructionDiscoveryRoot { /* private */ }
+impl InstructionDiscoveryRoot {
+    pub const fn new(kind: InstructionDiscoveryRootKind, path: InstructionPath) -> Self;
+    // accessors: kind(), path()
+}
+pub enum InstructionDiscoveryFindingKind {
+    RootUnavailable,
+    EntryUnreadable,
+    NonUtf8Source,
+    InvalidSkill,
+}
+pub struct InstructionDiscoveryFinding { /* private */ }
+impl InstructionDiscoveryFinding {
+    // accessors: path(), kind()
+}
+pub struct InstructionDiscoverySnapshot { /* private */ }
+impl InstructionDiscoverySnapshot {
+    // accessors: roots(), bundles(), findings()
+}
+pub fn discover_workspace_instructions(
+    roots: Vec<InstructionDiscoveryRoot>,
+) -> InstructionDiscoverySnapshot;
 ```
 
 ## application: operator_failure
@@ -10326,7 +10430,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **774 (+12 free fn)** |
+| domain: workspace_instruction                      | 12                    |
+| **signalbox-domain total**                         | **786 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10350,4 +10455,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **249 (+1 free fn)**  |
+| application: workspace_instructions                | 4 (+1 free fn)        |
+| **signalbox-application total**                    | **253 (+2 free fn)**  |

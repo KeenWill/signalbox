@@ -1,9 +1,9 @@
 # Workspace instructions and skills
 
 The comparative evidence and foundation-proposal boundary on this page were
-verified against PR #796 (`agent/agent-docs-skills-spec`). Its
-implemented-behavior statements become verified with the first implementing
-child.
+verified against PR #796 (`agent/agent-docs-skills-spec`). Discovery,
+registration, empty eligibility, and turn-start evidence are implemented by its
+first child (`agent/agent-docs-skills-foundation`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
@@ -63,6 +63,12 @@ daemon configuration. The workspace and every configured root are separate
 `DiscoveryRoot` values; a configured root is not silently folded into the
 workspace's authority or relative-path namespace. A session without a resolved
 workspace still discovers configured roots.
+
+Explicit roots use the optional version-one `[workspace_instructions]` table and
+its required `registered_roots` array of unique canonical absolute UTF-8 paths.
+Omitting the table is an empty array. Missing or unreadable registered roots are
+scan findings rather than startup failures, so their absence is durable evidence
+for each affected turn.
 
 The walk considers every nested directory and yields an agent-document candidate
 for each `AGENTS.md` regular file. In the workspace it yields an agent-skill
@@ -239,7 +245,7 @@ provider call and authenticated whenever that call is prepared or reconstituted.
 A model-requested admission during a tool round appends admission evidence and
 produces a successor manifest for the next call boundary; earlier call-boundary
 manifests remain addressable. The first implementation slice has no admission
-and stores only the turn-start manifest.
+and stores only the turn-start manifest (INV-061).
 
 Each manifest records:
 

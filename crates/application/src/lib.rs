@@ -27,6 +27,7 @@ mod tool_execution_test_support;
 mod tool_loop;
 mod tool_loop_ports;
 mod update_session_placement;
+mod workspace_instructions;
 
 pub use approval_judge::ApprovalJudgeAuthorization;
 pub use conversation_import::{
@@ -155,4 +156,8 @@ pub use tool_loop_ports::{
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UpdateSessionPlacementTransaction,
+};
+pub use workspace_instructions::{
+    InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryRoot,
+    InstructionDiscoverySnapshot, discover_workspace_instructions,
 };

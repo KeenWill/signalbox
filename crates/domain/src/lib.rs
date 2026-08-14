@@ -44,6 +44,7 @@ mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 mod workspace;
+mod workspace_instruction;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -379,6 +380,12 @@ pub use user_content::{
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
+pub use workspace_instruction::{
+    InstructionBundleId, InstructionBundleKind, InstructionBundleRegistration, InstructionDigest,
+    InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
+    InstructionSkillMetadata, InstructionSkillMetadataError, TurnInstructionManifest,
+    TurnInstructionManifestId,
+};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {
