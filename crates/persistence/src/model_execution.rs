@@ -422,18 +422,9 @@ impl CredentialPoolRuntimePolicy {
 
     const fn action(&self, cause: ProviderModelCallFailureCause) -> CredentialPoolRuntimeAction {
         match cause {
-            ProviderModelCallFailureCause::QuotaExhausted => {
-                let _configured_action = self.quota_exhausted;
-                CredentialPoolRuntimeAction::Stay
-            }
-            ProviderModelCallFailureCause::RateLimited => {
-                let _configured_action = self.rate_limited;
-                CredentialPoolRuntimeAction::Stay
-            }
-            ProviderModelCallFailureCause::Overloaded => {
-                let _configured_action = self.overloaded;
-                CredentialPoolRuntimeAction::Stay
-            }
+            ProviderModelCallFailureCause::QuotaExhausted => self.quota_exhausted,
+            ProviderModelCallFailureCause::RateLimited => self.rate_limited,
+            ProviderModelCallFailureCause::Overloaded => self.overloaded,
             ProviderModelCallFailureCause::CredentialRejected
             | ProviderModelCallFailureCause::PermissionDenied
             | ProviderModelCallFailureCause::InvalidRequest
