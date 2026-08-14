@@ -185,46 +185,48 @@ async fn supervise_repository_tasks(
     pollers: Vec<Arc<GitHubRepositoryPoller>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RepositoryWatchRuntimeError> {
-    if *shutdown.borrow() {
-        while let Some(result) = tasks.join_next().await {
-            result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
-        }
-        return Ok(());
-    }
-    loop {
-        select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    while let Some(result) = tasks.join_next().await {
-                        result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
-                    }
-                    return Ok(());
-                }
+    let result = async {
+        if *shutdown.borrow() {
+            while let Some(result) = tasks.join_next().await {
+                result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
             }
-            completed = tasks.join_next() => {
-                let result = match completed {
-                    Some(Ok(())) if *shutdown.borrow() => {
+            return Ok(());
+        }
+        loop {
+            select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
                         while let Some(result) = tasks.join_next().await {
                             result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
                         }
-                        Ok(())
-                    }
-                    Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
-                    Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
-                    None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
-                };
-                if result.is_err() {
-                    tasks.abort_all();
-                    while tasks.join_next().await.is_some() {}
-                    for poller in &pollers {
-                        poller.drain_fetches().await;
+                        return Ok(());
                     }
                 }
-                return result;
+                completed = tasks.join_next() => {
+                    return match completed {
+                        Some(Ok(())) if *shutdown.borrow() => {
+                            while let Some(result) = tasks.join_next().await {
+                                result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
+                            }
+                            Ok(())
+                        }
+                        Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
+                        Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
+                        None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
+                    };
+                }
             }
         }
     }
+    .await;
+
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    for poller in &pollers {
+        poller.drain_fetches().await;
+    }
+    result
 }
 
 struct RepositoryWatchTask {
@@ -4066,6 +4068,52 @@ mod tests {
             Arc::strong_count(&fixture.poller),
             1,
             "a failed supervisor leaves no child fetch holding the sibling poller"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_task_panic_during_shutdown_drain_drains_sibling_fetches() {
+        let server = ConcurrentScriptedServer::start(vec![
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{CANCELLED_FETCH_PULL_NUMBER}"
+                )),
+                ResponseBody(minimal_pull_detail(CANCELLED_FETCH_PULL_NUMBER)),
+            )
+            .delayed(CANCELLED_FETCH_DELAY),
+        ])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
+        let mut tasks = JoinSet::new();
+        tasks.spawn({
+            let poller = Arc::clone(&fixture.poller);
+            async move {
+                let _ = poller
+                    .fetch_pull_requests(
+                        BTreeSet::from([CANCELLED_FETCH_PULL_NUMBER]),
+                        &listed,
+                        None,
+                        Some(RepoWatchCursorGeneration::INITIAL),
+                    )
+                    .await;
+            }
+        });
+        server.request_in_flight().await;
+        tasks.spawn(async { panic!("fixture repository task panics during shutdown") });
+        let (_sender, receiver) = watch::channel(true);
+
+        let result =
+            supervise_repository_tasks(tasks, vec![Arc::clone(&fixture.poller)], receiver).await;
+
+        assert_eq!(
+            result,
+            Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked)
+        );
+        assert_eq!(
+            Arc::strong_count(&fixture.poller),
+            1,
+            "a shutdown-drain panic leaves no child fetch holding the sibling poller"
         );
     }
 
