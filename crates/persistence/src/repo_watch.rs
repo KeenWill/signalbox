@@ -124,7 +124,7 @@ pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Box<[RepoWatchEvent]>,
-    observation_started_at: Option<sqlx::types::time::OffsetDateTime>,
+    snapshot_observed_at: Option<sqlx::types::time::OffsetDateTime>,
 }
 
 impl RepoWatchCommitRequest {
@@ -137,13 +137,16 @@ impl RepoWatchCommitRequest {
             expected_generation,
             candidate,
             events: events.into_boxed_slice(),
-            observation_started_at: None,
+            snapshot_observed_at: None,
         }
     }
 
-    /// Records the database-clock boundary captured before this observation.
-    pub const fn observed_after(mut self, boundary: RepoWatchObservationBoundary) -> Self {
-        self.observation_started_at = Some(boundary.0);
+    /// Records the database-clock boundary captured after the provider snapshot.
+    pub const fn snapshot_observed_before(
+        mut self,
+        boundary: RepoWatchObservationBoundary,
+    ) -> Self {
+        self.snapshot_observed_at = Some(boundary.0);
         self
     }
 
@@ -464,7 +467,7 @@ impl PostgresRepoWatchStore {
                     &mut transaction,
                     repository,
                     cursor.generation(),
-                    request.observation_started_at,
+                    request.snapshot_observed_at,
                 )
                 .await?;
                 transaction.commit().await.map_err(|error| {
@@ -502,7 +505,7 @@ impl PostgresRepoWatchStore {
             repository,
             generation,
             request.events(),
-            request.observation_started_at,
+            request.snapshot_observed_at,
         )
         .await?;
         transaction.commit().await.map_err(|error| {
@@ -1389,15 +1392,10 @@ async fn insert_events(
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
     events: &[RepoWatchEvent],
-    observation_started_at: Option<sqlx::types::time::OffsetDateTime>,
+    snapshot_observed_at: Option<sqlx::types::time::OffsetDateTime>,
 ) -> Result<(), RepoWatchStoreError> {
-    record_github_write_observations(
-        transaction,
-        repository,
-        generation,
-        observation_started_at,
-    )
-    .await?;
+    record_github_write_observations(transaction, repository, generation, snapshot_observed_at)
+        .await?;
     for (index, event) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
@@ -1469,7 +1467,7 @@ async fn record_github_write_observations(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-    observation_started_at: Option<sqlx::types::time::OffsetDateTime>,
+    snapshot_observed_at: Option<sqlx::types::time::OffsetDateTime>,
 ) -> Result<(), RepoWatchStoreError> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock(
@@ -1548,7 +1546,7 @@ async fn record_github_write_observations(
     )
     .bind(repository.as_str())
     .bind(generation_to_i64(generation))
-    .bind(observation_started_at)
+    .bind(snapshot_observed_at)
     .execute(&mut **transaction)
     .await?;
     Ok(())

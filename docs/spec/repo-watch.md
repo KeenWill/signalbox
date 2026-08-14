@@ -511,7 +511,12 @@ them.
 review, comment, or review-thread identity acknowledged by the provider. A
 repository-watch cursor that observes a matching review write, thread reply, or
 thread resolution durably links every resulting event to the creating tool
-attempt. Each receipt records its first matching cursor once. A published
+attempt. For mutable thread resolutions, receipt ordering is compared with the
+database-clock instant immediately after the provider snapshot is observed, not
+with the start of the whole poll. A receipt completed during the poll but before
+that instant can therefore cause the state contained in the snapshot, while a
+receipt completed after the snapshot cannot suppress an earlier user
+resolution. Each receipt records its first matching cursor once. A published
 review's immutable receipt remains directly correlatable to each exact child
 thread without recurring per-generation observation rows, so the review and a
 delayed inline-thread event carry the same cause once each. An unchanged poll

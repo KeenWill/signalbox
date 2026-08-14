@@ -846,7 +846,7 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
                 RepoWatchCursorCandidate::new(reopened.clone()),
                 Vec::new(),
             )
-            .observed_after(post_mutation_poll),
+            .snapshot_observed_before(post_mutation_poll),
         )
         .await?;
     assert_eq!(unchanged_generation(unchanged), first_generation);
@@ -889,8 +889,8 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
 /// the following post-mutation observation still suppresses its resolution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt()
--> Result<(), Box<dyn Error>> {
+async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let repository = repository()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
@@ -923,7 +923,7 @@ async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt()
                 RepoWatchCursorCandidate::new(open.clone()),
                 Vec::new(),
             )
-            .observed_after(pre_mutation_poll),
+            .snapshot_observed_before(pre_mutation_poll),
         )
         .await?;
     assert_eq!(unchanged_generation(unchanged), first_generation);
@@ -944,7 +944,74 @@ async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt()
                 RepoWatchCursorCandidate::new(resolved.clone()),
                 events,
             )
-            .observed_after(post_mutation_poll),
+            .snapshot_observed_before(post_mutation_poll),
+        )
+        .await?;
+    let event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the session-created resolution event is pending");
+    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+        .evaluate(
+            event,
+            &rule,
+            &resolved,
+            &TemplateResolver,
+            dispatch_context(),
+        )
+        .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::SelfCaused);
+    Ok(())
+}
+
+/// A resolve receipt completed after the poll began but before its provider
+/// snapshot was observed is linked to the resolution contained in that snapshot.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn resolve_completed_during_poll_is_linked_to_observed_snapshot() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let rule = thread_resolved_rule()?;
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let open = thread_observation(RepoWatchThreadState::Open)?;
+    let first_generation = committed_generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(open.clone()),
+                    Vec::new(),
+                ),
+            )
+            .await?,
+    );
+
+    let _poll_started_at = event_store.begin_observation().await?;
+    complete_thread_resolve(&pool, 0x90_170).await?;
+    let resolved = thread_observation(RepoWatchThreadState::Resolved)?;
+    let snapshot_observed_at = event_store.begin_observation().await?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(&open),
+        &resolved,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(resolved.clone()),
+                events,
+            )
+            .snapshot_observed_before(snapshot_observed_at),
         )
         .await?;
     let event = dispatch_store
@@ -1010,7 +1077,7 @@ async fn pre_mutation_user_resolution_does_not_consume_later_resolve_receipt()
                 RepoWatchCursorCandidate::new(resolved.clone()),
                 events,
             )
-            .observed_after(user_poll),
+            .snapshot_observed_before(user_poll),
         )
         .await?;
     let event = dispatch_store
