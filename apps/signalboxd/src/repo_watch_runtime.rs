@@ -4813,7 +4813,7 @@ mod tests {
         let deferred_reviews =
             &current.state().pull_requests()[0].reviews()[RETAINED_REVIEW_IDS.len()..];
 
-        assert_eq!(events.len(), DEFERRED_REVIEW_IDS.len());
+        assert_eq!(events.len(), deferred_reviews.len());
         assert_eq!(
             events[0].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
