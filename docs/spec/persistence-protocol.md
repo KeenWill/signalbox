@@ -1,9 +1,15 @@
 # Persistence protocol
 
+The delegate denial-reason storage — the superseded decision-shape constraint
+and its byte-precise checks — was verified against this PR
+(`agent/judge-denial-reason`).
+
 The runner connection authority head, durable loss epoch, and lease offer/claim
 fences were verified against the parent slice (`agent/runner-loss-epoch`).
-Placement-relative lease-offer fencing was verified against this PR
-(`agent/runner-loss-propagation`).
+Placement-relative lease-offer fencing was verified against the parent slice
+(`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
+and ordered page read were verified against this PR
+(`agent/runner-loss-session-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -139,7 +145,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-two files, `202607180001` through
+`crates/persistence/migrations/` — seventy-five files, `202607180001` through
 `202608110015` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -243,7 +249,11 @@ Implemented table families (across the forward-only migrations):
   records dedicated approval-judge calls in the global model-call identity
   namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale;
+  recommendation, and rationale; migration `202608110014` supersedes its
+  decision-shape constraint so a delegate denial stores the checked reason
+  derived from its rationale, and backfills earlier delegate denials with the
+  same derivation, so a null reason means exactly one thing everywhere: the
+  rationale sanitizes to nothing;
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly
@@ -344,6 +354,26 @@ Representation rules, all enforced in the schema:
   connections until a checked replacement installs a fresh baseline. This is the
   implemented not-yet-projected placement fence; bounded session propagation
   remains the committed unimplemented transaction described below.
+- Migration `202608110006` gives every new durable connection-loss epoch a
+  pending propagation cursor in the same transaction. Migration backfill marks a
+  loss completed only when no affected current placement remains: losses already
+  absorbed into `202608110005`'s compatibility baseline complete, while a loss
+  committed after that migration with an older placement baseline stays pending.
+  A repeatable-read page authenticates the exact loss source and returns at most
+  64 current pinned or exact-identity unpinned placements whose baselines
+  precede that loss, ordered strictly after the durable session-identity cursor.
+  An exact-identity selection stored before enrollment remains affected by a
+  later loss for its selected runner despite having no enrollment baseline; the
+  page and both cursor guards associate it through the runner identity. Cursor
+  advancement is monotonic, cannot pass an affected current placement, and
+  cannot complete while one remains. Enrollment insertion, exact-identity
+  placement baseline derivation, and cursor completion share a transaction-level
+  runner-identity fence. An insertion that observes enrollment absence therefore
+  becomes visible before that enrollment can create and complete a loss cursor;
+  a completion that wins the fence becomes visible before a later insertion
+  derives its baseline. The cursor and ordered page are implemented; the
+  per-session transaction that changes placement, lease, turn, release, and
+  runner-event state remains the committed unimplemented propagation step below.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -672,7 +702,11 @@ statements live in the schema instead:
 - the placement-loss baseline trigger in migration `202608110005` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
-  deriving the immutable baseline and before the placement row becomes visible.
+  deriving the immutable baseline and before the placement row becomes visible;
+  migration `202608110006` adds a transaction-level runner-identity advisory
+  lock between the scheduler and enrollment locks, and enrollment insertion and
+  loss-cursor completion take that same identity lock before they can publish
+  the competing fact.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -801,17 +835,26 @@ Locks per transaction, in acquisition order:
   authority trigger takes the `tool_request` row `FOR UPDATE` after the
   scheduler lock and before checking that no nonterminal judge remains.
 
-- **Approval-judge transactions** (prepare, authorize, complete, and fail): the
-  `session_scheduler` row `FOR UPDATE` is always the first Rust-issued explicit
-  lock. Preparation then inserts the call; its schema guard takes the exact
-  `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
-  `FOR UPDATE`, before checking for an existing decision and validating the
-  prepared call. Completion performs its guarded lifecycle transition under the
-  scheduler lock; at commit, the deferred decision-authority trigger then takes
-  the `tool_request` row `FOR UPDATE`. Authorization and failure need no
-  additional explicit lock. The shared scheduler-first prefix prevents
-  approval-judge, tool-loop, and lifecycle-transition transactions from holding
-  these rows in reverse order.
+- **Approval-judge transactions** (prepare, authorize, complete, and fail):
+  preparation, authorization, and failure take the `session_scheduler` row
+  `FOR UPDATE` as their first Rust-issued explicit lock. Preparation then
+  inserts the call; its schema guard takes the exact `tool_request` row
+  `FOR UPDATE`, followed by the active `turn_lifecycle` row `FOR UPDATE`, before
+  checking for an existing decision and validating the prepared call. Completion
+  first locks the session row `FOR NO KEY UPDATE` and only then the scheduler
+  row: it resolves the goal authority in force before committing a decision, and
+  a goal system transition — a model declaration or scheduler-failure blocking —
+  serializes on the session row without taking the scheduler row, so holding the
+  session row from before that read until commit is what makes a goal-closing
+  transition and the completion recheck mutually exclusive. Applied goal
+  commands take the scheduler row too, after that same session row. The session
+  row precedes the scheduler row because every transaction that locks both
+  acquires them in that order. Completion performs its guarded lifecycle
+  transition under the scheduler lock; at commit, the deferred
+  decision-authority trigger then takes the `tool_request` row `FOR UPDATE`.
+  Authorization and failure need no additional explicit lock. The shared
+  scheduler-lock position prevents approval-judge, tool-loop, and
+  lifecycle-transition transactions from holding these rows in reverse order.
 
 - **Delegated terminal-observation transactions**: after nonlocking reads of the
   call's turn and delegation identity, observation commit and authoritative

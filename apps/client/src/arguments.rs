@@ -106,6 +106,9 @@ pub(crate) enum Command {
         format: ConversationImportFormat,
         source: ImportSourceArgument,
     },
+    BlobUpload {
+        source: PathBuf,
+    },
     Reconcile {
         session_id: CanonicalUuid,
         turn_id: CanonicalUuid,
@@ -422,6 +425,8 @@ enum CliCommand {
     Chat(SessionArguments),
     /// Import Claude Code sessions or Codex rollout JSONL files.
     Import(ImportArguments),
+    /// Operate immutable content-addressed blobs.
+    Blob(BlobArguments),
     /// Reconcile a turn parked on an ambiguous model call and continue with
     /// standard-input content.
     Reconcile(ReconcileArguments),
@@ -433,6 +438,25 @@ enum CliCommand {
     Approve(DecideArguments),
     /// Deny one pending tool request with an explicit reason.
     Deny(DenyArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct BlobArguments {
+    #[command(subcommand)]
+    command: BlobSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum BlobSubcommand {
+    /// Stream one nonempty file into the routed user-attachment store.
+    Upload(BlobUploadArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct BlobUploadArguments {
+    /// Regular file whose exact bytes are hashed and uploaded.
+    #[arg(value_name = "FILE")]
+    source: PathBuf,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2014,6 +2038,11 @@ pub(crate) fn parse(
                         "import requires exactly one FILE or --scan DIR",
                     )));
                 }
+            },
+        },
+        CliCommand::Blob(arguments) => match arguments.command {
+            BlobSubcommand::Upload(arguments) => Command::BlobUpload {
+                source: arguments.source,
             },
         },
         CliCommand::Reconcile(arguments) => Command::Reconcile {
@@ -4247,6 +4276,26 @@ mod tests {
             .expect("the explicit supported format and one path parse");
 
         assert_codex_file_import(parsed, Path::new("rollout.jsonl"));
+    }
+
+    #[test]
+    fn blob_upload_maps_one_explicit_source_file() {
+        let source = Path::new("attachment.bin");
+        let parsed = parse([
+            OsString::from("blob"),
+            OsString::from("upload"),
+            source.as_os_str().to_owned(),
+        ])
+        .expect("the grouped blob upload command parses");
+        let ParseOutcome::Run(Arguments {
+            command: Command::BlobUpload { source: observed },
+            ..
+        }) = parsed
+        else {
+            panic!("blob upload must map to its closed command")
+        };
+
+        assert_eq!(observed, source);
     }
 
     #[test]

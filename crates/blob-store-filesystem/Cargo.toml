@@ -26,6 +26,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "io-util",
     "rt",
 ] }
+uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 signalbox-blob-store = { path = "../blob-store", features = ["test-support"] }

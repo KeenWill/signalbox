@@ -25,6 +25,9 @@ bind is verified against this PR (`agent/per-session-workspaces`).
 The exact provider receipt returned by review-thread replies is verified against
 this PR (`agent/repo-watch-self-cause`).
 
+The change-request-scoped thread mutation contracts and their pre-dispatch
+ownership confirmation are verified through this PR (`agent/thread-ownership`).
+
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
 child stack.
@@ -1016,11 +1019,36 @@ The declarations and compact result objects are:
   the first 100 threads and, within each, the first 100 comments. A thread
   carries opaque id, resolution and outdated posture, path, optional line,
   comments, and `comments_truncated`; the outer result carries `truncated`.
-- `change_request_thread_reply` accepts an opaque `thread_id` and nonempty
-  `body`; it returns the created comment's opaque node id and numeric database
-  id, its parent review's numeric database id, and the comment URL.
-- `change_request_thread_resolve` accepts one opaque `thread_id`; it returns
-  that identity and the acknowledged resolution posture.
+- `change_request_thread_reply` accepts `repository`, `number`, an opaque
+  `thread_id`, and nonempty `body`; it returns the created comment's opaque node
+  id and numeric database id, its parent review's numeric database id, and the
+  comment URL. The named change request is the mutation's authority target: an opaque
+  thread identity alone is globally scoped, so without these coordinates neither
+  an approval decision over the arguments nor the executor could tell a thread
+  in the granted change request from one anywhere else the credential reaches.
+  Before dispatching the mutation, the GitHub adapter resolves the thread node
+  and confirms the code host places it inside exactly that change request. A
+  thread the code host does not place there — including an identity that
+  resolves to no node or to a node of another type — fails closed with the fixed
+  semantic detail
+  `requested review thread was not found in the named change request`, and no
+  mutation request is dispatched. Node absence is definitive only when every
+  error beside the evaluated null carries the code host's typed not-found
+  classification, or none accompanies it; any other field error proves nothing
+  about the thread and reports the undispatched mutation instead. The repository
+  comparison follows the code host's case-insensitive repository addressing; the
+  number must match exactly. Ownership-check failures keep read classification:
+  an infrastructure failure during the confirmation reports that the mutation
+  was never dispatched and is never commit-ambiguous. A review thread never
+  moves between change requests, so the confirmation cannot be invalidated
+  between the two requests. The confirmation and the mutation share the
+  transport's single 30-second exchange budget: the mutation receives only the
+  time the confirmation left, and exhaustion before dispatch reports the
+  undispatched mutation.
+- `change_request_thread_resolve` accepts `repository`, `number`, and one opaque
+  `thread_id` under the same pre-dispatch ownership confirmation as
+  `change_request_thread_reply`; it returns that thread identity and the
+  acknowledged resolution posture.
 - `change_request_ci_job_log` accepts `repository` and a positive `job_id`; it
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive

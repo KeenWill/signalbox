@@ -10,6 +10,7 @@ publish.workspace = true
 [features]
 default = []
 postgres-integration = ["dep:testcontainers-modules"]
+test-support = []
 
 [dependencies]
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }

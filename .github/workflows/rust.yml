@@ -132,7 +132,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            4320763c2083a2238494e2f206a4c71fa166039e1c60a4fecb3ceb95cfbe6f9e
+            f768b1abfb0e54c2b71297b1184427cce4f7ab6d8caee0c93237bf8a34868454
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -292,7 +292,7 @@ jobs:
           cache-on-failure: true
           key: postgres-integration
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -360,7 +360,7 @@ jobs:
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Only persistence is sharded today — 695 of the 1,112 ignored tests, and
+  # Only persistence is sharded today — 695 of the 1,122 ignored tests, and
   # 22m22s as a single job against roughly 7m at three ways.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it
@@ -401,7 +401,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
