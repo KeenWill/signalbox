@@ -2,16 +2,17 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    io::Read,
+    fs::{self, FileType},
+    io::{self, Read},
     path::PathBuf,
     time::{Duration, Instant},
 };
 
 use serde::Deserialize;
 use signalbox_domain::{
-    InstructionBundleKind, InstructionBundleRegistration, InstructionDigest,
-    InstructionDiscoveryRootKind, InstructionPath, InstructionSkillMetadata,
+    InstructionBundleKind, InstructionBundleRegistration, InstructionBundleRegistrationInput,
+    InstructionDigest, InstructionDiscoveryRootKind, InstructionPath, InstructionSkillMetadata,
+    InstructionSkillMetadataInput,
 };
 
 /// One explicit authority root to scan.
@@ -22,14 +23,17 @@ pub struct InstructionDiscoveryRoot {
 }
 
 impl InstructionDiscoveryRoot {
+    /// Binds one canonical path to its closed authority route.
     pub const fn new(kind: InstructionDiscoveryRootKind, path: InstructionPath) -> Self {
         Self { kind, path }
     }
 
+    /// Returns the root's authority route.
     pub const fn kind(&self) -> InstructionDiscoveryRootKind {
         self.kind
     }
 
+    /// Borrows the root's canonical absolute path.
     pub const fn path(&self) -> &InstructionPath {
         &self.path
     }
@@ -38,20 +42,30 @@ impl InstructionDiscoveryRoot {
 /// Closed discovery and registration failures retained with a scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstructionDiscoveryFindingKind {
+    /// The declared root could not be opened as a real directory.
     RootUnavailable,
+    /// A directory entry or candidate source could not be classified or read.
     EntryUnreadable,
+    /// A candidate path could not be represented as canonical UTF-8 evidence.
     NonUtf8SourcePath,
+    /// Candidate source bytes were not valid UTF-8.
     NonUtf8Source,
+    /// Portable skill frontmatter or registration shape was invalid.
     InvalidSkill,
+    /// A fixed discovery resource limit stopped the scan.
     LimitReached(InstructionDiscoveryLimitKind),
 }
 
 /// Fixed resource dimension that stopped one otherwise-greedy scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstructionDiscoveryLimitKind {
+    /// The scan classified its maximum number of directory entries.
     ClassifiedEntries,
+    /// The scan consumed its maximum number of finding records.
     Findings,
+    /// The scan consumed its maximum candidate-source byte count.
     CandidateSourceBytes,
+    /// The scan reached its maximum wall-clock duration.
     ElapsedTime,
 }
 
@@ -63,10 +77,12 @@ pub struct InstructionDiscoveryFinding {
 }
 
 impl InstructionDiscoveryFinding {
+    /// Borrows the canonical path nearest the failure.
     pub const fn path(&self) -> &InstructionPath {
         &self.path
     }
 
+    /// Returns the closed failure classification.
     pub const fn kind(&self) -> InstructionDiscoveryFindingKind {
         self.kind
     }
@@ -86,34 +102,42 @@ pub struct InstructionDiscoverySnapshot {
 }
 
 impl InstructionDiscoverySnapshot {
+    /// Borrows every root in deterministic scan order.
     pub fn roots(&self) -> &[InstructionDiscoveryRoot] {
         &self.roots
     }
 
+    /// Borrows every accepted bundle in deterministic discovery order.
     pub fn bundles(&self) -> &[InstructionBundleRegistration] {
         &self.bundles
     }
 
+    /// Borrows every typed finding in discovery order.
     pub fn findings(&self) -> &[InstructionDiscoveryFinding] {
         &self.findings
     }
 
+    /// Returns the fixed discovery-limit contract version.
     pub const fn limit_set_version(&self) -> u16 {
         self.limit_set_version
     }
 
+    /// Returns the number of directory entries charged to the scan.
     pub const fn classified_entries(&self) -> u64 {
         self.classified_entries
     }
 
+    /// Returns the number of candidate-source bytes charged to the scan.
     pub const fn candidate_source_bytes(&self) -> u64 {
         self.candidate_source_bytes
     }
 
+    /// Returns the observed scan duration rounded down to milliseconds.
     pub const fn elapsed_millis(&self) -> u64 {
         self.elapsed_millis
     }
 
+    /// Reports whether the scan completed before every fixed limit.
     pub const fn is_complete(&self) -> bool {
         self.complete
     }
@@ -138,7 +162,13 @@ struct DiscoveryState {
     started: Instant,
     classified_entries: u64,
     candidate_source_bytes: u64,
+    seen_sources: BTreeSet<InstructionPath>,
     complete: bool,
+}
+
+struct ClassifiedDirectoryEntry {
+    entry: fs::DirEntry,
+    file_type: FileType,
 }
 
 /// Greedily walks every supplied root without following symbolic links.
@@ -168,6 +198,7 @@ fn discover_with_limits(
         started: Instant::now(),
         classified_entries: 0,
         candidate_source_bytes: 0,
+        seen_sources: BTreeSet::new(),
         complete: true,
     };
     for root in &roots {
@@ -175,8 +206,6 @@ fn discover_with_limits(
             break;
         }
     }
-    let mut seen_sources = BTreeSet::new();
-    bundles.retain(|bundle| seen_sources.insert((bundle.source_path().clone(), bundle.kind())));
     InstructionDiscoverySnapshot {
         roots: roots.into_boxed_slice(),
         bundles: bundles.into_boxed_slice(),
@@ -209,12 +238,10 @@ fn walk_root(
     }
     let mut pending = vec![root_path];
     while let Some(directory) = pending.pop() {
-        if !check_elapsed(root.path(), findings, state)
-            || !inspect_directory(root, &directory, bundles, findings, state)
-        {
+        if !check_elapsed(root.path(), findings, state) {
             return false;
         }
-        let entries = match fs::read_dir(&directory) {
+        let directory_entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(_) => {
                 if !push_path_finding(
@@ -229,13 +256,13 @@ fn walk_root(
                 continue;
             }
         };
-        let mut children = Vec::new();
-        for entry in entries {
+        let mut entries = Vec::new();
+        for entry in directory_entries {
             if !consume_entry(root.path(), findings, state) {
                 return false;
             }
             match entry {
-                Ok(entry) => children.push(entry),
+                Ok(entry) => entries.push(entry),
                 Err(_) => {
                     if !push_path_finding(
                         &directory,
@@ -249,13 +276,14 @@ fn walk_root(
                 }
             }
         }
-        children.sort_by_key(fs::DirEntry::file_name);
-        for entry in children.into_iter().rev() {
+        entries.sort_by_key(fs::DirEntry::file_name);
+        let mut classified = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !check_elapsed(root.path(), findings, state) {
+                return false;
+            }
             match entry.file_type() {
-                Ok(file_type) if file_type.is_dir() && !file_type.is_symlink() => {
-                    pending.push(entry.path());
-                }
-                Ok(_) => {}
+                Ok(file_type) => classified.push(ClassifiedDirectoryEntry { entry, file_type }),
                 Err(_) => {
                     if !push_path_finding(
                         &entry.path(),
@@ -269,6 +297,17 @@ fn walk_root(
                 }
             }
         }
+        if !inspect_directory(root, &directory, &classified, bundles, findings, state) {
+            return false;
+        }
+        for classified_entry in classified.into_iter().rev() {
+            if !check_elapsed(root.path(), findings, state) {
+                return false;
+            }
+            if classified_entry.file_type.is_dir() {
+                pending.push(classified_entry.entry.path());
+            }
+        }
     }
     true
 }
@@ -276,15 +315,19 @@ fn walk_root(
 fn inspect_directory(
     root: &InstructionDiscoveryRoot,
     directory: &std::path::Path,
+    entries: &[ClassifiedDirectoryEntry],
     bundles: &mut Vec<InstructionBundleRegistration>,
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
 ) -> bool {
-    let agents = directory.join("AGENTS.md");
-    if is_regular_no_follow(&agents)
+    let agents = entries
+        .iter()
+        .find(|entry| entry.entry.file_name() == "AGENTS.md")
+        .filter(|entry| entry.file_type.is_file());
+    if let Some(agents) = agents
         && !register_file(
             root,
-            &agents,
+            &agents.entry.path(),
             InstructionBundleKind::AgentDocument,
             None,
             bundles,
@@ -308,12 +351,15 @@ fn inspect_directory(
                     .is_some_and(|name| name == ".agents")
         }
     };
-    let skill = directory.join("SKILL.md");
-    if is_skill && is_regular_no_follow(&skill) {
+    let skill = entries
+        .iter()
+        .find(|entry| entry.entry.file_name() == "SKILL.md")
+        .filter(|entry| entry.file_type.is_file());
+    if is_skill && let Some(skill) = skill {
         let parent = directory.file_name().and_then(|name| name.to_str());
         if !register_file(
             root,
-            &skill,
+            &skill.entry.path(),
             InstructionBundleKind::AgentSkill,
             parent,
             bundles,
@@ -350,6 +396,9 @@ fn register_file(
             );
         }
     };
+    if !state.seen_sources.insert(source_path.clone()) {
+        return true;
+    }
     let bytes = match read_candidate(source, root.path(), findings, state) {
         Ok(bytes) => bytes,
         Err(continue_scan) => return continue_scan,
@@ -379,15 +428,15 @@ fn register_file(
         },
         None => None,
     };
-    let Some(bundle) = InstructionBundleRegistration::new(
+    let Some(bundle) = InstructionBundleRegistration::new(InstructionBundleRegistrationInput {
         kind,
-        root.kind(),
-        root.path().clone(),
-        source_path.clone(),
-        bytes.len() as u64,
-        InstructionDigest::sha256(&bytes),
+        root_kind: root.kind(),
+        root_path: root.path().clone(),
+        source_path: source_path.clone(),
+        source_bytes: bytes.len() as u64,
+        source_hash: InstructionDigest::sha256(&bytes),
         skill,
-    ) else {
+    }) else {
         return push_finding(
             source_path,
             InstructionDiscoveryFindingKind::InvalidSkill,
@@ -397,11 +446,6 @@ fn register_file(
     };
     bundles.push(bundle);
     true
-}
-
-fn is_regular_no_follow(path: &std::path::Path) -> bool {
-    fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
 fn read_candidate(
@@ -414,7 +458,7 @@ fn read_candidate(
         .limits
         .candidate_source_bytes
         .saturating_sub(state.candidate_source_bytes);
-    let file = match fs::File::open(source) {
+    let file = match open_candidate_no_follow(source) {
         Ok(file) => file,
         Err(_) => {
             return Err(push_path_finding(
@@ -457,11 +501,40 @@ fn read_candidate(
     Ok(bytes)
 }
 
+#[cfg(unix)]
+fn open_candidate_no_follow(source: &std::path::Path) -> io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    let descriptor = open(
+        source,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    let file = fs::File::from(descriptor);
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other(
+            "instruction candidate is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_candidate_no_follow(_source: &std::path::Path) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no-follow instruction reads are unavailable on this platform",
+    ))
+}
+
 fn consume_entry(
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
 ) -> bool {
+    if !check_elapsed(fallback, findings, state) {
+        return false;
+    }
     if state.classified_entries >= state.limits.classified_entries {
         return reach_limit(
             fallback.clone(),
@@ -546,11 +619,50 @@ fn reach_limit(
 struct PortableSkillFrontmatter {
     name: String,
     description: String,
-    license: Option<String>,
-    compatibility: Option<String>,
-    metadata: Option<BTreeMap<String, String>>,
-    #[serde(rename = "allowed-tools")]
-    allowed_tools: Option<String>,
+    #[serde(default)]
+    license: OptionalFrontmatterField<String>,
+    #[serde(default)]
+    compatibility: OptionalFrontmatterField<String>,
+    #[serde(default)]
+    metadata: OptionalFrontmatterField<BTreeMap<String, String>>,
+    #[serde(default, rename = "allowed-tools")]
+    allowed_tools: OptionalFrontmatterField<String>,
+}
+
+#[derive(Default)]
+enum OptionalFrontmatterField<T> {
+    #[default]
+    Missing,
+    Present(T),
+}
+
+impl<'de, T> Deserialize<'de> for OptionalFrontmatterField<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+        if matches!(value, serde_yaml_ng::Value::Null) {
+            return Err(serde::de::Error::custom(
+                "an optional skill field cannot be null",
+            ));
+        }
+        T::deserialize(value)
+            .map(Self::Present)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl<T> OptionalFrontmatterField<T> {
+    fn as_ref(&self) -> Option<&T> {
+        match self {
+            Self::Missing => None,
+            Self::Present(value) => Some(value),
+        }
+    }
 }
 
 fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
@@ -566,7 +678,12 @@ fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
         return None;
     }
     let _portable_optional_fields = (parsed.metadata, parsed.allowed_tools);
-    InstructionSkillMetadata::try_new(parsed.name, parsed.description, parent).ok()
+    InstructionSkillMetadata::try_new(InstructionSkillMetadataInput {
+        name: parsed.name,
+        description: parsed.description,
+        parent_directory: parent.to_owned(),
+    })
+    .ok()
 }
 
 #[cfg(test)]
@@ -631,14 +748,11 @@ mod tests {
 
     #[test]
     fn overlapping_roots_emit_one_registration_for_the_same_source() {
+        let source = "---\nname: review-rust\ndescription: Review Rust changes.\n---\n# Review\n";
         let temporary = tempfile::tempdir().expect("temporary root exists");
         let skills = temporary.path().join(".agents/skills/review-rust");
         fs::create_dir_all(&skills).expect("nested skill directory exists");
-        fs::write(
-            skills.join("SKILL.md"),
-            "---\nname: review-rust\ndescription: Review Rust changes.\n---\n# Review\n",
-        )
-        .expect("skill is written");
+        fs::write(skills.join("SKILL.md"), source).expect("skill is written");
         let workspace = temporary.path().canonicalize().expect("root canonicalizes");
         let configured = temporary
             .path()
@@ -646,21 +760,26 @@ mod tests {
             .canonicalize()
             .expect("configured root canonicalizes");
 
-        let snapshot = discover_workspace_instructions(vec![
-            InstructionDiscoveryRoot::new(
-                InstructionDiscoveryRootKind::Configured,
-                InstructionPath::try_new(configured.to_string_lossy().into_owned())
-                    .expect("configured path is valid"),
-            ),
-            InstructionDiscoveryRoot::new(
-                InstructionDiscoveryRootKind::Workspace,
-                InstructionPath::try_new(workspace.to_string_lossy().into_owned())
-                    .expect("workspace path is valid"),
-            ),
-        ]);
+        let snapshot = discover_with_limits(
+            vec![
+                InstructionDiscoveryRoot::new(
+                    InstructionDiscoveryRootKind::Configured,
+                    InstructionPath::try_new(configured.to_string_lossy().into_owned())
+                        .expect("configured path is valid"),
+                ),
+                InstructionDiscoveryRoot::new(
+                    InstructionDiscoveryRootKind::Workspace,
+                    InstructionPath::try_new(workspace.to_string_lossy().into_owned())
+                        .expect("workspace path is valid"),
+                ),
+            ],
+            test_limits(100, 4, source.len() as u64, Duration::from_secs(1)),
+        );
 
         assert_eq!(snapshot.roots().len(), 2);
         assert_eq!(snapshot.bundles().len(), 1);
+        assert!(snapshot.is_complete());
+        assert_eq!(snapshot.candidate_source_bytes(), source.len() as u64);
         assert_eq!(
             snapshot.bundles()[0].root_kind(),
             InstructionDiscoveryRootKind::Workspace
@@ -670,7 +789,7 @@ mod tests {
     #[test]
     fn entry_limit_stops_an_incomplete_scan_with_typed_evidence() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
-        fs::create_dir(temporary.path().join("nested")).expect("nested directory exists");
+        fs::write(temporary.path().join("AGENTS.md"), "not admitted").expect("candidate exists");
         let root = workspace_root(&temporary);
 
         let snapshot =
@@ -678,6 +797,7 @@ mod tests {
 
         assert!(!snapshot.is_complete());
         assert_eq!(snapshot.classified_entries(), 0);
+        assert!(snapshot.bundles().is_empty());
         assert_eq!(snapshot.findings().len(), 1);
         assert_eq!(
             snapshot.findings()[0].kind(),
@@ -748,6 +868,45 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn candidate_open_refuses_a_symlink_after_directory_classification() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let outside = temporary.path().join("outside");
+        let candidate = temporary.path().join("AGENTS.md");
+        fs::write(&outside, "outside instructions").expect("outside source exists");
+        symlink(&outside, &candidate).expect("candidate link exists");
+        let root = workspace_root(&temporary);
+        let mut findings = Vec::new();
+        let mut state = test_state(test_limits(4, 4, 64, Duration::from_secs(1)));
+
+        let result = read_candidate(&candidate, root.path(), &mut findings, &mut state);
+
+        assert!(result.is_err());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].kind(),
+            InstructionDiscoveryFindingKind::EntryUnreadable
+        );
+    }
+
+    #[test]
+    fn explicit_null_portable_skill_fields_are_invalid() {
+        let license = "---\nname: review-rust\ndescription: Review.\nlicense: null\n---\n";
+        let compatibility =
+            "---\nname: review-rust\ndescription: Review.\ncompatibility: null\n---\n";
+        let metadata = "---\nname: review-rust\ndescription: Review.\nmetadata: null\n---\n";
+        let allowed_tools =
+            "---\nname: review-rust\ndescription: Review.\nallowed-tools: null\n---\n";
+
+        assert!(parse_skill(license, "review-rust").is_none());
+        assert!(parse_skill(compatibility, "review-rust").is_none());
+        assert!(parse_skill(metadata, "review-rust").is_none());
+        assert!(parse_skill(allowed_tools, "review-rust").is_none());
+    }
+
     fn workspace_root(temporary: &tempfile::TempDir) -> InstructionDiscoveryRoot {
         let canonical = temporary.path().canonicalize().expect("root canonicalizes");
         InstructionDiscoveryRoot::new(
@@ -768,6 +927,17 @@ mod tests {
             findings,
             candidate_source_bytes,
             elapsed,
+        }
+    }
+
+    fn test_state(limits: DiscoveryLimits) -> DiscoveryState {
+        DiscoveryState {
+            limits,
+            started: Instant::now(),
+            classified_entries: 0,
+            candidate_source_bytes: 0,
+            seen_sources: BTreeSet::new(),
+            complete: true,
         }
     }
 }
