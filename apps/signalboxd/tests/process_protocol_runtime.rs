@@ -5168,7 +5168,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
 /// S07 / INV-029: stopping an issued call records the durable cancellation
 /// request and retains the slot for lifecycle closure, and a distinct second
 /// stop is refused with the exact prior stop authority named.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
 -> Result<(), Box<dyn Error>> {
