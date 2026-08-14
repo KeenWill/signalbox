@@ -801,6 +801,8 @@ fn candidate_event(metadata: &Metadata<'_>) -> bool {
                 | "turn_attempt_id"
                 | "cause_code"
                 | "terminal_outcome"
+                | "tool_round_limit"
+                | "observed_tool_rounds"
         )
     })
 }
@@ -855,6 +857,20 @@ fn admitted_event_values(metadata: &Metadata<'_>, values: &RecordedValues) -> bo
             values.has_exact(&["message", "session_id", "turn_id"])
                 && values.uuid("session_id")
                 && values.uuid("turn_id")
+        }
+        ("signalbox_application::model_execution", "automatic tool-round limit reached") => {
+            values.has_exact(&[
+                "message",
+                "model_call_id",
+                "observed_tool_rounds",
+                "session_id",
+                "tool_round_limit",
+                "turn_id",
+            ]) && values.uuid("session_id")
+                && values.uuid("turn_id")
+                && values.uuid("model_call_id")
+                && values.unsigned("tool_round_limit")
+                && values.unsigned("observed_tool_rounds")
         }
         ("signalbox_model_provider_runtime", "model call dispatched") => {
             values.has_exact(&[
@@ -939,6 +955,12 @@ impl RecordedValues {
             .unwrap_or(false)
     }
 
+    fn unsigned(&self, name: &str) -> bool {
+        self.get(name)
+            .map(|value| value.trim_matches('"').parse::<u64>().is_ok())
+            .unwrap_or(false)
+    }
+
     fn closed(&self, name: &str, admitted: &[&str]) -> bool {
         self.get(name)
             .map(|value| admitted.contains(&value.trim_matches('"')))
@@ -990,6 +1012,7 @@ const TURN_OUTCOMES: &[&str] = &[
     "cancelled_with_tool_response",
     "target_unavailable",
     "capability_known_failure",
+    "tool_round_limit_reached",
     "continuation_target_unavailable",
 ];
 
@@ -1348,8 +1371,8 @@ mod tests {
         names
     }
 
-    fn event_names(span: &SpanData) -> Vec<String> {
-        let mut names = span.events[0]
+    fn event_names(span: &SpanData, event_index: usize) -> Vec<String> {
+        let mut names = span.events[event_index]
             .attributes
             .iter()
             .map(|attribute| attribute.key.as_str().to_owned())
@@ -1542,20 +1565,45 @@ mod tests {
                 terminal_outcome = "completed",
                 "turn terminalized"
             );
+            tracing::warn!(
+                target: "signalbox_application::model_execution",
+                session_id = %SESSION_ID,
+                turn_id = %TURN_ID,
+                model_call_id = %MODEL_CALL_ID,
+                tool_round_limit = 32_usize,
+                observed_tool_rounds = 32_usize,
+                "automatic tool-round limit reached"
+            );
         });
 
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "turn_work");
         assert_eq!(names(&spans[0]), vec!["session_id", "turn_id"]);
-        assert_eq!(spans[0].events.len(), 1);
+        assert_eq!(spans[0].events.len(), 2);
         assert_eq!(spans[0].events[0].name, "turn terminalized");
         assert_eq!(
-            event_names(&spans[0]),
+            event_names(&spans[0], 0),
             vec![
                 "level",
                 "session_id",
                 "target",
                 "terminal_outcome",
+                "turn_id"
+            ]
+        );
+        assert_eq!(
+            spans[0].events[1].name,
+            "automatic tool-round limit reached"
+        );
+        assert_eq!(
+            event_names(&spans[0], 1),
+            vec![
+                "level",
+                "model_call_id",
+                "observed_tool_rounds",
+                "session_id",
+                "target",
+                "tool_round_limit",
                 "turn_id"
             ]
         );

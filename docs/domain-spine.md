@@ -6143,6 +6143,7 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        cause: PreparedModelCallFailureCause,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
@@ -6153,6 +6154,11 @@ pub trait FailPreparedModelCallTransaction {
         session: SessionId,
         call: ModelCallId,
     ) -> impl Future<Output = Result<RetainedCapabilityFailureStatus, Self::Error>> + Send;
+}
+
+pub enum PreparedModelCallFailureCause {
+    CapabilityKnownFailure,
+    ToolRoundLimitReached,
 }
 
 pub enum RetainedCapabilityFailureStatus {
@@ -6296,6 +6302,8 @@ pub enum ModelCallExecutionOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
     CapabilityFailureAlreadyCommitted(ModelCallId),
+    ToolRoundLimitReached(Box<FailedModelCallTurn>),
+    ToolRoundLimitAlreadyCommitted(ModelCallId),
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
     ObservationAlreadyCommitted(ModelCallId),
 }
@@ -10386,7 +10394,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 32 (incl. 8 traits)   |
+| application: model_execution                       | 33 (incl. 8 traits)   |
 | application: tool_loop                             | 26 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
@@ -10402,4 +10410,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **256 (+1 free fn)**  |
+| **signalbox-application total**                    | **257 (+1 free fn)**  |
