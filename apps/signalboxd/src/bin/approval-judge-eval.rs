@@ -24,8 +24,8 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use signalbox_persistence::approval_judge_eval::{
-    ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRunId, ApprovalJudgeEvalRunRecord,
-    record_eval_run, verify_recording_schema,
+    APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION, ApprovalJudgeEvalCallRecord,
+    ApprovalJudgeEvalRunId, ApprovalJudgeEvalRunRecord, record_eval_run, verify_recording_schema,
 };
 use signalboxd::{
     DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess, HubModelConfiguration,
@@ -64,8 +64,6 @@ Options:
 /// Bumped whenever the majority, tie, or stability algorithms change, so
 /// before/after scorecards with identical replay metadata still declare
 /// which analysis produced their summaries.
-const SCORING_SEMANTICS_VERSION: u32 = 3;
-
 /// Closed scorecard grouping; deserialization is the single source of truth,
 /// so an unknown spelling fails the corpus load and a new variant fails
 /// compilation anywhere a match is not exhaustive.
@@ -767,7 +765,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
         "partial_cases": total_partial,
         "unmeasured_cases": total_unmeasured,
         "escalation_calibration": escalation,
-        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
+        "scoring_semantics_version": APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION,
         "categories": categories,
         "cases": case_reports,
     });
@@ -797,12 +795,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "recording eval run {run_identity} holding {} calls",
             recorded_calls.len()
         );
-        record_eval_run(
-            &recording.pool,
-            &recording.schema,
-            &run,
-            &recorded_calls,
-        )
+        record_eval_run(&recording.pool, &recording.schema, &run, &recorded_calls)
             .await
             .map_err(|error| {
                 format!("database recording failed for eval run {run_identity}: {error}")

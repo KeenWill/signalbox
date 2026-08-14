@@ -21,6 +21,12 @@ use sqlx::{
 
 use crate::{commit_failure_is_ambiguous, mapping::approval_judge_recommendation_to_str};
 
+/// Scorecard summary semantics accepted by durable eval recording.
+///
+/// The runner uses this same constant when emitting its scorecard, so a
+/// summary algorithm revision cannot be recorded under another version.
+pub const APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION: u32 = 3;
+
 /// Identity of one recorded eval run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgeEvalRunId(Uuid);
@@ -119,22 +125,46 @@ pub async fn verify_recording_schema(
     // and multiple matching identities fail closed instead of letting a
     // shadow schema win.
     let schemas = sqlx::query(
-        "SELECT namespace.nspname,
+        "WITH expected_trigger(trigger_name, table_name, function_name) AS (
+             VALUES
+               ('approval_judge_eval_run_stamps_its_recording_transaction',
+                'approval_judge_eval_run',
+                'stamp_eval_run_recording_transaction'),
+               ('approval_judge_eval_call_is_sealed_with_its_run',
+                'approval_judge_eval_call',
+                'reject_eval_call_outside_run_recording'),
+               ('approval_judge_eval_run_is_append_only',
+                'approval_judge_eval_run',
+                'reject_immutable_record_change'),
+               ('approval_judge_eval_run_cannot_be_truncated',
+                'approval_judge_eval_run',
+                'reject_immutable_record_change'),
+               ('approval_judge_eval_call_is_append_only',
+                'approval_judge_eval_call',
+                'reject_immutable_record_change'),
+               ('approval_judge_eval_call_cannot_be_truncated',
+                'approval_judge_eval_call',
+                'reject_immutable_record_change')
+         )
+         SELECT namespace.nspname,
                 pg_catalog.quote_ident(namespace.nspname) AS quoted_name
-           FROM pg_catalog.pg_trigger AS installed_trigger
-           JOIN pg_catalog.pg_class AS call_table
-             ON call_table.oid = installed_trigger.tgrelid
+           FROM expected_trigger
+           JOIN pg_catalog.pg_trigger AS installed_trigger
+             ON installed_trigger.tgname = expected_trigger.trigger_name
+            AND NOT installed_trigger.tgisinternal
+            AND installed_trigger.tgenabled IN ('O', 'A')
+           JOIN pg_catalog.pg_class AS evidence_table
+             ON evidence_table.oid = installed_trigger.tgrelid
+            AND evidence_table.relname = expected_trigger.table_name
            JOIN pg_catalog.pg_namespace AS namespace
-             ON namespace.oid = call_table.relnamespace
+             ON namespace.oid = evidence_table.relnamespace
            JOIN pg_catalog.pg_proc AS trigger_function
              ON trigger_function.oid = installed_trigger.tgfoid
-          WHERE NOT installed_trigger.tgisinternal
-            AND installed_trigger.tgname =
-                'approval_judge_eval_call_is_sealed_with_its_run'
-            AND call_table.relname = 'approval_judge_eval_call'
-            AND trigger_function.proname =
-                'reject_eval_call_outside_run_recording'
-            AND trigger_function.pronamespace = namespace.oid",
+            AND trigger_function.proname = expected_trigger.function_name
+            AND trigger_function.pronamespace = namespace.oid
+          GROUP BY namespace.oid, namespace.nspname
+         HAVING pg_catalog.count(*) =
+                (SELECT pg_catalog.count(*) FROM expected_trigger)",
     )
     .fetch_all(&mut *connection)
     .await?;
@@ -223,6 +253,11 @@ fn require_scorecard_header_agreement(
     }
     if header("repeats").and_then(serde_json::Value::as_u64) != Some(u64::from(run.repeats)) {
         return Err(header_mismatch("repeats"));
+    }
+    if header("scoring_semantics_version").and_then(serde_json::Value::as_u64)
+        != Some(u64::from(APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION))
+    {
+        return Err(header_mismatch("scoring_semantics_version"));
     }
     Ok(())
 }
@@ -326,14 +361,14 @@ fn require_scorecard_verdict_agreement(
 }
 
 fn failure_causes_are_valid(failed_calls: u64, failure_causes: Option<&serde_json::Value>) -> bool {
-    let failure_cause_count = failure_causes
-        .and_then(serde_json::Value::as_array)
-        .and_then(|causes| u64::try_from(causes.len()).ok());
-    if failed_calls == 0 {
-        failure_causes.is_none() || failure_cause_count == Some(0)
-    } else {
-        failure_cause_count == Some(failed_calls)
-    }
+    let Some(failure_causes) = failure_causes else {
+        return failed_calls == 0;
+    };
+    let Some(failure_causes) = failure_causes.as_array() else {
+        return false;
+    };
+    u64::try_from(failure_causes.len()).ok() == Some(failed_calls)
+        && failure_causes.iter().all(serde_json::Value::is_string)
 }
 
 /// Requires one case's derived summaries to agree with its own verdicts.
@@ -343,6 +378,16 @@ fn require_scorecard_case_summary_agreement(
     configured_repeats: u32,
     verdicts: &[(&str, &str)],
 ) -> Result<(), ApprovalJudgeEvalRecordingError> {
+    let expected_verdict = case
+        .get("expected")
+        .and_then(serde_json::Value::as_str)
+        .filter(|expected| matches!(*expected, "approve" | "deny" | "escalate_to_human"))
+        .ok_or_else(
+            || ApprovalJudgeEvalRecordingError::ScorecardSummaryMismatch {
+                case: String::from(name),
+                field: "expected",
+            },
+        )?;
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     for &(recommendation, _) in verdicts {
         *counts.entry(recommendation).or_default() += 1;
@@ -356,11 +401,7 @@ fn require_scorecard_case_summary_agreement(
     let stable = (configured_repeats >= 2 && complete).then_some(counts.len() == 1);
     let leading = counts.values().max().copied().unwrap_or(0);
     let tied = measured && counts.values().filter(|count| **count == leading).count() > 1;
-    let correct = measured
-        && majority
-            == case
-                .get("expected")
-                .and_then(serde_json::Value::as_str);
+    let correct = measured && majority == Some(expected_verdict);
     let expected = [
         ("verdict_counts", serde_json::json!(counts)),
         ("majority", serde_json::json!(majority)),
@@ -685,9 +726,8 @@ impl fmt::Display for ApprovalJudgeEvalRecordingError {
             Self::TablesUnwritable => formatter.write_str(
                 "eval recording tables refuse the connected role a required table privilege",
             ),
-            Self::SchemaAmbiguous => formatter.write_str(
-                "eval recording schema identity is ambiguous across database objects",
-            ),
+            Self::SchemaAmbiguous => formatter
+                .write_str("eval recording schema identity is ambiguous across database objects"),
             Self::CallOutsideConfiguredRepeats => formatter
                 .write_str("eval call repeat ordinal is outside the run's configured repeats"),
             Self::ScorecardHeaderMismatch { field } => write!(
@@ -795,6 +835,8 @@ mod tests {
         assert!(failure_causes_are_valid(0, None));
         assert!(failure_causes_are_valid(0, Some(&json!([]))));
         assert!(!failure_causes_are_valid(0, Some(&json!(["unexpected"]))));
+        assert!(!failure_causes_are_valid(1, Some(&json!([null]))));
+        assert!(!failure_causes_are_valid(1, Some(&json!([{}]))));
         assert!(!failure_causes_are_valid(0, Some(&json!("malformed"))));
     }
 
@@ -841,6 +883,11 @@ mod tests {
         let mut contradictory = valid;
         contradictory["correct"] = json!(false);
         assert_summary_mismatch(&contradictory, &verdicts, "correct");
+
+        let mut unknown_expected = contradictory;
+        unknown_expected["correct"] = json!(true);
+        unknown_expected["expected"] = json!("maybe");
+        assert_summary_mismatch(&unknown_expected, &verdicts, "expected");
     }
 
     #[test]
@@ -886,9 +933,11 @@ mod tests {
         contradictory["total_cases"] = json!(2);
         assert!(matches!(
             require_scorecard_aggregate_summary_agreement(&contradictory, &cases),
-            Err(ApprovalJudgeEvalRecordingError::ScorecardAggregateMismatch {
-                field: "total_cases"
-            })
+            Err(
+                ApprovalJudgeEvalRecordingError::ScorecardAggregateMismatch {
+                    field: "total_cases"
+                }
+            )
         ));
     }
 

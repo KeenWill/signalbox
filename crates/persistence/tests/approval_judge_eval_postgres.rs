@@ -15,9 +15,9 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     approval_judge_eval::{
-        ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRecordingError, ApprovalJudgeEvalRunId,
-        ApprovalJudgeEvalRunRecord, record_eval_run as record_eval_run_in_schema,
-        verify_recording_schema,
+        APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION, ApprovalJudgeEvalCallRecord,
+        ApprovalJudgeEvalRecordingError, ApprovalJudgeEvalRunId, ApprovalJudgeEvalRunRecord,
+        record_eval_run as record_eval_run_in_schema, verify_recording_schema,
     },
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
@@ -81,6 +81,7 @@ const APPROVE_SPELLING: &str = "approve";
 const DENY_SPELLING: &str = "deny";
 const FOREIGN_RECOMMENDATION_SPELLING: &str = "maybe";
 const FAILURE_CAUSES: [&str; 2] = ["fixture timeout", "fixture transport failure"];
+const SHADOW_SCHEMA: &str = "shadow_approval_judge_eval";
 
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -317,6 +318,7 @@ fn scorecard_with_cases(
         "contract_digest": CONTRACT_DIGEST,
         "rendered_digest": RENDERED_DIGEST,
         "repeats": REPEATS,
+        "scoring_semantics_version": APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION,
         "total_cases": aggregates.total_cases,
         "correct_majorities": aggregates.correct_majorities,
         "unstable_cases": aggregates.unstable_cases,
@@ -704,18 +706,37 @@ async fn recording_requires_the_daemon_applied_schema() -> Result<(), Box<dyn Er
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn recording_requires_every_evidence_trigger_to_be_active() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    sqlx::query(
+        "ALTER TABLE approval_judge_eval_run
+         DISABLE TRIGGER approval_judge_eval_run_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let absent = verify_recording_schema(&pool)
+        .await
+        .expect_err("a disabled append-only trigger makes recording unavailable");
+    expect_tables_absent(&absent);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn recording_uses_the_configured_migration_schema() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres_in_configured_schema().await?;
-    sqlx::query("CREATE SCHEMA shadow_approval_judge_eval AUTHORIZATION signalbox")
-        .execute(&pool)
-        .await?;
-    sqlx::raw_sql(
-        "CREATE TABLE shadow_approval_judge_eval.approval_judge_eval_run
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE SCHEMA {SHADOW_SCHEMA} AUTHORIZATION signalbox"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {SHADOW_SCHEMA}.approval_judge_eval_run
              (LIKE configured_approval_judge_eval.approval_judge_eval_run INCLUDING ALL);
-         CREATE TABLE shadow_approval_judge_eval.approval_judge_eval_call
+         CREATE TABLE {SHADOW_SCHEMA}.approval_judge_eval_call
              (LIKE configured_approval_judge_eval.approval_judge_eval_call INCLUDING ALL);
-         ALTER ROLE signalbox SET search_path TO shadow_approval_judge_eval",
-    )
+         ALTER ROLE signalbox SET search_path TO {SHADOW_SCHEMA}"
+    )))
     .execute(&pool)
     .await?;
     let connection_options = pool.connect_options().clone();
@@ -743,16 +764,17 @@ async fn recording_uses_the_configured_migration_schema() -> Result<(), Box<dyn 
     .bind(run.run.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(current_schema, "shadow_approval_judge_eval");
+    assert_eq!(current_schema, SHADOW_SCHEMA);
     assert_eq!(stored, 1);
-    let shadow_stored: i64 = sqlx::query_scalar(
+    let shadow_query = sqlx::AssertSqlSafe(format!(
         "SELECT count(*)
-           FROM shadow_approval_judge_eval.approval_judge_eval_run
-          WHERE eval_run_id = $1",
-    )
-    .bind(run.run.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+           FROM {SHADOW_SCHEMA}.approval_judge_eval_run
+          WHERE eval_run_id = $1"
+    ));
+    let shadow_stored: i64 = sqlx::query_scalar(shadow_query)
+        .bind(run.run.into_uuid())
+        .fetch_one(&pool)
+        .await?;
     assert_eq!(shadow_stored, 0);
     Ok(())
 }
@@ -860,6 +882,13 @@ async fn contradictory_scorecard_headers_are_rejected() -> Result<(), Box<dyn Er
             .fetch_one(&pool)
             .await?;
     assert_eq!(stored_runs, 0);
+
+    let mut wrong_semantics = run_record_with(RUN_IDENTITY, &[], no_case_aggregates());
+    wrong_semantics.scorecard["scoring_semantics_version"] = serde_json::json!(0);
+    let error = record_eval_run(&pool, &wrong_semantics, &[])
+        .await
+        .expect_err("a scorecard with foreign scoring semantics is rejected");
+    expect_scorecard_header_mismatch(&error, "scoring_semantics_version");
     Ok(())
 }
 
@@ -1143,8 +1172,7 @@ async fn failed_calls_require_one_failure_cause_each() -> Result<(), Box<dyn Err
         )],
         first_partial_case_aggregates(),
     );
-    too_few.scorecard["cases"][0]["failure_causes"] =
-        serde_json::json!(["only one cause"]);
+    too_few.scorecard["cases"][0]["failure_causes"] = serde_json::json!(["only one cause"]);
     let error = record_eval_run(&pool, &too_few, &[first_call()])
         .await
         .expect_err("two failed calls cannot have only one failure cause");
