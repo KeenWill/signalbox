@@ -12,9 +12,11 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, CompiledTool, CompiledToolCatalog, ExecutableToolSnapshotSource,
     ImportedConversationConverter, ImportedConversationStore, InitialRunnerDispatchRequest,
-    NoToolCatalog, PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome,
-    ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
-    RunnerReplacementProvisioningOutcome, ToolDefinition, ToolInputSchema,
+    NoToolCatalog, PinnedRunnerDispatchRequest, PinnedRunnerReplacementIdentities,
+    PinnedRunnerReplacementOutcome, PinnedRunnerReplacementTransaction,
+    PromotePendingRunnerOutcome, ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest,
+    RunnerLeaseResultRequest, RunnerReplacementProvisioningOutcome, ToolDefinition,
+    ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -146,6 +148,8 @@ const UNADVERTISED_PENDING_REPLACEMENT_COMMAND: u128 = 0x937e;
 const WORKSPACE_REPLACEMENT_COMMAND: u128 = 0x937f;
 const WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9380;
 const REPLAY_WORKSPACE_PROVISIONING_AUTHORIZATION: u128 = 0x9382;
+const PINNED_REPLACEMENT_SEMANTIC_ENTRY: u128 = 0x9383;
+const PINNED_REPLACEMENT_FRONTIER: u128 = 0x9384;
 const REGISTER_WORKSPACE_COMMAND: u128 = 0x9362;
 const REGISTERED_WORKSPACE: u128 = 0x9363;
 const MINT_GIT_REMOTE_COMMAND: u128 = 0x9364;
@@ -2219,6 +2223,55 @@ async fn stored_credentialless_pin_fixture(
             offer_request(),
         )
         .expect("the credentialless registration pins the placement");
+    store.store_pin(&pin, &registration).await?;
+    Ok((store, expected_enrollment, registration, pin))
+}
+
+async fn stored_exact_directory_pin_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+    ),
+    Box<dyn Error>,
+> {
+    insert_session(pool).await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let directory = exact_runner_directory();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::Exact(directory.clone()),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            directory,
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the exact-directory fixture pins without provisioning");
     store.store_pin(&pin, &registration).await?;
     Ok((store, expected_enrollment, registration, pin))
 }
@@ -5553,7 +5606,6 @@ async fn inv042_inv044_pending_successor_promotes_after_predecessor_reconnect_an
     .bind(command.command().into_uuid())
     .fetch_one(&pool)
     .await?;
-
     assert_eq!(applied, expected);
     assert_eq!(replayed, expected);
     assert_eq!(
@@ -22830,6 +22882,256 @@ async fn s32_inv044_workspace_free_pinned_replacement_provisioning_is_not_applic
 
     assert_eq!(outcome, RunnerReplacementProvisioningOutcome::NotApplicable);
     assert!(!claimed);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012 / INV-044: the terminal port claims an exact-directory,
+/// workspace-free pinned replacement without appending terminal facts, and an
+/// equal replay observes the same durable stage.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (mut store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let first = store.complete(command, identities).await?;
+    let replay = store.complete(command, identities).await?;
+    let conflict = store
+        .complete(
+            ReplaceLostRunner::new(
+                command.command(),
+                session,
+                RunnerGeneration::one(),
+                RunnerReplacementTarget::Runner(enrollment().runner()),
+            ),
+            identities,
+        )
+        .await?;
+    let repository_port_replay = store
+        .stage_runner_replacement_provisioning(
+            command,
+            WorkspaceProvisioningAuthorizationId::from_uuid(uuid(
+                WORKSPACE_PROVISIONING_AUTHORIZATION,
+            )),
+        )
+        .await?;
+    let command_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM replace_lost_runner_command WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let result_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM replace_lost_runner_result WHERE command_id = $1")
+            .bind(command.command().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let provisioning_stage_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_workspace_provisioning_authorization
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let workspace_free_stage_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_workspace_free_replacement_stage
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        first,
+        PinnedRunnerReplacementOutcome::Staged {
+            command: command.command()
+        }
+    );
+    assert_eq!(replay, first);
+    assert_eq!(
+        conflict,
+        PinnedRunnerReplacementOutcome::ConflictingReuse {
+            command: command.command()
+        }
+    );
+    assert_eq!(
+        repository_port_replay,
+        RunnerReplacementProvisioningOutcome::NotApplicable
+    );
+    assert_eq!(command_count, 1);
+    assert_eq!(result_count, 0);
+    assert_eq!(provisioning_stage_count, 0);
+    assert_eq!(workspace_free_stage_count, 1);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a runner-default placement remains unclaimed because no
+/// authenticated successor directory exists at the workspace-free boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_default_pinned_replacement_stage_is_not_applicable()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(replacement_enrollment().runner()),
+    );
+    let outcome = store
+        .stage_workspace_free_pinned_replacement(command)
+        .await?;
+    let claimed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM durable_command WHERE command_id = $1
+        )",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(outcome, PinnedRunnerReplacementOutcome::NotApplicable);
+    assert!(!claimed);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a typed workspace-free stage cannot substitute a directory
+/// that differs from its exact lost placement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_free_replacement_stage_rejects_cross_wired_directory()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let command = DurableCommandId::from_uuid(uuid(SAME_RUNNER_REPLACEMENT_COMMAND));
+    let lost_event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_current_session_placement
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_lost_runner', 1, transaction_timestamp())",
+    )
+    .bind(command.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_lost_runner_command
+            (command_id, session_id, expected_placement_revision,
+             target_kind, target_runner_id)
+         VALUES ($1, $2, 1, 'runner', $3)",
+    )
+    .bind(command.into_uuid())
+    .bind(session.into_uuid())
+    .bind(replacement_enrollment().runner().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_workspace_free_replacement_stage
+            (command_id, session_id, lost_placement_event_ordinal,
+             lost_placement_revision, requested_working_directory)
+         VALUES ($1, $2, $3, 1, '/workspace/cross-wired')",
+    )
+    .bind(command.into_uuid())
+    .bind(session.into_uuid())
+    .bind(lost_event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    let rejected = transaction
+        .commit()
+        .await
+        .expect_err("the deferred stage guard rejects another directory");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012: concurrent equal workspace-free replacement claims
+/// serialize at the user-global command and both complete within the lock
+/// timeout with the same retained stage.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_equal_workspace_free_replacement_stages_serialize_with_timeout()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(replacement_enrollment().runner()),
+    );
+    let first_store = store.clone();
+    let second_store = store;
+    let (first, second) = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, async {
+        tokio::join!(
+            first_store.stage_workspace_free_pinned_replacement(command),
+            second_store.stage_workspace_free_pinned_replacement(command),
+        )
+    })
+    .await
+    .expect("the equal claims complete within the fixture lock timeout");
+    let first = first?;
+    let second = second?;
+    let command_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM replace_lost_runner_command WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let stage_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_workspace_free_replacement_stage
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(first, second);
+    assert_eq!(
+        first,
+        PinnedRunnerReplacementOutcome::Staged {
+            command: command.command()
+        }
+    );
+    assert_eq!(command_count, 1);
+    assert_eq!(stage_count, 1);
     drop(pool);
     Ok(())
 }
