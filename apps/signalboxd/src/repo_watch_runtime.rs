@@ -5744,9 +5744,10 @@ mod tests {
     fn a_new_attempt_clears_prior_poll_metrics_without_discarding_the_cache() {
         let mut cache = PollCache::default();
         let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        let entity_tag = EntityTag(ENTITY_TAG.to_owned());
         cache.insert(
             key.clone(),
-            EntityTag(ENTITY_TAG.to_owned()),
+            entity_tag.clone(),
             CACHE_WIRE_BYTES,
             Vec::<u8>::new(),
         );
@@ -5761,10 +5762,7 @@ mod tests {
         assert_eq!(cache.requests, 0);
         assert_eq!(cache.poll_wire_bytes, 0);
         assert_eq!(cache.cached_wire_bytes, CACHE_WIRE_BYTES);
-        assert_eq!(
-            cache.entity_tag(&key),
-            Some(&EntityTag(ENTITY_TAG.to_owned()))
-        );
+        assert_eq!(cache.entity_tag(&key), Some(&entity_tag));
     }
 
     #[test]
