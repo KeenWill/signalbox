@@ -773,13 +773,16 @@ Locks per transaction, in acquisition order:
   takes no row lock.
 
 - **Empty turn-instruction manifest recording**: the `session_scheduler` row
-  `FOR UPDATE` is the only explicit lock. Recording runs after activation and
-  before model work; holding the scheduler lock while rechecking the exact
-  active `turn_lifecycle` row keeps lifecycle writers out until its discovery,
-  registrations, and empty manifest commit atomically. This temporary
-  post-activation boundary is sound only while eligibility is the one immutable
-  empty value. The committed nonempty eligibility surface moves the manifest
-  into activation under this same scheduler lock, as
+  `FOR UPDATE` is the only explicit lock. An ordinary activation records after
+  activation and before model work, rechecking the exact active `turn_lifecycle`
+  row under that lock. A counted activation records after the fitting exact
+  count and before its activation commit, rechecking the exact queued row; the
+  later atomic activation-and-first-call transaction takes the same scheduler
+  lock and authenticates that manifest. In either path, discovery,
+  registrations, and the empty manifest commit atomically. These temporary
+  boundaries are sound only while eligibility is the one immutable empty value.
+  The committed nonempty eligibility surface moves the manifest into activation
+  under this same scheduler lock, as
   [the activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
   requires.
 

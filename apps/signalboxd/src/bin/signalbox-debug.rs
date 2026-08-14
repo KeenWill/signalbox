@@ -42,7 +42,8 @@ use signalbox_persistence::{
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
     HubModelConfiguration, ModelAdapter, PostgresProviderModelExecution,
-    PostgresScriptedModelExecution,
+    PostgresScriptedModelExecution, WorkspaceInstructionPreparedExecution,
+    WorkspaceInstructionRuntime,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::{
@@ -537,13 +538,17 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
     );
+    let workspace_instructions = WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new());
     let transcript = match provider {
         DebugProviderRuntime::Scripted(reply) => {
             let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
-                    repository,
-                    InProcessAttemptDispatchGate::default(),
-                    reply,
+                FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+                    PostgresScriptedModelExecution::new(
+                        repository,
+                        InProcessAttemptDispatchGate::default(),
+                        reply,
+                    ),
+                    workspace_instructions,
                 ));
             let (pass, pass_failure) =
                 ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
@@ -559,10 +564,13 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         }
         DebugProviderRuntime::Anthropic(provider) => {
             let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-                    repository,
-                    InProcessAttemptDispatchGate::default(),
-                    provider,
+                FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+                    PostgresProviderModelExecution::new(
+                        repository,
+                        InProcessAttemptDispatchGate::default(),
+                        provider,
+                    ),
+                    workspace_instructions,
                 ));
             let (pass, pass_failure) =
                 ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));

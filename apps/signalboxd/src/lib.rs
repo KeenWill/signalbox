@@ -213,6 +213,144 @@ pub trait ActivatedTurnExecution {
     fn report_post_activation_failure(&self) {}
 }
 
+/// Failure while preparing one turn's instruction record or running its
+/// delegated execution.
+#[derive(Debug)]
+pub enum WorkspaceInstructionPreparedExecutionError<ExecutionError> {
+    /// Discovery or durable turn-manifest recording failed.
+    WorkspaceInstructions(WorkspaceInstructionRuntimeError),
+    /// The wrapped execution failed after instruction preparation.
+    Execution(ExecutionError),
+}
+
+impl<ExecutionError> fmt::Display for WorkspaceInstructionPreparedExecutionError<ExecutionError>
+where
+    ExecutionError: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceInstructions(error) => error.fmt(formatter),
+            Self::Execution(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<ExecutionError> Error for WorkspaceInstructionPreparedExecutionError<ExecutionError>
+where
+    ExecutionError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::WorkspaceInstructions(error) => Some(error),
+            Self::Execution(error) => Some(error),
+        }
+    }
+}
+
+impl<ExecutionError> ClassifyOperatorFailure
+    for WorkspaceInstructionPreparedExecutionError<ExecutionError>
+where
+    ExecutionError: ClassifyOperatorFailure,
+{
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::WorkspaceInstructions(error) => error.operator_failure_class(),
+            Self::Execution(error) => error.operator_failure_class(),
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::WorkspaceInstructions(error) => error.operator_failure_cause_code(),
+            Self::Execution(error) => error.operator_failure_cause_code(),
+        }
+    }
+}
+
+/// Adds daemon-owned instruction discovery and turn-manifest recording before
+/// an activated-turn execution that does not own the provider/tool loop.
+#[derive(Clone, Debug)]
+pub struct WorkspaceInstructionPreparedExecution<Execution> {
+    execution: Execution,
+    workspace_instructions: WorkspaceInstructionRuntime,
+}
+
+impl<Execution> WorkspaceInstructionPreparedExecution<Execution> {
+    /// Wraps one execution with the exact instruction runtime it must use.
+    pub const fn new(
+        execution: Execution,
+        workspace_instructions: WorkspaceInstructionRuntime,
+    ) -> Self {
+        Self {
+            execution,
+            workspace_instructions,
+        }
+    }
+}
+
+impl<Execution> ActivatedTurnExecution for WorkspaceInstructionPreparedExecution<Execution>
+where
+    Execution: ActivatedTurnExecution + Clone + Send + 'static,
+{
+    type Error = WorkspaceInstructionPreparedExecutionError<Execution::Error>;
+
+    fn execute(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.clone();
+        let workspace_instructions = self.workspace_instructions.clone();
+        async move {
+            if !workspace_instructions
+                .prepare(activated.session(), activated.turn())
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::WorkspaceInstructions)?
+            {
+                return Ok(());
+            }
+            execution
+                .execute(activated)
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::Execution)
+        }
+    }
+
+    fn resume_active(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.clone();
+        async move {
+            execution
+                .resume_active(session)
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::Execution)
+        }
+    }
+
+    fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
+        match error {
+            WorkspaceInstructionPreparedExecutionError::WorkspaceInstructions(_) => true,
+            WorkspaceInstructionPreparedExecutionError::Execution(error) => {
+                Execution::active_resume_failure_requires_recovery(error)
+            }
+        }
+    }
+
+    fn active_resume_failure_turn(error: &Self::Error) -> Option<TurnId> {
+        match error {
+            WorkspaceInstructionPreparedExecutionError::WorkspaceInstructions(_) => None,
+            WorkspaceInstructionPreparedExecutionError::Execution(error) => {
+                Execution::active_resume_failure_turn(error)
+            }
+        }
+    }
+
+    fn report_post_activation_failure(&self) {
+        self.execution.report_post_activation_failure();
+    }
+}
+
 /// Cheap-clone handle that raises the daemon's fatal recovery signal.
 ///
 /// The scheduler pass reaches the signal through its execution role, but the

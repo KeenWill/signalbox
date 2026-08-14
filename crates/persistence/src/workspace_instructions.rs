@@ -88,7 +88,38 @@ impl WorkspaceInstructionRepository {
         discovery: InstructionDiscoveryId,
         manifest: TurnInstructionManifest,
         snapshot: &InstructionDiscoverySnapshot,
+        next_bundle_id: NextBundleId,
+    ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
+    where
+        NextBundleId: FnMut() -> InstructionBundleId,
+    {
+        self.record_for_state(discovery, manifest, snapshot, next_bundle_id, "active")
+            .await
+    }
+
+    /// Records the empty manifest required by one counted activation while its
+    /// candidate is still queued.
+    pub async fn record_counted_activation<NextBundleId>(
+        &self,
+        discovery: InstructionDiscoveryId,
+        manifest: TurnInstructionManifest,
+        snapshot: &InstructionDiscoverySnapshot,
+        next_bundle_id: NextBundleId,
+    ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
+    where
+        NextBundleId: FnMut() -> InstructionBundleId,
+    {
+        self.record_for_state(discovery, manifest, snapshot, next_bundle_id, "queued")
+            .await
+    }
+
+    async fn record_for_state<NextBundleId>(
+        &self,
+        discovery: InstructionDiscoveryId,
+        manifest: TurnInstructionManifest,
+        snapshot: &InstructionDiscoverySnapshot,
         mut next_bundle_id: NextBundleId,
+        required_state: &'static str,
     ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
     where
         NextBundleId: FnMut() -> InstructionBundleId,
@@ -112,7 +143,7 @@ impl WorkspaceInstructionRepository {
         .bind(manifest.turn().into_uuid())
         .fetch_optional(&mut *transaction)
         .await?;
-        if state.as_deref() != Some("active") {
+        if state.as_deref() != Some(required_state) {
             transaction.rollback().await?;
             return Ok(RecordTurnInstructionSnapshotOutcome::TurnUnavailable);
         }

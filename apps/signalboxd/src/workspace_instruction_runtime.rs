@@ -122,6 +122,52 @@ impl WorkspaceInstructionRuntime {
         session: SessionId,
         turn: TurnId,
     ) -> Result<bool, WorkspaceInstructionRuntimeError> {
+        let snapshot = self.discover(session).await?;
+        let discovery = InstructionDiscoveryId::from_uuid(Uuid::now_v7());
+        let manifest = TurnInstructionManifest::empty_turn_start(
+            TurnInstructionManifestId::from_uuid(Uuid::now_v7()),
+            session,
+            turn,
+        );
+        let outcome = self
+            .repository
+            .record_turn_start(discovery, manifest, &snapshot, || {
+                InstructionBundleId::from_uuid(Uuid::now_v7())
+            })
+            .await
+            .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
+        outcome_is_available(outcome)
+    }
+
+    /// Records the canonical empty manifest before a counted activation whose
+    /// first model call must commit in the activation transaction.
+    pub async fn prepare_counted_activation(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<bool, WorkspaceInstructionRuntimeError> {
+        let snapshot = self.discover(session).await?;
+        let discovery = InstructionDiscoveryId::from_uuid(Uuid::now_v7());
+        let manifest = TurnInstructionManifest::empty_turn_start(
+            TurnInstructionManifestId::from_uuid(Uuid::now_v7()),
+            session,
+            turn,
+        );
+        let outcome = self
+            .repository
+            .record_counted_activation(discovery, manifest, &snapshot, || {
+                InstructionBundleId::from_uuid(Uuid::now_v7())
+            })
+            .await
+            .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
+        outcome_is_available(outcome)
+    }
+
+    async fn discover(
+        &self,
+        session: SessionId,
+    ) -> Result<signalbox_application::InstructionDiscoverySnapshot, WorkspaceInstructionRuntimeError>
+    {
         let mut roots = Vec::with_capacity(self.configured_roots.len() + 1);
         if let Some(workspace_roots) = &self.workspace_roots {
             let path = match workspace_roots.resolve(session) {
@@ -142,27 +188,20 @@ impl WorkspaceInstructionRuntime {
         let snapshot = tokio::task::spawn_blocking(move || discover_workspace_instructions(roots))
             .await
             .map_err(WorkspaceInstructionRuntimeError::DiscoveryTask)?;
-        let discovery = InstructionDiscoveryId::from_uuid(Uuid::now_v7());
-        let manifest = TurnInstructionManifest::empty_turn_start(
-            TurnInstructionManifestId::from_uuid(Uuid::now_v7()),
-            session,
-            turn,
-        );
-        let outcome = self
-            .repository
-            .record_turn_start(discovery, manifest, &snapshot, || {
-                InstructionBundleId::from_uuid(Uuid::now_v7())
-            })
-            .await
-            .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
-        match outcome {
-            RecordTurnInstructionSnapshotOutcome::Recorded(_)
-            | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => Ok(true),
-            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(_) => {
-                Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
-            }
-            RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(false),
+        Ok(snapshot)
+    }
+}
+
+fn outcome_is_available(
+    outcome: RecordTurnInstructionSnapshotOutcome,
+) -> Result<bool, WorkspaceInstructionRuntimeError> {
+    match outcome {
+        RecordTurnInstructionSnapshotOutcome::Recorded(_)
+        | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => Ok(true),
+        RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(_) => {
+            Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
         }
+        RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(false),
     }
 }
 

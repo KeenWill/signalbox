@@ -432,7 +432,12 @@ A model-requested admission during a tool round appends admission evidence and
 the next preparation atomically produces a successor manifest with its model
 call; earlier call-boundary manifests remain addressable. The first
 implementation slice has no admission and stores only the turn-start manifest
-(INV-061).
+(INV-061). Ordinary activation records that empty manifest after activation and
+before model work. Exact-count guarding records it for the queued candidate
+after the fitting count and before the atomic counted activation and first-call
+checkpoint; both boundaries serialize on the session scheduler. This earlier
+counted boundary is safe only because no present command can change the empty
+eligibility or admission sets.
 
 Each manifest records:
 

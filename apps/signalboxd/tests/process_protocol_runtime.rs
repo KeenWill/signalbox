@@ -1605,14 +1605,17 @@ async fn execute_streamed_turn_until(
         RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                runtime.pool.clone(),
-                model_configuration.target_catalog(),
-                ModelCallCredentialReference::new("streaming-fixture"),
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    model_configuration.target_catalog(),
+                    ModelCallCredentialReference::new("streaming-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -1652,14 +1655,17 @@ async fn execute_recorded_turn(
         RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                runtime.pool.clone(),
-                model_configuration.target_catalog(),
-                ModelCallCredentialReference::new("recording-fixture"),
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    model_configuration.target_catalog(),
+                    ModelCallCredentialReference::new("recording-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -1733,10 +1739,13 @@ async fn execute_guarded_turn(
     .with_session_credentials(model_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -1752,7 +1761,12 @@ async fn execute_guarded_turn(
         model_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
     let observation_pool = runtime.pool.clone();
     let session = SessionId::from_uuid(session_id.into_uuid());
@@ -2029,10 +2043,15 @@ async fn activate_turn(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
     );
-    assert!(matches!(
-        service.execute(session).await?,
-        StartEligibleTurnOutcome::Activated(_)
-    ));
+    let StartEligibleTurnOutcome::Activated(activated) = service.execute(session).await? else {
+        return Err(io::Error::other("the fixture turn must activate").into());
+    };
+    let recorded = signalboxd::WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new())
+        .prepare(session, activated.turn())
+        .await?;
+    if !recorded {
+        return Err(io::Error::other("the fixture instruction manifest must record").into());
+    }
     Ok(())
 }
 
@@ -3806,13 +3825,7 @@ async fn park_turn_on_ambiguous_model_call(
     session_id: CanonicalUuid,
 ) -> Result<(), Box<dyn Error>> {
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let mut activation = StartEligibleTurnService::new(
-        UuidV7StartEligibleTurnIdGenerator,
-        StartEligibleTurnRepository::new(pool.clone()),
-    );
-    let StartEligibleTurnOutcome::Activated(_) = activation.execute(session).await? else {
-        return Err(io::Error::other("the queued fixture turn must activate").into());
-    };
+    activate_turn(pool, session).await?;
 
     let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
     let calls = PostgresModelCallRepository::new(
@@ -5694,6 +5707,15 @@ async fn activate_expected_turn(
         StartEligibleTurnOutcome::Activated(activated)
             if activated.turn().into_uuid() == expected_turn.into_uuid() =>
         {
+            let recorded =
+                signalboxd::WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new())
+                    .prepare(session, activated.turn())
+                    .await?;
+            if !recorded {
+                return Err(
+                    io::Error::other("the fixture instruction manifest must record").into(),
+                );
+            }
             Ok(())
         }
         StartEligibleTurnOutcome::Activated(activated) => Err(io::Error::other(format!(
@@ -7326,10 +7348,13 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     .with_session_credentials(guarded_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -7355,7 +7380,12 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         guarded_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let session = SessionId::from_uuid(session_id.into_uuid());
     let first_attempt = pass.run(session).await;
     assert_context_still_exceeded(first_attempt, queued_turn);
@@ -7465,10 +7495,13 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
     );
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -7484,7 +7517,12 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         model_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let session = SessionId::from_uuid(session_id.into_uuid());
 
     let outcome = pass.run(session).await;
