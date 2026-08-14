@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchObservation, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
-    RepoWatchWorkflowRunObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment, RepoWatchConvergenceVerdict,
+    RepoWatchObservation, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchReviewObservation, RepoWatchThreadObservation, RepoWatchWorkflowRunObservation,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -35,13 +35,14 @@ use crate::{
         RepoWatchEventTargetStorageKind, RepoWatchReactionSubjectStorageKind,
         positive_u64_from_numeric, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
-        repo_watch_event_kind_to_str, repo_watch_event_target_from_str,
-        repo_watch_event_target_to_str, repo_watch_mergeable_state_from_str,
-        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
-        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_reaction_subject_kind_from_str,
-        repo_watch_reaction_subject_kind_to_str, repo_watch_reaction_subject_to_storage,
+        repo_watch_checks_outcome_to_str, repo_watch_convergence_verdict_to_str,
+        repo_watch_event_kind_from_str, repo_watch_event_kind_to_str,
+        repo_watch_event_target_from_str, repo_watch_event_target_to_str,
+        repo_watch_mergeable_state_from_str, repo_watch_mergeable_state_to_str,
+        repo_watch_pull_request_lifecycle_from_str, repo_watch_pull_request_lifecycle_to_str,
+        repo_watch_reaction_change_from_str, repo_watch_reaction_change_to_str,
+        repo_watch_reaction_subject_kind_from_str, repo_watch_reaction_subject_kind_to_str,
+        repo_watch_reaction_subject_to_storage, repo_watch_review_decision_to_str,
         repo_watch_review_state_from_str, repo_watch_review_state_to_str,
         repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
     },
@@ -306,6 +307,8 @@ pub enum RepoWatchStoreError {
     EventsWithoutStateChange,
     CursorGenerationExhausted,
     EventBatchTooLarge,
+    ConvergenceEvidenceTooLarge,
+    ConvergenceEvidenceMismatch,
 }
 
 impl fmt::Display for RepoWatchStoreError {
@@ -344,6 +347,11 @@ impl fmt::Display for RepoWatchStoreError {
             }
             Self::EventBatchTooLarge => formatter
                 .write_str("repository-watch event batch exceeds the durable ordinal range"),
+            Self::ConvergenceEvidenceTooLarge => {
+                formatter.write_str("repository-watch convergence evidence exceeds durable bounds")
+            }
+            Self::ConvergenceEvidenceMismatch => formatter
+                .write_str("repository-watch convergence evidence names another cursor state"),
         }
     }
 }
@@ -358,7 +366,9 @@ impl Error for RepoWatchStoreError {
             | Self::DuplicateEventIdentity(_)
             | Self::EventsWithoutStateChange
             | Self::CursorGenerationExhausted
-            | Self::EventBatchTooLarge => None,
+            | Self::EventBatchTooLarge
+            | Self::ConvergenceEvidenceTooLarge
+            | Self::ConvergenceEvidenceMismatch => None,
         }
     }
 }
@@ -475,6 +485,149 @@ impl PostgresRepoWatchStore {
             generation,
             candidate: request.candidate,
         }))
+    }
+
+    /// Appends changed exact-head convergence evidence and seals every
+    /// converged head. Equal current evidence is an idempotent replay, while a
+    /// seal is monotonic for its exact head.
+    pub async fn record_convergence_assessments(
+        &self,
+        repository: &RepositorySlug,
+        cursor_generation: RepoWatchCursorGeneration,
+        assessments: &[RepoWatchConvergenceAssessment],
+    ) -> Result<(), RepoWatchStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        let cursor = load_cursor_in_transaction(&mut transaction, repository)
+            .await?
+            .ok_or(RepoWatchStoreError::ConvergenceEvidenceMismatch)?;
+        let pull_requests = cursor.candidate().observation().state().pull_requests();
+        if cursor.generation() != cursor_generation || pull_requests.len() != assessments.len() {
+            transaction.rollback().await?;
+            return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
+        }
+        let mut assessed_pull_requests = HashSet::with_capacity(assessments.len());
+        for assessment in assessments {
+            if !assessed_pull_requests.insert(assessment.number()) {
+                transaction.rollback().await?;
+                return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
+            }
+            let matches_cursor = pull_requests.iter().any(|pull_request| {
+                pull_request.context().number() == assessment.number()
+                    && pull_request.context().head_sha() == assessment.head_sha()
+                    && pull_request.context().base_branch() == assessment.base_branch()
+                    && pull_request.mergeable_state() == assessment.mergeable_state()
+            });
+            if !matches_cursor {
+                transaction.rollback().await?;
+                return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
+            }
+        }
+        for assessment in assessments {
+            let unresolved_threads = assessment
+                .unresolved_threads()
+                .iter()
+                .map(|thread| thread.as_str().to_owned())
+                .collect::<Vec<_>>();
+            let non_green_gating_checks = assessment
+                .non_green_gating_checks()
+                .iter()
+                .map(|check| check.as_str().to_owned())
+                .collect::<Vec<_>>();
+            let gating_check_count = i64::try_from(assessment.gating_check_count())
+                .map_err(|_| RepoWatchStoreError::ConvergenceEvidenceTooLarge)?;
+            let evidence_is_unchanged: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM (
+                            SELECT head_sha, base_branch, mergeable_state,
+                                   review_decision, unresolved_threads,
+                                   gating_check_count, non_green_gating_checks,
+                                   verdict_kind
+                              FROM repo_watch_pull_request_convergence_assessment
+                             WHERE repository = $1
+                               AND pull_request_number = $2
+                             ORDER BY recorded_at DESC, assessment_id DESC
+                             LIMIT 1
+                           ) AS current
+                     WHERE current.head_sha = $3
+                       AND current.base_branch = $4
+                       AND current.mergeable_state = $5
+                       AND current.review_decision = $6
+                       AND current.unresolved_threads = $7
+                       AND current.gating_check_count = $8
+                       AND current.non_green_gating_checks = $9
+                       AND current.verdict_kind = $10
+                )",
+            )
+            .bind(repository.as_str())
+            .bind(Decimal::from(assessment.number().get()))
+            .bind(assessment.head_sha().as_str())
+            .bind(assessment.base_branch().as_str())
+            .bind(repo_watch_mergeable_state_to_str(
+                assessment.mergeable_state(),
+            ))
+            .bind(repo_watch_review_decision_to_str(
+                assessment.review_decision(),
+            ))
+            .bind(&unresolved_threads)
+            .bind(gating_check_count)
+            .bind(&non_green_gating_checks)
+            .bind(repo_watch_convergence_verdict_to_str(assessment.verdict()))
+            .fetch_one(&mut *transaction)
+            .await?;
+            if evidence_is_unchanged {
+                continue;
+            }
+            let assessment_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO repo_watch_pull_request_convergence_assessment
+                    (assessment_id, repository, cursor_generation,
+                     pull_request_number, head_sha, base_branch, mergeable_state,
+                     review_decision, unresolved_threads, gating_check_count,
+                     non_green_gating_checks, verdict_kind)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+            )
+            .bind(assessment_id)
+            .bind(repository.as_str())
+            .bind(generation_to_i64(cursor_generation))
+            .bind(Decimal::from(assessment.number().get()))
+            .bind(assessment.head_sha().as_str())
+            .bind(assessment.base_branch().as_str())
+            .bind(repo_watch_mergeable_state_to_str(
+                assessment.mergeable_state(),
+            ))
+            .bind(repo_watch_review_decision_to_str(
+                assessment.review_decision(),
+            ))
+            .bind(&unresolved_threads)
+            .bind(gating_check_count)
+            .bind(&non_green_gating_checks)
+            .bind(repo_watch_convergence_verdict_to_str(assessment.verdict()))
+            .execute(&mut *transaction)
+            .await?;
+            if assessment.verdict() != RepoWatchConvergenceVerdict::NotConverged {
+                sqlx::query(
+                    "INSERT INTO repo_watch_pull_request_convergence
+                        (repository, pull_request_number, head_sha,
+                         assessment_id, convergence_kind)
+                     VALUES ($1,$2,$3,$4,$5)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(repository.as_str())
+                .bind(Decimal::from(assessment.number().get()))
+                .bind(assessment.head_sha().as_str())
+                .bind(assessment_id)
+                .bind(repo_watch_convergence_verdict_to_str(assessment.verdict()))
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn load_event_page(

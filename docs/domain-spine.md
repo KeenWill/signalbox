@@ -6801,6 +6801,42 @@ impl RepoWatchReviewObservation {
     // accessors: id(), reviewer(), state(), commit()
 }
 
+pub enum RepoWatchReviewDecision {
+    None,
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+pub enum RepoWatchConvergenceVerdict {
+    NotConverged,
+    InternallyConverged,
+    MergeReady,
+}
+
+pub struct RepoWatchConvergenceAssessmentInput {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub mergeable_state: MergeableState,
+    pub review_decision: RepoWatchReviewDecision,
+    pub unresolved_threads: Vec<ReviewThreadId>,
+    pub gating_check_count: u64,
+    pub non_green_gating_checks: Vec<CheckRunName>,
+}
+
+pub struct RepoWatchConvergenceAssessment { /* private */ }
+impl RepoWatchConvergenceAssessment {
+    pub fn try_new(
+        input: RepoWatchConvergenceAssessmentInput,
+    ) -> Result<Self, RepoWatchConvergenceAssessmentError>;
+    // accessors: number(), head_sha(), base_branch(), mergeable_state(),
+    // review_decision(), unresolved_threads(), gating_check_count(),
+    // non_green_gating_checks(), verdict()
+}
+
+pub struct RepoWatchConvergenceAssessmentError;
+
 pub enum RepoWatchThreadState {
     Open,
     Resolved,
@@ -6964,6 +7000,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
     TargetClosed,
+    TargetConverged,
     Occupied,
     Cooldown,
     Dispatched {
@@ -10340,7 +10377,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 33 (incl. 4 traits)   |
+| application: repo_watch                            | 38 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10351,4 +10388,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **249 (+1 free fn)**  |
+| **signalbox-application total**                    | **254 (+1 free fn)**  |

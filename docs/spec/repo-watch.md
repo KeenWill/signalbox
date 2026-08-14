@@ -27,7 +27,8 @@ that goal's generation, are verified against this PR
 current-state delivery below are verified against this PR
 (`agent/repo-watch-dispatch-loop`). Runtime-relevance release, held-slot
 diagnostics, and terminal-target cutoff are verified against this PR
-(`agent/dispatch-autonomy`).
+(`agent/dispatch-autonomy`). Exact-head convergence assessment and cutoff are
+verified against this PR (`agent/dispatch-autonomy-convergence`).
 
 ## Configuration and credential boundary
 
@@ -520,6 +521,49 @@ or an unrelated session. A later open event makes an earlier unprocessed cutoff
 a recorded reopen instead. Dispatch admission rechecks the latest durable
 lifecycle under the repository lock: a stale match or obligation for a terminal
 target settles as `target_closed` without creating a session.
+
+**Implemented behavior.** Every completed poll also reconciles durable
+convergence evidence for each exact pull-request head in its committed cursor.
+Evidence identical to that head's latest assessment is an idempotent replay;
+changed evidence appends a new assessment. The assessment follows the
+repository's operational status rule: every review thread must be resolved,
+without filtering by author or outdated state; every gating check on the exact
+current commit must be green; mergeability must not be `conflicting`; and the
+aggregate review decision must not be `changes_requested`. Check runs are green
+only when completed with `success`, `skipped`, or `neutral`, and status contexts
+are green only at `success`. Pending, incomplete, missing-conclusion, and other
+terminal results are not green. Check names containing `report only` or
+`CodeRabbit`, compared case-insensitively, are non-gating. The GraphQL
+check-rollup and review-thread connections are read through every bounded page.
+The head, check, and aggregate-review evidence is read before the thread
+inventory, matching the operational reference's ordering so a review thread
+opened between those reads cannot be hidden by an earlier thread snapshot. The
+rollup's commit, head, base, and mergeability evidence must agree with the REST
+pull-request projection and the cursor generation or the poll fails without
+recording an assessment.
+
+**Implemented behavior.** A passing assessment for a pull request based on
+`main` is `merge_ready`. A passing assessment based on another branch is
+`internally_converged`, not merge-ready; both classifications end autonomous
+work on that exact head. Every assessment is append-only evidence, and
+`repo_watch_current_pull_request_convergence` exposes the latest evidence,
+derived verdict, and any exact-head seal. The first passing assessment also
+creates one monotonic seal for the repository, pull request, and exact head SHA.
+Later checks or reviews on the same sealed head remain visible as newer
+assessment evidence but cannot reopen dispatch, so a session does not revisit
+threads it already resolved on that unchanged head. A different head SHA has no
+inherited seal and is assessed and dispatched afresh; convergence therefore
+terminates unchanged-head review cycles without treating a new revision as
+already finished.
+
+**Implemented behavior.** Repository watch records one convergence cutoff for
+each seal. When the sealed head remains the latest assessed head, the cutoff
+applies the ordinary parent-only stop to every generation-one goal repository
+watch commissioned for the pull request, with the same provenance limits as a
+lifecycle cutoff. Dispatch admission rechecks the seal under the repository
+lock: a stale match or collapsed obligation for the sealed exact head settles as
+`target_converged` without creating a session. A seal for an older head is
+recorded but cannot stop work on the newer head.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
