@@ -4183,7 +4183,10 @@ mod tests {
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, listed_pull_request(HEAD_SHA))]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let poller = Arc::clone(&fixture.poller);
@@ -4229,7 +4232,10 @@ mod tests {
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, listed_pull_request(HEAD_SHA))]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let poller = Arc::clone(&fixture.poller);
