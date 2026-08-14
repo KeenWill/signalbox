@@ -2790,9 +2790,9 @@ mod tests {
     const IN_PROGRESS_CHECK_RUN_NAME: &str = "lint";
     const RETAINED_REVIEW_IDS: [u64; 2] = [31, 32];
     const PENDING_REVIEW_ID: u64 = 33;
-    // Public provider identities from the deferred-refresh reproduction. The
-    // surrounding actors and content stay synthetic test data.
-    const DEFERRED_REVIEW_IDS: [u64; 3] = [4_922_903_072, 4_922_910_037, 4_922_938_791];
+    // Distinct ordered identities preserve the provider order of the deferred
+    // review fixtures.
+    const DEFERRED_REVIEW_IDS: [u64; 3] = [34, 35, 36];
     const DEFERRED_USER_REVIEWER: &str = "watch-user";
     const DEFERRED_APPROVING_REVIEWER: &str = "review-agent-one[bot]";
     const DEFERRED_COMMENTING_REVIEWER: &str = "review-agent-two[bot]";
