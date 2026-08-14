@@ -853,7 +853,7 @@ impl PostgresModelCallRepository {
                 let source_turn = execution.turn();
                 let reclassifications = steering_identities
                     .iter()
-                    .map(|(_, reclassification)| reclassification.clone())
+                    .map(|(_, reclassification)| *reclassification)
                     .collect::<Vec<_>>();
                 let mut proposed_turns = BTreeSet::new();
                 for reclassification in &reclassifications {
@@ -1040,7 +1040,7 @@ impl PostgresModelCallRepository {
                 "provider observation was discarded by logical delegation terminalization",
             ))?;
         match outcome {
-            ModelCallObservationCommitOutcome::Terminal(outcome) => Ok(outcome),
+            ModelCallObservationCommitOutcome::Terminal(outcome) => Ok(*outcome),
             ModelCallObservationCommitOutcome::AvailabilitySuccessor(_) => {
                 Err(ModelCallRepositoryError::InvalidTransition(
                     "exact terminal candidates produced an availability successor",
@@ -1171,9 +1171,9 @@ impl PostgresModelCallRepository {
                         )
                         .await?;
                         return Ok(Some(
-                            ModelCallObservationCommitOutcome::AvailabilitySuccessor(
+                            ModelCallObservationCommitOutcome::AvailabilitySuccessor(Box::new(
                                 AvailabilitySuccessorOutcome::new(successor, backoff),
-                            ),
+                            )),
                         ));
                     }
                     sqlx::query(
@@ -1226,10 +1226,14 @@ impl PostgresModelCallRepository {
                         },
                     )));
                 }
-                return Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome)));
+                return Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
+                    outcome,
+                ))));
             }
             let ModelCallTerminalIdentityCandidates::Exact(identities) = identities else {
-                unreachable!("terminal candidate selection removes tool alternatives")
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "terminal candidate selection retained a nonterminal alternative",
+                ));
             };
             let outcome = execution
                 .apply_terminal_observation(observation, identities)
@@ -1245,7 +1249,9 @@ impl PostgresModelCallRepository {
                 provider_failure_cause,
             )
             .await?;
-            Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome)))
+            Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
+                outcome,
+            ))))
         }
         .await;
         finish_commit(transaction, result).await
@@ -2155,7 +2161,7 @@ where
     {
         let reclassifications = steering_identities
             .iter()
-            .map(|(_, reclassification)| reclassification.clone())
+            .map(|(_, reclassification)| *reclassification)
             .collect::<Vec<_>>();
         let exhausted = execution
             .fail_credential_pool_exhausted(
@@ -3725,7 +3731,7 @@ fn attach_pending_reclassification_candidates(
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<ModelCallTerminalIdentityCandidates, ModelCallRepositoryError> {
     let reclassifications = pending_reclassification_candidates(execution, next_turn)?;
-    Ok(match identities {
+    let identities = match identities {
         ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Completed(
             identities,
         )) => ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Completed(
@@ -3773,9 +3779,12 @@ fn attach_pending_reclassification_candidates(
             successor_attempt,
         },
         ModelCallTerminalIdentityCandidates::ToolRound { .. } => {
-            unreachable!("tool candidates were selected above")
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "tool terminal candidates were not selected before reclassification",
+            ));
         }
-    })
+    };
+    Ok(identities)
 }
 
 fn prepared_matches_authorized(

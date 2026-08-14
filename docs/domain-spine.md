@@ -6240,13 +6240,13 @@ pub enum ModelCallTerminalIdentityCandidates {
 }
 
 pub enum ModelCallObservationCommitOutcome {
-    Terminal(ModelCallTerminalOutcome),
-    AvailabilitySuccessor(AvailabilitySuccessorOutcome),
+    Terminal(Box<ModelCallTerminalOutcome>),
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
     PoolExhausted(CredentialPoolExhaustedOutcome),
 }
 
 pub enum CredentialPoolExhaustedOutcome {
-    BeforeCall(CredentialPoolExhaustedModelCallTurn),
+    BeforeCall(Box<CredentialPoolExhaustedModelCallTurn>),
     AfterCall {
         pool_name: Arc<str>,
         terminal: Box<ModelCallTerminalOutcome>,

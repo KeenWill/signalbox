@@ -893,7 +893,7 @@ enum RetainedModelCallExecutionStateKind {
         /// Session owning the exact issued call.
         session: SessionId,
         /// Unchanged correlated observation returned by provider work.
-        observation: CorrelatedModelCallTerminalObservation,
+        observation: Box<CorrelatedModelCallTerminalObservation>,
         /// Frozen policy outcomes for each tool proposal, in proposal order.
         tool_approvals: Box<[InitialToolApproval]>,
     },
@@ -1494,7 +1494,11 @@ where
                     }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self
-                            .commit_terminal_observation(retained_session, retained, tool_approvals)
+                            .commit_terminal_observation(
+                                retained_session,
+                                *retained,
+                                tool_approvals,
+                            )
                             .await;
                     }
                     Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal) => {
@@ -1510,7 +1514,7 @@ where
                         });
                         return Err(ModelCallExecutionError::ObservationCommit {
                             error,
-                            retained_observation: retained,
+                            retained_observation: *retained,
                         });
                     }
                 },
@@ -1542,7 +1546,7 @@ where
                         TurnTerminalOutcome::Failed,
                     );
                     return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
-                        CredentialPoolExhaustedOutcome::BeforeCall(*exhausted),
+                        CredentialPoolExhaustedOutcome::BeforeCall(exhausted),
                     )));
                 }
                 Ok(PrepareModelCallOutcome::Checkpointed(call)) => {
@@ -1792,13 +1796,10 @@ where
                         | signalbox_domain::ProviderModelCallFailureCause::Overloaded
                 )
             ) && observation.non_acceptance_proven()
-            {
-                let ModelCallTerminalIdentityCandidates::Exact(
+                && let ModelCallTerminalIdentityCandidates::Exact(
                     signalbox_domain::ModelCallTerminalIdentities::Failed(failed),
                 ) = identities
-                else {
-                    unreachable!("an availability cause is always a known failure")
-                };
+            {
                 identities = ModelCallTerminalIdentityCandidates::Availability {
                     failed,
                     successor_attempt: self.ids.next_turn_attempt_id(),
@@ -1813,14 +1814,10 @@ where
             {
                 Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome))) => {
                     report_model_call_terminalization(&outcome);
-                    return Ok(ModelCallExecutionOutcome::ObservationCommitted(Box::new(
-                        outcome,
-                    )));
+                    return Ok(ModelCallExecutionOutcome::ObservationCommitted(outcome));
                 }
                 Ok(Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor))) => {
-                    return Ok(ModelCallExecutionOutcome::AvailabilitySuccessor(Box::new(
-                        successor,
-                    )));
+                    return Ok(ModelCallExecutionOutcome::AvailabilitySuccessor(successor));
                 }
                 Ok(Some(ModelCallObservationCommitOutcome::PoolExhausted(exhausted))) => {
                     return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
@@ -1838,7 +1835,7 @@ where
                     self.retained_state = Some(RetainedModelCallExecutionState {
                         state: RetainedModelCallExecutionStateKind::TerminalObservation {
                             session,
-                            observation: observation.clone(),
+                            observation: Box::new(observation.clone()),
                             tool_approvals,
                         },
                     });
@@ -1995,9 +1992,9 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCallObservationCommitOutcome {
     /// The observation reached an ordinary terminal or durable-wait outcome.
-    Terminal(ModelCallTerminalOutcome),
+    Terminal(Box<ModelCallTerminalOutcome>),
     /// Pool policy authorized a distinct availability successor attempt.
-    AvailabilitySuccessor(AvailabilitySuccessorOutcome),
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
     /// Every member is unavailable; the pool, not one member, terminalized.
     PoolExhausted(CredentialPoolExhaustedOutcome),
 }
@@ -2006,7 +2003,7 @@ pub enum ModelCallObservationCommitOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CredentialPoolExhaustedOutcome {
     /// Selection found no member before creating a call.
-    BeforeCall(CredentialPoolExhaustedModelCallTurn),
+    BeforeCall(Box<CredentialPoolExhaustedModelCallTurn>),
     /// A qualifying member failure consumed the last available member.
     AfterCall {
         /// Deployment-owned pool name.
@@ -5634,7 +5631,7 @@ mod tests {
                     observation,
                     ..
                 },
-            }) if observation == retained_observation
+            }) if observation.as_ref() == &retained_observation
         ));
     }
 

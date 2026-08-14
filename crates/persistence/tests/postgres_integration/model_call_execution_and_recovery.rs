@@ -2005,10 +2005,10 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
             },
         )
         .await?;
-    let Some(ModelCallObservationCommitOutcome::Terminal(ModelCallTerminalOutcome::Completed(
-        completed,
-    ))) = outcome
-    else {
+    let Some(ModelCallObservationCommitOutcome::Terminal(terminal)) = outcome else {
+        panic!("the source call must complete");
+    };
+    let ModelCallTerminalOutcome::Completed(completed) = *terminal else {
         panic!("the source call must complete");
     };
     assert_eq!(completed.reclassified_pending_steering().len(), 1);
