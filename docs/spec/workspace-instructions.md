@@ -85,12 +85,13 @@ identical trees yield candidates in identical order. Entries that cannot be read
 or classified produce typed discovery findings; they do not disappear as an
 empty successful result.
 
-One scan emits a canonical source path and source hash only once even when
-workspace and configured roots overlap. Roots sort by kind and canonical path;
-the first containing root is the primary authorizing root, while the complete
-ordered root inventory preserves every other containing authority. Registration
-therefore assigns one identity and admission cannot render the same source twice
-through root aliases.
+One scan emits a canonical source path only once even when workspace and
+configured roots overlap; the first read fixes its source hash for that scan.
+Workspace roots sort before configured roots and each kind sorts by canonical
+path. The first containing root is the primary authorizing root, while the
+complete ordered root inventory preserves every other containing authority.
+Registration therefore assigns one identity and admission cannot render the same
+source twice through root aliases or observe two versions from a mid-scan edit.
 
 The greedy walk intentionally exceeds terminal clients' common
 root-to-working-directory behavior: a daemon owns the workspace and must make
