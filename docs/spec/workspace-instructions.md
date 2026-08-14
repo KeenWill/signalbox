@@ -1,9 +1,9 @@
 # Workspace instructions and skills
 
 The comparative evidence and foundation-proposal boundary on this page were
-verified against PR #796 (`agent/agent-docs-skills-spec`). Discovery and the
-explicit-root configuration were verified against PR #798
-(`agent/agent-docs-skills-foundation`).
+verified against PR #796 (`agent/agent-docs-skills-spec`). Bounded filesystem
+discovery, typed registration construction, and explicit-root configuration were
+verified against PR #798 (`agent/agent-docs-skills-foundation`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,

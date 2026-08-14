@@ -158,6 +158,6 @@ pub use update_session_placement::{
     UpdateSessionPlacementTransaction,
 };
 pub use workspace_instructions::{
-    InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryRoot,
-    InstructionDiscoverySnapshot, discover_workspace_instructions,
+    InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
+    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };
