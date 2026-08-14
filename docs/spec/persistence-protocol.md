@@ -35,8 +35,10 @@ workspace-free pinned-replacement command stage is verified against this PR
 and execution-placement reconstitution facts are verified against this PR
 (`agent/runner-lease-domain-correlation`). The workspace-free pinned-replacement
 terminal-result representation and typed readback are verified against this PR
-(`agent/runner-pinned-replacement-result-persistence`). Existing-pin
-attempt-and-offer atomicity is verified against this PR
+(`agent/runner-pinned-replacement-result-persistence`). Frontier-root
+workspace-free pinned-replacement completion is verified against this PR
+(`agent/runner-pinned-replacement-transaction`). Existing-pin attempt-and-offer
+atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -656,10 +658,20 @@ Representation rules, all enforced in the schema:
   workspace-free stage, current successor placement, retained placement request,
   live advertised registration, and exact final-member placement frontier to
   agree. Typed readback reconstructs the closed pinned replacement receipt from
-  those independently joined rows. No transaction remains open across runner
-  I/O. **Committed unimplemented functionality.** No present adapter consumes
-  the stage to install the terminal pinned placement, transcript boundary,
-  frontier, and result atomically.
+  those independently joined rows. The persistence adapter consumes that stage
+  for a direct distinct active runner when the retained placement is
+  credential-free, workspace-free, names one exact directory, has no interrupted
+  physical attempt, and the session has neither an active turn nor an earlier
+  nonempty semantic frontier. Its terminal transaction takes the scheduler
+  before successor and placement authority, rechecks the exact stage and live
+  advertisement, then atomically installs the successor placement,
+  reference-only relocation entry, one-entry root frontier and placement
+  pointer, `Replaced` outbox event, and applied result. Equal replay returns the
+  retained typed result. No transaction remains open across runner I/O.
+  **Committed unimplemented functionality.** An active turn or earlier nonempty
+  frontier retains the stage for the observation-aware prefix-extension
+  transaction. Pending-enrollment and same-runner workspace-free targets also
+  remain staged for later checked completion.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
