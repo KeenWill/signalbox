@@ -1,8 +1,9 @@
 # Workspace instructions and skills
 
-PR #796 contains the comparative evidence and foundation-proposal boundary on
-this page. Discovery, registration, empty eligibility, and turn-start evidence
-were verified against PR #798 (`agent/agent-docs-skills-foundation`).
+The comparative evidence and foundation-proposal boundary on this page were
+verified against PR #796 (`agent/agent-docs-skills-spec`). Discovery,
+registration, empty eligibility, and turn-start evidence are implemented by its
+first child (`agent/agent-docs-skills-foundation`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
