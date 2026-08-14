@@ -301,6 +301,7 @@ impl RepositoryWatchTask {
             let mut attempt_cancelled = false;
             select! {
                 result = self.run_attempt() => {
+                    let metrics = self.poller.attempt_metrics();
                     match result {
                         Ok(()) => tracing::debug!(
                             repository = %self.repository.as_str(),
@@ -309,6 +310,10 @@ impl RepositoryWatchTask {
                         Err(error) => tracing::warn!(
                             repository = %self.repository.as_str(),
                             cause_code = error.cause_code(),
+                            request_count = metrics.requests,
+                            poll_wire_bytes = metrics.poll_wire_bytes,
+                            cached_resource_count = metrics.cached_resources,
+                            cached_wire_bytes = metrics.cached_wire_bytes,
                             "repository-watch polling attempt failed closed"
                         ),
                     }
@@ -846,6 +851,16 @@ impl GitHubRepositoryPoller {
 
     fn cache(&self) -> MutexGuard<'_, PollCache> {
         self.cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn attempt_metrics(&self) -> PollAttemptMetrics {
+        let cache = self.cache();
+        PollAttemptMetrics {
+            requests: cache.requests,
+            poll_wire_bytes: cache.poll_wire_bytes,
+            cached_resources: cache.resources.len(),
+            cached_wire_bytes: cache.cached_wire_bytes,
+        }
     }
 
     #[cfg(test)]
@@ -2027,6 +2042,14 @@ struct PollCache {
     touched: HashSet<ResourceKey>,
     requests: usize,
     poll_wire_bytes: usize,
+    cached_wire_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct PollAttemptMetrics {
+    requests: usize,
+    poll_wire_bytes: usize,
+    cached_resources: usize,
     cached_wire_bytes: usize,
 }
 
