@@ -64,6 +64,11 @@ separate `DiscoveryRoot` values; a configured root is not silently folded into
 the workspace's authority or relative-path namespace. A session without a
 daemon-local resolved workspace still discovers configured roots.
 
+Version one has exactly two root kinds and canonical lowercase spellings:
+`workspace` for the session's daemon-local resolved workspace and `configured`
+for an explicitly registered daemon directory. Selectors, wrappers, stored
+variants, and canonical digests use only those spellings.
+
 A runner placement owns a different filesystem and is not a daemon-local
 resolved workspace. Version one records no workspace `DiscoveryRoot` and does
 not claim to scan that workspace; configured daemon roots remain discoverable,
@@ -100,10 +105,12 @@ limit finding.
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.
 Workspace roots sort before configured roots and each kind sorts by canonical
-path. The first containing root is the primary authorizing root, while the
-complete ordered root inventory preserves every other containing authority.
-Registration therefore assigns one identity and admission cannot render the same
-source twice through root aliases or observe two versions from a mid-scan edit.
+path. The first root whose kind-specific discovery rules actually yielded the
+candidate is its primary authorizing root; mere path containment grants no
+candidate authority. The complete ordered root inventory preserves every other
+root that also yielded that source. Registration therefore assigns one identity,
+and admission cannot render the same source twice through root aliases or
+observe two versions from a mid-scan edit.
 
 The greedy walk intentionally exceeds terminal clients' common
 root-to-working-directory behavior: a daemon owns the workspace and must make
@@ -219,6 +226,13 @@ enters semantic tool-result history. A changed or missing source fails with
 stale-source evidence rather than admitting unregistered bytes. Skill-resource
 reads require a later resource-address and hash contract.
 
+Admission is idempotent by bundle within the effective admitted set. A distinct
+request for an already admitted bundle returns an `already_admitted` receipt
+naming the existing admission and exact rendered evidence, records that
+request's replay link, and appends no second `InstructionAdmission`. It does not
+re-read a moving source. A replay of either request returns its recorded
+receipt, so one manifest can never contain duplicate bundle identities.
+
 List reads only registration metadata; preview performs the single-source
 revalidated read above. Their bounds are independent of aggregate registered
 content. Catalog budgeting shortens descriptions before omitting identities, and
@@ -242,10 +256,10 @@ Each `instructions.read` request has a replay-stable tool-request identity. In
 the same transaction as its receipt-only tool result, a successful request
 appends one `InstructionAdmission` naming the prior admitted-set hash, bundle,
 rendered evidence, exact rendered wrapper bytes, and request identity. The
-immutable admission or its content-addressed daemon blob remains the authority
-for later projections even if the workspace source changes or disappears.
-Replaying that identity returns the same receipt; a conflicting replay is
-corruption. A failed request appends no admission and does not change the set.
+immutable admission row is the version-one plaintext authority for later
+projections even if the workspace source changes or disappears. Replaying that
+identity returns the same receipt; a conflicting replay is corruption. A failed
+request appends no admission and does not change the set.
 
 After a tool batch, preparation folds successful admissions in durable request
 order and ignores idempotent repeats. The owning continuation transaction in
@@ -370,6 +384,15 @@ and wrapper. It never borrows a shared pool whose earlier entries can starve
 later ones. Rendered byte length, source truncation boundary, and retained exact
 wrapper bytes are evidence.
 
+Version one has a fixed 65,536-byte aggregate workspace-instruction-region
+budget, including every wrapper. A provider model with a smaller instruction
+capacity is not eligible for this capability. A successful read serializes on
+the admitted-set head and preflights the current region plus its candidate
+against that aggregate budget before committing its receipt or admission.
+Concurrent and same-batch reads therefore observe one ordered predecessor and
+cannot commit a set whose instruction region alone is unrenderable. Aggregate
+exhaustion is a typed failed read and changes no durable admitted set.
+
 The durable rendered-content hash is SHA-256 over the exact bytes placed in
 prepared model input **after** wrappers, labels, and budget truncation. It is
 not the source-file hash. A manifest thus describes what the model saw when
@@ -403,8 +426,8 @@ Each manifest records:
 The required audit tuple is source path, typed identity, and rendered hash; the
 source hash diagnoses registration-to-admission changes. Comparing manifests
 does not require the live workspace. The manifest proves exact equality and
-provenance; the immutable admission or its content-addressed blob retains the
-rendered plaintext required to reconstruct later projections.
+provenance; the immutable admission row retains the rendered plaintext required
+to reconstruct later projections.
 
 Persistence is append-only. Constraints require every bundle row to name its
 manifest and registered bundle, prohibit duplicate bundle identities in one
@@ -442,5 +465,6 @@ recovery.
 - Whole-bundle unload is reserved by the projection decision but deferred.
 - Resource reads, file watching, rescans, ignore rules, symlink traversal,
   further vendor formats, search/ranking, eager and path-triggered admission,
-  and alternate rendered-plaintext storage are undecided and tracked in
-  [open questions](../open-questions.md), never inferred from this baseline.
+  and later externalization of retained rendered plaintext are undecided and
+  tracked in [open questions](../open-questions.md), never inferred from this
+  baseline.
