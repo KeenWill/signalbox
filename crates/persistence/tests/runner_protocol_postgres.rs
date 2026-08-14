@@ -30,15 +30,16 @@ use signalbox_domain::{
     ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
     ImportedTranscriptEntryId, InitialToolApproval, LostPinnedRunnerPlacement, ModelCallId,
     ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
-    PerInputConfigurationChoices, PinnedRunnerPlacement, PromotePendingRunner,
-    PromotePendingRunnerRejection, PromotePendingRunnerResult, PromotedRunnerEnrollment,
-    ProvisionedWorkspace, ReplaceLostRunner, ReplaceLostRunnerBeforePinRejection,
-    ReplaceLostRunnerBeforePinResult, ReplacedLostRunnerBeforePin,
-    ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement, RunnerAuthenticationId,
-    RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
-    RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
+    PerInputConfigurationChoices, PinnedRunnerPlacement, PinnedRunnerReplacementResult,
+    PromotePendingRunner, PromotePendingRunnerRejection, PromotePendingRunnerResult,
+    PromotedRunnerEnrollment, ProvisionedWorkspace, ReplaceLostRunner,
+    ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
+    ReplacedLostRunnerBeforePin, ReplacedPinnedRunner, ResolvedContextFrontierReconstitutionInput,
+    RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
+    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
+    RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
     RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
     RunnerRegistrationReconciliation, RunnerReplacementProvisioningRejection,
     RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
@@ -2274,6 +2275,168 @@ async fn stored_exact_directory_pin_fixture(
         .expect("the exact-directory fixture pins without provisioning");
     store.store_pin(&pin, &registration).await?;
     Ok((store, expected_enrollment, registration, pin))
+}
+
+struct WorkspaceFreeReplacementTerminalFixture {
+    store: RunnerProtocolStore,
+    command: ReplaceLostRunner,
+    identities: PinnedRunnerReplacementIdentities,
+    replacement: SessionRunnerPlacement,
+    registration: StoredValidatedRunnerRegistration,
+    connection: signalbox_persistence::runner_protocol::RunnerConnectionSnapshot,
+}
+
+async fn workspace_free_replacement_terminal_fixture(
+    pool: &PgPool,
+) -> Result<WorkspaceFreeReplacementTerminalFixture, Box<dyn Error>> {
+    let (mut store, _, _, pin) = stored_exact_directory_pin_fixture(pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the exact-directory pinned runner may be marked lost");
+    let session = lost.session();
+    let replacement_request = lost.request().clone();
+    append_runner_lost_projection(pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let registration = store.register(&successor, advertisement()).await?;
+    let connection = store.open_connection(successor.enrollment()).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(WORKSPACE_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::Runner(successor.runner()),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let staged = store.complete(command, identities).await?;
+    assert_eq!(
+        staged,
+        PinnedRunnerReplacementOutcome::Staged {
+            command: command.command()
+        }
+    );
+    let replacement = lost
+        .replace_lost_runner(
+            replacement_request,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            None,
+        )
+        .expect("the exact connected successor can replace the lost runner");
+    store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &registration,
+            replacement.grant.as_ref(),
+        )
+        .await?;
+    Ok(WorkspaceFreeReplacementTerminalFixture {
+        store,
+        command,
+        identities,
+        replacement: replacement.placement,
+        registration,
+        connection,
+    })
+}
+
+async fn insert_workspace_free_replacement_terminal_projection(
+    pool: &PgPool,
+    fixture: &WorkspaceFreeReplacementTerminalFixture,
+    receipt_working_directory: &RunnerWorkingDirectory,
+) -> Result<(), sqlx::Error> {
+    let session = fixture.replacement.session();
+    let revision = fixture.replacement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_current_session_placement
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(fixture.identities.semantic_entry().into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(fixture.identities.context_frontier().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(fixture.identities.context_frontier().into_uuid())
+    .bind(fixture.identities.semantic_entry().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(fixture.identities.semantic_entry().into_uuid())
+    .bind(fixture.identities.context_frontier().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_lost_runner_result
+            (command_id, session_id, result_kind, placement_event_ordinal,
+             placement_revision, placement_state_kind, prior_runner_id,
+             new_runner_id, sandbox_profile, working_directory,
+             target_enrollment_id, target_registration_revision,
+             target_connection_epoch, target_connection_event_ordinal)
+         SELECT $1, current_head.session_id, 'applied', placement.event_ordinal,
+                placement.placement_revision, placement.state_kind,
+                lost.lost_runner_id, placement.pinned_runner_id,
+                placement.requested_sandbox_profile, $2,
+                placement.registration_enrollment_id,
+                placement.registration_revision, $3, $4
+           FROM runner_current_session_placement AS current_head
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current_head.session_id
+            AND placement.event_ordinal = current_head.event_ordinal
+           JOIN runner_workspace_free_replacement_stage AS stage
+             ON stage.command_id = $1
+            AND stage.session_id = current_head.session_id
+           JOIN runner_session_placement_record AS lost
+             ON lost.session_id = stage.session_id
+            AND lost.event_ordinal = stage.lost_placement_event_ordinal
+          WHERE current_head.session_id = $5",
+    )
+    .bind(fixture.command.command().into_uuid())
+    .bind(receipt_working_directory.as_str())
+    .bind(Decimal::from(fixture.connection.epoch().get()))
+    .bind(Decimal::from(fixture.connection.event_ordinal()))
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 async fn store_additional_credentialless_pin_fixture(
@@ -22981,6 +23144,112 @@ async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
     assert_eq!(result_count, 0);
     assert_eq!(provisioning_stage_count, 0);
     assert_eq!(workspace_free_stage_count, 1);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-012 / INV-044: a workspace-free terminal replacement receipt
+/// reads back the exact successor placement, directory, and sandbox.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_inv044_workspace_free_pinned_replacement_result_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut fixture = workspace_free_replacement_terminal_fixture(&pool).await?;
+    insert_workspace_free_replacement_terminal_projection(
+        &pool,
+        &fixture,
+        &exact_runner_directory(),
+    )
+    .await?;
+    let replay = fixture
+        .store
+        .complete(fixture.command, fixture.identities)
+        .await?;
+    let expected_revision =
+        RunnerGeneration::try_from_u64(2).expect("the fixture's successor revision is positive");
+    let expected = PinnedRunnerReplacementOutcome::Recorded(
+        PinnedRunnerReplacementResult::Applied(ReplacedPinnedRunner::new(
+            fixture.replacement.session(),
+            enrollment().runner(),
+            replacement_enrollment().runner(),
+            expected_revision,
+            exact_runner_directory(),
+            RunnerSandboxProfile::WorkspaceRestricted,
+        )),
+    );
+
+    assert_eq!(replay, expected);
+    assert_eq!(fixture.replacement.revision(), expected_revision);
+    assert_eq!(
+        fixture.registration.registration().runner(),
+        replacement_enrollment().runner()
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a pinned replacement receipt cannot substitute a working
+/// directory that differs from both its retained stage and successor pin.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_free_pinned_replacement_result_rejects_cross_wired_directory()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_free_replacement_terminal_fixture(&pool).await?;
+    let cross_wired = replacement_runner_directory();
+    let rejected =
+        insert_workspace_free_replacement_terminal_projection(&pool, &fixture, &cross_wired)
+            .await
+            .expect_err("the deferred result guard rejects another directory");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: typed readback independently rejects a pinned receipt whose
+/// directory no longer matches its immutable stage and successor placement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_free_pinned_replacement_result_readback_rejects_corruption()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut fixture = workspace_free_replacement_terminal_fixture(&pool).await?;
+    insert_workspace_free_replacement_terminal_projection(
+        &pool,
+        &fixture,
+        &exact_runner_directory(),
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE replace_lost_runner_result
+         DISABLE TRIGGER replace_lost_runner_result_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE replace_lost_runner_result
+            SET working_directory = $2
+          WHERE command_id = $1",
+    )
+    .bind(fixture.command.command().into_uuid())
+    .bind(replacement_runner_directory().as_str())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE replace_lost_runner_result
+         ENABLE TRIGGER replace_lost_runner_result_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = fixture
+        .store
+        .complete(fixture.command, fixture.identities)
+        .await
+        .expect_err("typed readback rejects a result detached from its stage");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
     drop(pool);
     Ok(())
 }
