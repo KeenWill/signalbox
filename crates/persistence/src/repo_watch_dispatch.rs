@@ -908,6 +908,13 @@ async fn event_is_self_caused(
                 AND receipt.thread_id = event.thread_id
                 AND receipt.tool_attempt_id < event.event_id
                 AND receipt.recorded_at <= event.snapshot_observed_at
+                AND EXISTS (
+                    SELECT 1
+                      FROM repo_watch_github_write_observation AS observed
+                     WHERE observed.tool_attempt_id = receipt.tool_attempt_id
+                       AND observed.repository = event.repository
+                       AND observed.cursor_generation = event.cursor_generation
+                )
            )
           WHERE event.event_id = $1
           ORDER BY receipt.tool_attempt_id

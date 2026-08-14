@@ -41,7 +41,8 @@ use signalbox_domain::{
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
-    RepoWatchCursorCandidate, RepoWatchCursorGeneration,
+    RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservationBoundary,
+    RepoWatchThreadObservationBoundary,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
@@ -279,15 +280,17 @@ impl RepositoryWatchTask {
             MAX_CREDENTIAL_BYTES,
         );
         let store = PostgresRepoWatchStore::new(pool.clone());
+        let mut poller = GitHubRepositoryPoller::try_new(
+            configuration.repository().clone(),
+            signal_reviewers,
+            credentials,
+            credential_reference,
+        )?;
+        poller.observation_store = Some(store.clone());
         Ok(Self {
             repository: configuration.repository().clone(),
             interval: configuration.poll_interval(),
-            poller: Arc::new(GitHubRepositoryPoller::try_new(
-                configuration.repository().clone(),
-                signal_reviewers,
-                credentials,
-                credential_reference,
-            )?),
+            poller: Arc::new(poller),
             store,
             dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
             rules,
@@ -451,6 +454,7 @@ impl RepositoryWatchTask {
             .poller
             .poll_against_cursor(previous, cursor_generation)
             .await?;
+        let thread_observation_boundaries = self.poller.take_thread_observation_boundaries();
         let events = derive_repo_watch_events(
             &self.repository,
             previous,
@@ -467,7 +471,7 @@ impl RepositoryWatchTask {
                     RepoWatchCursorCandidate::new(observation),
                     events,
                 )
-                .snapshot_observed_before(snapshot_observed_at),
+                .with_thread_observation_boundaries(thread_observation_boundaries),
             )
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
@@ -766,6 +770,8 @@ struct GitHubRepositoryPoller {
     client: Client,
     rest_base: Url,
     graphql_url: Url,
+    observation_store: Option<PostgresRepoWatchStore>,
+    thread_observation_boundaries: Mutex<Vec<RepoWatchThreadObservationBoundary>>,
     cache: Mutex<PollCache>,
     freshness: Mutex<HashMap<u64, PullRequestFreshness>>,
     // The child fetches one attempt spawns. Owned here rather than by the
@@ -854,6 +860,8 @@ impl GitHubRepositoryPoller {
             client,
             rest_base,
             graphql_url,
+            observation_store: None,
+            thread_observation_boundaries: Mutex::new(Vec::new()),
             cache: Mutex::new(PollCache::default()),
             freshness: Mutex::new(HashMap::new()),
             fetches: tokio::sync::Mutex::new(JoinSet::new()),
@@ -873,15 +881,44 @@ impl GitHubRepositoryPoller {
             .await
     }
 
+    fn thread_observation_boundaries(
+        &self,
+    ) -> MutexGuard<'_, Vec<RepoWatchThreadObservationBoundary>> {
+        self.thread_observation_boundaries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn take_thread_observation_boundaries(&self) -> Vec<RepoWatchThreadObservationBoundary> {
+        std::mem::take(&mut *self.thread_observation_boundaries())
+    }
+
+    async fn capture_observation_boundary(
+        &self,
+    ) -> Result<RepoWatchObservationBoundary, RepositoryWatchAttemptError> {
+        match &self.observation_store {
+            Some(store) => store
+                .capture_observation_boundary()
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence),
+            None => Ok(RepoWatchObservationBoundary::captured_at(
+                sqlx::types::time::OffsetDateTime::now_utc(),
+            )),
+        }
+    }
+
     async fn poll_against_cursor(
         self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
         self.cache().begin_poll();
+        self.thread_observation_boundaries().clear();
         let result = self.poll_complete(previous, cursor_generation).await;
         if result.is_ok() {
             self.cache().complete_poll();
+        } else {
+            self.thread_observation_boundaries().clear();
         }
         result
     }
@@ -1436,6 +1473,11 @@ impl GitHubRepositoryPoller {
                 ));
             }
             if !connection.page_info.has_next_page {
+                let boundary = self.capture_observation_boundary().await?;
+                self.thread_observation_boundaries()
+                    .extend(observations.iter().map(|thread| {
+                        RepoWatchThreadObservationBoundary::new(thread.thread().clone(), boundary)
+                    }));
                 return Ok(observations);
             }
             after = connection.page_info.end_cursor;

@@ -125,7 +125,7 @@ pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Box<[RepoWatchEvent]>,
-    snapshot_observed_at: Option<sqlx::types::time::OffsetDateTime>,
+    thread_observation_boundaries: Box<[RepoWatchThreadObservationBoundary]>,
 }
 
 impl RepoWatchCommitRequest {
@@ -138,16 +138,16 @@ impl RepoWatchCommitRequest {
             expected_generation,
             candidate,
             events: events.into_boxed_slice(),
-            snapshot_observed_at: None,
+            thread_observation_boundaries: Vec::new().into_boxed_slice(),
         }
     }
 
-    /// Records the database-clock boundary captured after the provider snapshot.
-    pub const fn snapshot_observed_before(
+    /// Carries the boundaries captured with the provider's thread responses.
+    pub fn with_thread_observation_boundaries(
         mut self,
-        boundary: RepoWatchObservationBoundary,
+        boundaries: Vec<RepoWatchThreadObservationBoundary>,
     ) -> Self {
-        self.snapshot_observed_at = Some(boundary.0);
+        self.thread_observation_boundaries = boundaries.into_boxed_slice();
         self
     }
 
@@ -164,9 +164,37 @@ impl RepoWatchCommitRequest {
     }
 }
 
-/// Database-clock boundary captured before one provider observation begins.
+/// Opaque database-clock boundary captured at an observation site.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchObservationBoundary(sqlx::types::time::OffsetDateTime);
+
+impl RepoWatchObservationBoundary {
+    /// Wraps one value supplied by the observation site's database clock.
+    pub const fn captured_at(value: sqlx::types::time::OffsetDateTime) -> Self {
+        Self(value)
+    }
+}
+
+/// The exact boundary captured with one provider thread response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchThreadObservationBoundary {
+    thread: ReviewThreadId,
+    boundary: RepoWatchObservationBoundary,
+}
+
+impl RepoWatchThreadObservationBoundary {
+    pub const fn new(thread: ReviewThreadId, boundary: RepoWatchObservationBoundary) -> Self {
+        Self { thread, boundary }
+    }
+
+    pub const fn thread(&self) -> &ReviewThreadId {
+        &self.thread
+    }
+
+    const fn observed_at(&self) -> sqlx::types::time::OffsetDateTime {
+        self.boundary.0
+    }
+}
 
 /// Outcome of one atomic cursor-and-event commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -321,6 +349,7 @@ pub enum RepoWatchStoreError {
     EventsWithoutStateChange,
     CursorGenerationExhausted,
     EventBatchTooLarge,
+    MissingThreadObservationBoundary(ReviewThreadId),
 }
 
 impl fmt::Display for RepoWatchStoreError {
@@ -359,6 +388,11 @@ impl fmt::Display for RepoWatchStoreError {
             }
             Self::EventBatchTooLarge => formatter
                 .write_str("repository-watch event batch exceeds the durable ordinal range"),
+            Self::MissingThreadObservationBoundary(thread) => write!(
+                formatter,
+                "repository-watch thread event lacks its captured observation boundary: {}",
+                thread.as_str()
+            ),
         }
     }
 }
@@ -373,7 +407,8 @@ impl Error for RepoWatchStoreError {
             | Self::DuplicateEventIdentity(_)
             | Self::EventsWithoutStateChange
             | Self::CursorGenerationExhausted
-            | Self::EventBatchTooLarge => None,
+            | Self::EventBatchTooLarge
+            | Self::MissingThreadObservationBoundary(_) => None,
         }
     }
 }
@@ -407,8 +442,8 @@ impl PostgresRepoWatchStore {
         Self { pool }
     }
 
-    /// Captures an ordering boundary before a provider poll starts.
-    pub async fn begin_observation(
+    /// Captures the database-clock boundary at a provider observation site.
+    pub async fn capture_observation_boundary(
         &self,
     ) -> Result<RepoWatchObservationBoundary, RepoWatchStoreError> {
         sqlx::query_scalar("SELECT clock_timestamp()")
@@ -468,7 +503,7 @@ impl PostgresRepoWatchStore {
                     &mut transaction,
                     repository,
                     cursor.generation(),
-                    request.snapshot_observed_at,
+                    &request.thread_observation_boundaries,
                 )
                 .await?;
                 transaction.commit().await.map_err(|error| {
@@ -506,7 +541,7 @@ impl PostgresRepoWatchStore {
             repository,
             generation,
             request.events(),
-            request.snapshot_observed_at,
+            &request.thread_observation_boundaries,
         )
         .await?;
         transaction.commit().await.map_err(|error| {
@@ -1393,14 +1428,33 @@ async fn insert_events(
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
     events: &[RepoWatchEvent],
-    snapshot_observed_at: Option<sqlx::types::time::OffsetDateTime>,
+    thread_observation_boundaries: &[RepoWatchThreadObservationBoundary],
 ) -> Result<(), RepoWatchStoreError> {
-    record_github_write_observations(transaction, repository, generation, snapshot_observed_at)
-        .await?;
+    record_github_write_observations(
+        transaction,
+        repository,
+        generation,
+        thread_observation_boundaries,
+    )
+    .await?;
     for (index, event) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
         let encoded = EncodedEvent::from_event(event);
+        let snapshot_observed_at = encoded.thread_id.as_deref().and_then(|thread| {
+            thread_observation_boundaries
+                .iter()
+                .find(|candidate| candidate.thread().as_str() == thread)
+                .map(RepoWatchThreadObservationBoundary::observed_at)
+        });
+        if let Some(thread) = encoded.thread_id.as_deref()
+            && snapshot_observed_at.is_none()
+        {
+            return Err(RepoWatchStoreError::MissingThreadObservationBoundary(
+                ReviewThreadId::try_new(thread.to_owned())
+                    .expect("encoded thread identity came from the domain"),
+            ));
+        }
         sqlx::query(
             "INSERT INTO repo_watch_event (
                 event_id, repository, cursor_generation, event_ordinal, event_version,
@@ -1469,7 +1523,7 @@ async fn record_github_write_observations(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-    snapshot_observed_at: Option<sqlx::types::time::OffsetDateTime>,
+    thread_observation_boundaries: &[RepoWatchThreadObservationBoundary],
 ) -> Result<(), RepoWatchStoreError> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock(
@@ -1493,10 +1547,7 @@ async fn record_github_write_observations(
          )
          SELECT receipt.tool_attempt_id, $1, $2
            FROM repo_watch_github_write_receipt AS receipt
-          WHERE (
-                receipt.operation_kind <> 'thread_resolve'
-                OR ($3::timestamptz IS NOT NULL AND receipt.recorded_at <= $3)
-            )
+          WHERE receipt.operation_kind <> 'thread_resolve'
             AND NOT EXISTS (
                 SELECT 1
                   FROM repo_watch_github_write_observation AS observed
@@ -1548,9 +1599,32 @@ async fn record_github_write_observations(
     )
     .bind(repository.as_str())
     .bind(generation_to_i64(generation))
-    .bind(snapshot_observed_at)
     .execute(&mut **transaction)
     .await?;
+    for observed in thread_observation_boundaries {
+        sqlx::query(
+            "INSERT INTO repo_watch_github_write_observation (
+                 tool_attempt_id, repository, cursor_generation
+             )
+             SELECT receipt.tool_attempt_id, $1, $2
+               FROM repo_watch_github_write_receipt AS receipt
+              WHERE receipt.operation_kind = 'thread_resolve'
+                AND receipt.thread_id = $3
+                AND receipt.recorded_at <= $4
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_github_write_observation AS prior
+                     WHERE prior.tool_attempt_id = receipt.tool_attempt_id
+                )
+             ON CONFLICT (tool_attempt_id, repository, cursor_generation) DO NOTHING",
+        )
+        .bind(repository.as_str())
+        .bind(generation_to_i64(generation))
+        .bind(observed.thread().as_str())
+        .bind(observed.observed_at())
+        .execute(&mut **transaction)
+        .await?;
+    }
     Ok(())
 }
 
