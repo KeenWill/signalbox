@@ -1902,6 +1902,7 @@ mod tests {
     const CHECK_SUITE_ID: u64 = 101;
     const CHECK_RUN_ID: u64 = 102;
     const REVIEW_ID: u64 = 103;
+    const REVIEW_NODE_ID: &str = "review-node-103";
     const WORKFLOW_RUN_ID: u64 = 104;
     const NEXT_WORKFLOW_RUN_ID: u64 = 105;
     const WORKFLOW_ID: u64 = 106;
@@ -2019,17 +2020,14 @@ mod tests {
 
         let candidate = RepoWatchStaleReviewClearanceCandidate::try_new(
             &assessment,
-            format!("review-node-{REVIEW_ID}"),
+            REVIEW_NODE_ID.to_owned(),
             RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
             CommitSha::try_new(String::from(REVIEW_COMMIT))?,
         )?;
 
         assert_eq!(candidate.number(), assessment.number());
         assert_eq!(candidate.current_head_sha(), assessment.head_sha());
-        assert_eq!(
-            candidate.review_node_id(),
-            format!("review-node-{REVIEW_ID}")
-        );
+        assert_eq!(candidate.review_node_id(), REVIEW_NODE_ID);
         assert_eq!(candidate.reviewer().as_str(), REVIEWER);
         assert_eq!(candidate.reviewed_head_sha().as_str(), REVIEW_COMMIT);
         Ok(())
@@ -2048,7 +2046,7 @@ mod tests {
 
         let result = RepoWatchStaleReviewClearanceCandidate::try_new(
             &assessment,
-            format!("review-node-{REVIEW_ID}"),
+            REVIEW_NODE_ID.to_owned(),
             RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
             assessment.head_sha().clone(),
         );
@@ -2070,7 +2068,7 @@ mod tests {
 
         let result = RepoWatchStaleReviewClearanceCandidate::try_new(
             &assessment,
-            format!("review-node-{REVIEW_ID}"),
+            REVIEW_NODE_ID.to_owned(),
             RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
             CommitSha::try_new(String::from(REVIEW_COMMIT))?,
         );
@@ -2092,7 +2090,7 @@ mod tests {
 
         let result = RepoWatchStaleReviewClearanceCandidate::try_new(
             &assessment,
-            format!("review-node-{REVIEW_ID}"),
+            REVIEW_NODE_ID.to_owned(),
             RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
             CommitSha::try_new(String::from(REVIEW_COMMIT))?,
         );
@@ -2114,7 +2112,7 @@ mod tests {
 
         let result = RepoWatchStaleReviewClearanceCandidate::try_new(
             &assessment,
-            format!("review-node-{REVIEW_ID}"),
+            REVIEW_NODE_ID.to_owned(),
             RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
             CommitSha::try_new(String::from(REVIEW_COMMIT))?,
         );
