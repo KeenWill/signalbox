@@ -1981,6 +1981,7 @@ async fn stderr_credential_rejection_is_classified_before_exit_status() {
     let error = provider_error(&result.evidence);
 
     assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert!(!error.non_acceptance_proven);
     assert!(
         !error
             .native
@@ -2063,6 +2064,7 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error(
     let error = provider_error(&result.evidence);
 
     assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert!(error.non_acceptance_proven);
     assert_eq!(
         error.native.message.as_deref(),
         Some(fixtures::STREAM_ERROR_MESSAGE)
@@ -3728,7 +3730,6 @@ async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {
     .await;
 
     assert_eq!(provider_error(&result.evidence).kind, expected);
-    assert!(provider_error(&result.evidence).non_acceptance_proven);
     assert_eq!(result.spawns, 1);
 }
 

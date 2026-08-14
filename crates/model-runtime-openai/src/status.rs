@@ -64,13 +64,37 @@ pub(crate) fn classify_error_envelope(
     classify_error(status, None)
 }
 
+/// Classifies an error envelope and grants substitution proof only when the
+/// precedence-selected native availability token agrees with HTTP 429.
+pub(crate) fn classify_error_envelope_with_proof(
+    status: u16,
+    code: Option<&str>,
+    error_type: Option<&str>,
+) -> (ProviderErrorKind, bool) {
+    let kind = classify_error_envelope(status, code, error_type);
+    let selected_token = match (
+        classify_error(0, code) == ProviderErrorKind::Unrecognized,
+        classify_error(0, error_type) == ProviderErrorKind::Unrecognized,
+    ) {
+        (false, _) => code,
+        (true, false) => error_type,
+        (true, true) => std::option::Option::None,
+    };
+    let non_acceptance_proven = status == 429
+        && matches!(
+            selected_token,
+            Some("rate_limit_exceeded" | "rate_limit_error" | "insufficient_quota")
+        );
+    (kind, non_acceptance_proven)
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use signalbox_expect_table::table;
     use signalbox_model_runtime::ProviderErrorKind;
 
-    use super::{classify_error, classify_error_envelope};
+    use super::{classify_error, classify_error_envelope, classify_error_envelope_with_proof};
 
     #[derive(Debug)]
     #[allow(
@@ -115,6 +139,30 @@ mod tests {
         assert_eq!(
             classify_error(401, Some("insufficient_quota")),
             ProviderErrorKind::CredentialRejected
+        );
+    }
+
+    #[test]
+    fn substitution_proof_requires_the_selected_noncontradictory_native_token() {
+        assert_eq!(
+            classify_error_envelope_with_proof(429, Some("insufficient_quota"), None),
+            (ProviderErrorKind::QuotaExhausted, true)
+        );
+        assert_eq!(
+            classify_error_envelope_with_proof(429, Some("future_limit"), None),
+            (ProviderErrorKind::RateLimited, false)
+        );
+        assert_eq!(
+            classify_error_envelope_with_proof(401, Some("rate_limit_error"), None),
+            (ProviderErrorKind::CredentialRejected, false)
+        );
+        assert_eq!(
+            classify_error_envelope_with_proof(
+                429,
+                Some("invalid_request_error"),
+                Some("insufficient_quota")
+            ),
+            (ProviderErrorKind::InvalidRequest, false)
         );
     }
 
