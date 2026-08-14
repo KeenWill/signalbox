@@ -186,6 +186,8 @@ document it names as their owner; scenarios and fixtures may themselves be the
 statement of record. Other documents link to an owner rather than restating it,
 and an owning scenario or fixture changes only with the owner-approved change
 that authorizes it.
+Raising a hard safety ceiling requires a reviewed code change with a test and
+rationale.
 
 Ordinary implementation choices are made in the pull request and remain durable
 in its description and git history. Foundation-weight changes — changing
