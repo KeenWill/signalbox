@@ -439,6 +439,18 @@ answers who issued one command; `SessionCreationCause` answers why a session
 exists — they are independent facts, and neither substitutes for the other (see
 [sessions-and-transcript](sessions-and-transcript.md)).
 
+**Committed unimplemented functionality.** No present surface constructs a
+program actor. The closed actor algebra gains a program-issuance arm — a
+verified reference to the issuing program run, constructible only by the
+[program substrate](program-substrate.md)'s host-side session capability, with
+the same validated-reference, no-conferred-authority semantics as every other
+arm — and `SubmitInput` gains a program admissibility path fixing that actor, so
+a program-driven turn is never recorded as user-issued. This constrains present
+change: the actor storage convention (closed `actor_kind` discriminator,
+variant-shaped reference columns, replay-equality inclusion) must remain
+extensible to that arm, and nothing may assume the `SubmitInput` actor is always
+`user`.
+
 ## Durable-command telemetry correlation
 
 Operational telemetry is emitted through the `tracing` facade by
