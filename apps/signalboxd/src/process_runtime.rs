@@ -5794,13 +5794,19 @@ where
 
 async fn wait_for_connection_loss(reader: &BufReader<OwnedReadHalf>) {
     loop {
-        let Ok(readiness) = reader.get_ref().ready(Interest::READABLE).await else {
+        let Ok(readiness) = reader
+            .get_ref()
+            .ready(Interest::READABLE | Interest::WRITABLE)
+            .await
+        else {
             return;
         };
-        if readiness.is_read_closed() {
+        if readiness.is_read_closed() && readiness.is_write_closed() {
             return;
         }
-        tokio::task::yield_now().await;
+        // Unconsumed pipelined bytes and an orderly write-half close keep the
+        // socket ready, so back off before checking for full closure again.
+        sleep(Duration::from_millis(100)).await;
     }
 }
 
