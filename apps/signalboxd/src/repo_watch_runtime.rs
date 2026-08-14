@@ -5821,7 +5821,7 @@ mod tests {
             encoded["delivery"]["current"]["reviews"]
                 .as_array()
                 .map(Vec::len),
-            Some(observation.state().pull_requests()[0].reviews().len())
+            Some(RETAINED_REVIEW_IDS.len())
         );
         assert_eq!(
             encoded["delivery"]["current"]["threads"][0]["thread"],
