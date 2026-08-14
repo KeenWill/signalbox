@@ -1,6 +1,6 @@
 //! Typed workspace-instruction registration and turn-start provenance.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, path::Path};
 
 use sha2::{Digest, Sha256};
 
@@ -239,7 +239,7 @@ pub struct InstructionBundleRegistration {
 }
 
 impl InstructionBundleRegistration {
-    /// Validates path containment and bundle/metadata shape.
+    /// Validates path containment, bundle/metadata shape, and source naming.
     pub fn new(input: InstructionBundleRegistrationInput) -> Option<Self> {
         let InstructionBundleRegistrationInput {
             kind,
@@ -250,7 +250,21 @@ impl InstructionBundleRegistration {
             source_hash,
             skill,
         } = input;
-        let shape_matches = matches!(kind, InstructionBundleKind::AgentSkill) == skill.is_some();
+        let source = Path::new(source_path.as_str());
+        let shape_matches = match (kind, skill.as_ref()) {
+            (InstructionBundleKind::AgentDocument, None) => {
+                source.file_name().is_some_and(|name| name == "AGENTS.md")
+            }
+            (InstructionBundleKind::AgentSkill, Some(metadata)) => {
+                source.file_name().is_some_and(|name| name == "SKILL.md")
+                    && source
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name == metadata.name())
+            }
+            _ => false,
+        };
         let below_root = source_path
             .as_str()
             .strip_prefix(root_path.as_str())
@@ -424,5 +438,60 @@ mod tests {
         });
 
         assert_eq!(error, Err(InstructionSkillMetadataError::ParentMismatch));
+    }
+
+    #[test]
+    fn bundle_registration_requires_the_kind_specific_source_name() {
+        let agent_document = InstructionBundleRegistration::new(registration_input(
+            InstructionBundleKind::AgentDocument,
+            "/workspace/NOT-AGENTS.md",
+            None,
+        ));
+        let skill = InstructionBundleRegistration::new(registration_input(
+            InstructionBundleKind::AgentSkill,
+            "/workspace/.agents/skills/review/NOT-SKILL.md",
+            Some(review_skill()),
+        ));
+
+        assert!(agent_document.is_none());
+        assert!(skill.is_none());
+    }
+
+    #[test]
+    fn bundle_registration_requires_the_skill_source_parent() {
+        let registration = InstructionBundleRegistration::new(registration_input(
+            InstructionBundleKind::AgentSkill,
+            "/workspace/.agents/skills/other/SKILL.md",
+            Some(review_skill()),
+        ));
+
+        assert!(registration.is_none());
+    }
+
+    fn review_skill() -> InstructionSkillMetadata {
+        InstructionSkillMetadata::try_new(InstructionSkillMetadataInput {
+            name: String::from("review"),
+            description: String::from("Review one change."),
+            parent_directory: String::from("review"),
+        })
+        .expect("fixture skill is valid")
+    }
+
+    fn registration_input(
+        kind: InstructionBundleKind,
+        source_path: &str,
+        skill: Option<InstructionSkillMetadata>,
+    ) -> InstructionBundleRegistrationInput {
+        InstructionBundleRegistrationInput {
+            kind,
+            root_kind: InstructionDiscoveryRootKind::Workspace,
+            root_path: InstructionPath::try_new(String::from("/workspace"))
+                .expect("fixture root is valid"),
+            source_path: InstructionPath::try_new(source_path.to_owned())
+                .expect("fixture source is valid"),
+            source_bytes: 1,
+            source_hash: InstructionDigest::sha256(b"fixture"),
+            skill,
+        }
     }
 }

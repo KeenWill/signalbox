@@ -2,10 +2,16 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, FileType},
-    io::{self, Read},
     path::PathBuf,
     time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use std::{
+    ffi::{OsStr, OsString},
+    fs,
+    io::{self, Read},
+    os::{fd::OwnedFd, unix::ffi::OsStrExt},
 };
 
 use serde::Deserialize;
@@ -166,9 +172,18 @@ struct DiscoveryState {
     complete: bool,
 }
 
+#[cfg(unix)]
 struct ClassifiedDirectoryEntry {
-    entry: fs::DirEntry,
-    file_type: FileType,
+    name: OsString,
+    file_type: rustix::fs::FileType,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct CandidateLocation<'a> {
+    directory_descriptor: &'a OwnedFd,
+    directory: &'a std::path::Path,
+    source_name: &'a OsStr,
 }
 
 /// Greedily walks every supplied root without following symbolic links.
@@ -218,6 +233,7 @@ fn discover_with_limits(
     }
 }
 
+#[cfg(unix)]
 fn walk_root(
     root: &InstructionDiscoveryRoot,
     bundles: &mut Vec<InstructionBundleRegistration>,
@@ -225,9 +241,9 @@ fn walk_root(
     state: &mut DiscoveryState,
 ) -> bool {
     let root_path = PathBuf::from(root.path().as_str());
-    match fs::symlink_metadata(&root_path) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) | Err(_) => {
+    let root_descriptor = match open_directory_no_follow(&root_path) {
+        Ok(descriptor) => descriptor,
+        Err(_) => {
             return push_finding(
                 root.path().clone(),
                 InstructionDiscoveryFindingKind::RootUnavailable,
@@ -235,35 +251,59 @@ fn walk_root(
                 state,
             );
         }
-    }
-    let mut pending = vec![root_path];
-    while let Some(directory) = pending.pop() {
+    };
+    let mut pending = vec![(root_descriptor, root_path, true)];
+    while let Some((directory_descriptor, directory, is_root)) = pending.pop() {
         if !check_elapsed(root.path(), findings, state) {
             return false;
         }
-        let directory_entries = match fs::read_dir(&directory) {
+        let mut directory_entries = match rustix::fs::Dir::read_from(&directory_descriptor) {
             Ok(entries) => entries,
             Err(_) => {
-                if !push_path_finding(
-                    &directory,
-                    root.path(),
-                    InstructionDiscoveryFindingKind::EntryUnreadable,
-                    findings,
-                    state,
-                ) {
+                let kind = if is_root {
+                    InstructionDiscoveryFindingKind::RootUnavailable
+                } else {
+                    InstructionDiscoveryFindingKind::EntryUnreadable
+                };
+                if !push_path_finding(&directory, root.path(), kind, findings, state) {
                     return false;
                 }
                 continue;
             }
         };
         let mut entries = Vec::new();
-        for entry in directory_entries {
-            if !consume_entry(root.path(), findings, state) {
-                return false;
-            }
+        while let Some(entry) = directory_entries.read() {
             match entry {
-                Ok(entry) => entries.push(entry),
+                Ok(entry) => {
+                    let name = OsStr::from_bytes(entry.file_name().to_bytes());
+                    if name != OsStr::new(".") && name != OsStr::new("..") {
+                        if !consume_entry(root.path(), findings, state) {
+                            return false;
+                        }
+                        let entry_path = directory.join(name);
+                        match classify_entry_at(&directory_descriptor, name) {
+                            Ok(file_type) => entries.push(ClassifiedDirectoryEntry {
+                                name: name.to_os_string(),
+                                file_type,
+                            }),
+                            Err(_) => {
+                                if !push_path_finding(
+                                    &entry_path,
+                                    root.path(),
+                                    InstructionDiscoveryFindingKind::EntryUnreadable,
+                                    findings,
+                                    state,
+                                ) {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
                 Err(_) => {
+                    if !consume_entry(root.path(), findings, state) {
+                        return false;
+                    }
                     if !push_path_finding(
                         &directory,
                         root.path(),
@@ -276,44 +316,63 @@ fn walk_root(
                 }
             }
         }
-        entries.sort_by_key(fs::DirEntry::file_name);
-        let mut classified = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if !check_elapsed(root.path(), findings, state) {
-                return false;
-            }
-            match entry.file_type() {
-                Ok(file_type) => classified.push(ClassifiedDirectoryEntry { entry, file_type }),
-                Err(_) => {
-                    if !push_path_finding(
-                        &entry.path(),
-                        root.path(),
-                        InstructionDiscoveryFindingKind::EntryUnreadable,
-                        findings,
-                        state,
-                    ) {
-                        return false;
-                    }
-                }
-            }
-        }
-        if !inspect_directory(root, &directory, &classified, bundles, findings, state) {
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        if !inspect_directory(
+            root,
+            &directory_descriptor,
+            &directory,
+            &entries,
+            bundles,
+            findings,
+            state,
+        ) {
             return false;
         }
-        for classified_entry in classified.into_iter().rev() {
+        for classified_entry in entries.into_iter().rev() {
             if !check_elapsed(root.path(), findings, state) {
                 return false;
             }
-            if classified_entry.file_type.is_dir() {
-                pending.push(classified_entry.entry.path());
+            if classified_entry.file_type == rustix::fs::FileType::Directory {
+                let child_path = directory.join(&classified_entry.name);
+                match open_directory_at_no_follow(&directory_descriptor, &classified_entry.name) {
+                    Ok(descriptor) => pending.push((descriptor, child_path, false)),
+                    Err(_) => {
+                        if !push_path_finding(
+                            &child_path,
+                            root.path(),
+                            InstructionDiscoveryFindingKind::EntryUnreadable,
+                            findings,
+                            state,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
             }
         }
     }
     true
 }
 
+#[cfg(not(unix))]
+fn walk_root(
+    root: &InstructionDiscoveryRoot,
+    _bundles: &mut Vec<InstructionBundleRegistration>,
+    findings: &mut Vec<InstructionDiscoveryFinding>,
+    state: &mut DiscoveryState,
+) -> bool {
+    push_finding(
+        root.path().clone(),
+        InstructionDiscoveryFindingKind::RootUnavailable,
+        findings,
+        state,
+    )
+}
+
+#[cfg(unix)]
 fn inspect_directory(
     root: &InstructionDiscoveryRoot,
+    directory_descriptor: &OwnedFd,
     directory: &std::path::Path,
     entries: &[ClassifiedDirectoryEntry],
     bundles: &mut Vec<InstructionBundleRegistration>,
@@ -322,12 +381,16 @@ fn inspect_directory(
 ) -> bool {
     let agents = entries
         .iter()
-        .find(|entry| entry.entry.file_name() == "AGENTS.md")
-        .filter(|entry| entry.file_type.is_file());
+        .find(|entry| entry.name == OsStr::new("AGENTS.md"))
+        .filter(|entry| entry.file_type == rustix::fs::FileType::RegularFile);
     if let Some(agents) = agents
         && !register_file(
             root,
-            &agents.entry.path(),
+            CandidateLocation {
+                directory_descriptor,
+                directory,
+                source_name: &agents.name,
+            },
             InstructionBundleKind::AgentDocument,
             None,
             bundles,
@@ -353,13 +416,17 @@ fn inspect_directory(
     };
     let skill = entries
         .iter()
-        .find(|entry| entry.entry.file_name() == "SKILL.md")
-        .filter(|entry| entry.file_type.is_file());
+        .find(|entry| entry.name == OsStr::new("SKILL.md"))
+        .filter(|entry| entry.file_type == rustix::fs::FileType::RegularFile);
     if is_skill && let Some(skill) = skill {
         let parent = directory.file_name().and_then(|name| name.to_str());
         if !register_file(
             root,
-            &skill.entry.path(),
+            CandidateLocation {
+                directory_descriptor,
+                directory,
+                source_name: &skill.name,
+            },
             InstructionBundleKind::AgentSkill,
             parent,
             bundles,
@@ -372,15 +439,17 @@ fn inspect_directory(
     true
 }
 
+#[cfg(unix)]
 fn register_file(
     root: &InstructionDiscoveryRoot,
-    source: &std::path::Path,
+    location: CandidateLocation<'_>,
     kind: InstructionBundleKind,
     skill_parent: Option<&str>,
     bundles: &mut Vec<InstructionBundleRegistration>,
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
 ) -> bool {
+    let source = location.directory.join(location.source_name);
     let source_path = match source
         .to_str()
         .and_then(|value| InstructionPath::try_new(value.to_owned()).ok())
@@ -388,7 +457,7 @@ fn register_file(
         Some(path) => path,
         None => {
             return push_path_finding(
-                source,
+                &source,
                 root.path(),
                 InstructionDiscoveryFindingKind::NonUtf8SourcePath,
                 findings,
@@ -399,7 +468,7 @@ fn register_file(
     if !state.seen_sources.insert(source_path.clone()) {
         return true;
     }
-    let bytes = match read_candidate(source, root.path(), findings, state) {
+    let bytes = match read_candidate(location, &source, root.path(), findings, state) {
         Ok(bytes) => bytes,
         Err(continue_scan) => return continue_scan,
     };
@@ -448,7 +517,33 @@ fn register_file(
     true
 }
 
+#[cfg(unix)]
 fn read_candidate(
+    location: CandidateLocation<'_>,
+    source: &std::path::Path,
+    fallback: &InstructionPath,
+    findings: &mut Vec<InstructionDiscoveryFinding>,
+    state: &mut DiscoveryState,
+) -> Result<Vec<u8>, bool> {
+    let file =
+        match open_candidate_at_no_follow(location.directory_descriptor, location.source_name) {
+            Ok(file) => file,
+            Err(_) => {
+                return Err(push_path_finding(
+                    source,
+                    fallback,
+                    InstructionDiscoveryFindingKind::EntryUnreadable,
+                    findings,
+                    state,
+                ));
+            }
+        };
+    read_candidate_from(file, source, fallback, findings, state)
+}
+
+#[cfg(unix)]
+fn read_candidate_from(
+    source_file: impl Read,
     source: &std::path::Path,
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
@@ -458,32 +553,10 @@ fn read_candidate(
         .limits
         .candidate_source_bytes
         .saturating_sub(state.candidate_source_bytes);
-    let file = match open_candidate_no_follow(source) {
-        Ok(file) => file,
-        Err(_) => {
-            return Err(push_path_finding(
-                source,
-                fallback,
-                InstructionDiscoveryFindingKind::EntryUnreadable,
-                findings,
-                state,
-            ));
-        }
-    };
     let mut bytes = Vec::new();
-    if file
+    let read_result = source_file
         .take(remaining.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
-        return Err(push_path_finding(
-            source,
-            fallback,
-            InstructionDiscoveryFindingKind::EntryUnreadable,
-            findings,
-            state,
-        ));
-    }
+        .read_to_end(&mut bytes);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > remaining {
         state.candidate_source_bytes = state.limits.candidate_source_bytes;
         reach_limit(
@@ -495,6 +568,15 @@ fn read_candidate(
         return Err(false);
     }
     state.candidate_source_bytes += u64::try_from(bytes.len()).unwrap_or(remaining);
+    if read_result.is_err() {
+        return Err(push_path_finding(
+            source,
+            fallback,
+            InstructionDiscoveryFindingKind::EntryUnreadable,
+            findings,
+            state,
+        ));
+    }
     if !check_elapsed(fallback, findings, state) {
         return Err(false);
     }
@@ -502,11 +584,47 @@ fn read_candidate(
 }
 
 #[cfg(unix)]
-fn open_candidate_no_follow(source: &std::path::Path) -> io::Result<fs::File> {
-    use rustix::fs::{Mode, OFlags, open};
+fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
 
-    let descriptor = open(
+    openat(
+        CWD,
         source,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn classify_entry_at(directory: &OwnedFd, name: &OsStr) -> io::Result<rustix::fs::FileType> {
+    use rustix::fs::{AtFlags, FileType, statat};
+
+    statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map(|status| FileType::from_raw_mode(status.st_mode))
+        .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn open_directory_at_no_follow(directory: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn open_candidate_at_no_follow(directory: &OwnedFd, name: &OsStr) -> io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let descriptor = openat(
+        directory,
+        name,
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
     )?;
@@ -517,14 +635,6 @@ fn open_candidate_no_follow(source: &std::path::Path) -> io::Result<fs::File> {
         ));
     }
     Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_candidate_no_follow(_source: &std::path::Path) -> io::Result<fs::File> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "no-follow instruction reads are unavailable on this platform",
-    ))
 }
 
 fn consume_entry(
@@ -690,6 +800,22 @@ fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    struct BytesThenError {
+        bytes: Option<Vec<u8>>,
+    }
+
+    #[cfg(unix)]
+    impl Read for BytesThenError {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let Some(bytes) = self.bytes.take() else {
+                return Err(io::Error::other("fixture read failure"));
+            };
+            buffer[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+    }
+
     #[test]
     fn greedy_discovery_finds_nested_documents_and_skills() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
@@ -744,6 +870,31 @@ mod tests {
         let snapshot = discover_workspace_instructions(vec![root]);
 
         assert!(snapshot.bundles().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_open_failure_is_root_unavailable() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let outside = tempfile::tempdir().expect("outside root exists");
+        let linked_root = temporary.path().join("linked-root");
+        symlink(outside.path(), &linked_root).expect("root link exists");
+        let root = InstructionDiscoveryRoot::new(
+            InstructionDiscoveryRootKind::Workspace,
+            InstructionPath::try_new(linked_root.to_string_lossy().into_owned())
+                .expect("linked path has canonical spelling"),
+        );
+
+        let snapshot = discover_workspace_instructions(vec![root]);
+
+        assert!(snapshot.bundles().is_empty());
+        assert_eq!(snapshot.findings().len(), 1);
+        assert_eq!(
+            snapshot.findings()[0].kind(),
+            InstructionDiscoveryFindingKind::RootUnavailable
+        );
     }
 
     #[test]
@@ -879,12 +1030,71 @@ mod tests {
         fs::write(&outside, "outside instructions").expect("outside source exists");
         symlink(&outside, &candidate).expect("candidate link exists");
         let root = workspace_root(&temporary);
+        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
         let mut findings = Vec::new();
         let mut state = test_state(test_limits(4, 4, 64, Duration::from_secs(1)));
 
-        let result = read_candidate(&candidate, root.path(), &mut findings, &mut state);
+        let result = read_candidate(
+            CandidateLocation {
+                directory_descriptor: &descriptor,
+                directory: temporary.path(),
+                source_name: OsStr::new("AGENTS.md"),
+            },
+            &candidate,
+            root.path(),
+            &mut findings,
+            &mut state,
+        );
 
         assert!(result.is_err());
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].kind(),
+            InstructionDiscoveryFindingKind::EntryUnreadable
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_open_refuses_a_symlink_after_enumeration() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let outside = tempfile::tempdir().expect("outside root exists");
+        let child = temporary.path().join("child");
+        symlink(outside.path(), &child).expect("child link exists");
+        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+
+        let result = open_directory_at_no_follow(&descriptor, OsStr::new("child"));
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_candidate_read_charges_retained_bytes() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let source = temporary.path().join("AGENTS.md");
+        let root = workspace_root(&temporary);
+        let mut findings = Vec::new();
+        let mut state = test_state(test_limits(4, 4, 64, Duration::from_secs(1)));
+        let retained = b"read before failure".to_vec();
+
+        let result = read_candidate_from(
+            BytesThenError {
+                bytes: Some(retained.clone()),
+            },
+            &source,
+            root.path(),
+            &mut findings,
+            &mut state,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            state.candidate_source_bytes,
+            u64::try_from(retained.len()).expect("fixture length fits u64")
+        );
         assert_eq!(findings.len(), 1);
         assert_eq!(
             findings[0].kind(),
