@@ -43,9 +43,12 @@ lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
 The runner-local workspace-release journal and exact acknowledgement boundary
 are verified against this PR (`agent/runner-workspace-operation-journal`). Its
 exact live acknowledgement and heartbeat projection are verified against this PR
-(`agent/runner-workspace-release-acknowledgements`). Established-connection
-routing of those inbound claim and result frames through the durable
-transactions before acknowledgement is re-verified through this PR
+(`agent/runner-workspace-release-acknowledgements`). Managed predecessor
+workspace evidence for later durable release precondition checks is prepared by
+the exact domain candidate verified against this PR
+(`agent/runner-workspace-release-candidate`). Established-connection routing of
+those inbound claim and result frames through the durable transactions before
+acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -2060,6 +2063,15 @@ A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
 lease or unacknowledged result remains. The session itself need not be terminal
 and may continue on its successor placement or with daemon-only tools.
+
+A successful pinned replacement exposes a closed
+`RunnerWorkspaceReleaseCandidate` only when its predecessor retained a managed
+workspace manifest. The candidate binds the session, exact retired placement
+revision, cleanup-owning runner, and protected manifest identity. It is not
+cleanup authority: the consuming durable transaction must still authenticate the
+exact retired predecessor against the current placement head, the empty lease
+and result boundary, and the live owner connection. A plain exact directory has
+no manifest and produces no candidate.
 
 A release exists only for a workspace the runner itself created: a provisioned
 repository worktree, or the private root the runner made below its own state

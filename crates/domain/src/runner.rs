@@ -2974,6 +2974,42 @@ pub struct ProvisionedWorkspace {
     pub recovery: Option<WorkspaceRecovery>,
 }
 
+/// Exact managed predecessor workspace that may become releasable.
+///
+/// This is not cleanup authority. A durable transaction must still prove that
+/// the named placement is retired, no live lease or unacknowledged result
+/// remains, and the cleanup-owning runner is connected before enqueueing a
+/// release.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RunnerWorkspaceReleaseCandidate {
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+    runner: RunnerId,
+    manifest: WorkspaceManifestId,
+}
+
+impl RunnerWorkspaceReleaseCandidate {
+    /// Returns the session whose predecessor placement was retired.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact retired placement revision.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the runner that owns cleanup of the managed workspace.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the exact protected workspace-manifest identity.
+    pub const fn manifest_id(&self) -> WorkspaceManifestId {
+        self.manifest
+    }
+}
+
 /// Checked facts authorizing one repository-workspace provisioning operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceProvisioningAuthorization {
@@ -4543,6 +4579,26 @@ pub struct RunnerPlacementReplacement {
     pub grant_change: Option<RunnerCredentialGrantChange>,
 }
 
+impl RunnerPlacementReplacement {
+    /// Identifies a managed predecessor workspace for durable release checks.
+    ///
+    /// A plain exact directory has no manifest and therefore produces no
+    /// candidate. Reachability and outstanding-execution checks remain the
+    /// responsibility of the transaction that consumes this evidence.
+    pub fn workspace_release_candidate(&self) -> Option<RunnerWorkspaceReleaseCandidate> {
+        self.change
+            .before
+            .workspace
+            .as_ref()
+            .map(|workspace| RunnerWorkspaceReleaseCandidate {
+                session: self.change.session,
+                placement_revision: self.change.prior_revision,
+                runner: workspace.runner,
+                manifest: workspace.manifest_id,
+            })
+    }
+}
+
 /// Complete before-and-after facts for runner placement replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerPlacementChange {
@@ -5273,6 +5329,33 @@ mod tests {
             recovery: Some(WorkspaceRecovery::Commit {
                 revision: WorkspaceRevision::try_new("c".repeat(40))
                     .expect("the fixture recovery revision is canonical"),
+            }),
+        }
+    }
+
+    fn successor_repository_workspace(runner: RunnerId) -> ProvisionedWorkspace {
+        ProvisionedWorkspace {
+            session: session_id(SESSION),
+            placement_revision: RunnerGeneration::try_from_u64(2)
+                .expect("the successor fixture states revision two"),
+            runner,
+            repository: Some(repository_key()),
+            canonical_clone_url_digest: Some(
+                CanonicalCloneUrlDigest::try_new("d".repeat(64))
+                    .expect("the successor clone URL digest is canonical"),
+            ),
+            credential_profile: None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: directory("/workspace/replacement"),
+            relative_path: WorkspaceRelativePath::try_new(format!(
+                "sessions/{}/2/repo",
+                session_id(SESSION).as_uuid()
+            ))
+            .expect("the successor relative path is valid"),
+            manifest_id: WorkspaceManifestId::from_uuid(uuid::Uuid::from_u128(0x7b04)),
+            recovery: Some(WorkspaceRecovery::Commit {
+                revision: WorkspaceRevision::try_new("e".repeat(40))
+                    .expect("the successor recovery revision is canonical"),
             }),
         }
     }
@@ -8319,6 +8402,75 @@ mod tests {
         );
         assert_eq!(replaced.change.before.runner, initial.runner());
         assert_eq!(replaced.change.after.runner, replacement.runner());
+    }
+
+    #[test]
+    fn s32_inv044_replacement_identifies_the_managed_predecessor_workspace() {
+        let initial = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let predecessor_workspace = repository_workspace(initial.runner());
+        let expected_session = predecessor_workspace.session;
+        let expected_retired_revision = predecessor_workspace.placement_revision;
+        let expected_runner = predecessor_workspace.runner;
+        let expected_manifest = predecessor_workspace.manifest_id;
+        let lost = pinned_repository(&initial)
+            .mark_runner_lost()
+            .expect("the repository placement can record connection loss");
+        let replaced = lost
+            .replace_lost_runner(
+                repository_placement_request(replacement.runner()),
+                &replacement,
+                directory("/workspace/replacement"),
+                Some(successor_repository_workspace(replacement.runner())),
+                None,
+            )
+            .expect("the successor repository workspace satisfies replacement");
+        let candidate = replaced
+            .workspace_release_candidate()
+            .expect("the managed predecessor supplies release evidence");
+
+        assert_eq!(candidate.session(), expected_session);
+        assert_eq!(candidate.placement_revision(), expected_retired_revision);
+        assert_eq!(candidate.runner(), expected_runner);
+        assert_eq!(candidate.manifest_id(), expected_manifest);
+    }
+
+    #[test]
+    fn s32_inv044_exact_directory_replacement_has_no_workspace_release_candidate() {
+        let initial = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let pinned = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            exact_placement_request(initial.runner()),
+        )
+        .pin_and_offer_lease(
+            &enrollment_for_registration(&initial),
+            &initial,
+            directory("/workspace/session"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the exact directory satisfies initial placement")
+        .placement;
+        let lost = pinned
+            .mark_runner_lost()
+            .expect("the exact-directory placement can record connection loss");
+        let replaced = lost
+            .replace_lost_runner(
+                exact_placement_request(replacement.runner()),
+                &replacement,
+                directory("/workspace/session"),
+                None,
+                None,
+            )
+            .expect("the successor may use the exact borrowed directory");
+
+        assert_eq!(replaced.workspace_release_candidate(), None);
     }
 
     #[test]
