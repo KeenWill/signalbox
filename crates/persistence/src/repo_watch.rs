@@ -1411,12 +1411,12 @@ async fn insert_events(
                 review_reviewer, review_state, review_id, review_commit, thread_id,
                 label_name, advanced_branch, reaction_subject_kind,
                 reaction_subject_id, reaction_reactor, reaction_content,
-                reaction_change
+                reaction_change, snapshot_observed_at
              ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-                $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
+                $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38
              )",
         )
         .bind(encoded.event_id)
@@ -1456,6 +1456,7 @@ async fn insert_events(
         .bind(encoded.reaction_reactor)
         .bind(encoded.reaction_content)
         .bind(encoded.reaction_change)
+        .bind(snapshot_observed_at)
         .execute(&mut **transaction)
         .await?;
         record_event_self_cause(transaction, event, generation).await?;

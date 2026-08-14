@@ -1,6 +1,9 @@
 -- Reconcile provider events that committed before their exact GitHub write
 -- receipt, independently of whether any active rule evaluates the event.
 
+ALTER TABLE repo_watch_event
+    ADD COLUMN snapshot_observed_at timestamptz;
+
 CREATE FUNCTION reconcile_repo_watch_github_write_receipt()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -48,7 +51,7 @@ BEGIN
             AND NEW.operation_kind = 'thread_resolve'
             AND NEW.thread_id = event.thread_id
             AND NEW.tool_attempt_id < event.event_id
-            AND event.recorded_at <= NEW.recorded_at
+            AND NEW.recorded_at <= event.snapshot_observed_at
         )
     ON CONFLICT (event_id) DO NOTHING;
     RETURN NULL;

@@ -907,7 +907,7 @@ async fn event_is_self_caused(
                 AND receipt.operation_kind = 'thread_resolve'
                 AND receipt.thread_id = event.thread_id
                 AND receipt.tool_attempt_id < event.event_id
-                AND event.recorded_at <= receipt.recorded_at
+                AND receipt.recorded_at <= event.snapshot_observed_at
            )
           WHERE event.event_id = $1
           ORDER BY receipt.tool_attempt_id

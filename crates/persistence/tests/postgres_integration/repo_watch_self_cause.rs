@@ -1098,6 +1098,131 @@ async fn pre_mutation_user_resolution_does_not_consume_later_resolve_receipt()
     Ok(())
 }
 
+/// A user resolution committed from a provider snapshot taken while a
+/// redundant session resolve was in flight remains dispatchable when that
+/// resolve receipt arrives later.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn user_resolution_snapshot_before_late_resolve_receipt_dispatches()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let rule = thread_resolved_rule()?;
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let open = thread_observation(RepoWatchThreadState::Open)?;
+    let first_generation = committed_generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(open.clone()),
+                    Vec::new(),
+                ),
+            )
+            .await?,
+    );
+
+    let arguments = format!(r#"{{"thread_id":"{THREAD}"}}"#);
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        0x90_190,
+        "change_request_thread_resolve",
+        &arguments,
+    )
+    .await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x90_1b1)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(0x90_1b2)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(0x90_1b3));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+
+    let resolved = thread_observation(RepoWatchThreadState::Resolved)?;
+    let snapshot_observed_at = event_store.begin_observation().await?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(&open),
+        &resolved,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(resolved.clone()),
+                events,
+            )
+            .snapshot_observed_before(snapshot_observed_at),
+        )
+        .await?;
+
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(format!(
+                            r#"{{"resolved":true,"thread_id":"{THREAD}"}}"#
+                        ))
+                        .expect("fixture tool result is bounded"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let event = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the user resolution event is pending");
+    let durable_cause: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_event_self_cause
+              WHERE event_id = $1
+         )",
+    )
+    .bind(event.id().as_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(!durable_cause);
+    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+        .evaluate(
+            event,
+            &rule,
+            &resolved,
+            &TemplateResolver,
+            dispatch_context(),
+        )
+        .await?;
+
+    assert_dispatched(outcome);
+    Ok(())
+}
+
 /// Dispatch waits while an exact mutation is in flight, then reconciles the
 /// completed receipt to the already-stored provider events.
 #[tokio::test(flavor = "multi_thread")]
