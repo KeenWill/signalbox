@@ -752,6 +752,18 @@ fails closed. This decides the sessions whose binding is still open; a session
 that already bound the configured root is governed by the recorded-binding rule
 below instead.
 
+**Committed unimplemented functionality — pre-activation instruction binding.**
+A session template carrying a `workspace` instruction selector makes workspace
+binding a prerequisite to that session's first turn activation. The daemon uses
+this section's same configured-versus-derived resolution, misprovisioning
+refusal, identity checks, and sticky process-lifetime binding; after the binding
+is established, instruction discovery and selector resolution run against that
+bound root before activation can freeze eligibility. It does not probe and scan
+a candidate pathname while leaving the binding open. No present template field
+or session-creation path requests this eager binding; the eligibility slice that
+adds workspace selectors must compose it with the existing binding
+implementation rather than create a second resolver.
+
 The derived parent is classified the same way and before the session's own
 directory, because it is the one intermediate component this derivation
 introduces and every no-follow open after it declines to follow only the
