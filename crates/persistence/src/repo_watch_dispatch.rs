@@ -19,7 +19,11 @@ use signalbox_domain::{
 use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
 
 use crate::{
-    commit_failure_is_ambiguous, create_session::insert_fresh_prepared, mapping::session_id_to_uuid,
+    commit_failure_is_ambiguous,
+    create_session::insert_fresh_prepared,
+    mapping::{
+        RepoWatchSingletonScopeStorageKind, repo_watch_singleton_scope_to_str, session_id_to_uuid,
+    },
 };
 
 const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
@@ -775,7 +779,7 @@ impl PostgresRepoWatchDispatchStore {
 
 #[derive(Clone, Debug)]
 pub(crate) struct StoredSingletonKey {
-    pub(crate) scope: &'static str,
+    pub(crate) scope: RepoWatchSingletonScopeStorageKind,
     pub(crate) repository: Option<String>,
     pub(crate) pull_request: Option<Decimal>,
     pub(crate) stack_root_pull_request: Option<Decimal>,
@@ -785,7 +789,7 @@ impl StoredSingletonKey {
     fn from_domain(key: &RepoWatchSingletonKey) -> Self {
         match key {
             RepoWatchSingletonKey::PullRequest { repository, number } => Self {
-                scope: "pull_request",
+                scope: RepoWatchSingletonScopeStorageKind::PullRequest,
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: Some(Decimal::from(number.get())),
                 stack_root_pull_request: None,
@@ -794,19 +798,19 @@ impl StoredSingletonKey {
                 repository,
                 root_pull_request,
             } => Self {
-                scope: "stack",
+                scope: RepoWatchSingletonScopeStorageKind::Stack,
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: None,
                 stack_root_pull_request: Some(Decimal::from(root_pull_request.get())),
             },
             RepoWatchSingletonKey::Rule => Self {
-                scope: "rule",
+                scope: RepoWatchSingletonScopeStorageKind::Rule,
                 repository: None,
                 pull_request: None,
                 stack_root_pull_request: None,
             },
             RepoWatchSingletonKey::Repository { repository } => Self {
-                scope: "repo",
+                scope: RepoWatchSingletonScopeStorageKind::Repository,
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: None,
                 stack_root_pull_request: None,
@@ -819,7 +823,7 @@ impl StoredSingletonKey {
             "repo-watch\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             rule_id.as_str(),
             version.get(),
-            self.scope,
+            repo_watch_singleton_scope_to_str(self.scope),
             self.repository.as_deref().unwrap_or(""),
             self.pull_request
                 .map_or(String::new(), |value| value.to_string()),
@@ -867,7 +871,7 @@ async fn insert_batch(
     .bind(i64::try_from(batch.rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(batch.singleton.scope)
+    .bind(repo_watch_singleton_scope_to_str(batch.singleton.scope))
     .bind(batch.singleton.repository.as_deref())
     .bind(batch.singleton.pull_request)
     .bind(batch.singleton.stack_root_pull_request)
@@ -1024,7 +1028,7 @@ async fn occupying_dispatch(
     .bind(i64::try_from(rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(key.scope)
+    .bind(repo_watch_singleton_scope_to_str(key.scope))
     .bind(key.repository.as_deref())
     .bind(key.pull_request)
     .bind(key.stack_root_pull_request)
@@ -1059,7 +1063,7 @@ async fn singleton_is_cooling_down(
     .bind(i64::try_from(rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(key.scope)
+    .bind(repo_watch_singleton_scope_to_str(key.scope))
     .bind(key.repository.as_deref())
     .bind(key.pull_request)
     .bind(key.stack_root_pull_request)

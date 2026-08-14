@@ -8,6 +8,7 @@ use signalbox_domain::{
 };
 use sqlx::{Postgres, Row, Transaction, types::Uuid};
 
+use crate::mapping::{repo_watch_singleton_scope_from_str, repo_watch_singleton_scope_to_str};
 use crate::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError, StoredSingletonKey,
     stored_rule_version,
@@ -142,25 +143,18 @@ impl PostgresRepoWatchDispatchStore {
                 )
             })?,
             singleton: StoredSingletonKey {
-                scope: stored_singleton_scope(row.try_get("singleton_scope")?)?,
+                scope: repo_watch_singleton_scope_from_str(
+                    &row.try_get::<String, _>("singleton_scope")?,
+                )
+                .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+                    "repository-watch obligation singleton scope is unsupported",
+                ))?,
                 repository: row.try_get("singleton_repository")?,
                 pull_request: row.try_get::<Option<Decimal>, _>("singleton_pull_request_number")?,
                 stack_root_pull_request: row
                     .try_get::<Option<Decimal>, _>("singleton_stack_root_pull_request_number")?,
             },
         }))
-    }
-}
-
-fn stored_singleton_scope(value: String) -> Result<&'static str, RepoWatchDispatchRepositoryError> {
-    match value.as_str() {
-        "pull_request" => Ok("pull_request"),
-        "stack" => Ok("stack"),
-        "rule" => Ok("rule"),
-        "repo" => Ok("repo"),
-        _ => Err(RepoWatchDispatchRepositoryError::Corruption(
-            "repository-watch obligation singleton scope is unsupported",
-        )),
     }
 }
 
@@ -185,7 +179,7 @@ pub(crate) async fn active_obligation_exists(
     )
     .bind(rule_id.as_str())
     .bind(stored_rule_version(rule_version)?)
-    .bind(singleton.scope)
+    .bind(repo_watch_singleton_scope_to_str(singleton.scope))
     .bind(singleton.repository.as_deref())
     .bind(singleton.pull_request)
     .bind(singleton.stack_root_pull_request)
@@ -222,7 +216,7 @@ pub(crate) async fn record_dispatch_obligation(
     .bind(blocking_dispatch.map(|value| *value.as_uuid()))
     .bind(rule_id.as_str())
     .bind(stored_rule_version(rule_version)?)
-    .bind(singleton.scope)
+    .bind(repo_watch_singleton_scope_to_str(singleton.scope))
     .bind(singleton.repository.as_deref())
     .bind(singleton.pull_request)
     .bind(singleton.stack_root_pull_request)
@@ -248,7 +242,7 @@ pub(crate) async fn record_dispatch_obligation(
     .bind(event.repository().as_str())
     .bind(rule_id.as_str())
     .bind(stored_rule_version(rule_version)?)
-    .bind(singleton.scope)
+    .bind(repo_watch_singleton_scope_to_str(singleton.scope))
     .bind(singleton.repository.as_deref())
     .bind(singleton.pull_request)
     .bind(singleton.stack_root_pull_request)
