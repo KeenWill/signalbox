@@ -8366,6 +8366,8 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let byte_length = CanonicalU64::new(9);
+        let replica_count = CanonicalU64::new(1);
         let listener = UnixListener::bind(&socket)?;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
@@ -8383,8 +8385,8 @@ mod tests {
                 metadata.request_id(),
                 ServerMessage::BlobMetadata {
                     digest,
-                    byte_length: CanonicalU64::new(9),
-                    replica_count: CanonicalU64::new(1),
+                    byte_length,
+                    replica_count,
                 },
             )
             .map_err(io::Error::other)?;
@@ -8402,7 +8404,11 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(stdout)?,
-            format!("digest={digest} byte_length=9 replica_count=1\n")
+            format!(
+                "digest={digest} byte_length={} replica_count={}\n",
+                byte_length.value(),
+                replica_count.value()
+            )
         );
         assert!(stderr.is_empty());
         server.await??;
