@@ -116,111 +116,6 @@ CREATE INDEX repo_watch_dispatch_obligation_ready_order
     ON repo_watch_dispatch_obligation (repository, rule_id, rule_version, owed_since)
     WHERE settled_kind IS NULL;
 
--- Earlier occupied evaluations did not retain their refused singleton key.
--- Seed only facts for which exactly one batch can have supplied that refusal;
--- an ambiguous historical stack topology is not authority to invent a key.
-WITH candidate AS (
-    SELECT evaluation.repository,
-           evaluation.rule_id,
-           evaluation.rule_version,
-           evaluation.event_id,
-           evaluation.cursor_generation,
-           evaluation.event_ordinal,
-           evaluation.evaluated_at,
-           batch.dispatch_id AS blocking_dispatch_id,
-           batch.singleton_scope,
-           batch.singleton_repository,
-           batch.singleton_pull_request_number,
-           batch.singleton_stack_root_pull_request_number,
-           count(*) OVER (
-               PARTITION BY evaluation.repository, evaluation.rule_id,
-                            evaluation.rule_version, evaluation.event_id
-           ) AS candidate_count
-      FROM repo_watch_rule_evaluation AS evaluation
-      JOIN repo_watch_event AS event
-        ON event.event_id = evaluation.event_id
-      JOIN repo_watch_dispatch_batch AS batch
-        ON batch.rule_id = evaluation.rule_id
-       AND batch.rule_version = evaluation.rule_version
-       AND batch.admitted_at <= evaluation.evaluated_at
-      LEFT JOIN repo_watch_dispatch_release AS released
-        ON released.dispatch_id = batch.dispatch_id
-     WHERE evaluation.outcome_kind = 'occupied'
-       AND (released.released_at IS NULL OR released.released_at >= evaluation.evaluated_at)
-       AND NOT EXISTS (
-            SELECT 1
-              FROM repo_watch_rule_deactivation AS deactivation
-             WHERE deactivation.repository = evaluation.repository
-               AND deactivation.rule_id = evaluation.rule_id
-               AND deactivation.rule_version = evaluation.rule_version
-       )
-       AND (
-            (batch.singleton_scope = 'pull_request'
-                AND batch.singleton_repository = evaluation.repository
-                AND batch.singleton_pull_request_number = event.pull_request_number)
-            OR (batch.singleton_scope = 'stack'
-                AND batch.singleton_repository = evaluation.repository)
-            OR batch.singleton_scope = 'rule'
-            OR (batch.singleton_scope = 'repo'
-                AND batch.singleton_repository = evaluation.repository)
-       )
-), unambiguous AS (
-    SELECT *
-      FROM candidate
-     WHERE candidate_count = 1
-), collapsed AS (
-    SELECT rule_id,
-           rule_version,
-           singleton_scope,
-           singleton_repository,
-           singleton_pull_request_number,
-           singleton_stack_root_pull_request_number,
-           (array_agg(
-                repository
-                ORDER BY evaluated_at, repository, cursor_generation,
-                         event_ordinal, event_id
-            ))[1] AS first_repository,
-           (array_agg(
-                event_id
-                ORDER BY evaluated_at, repository, cursor_generation,
-                         event_ordinal, event_id
-            ))[1] AS first_event_id,
-           (array_agg(
-                repository
-                ORDER BY evaluated_at DESC, repository DESC,
-                         cursor_generation DESC, event_ordinal DESC, event_id DESC
-            ))[1] AS latest_repository,
-           (array_agg(
-                event_id
-                ORDER BY evaluated_at DESC, repository DESC,
-                         cursor_generation DESC, event_ordinal DESC, event_id DESC
-            ))[1] AS latest_event_id,
-           count(*)::bigint AS matched_event_count,
-           (array_agg(
-                blocking_dispatch_id
-                ORDER BY evaluated_at DESC, repository DESC,
-                         cursor_generation DESC, event_ordinal DESC, event_id DESC
-            ))[1] AS blocking_dispatch_id,
-           min(evaluated_at) AS owed_since,
-           max(evaluated_at) AS latest_match_at
-      FROM unambiguous
-     GROUP BY rule_id, rule_version, singleton_scope, singleton_repository,
-              singleton_pull_request_number,
-              singleton_stack_root_pull_request_number
-)
-INSERT INTO repo_watch_dispatch_obligation
-    (obligation_id, repository, rule_id, rule_version, singleton_scope,
-     singleton_repository, singleton_pull_request_number,
-     singleton_stack_root_pull_request_number, first_repository,
-     first_event_id, latest_event_id, matched_event_count,
-     blocking_dispatch_id, owed_since, latest_match_at)
-SELECT blocking_dispatch_id, latest_repository, rule_id, rule_version,
-       singleton_scope, singleton_repository, singleton_pull_request_number,
-       singleton_stack_root_pull_request_number, first_repository,
-       first_event_id, latest_event_id, matched_event_count,
-       blocking_dispatch_id, owed_since, latest_match_at
-  FROM collapsed;
-
 CREATE FUNCTION repo_watch_settle_deactivated_dispatch_obligations()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -289,9 +184,14 @@ SELECT obligation.obligation_id,
          LIMIT 1
   ) AS occupying ON true
   LEFT JOIN LATERAL (
-        SELECT max(
-            released.released_at + batch.cooldown_seconds * interval '1 second'
-        ) AS eligible_at
+        SELECT max(CASE
+            WHEN batch.cooldown_seconds::numeric <= extract(epoch FROM (
+                '294276-12-31 23:59:59+00'::timestamptz - released.released_at
+            ))
+            THEN released.released_at
+                + batch.cooldown_seconds * interval '1 second'
+            ELSE 'infinity'::timestamptz
+        END) AS eligible_at
           FROM repo_watch_dispatch_release AS released
           JOIN repo_watch_dispatch_batch AS batch
             ON batch.dispatch_id = released.dispatch_id
