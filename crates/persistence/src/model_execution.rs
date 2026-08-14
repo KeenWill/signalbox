@@ -30,11 +30,11 @@ use signalbox_domain::{
     DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
     DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
     FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
-    InstructionDigest, ModelAlias, ModelCallDisposition, ModelCallExecution,
-    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
-    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
+    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
+    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
     PendingSteeringReclassificationIdentity, PinnedProviderTargetReconstitutionInput,
     PreparedDelegatedTurnActivation, PreparedModelCallRequest, PreparedToolResultProjection,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
@@ -45,8 +45,7 @@ use signalbox_domain::{
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
     ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
-    ToolRoundModelCallTurn, TurnId, TurnInstructionManifest, TurnInstructionManifestId,
-    UserContent,
+    ToolRoundModelCallTurn, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -4553,48 +4552,15 @@ pub(crate) async fn insert_prepared_call(
     .await?
     .rows_affected();
     require_single(pinned_rows, "turn-level provider target pin")?;
-    let instruction_manifest = sqlx::query(
-        "SELECT turn_instruction_manifest_id, eligibility_hash, manifest_hash
-           FROM turn_instruction_manifest
-          WHERE session_id = $1
-            AND turn_id = $2
-            AND boundary_kind = 'turn_start'",
-    )
-    .bind(session_id_to_uuid(prepared.session()))
-    .bind(turn_id_to_uuid(prepared.turn()))
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(ModelCallCorruption::Missing("turn instruction manifest"))?;
-    let instruction_manifest_id = TurnInstructionManifestId::from_uuid(
-        instruction_manifest.try_get("turn_instruction_manifest_id")?,
-    );
-    let eligibility_hash: Vec<u8> = instruction_manifest.try_get("eligibility_hash")?;
-    let manifest_hash: Vec<u8> = instruction_manifest.try_get("manifest_hash")?;
-    let eligibility_hash: [u8; 32] = eligibility_hash
-        .try_into()
-        .map_err(|_| ModelCallCorruption::Inconsistent("instruction eligibility hash"))?;
-    let manifest_hash: [u8; 32] = manifest_hash
-        .try_into()
-        .map_err(|_| ModelCallCorruption::Inconsistent("instruction manifest hash"))?;
-    TurnInstructionManifest::reconstitute_empty_turn_start(
-        instruction_manifest_id,
-        prepared.session(),
-        prepared.turn(),
-        InstructionDigest::from_sha256(eligibility_hash),
-        InstructionDigest::from_sha256(manifest_hash),
-    )
-    .ok_or(ModelCallCorruption::Inconsistent(
-        "turn instruction manifest authentication",
-    ))?;
     sqlx::query(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
              context_frontier_id, credential_reference,
-             usage_input_includes_cache_tokens, turn_instruction_manifest_id, state_kind,
+             usage_input_includes_cache_tokens, state_kind,
              terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'prepared', NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -4608,7 +4574,6 @@ pub(crate) async fn insert_prepared_call(
     .bind(call.frontier().snapshot().into_uuid())
     .bind(credential_reference.as_str())
     .bind(input_includes_cache_tokens)
-    .bind(instruction_manifest_id.into_uuid())
     .execute(&mut *connection)
     .await?;
     outbox::append(

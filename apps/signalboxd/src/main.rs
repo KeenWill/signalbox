@@ -57,9 +57,8 @@ use signalboxd::{
     MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SessionWorkspaceRoots, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, WorkspaceInstructionRuntime,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
@@ -1231,28 +1230,6 @@ async fn run_hub(
             erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
         })?;
     let pool = database.pool().clone();
-    let session_workspace_roots = match daemon_tool_configuration
-        .map(|configuration| SessionWorkspaceRoots::try_new(configuration.workspace_root()))
-        .transpose()
-    {
-        Ok(roots) => roots,
-        Err(error) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Tools(&error),
-            );
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
-    let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
-        pool.clone(),
-        session_workspace_roots,
-        model_configuration
-            .workspace_instructions()
-            .roots()
-            .to_vec(),
-    );
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -1571,7 +1548,6 @@ async fn run_hub(
             UsageLimitedModelCallProvider::new(provider, &model_configuration),
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
-        .with_workspace_instructions(workspace_instruction_runtime)
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),

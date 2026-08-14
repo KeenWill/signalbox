@@ -215,12 +215,6 @@ Implemented table families (across the forward-only migrations):
   exact append-only representation, idempotency, and completeness rules are
   owned by [conversation-import](conversation-import.md);
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
-- `instruction_discovery` and its ordered roots, candidates, and findings,
-  `registered_instruction_bundle`, and `turn_instruction_manifest`, whose
-  append-only discovery, registration, and exact turn-start provenance are owned
-  by [workspace-instructions](workspace-instructions.md) (INV-061). Migration
-  `202608140001` backfills the empty manifest for existing turns and makes every
-  `model_call` name the manifest for its own session and turn;
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned

@@ -1,9 +1,9 @@
 # Workspace instructions and skills
 
 The comparative evidence and foundation-proposal boundary on this page were
-verified against PR #796 (`agent/agent-docs-skills-spec`). Discovery,
-registration, empty eligibility, and turn-start evidence are implemented by its
-first child (`agent/agent-docs-skills-foundation`).
+verified against PR #796 (`agent/agent-docs-skills-spec`). Discovery and the
+explicit-root configuration were verified against PR #798
+(`agent/agent-docs-skills-foundation`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
@@ -357,8 +357,7 @@ provider call and authenticated whenever that call is prepared or reconstituted.
 A model-requested admission during a tool round appends admission evidence and
 the next preparation atomically produces a successor manifest with its model
 call; earlier call-boundary manifests remain addressable. The first
-implementation slice has no admission and stores only the turn-start manifest
-(INV-061).
+implementation slice has no admission and stores only the turn-start manifest.
 
 Each manifest records:
 

@@ -3389,7 +3389,6 @@ dependencies = [
  "signalbox-expect-table",
  "signalbox-tools-plan",
  "sqlx",
- "tempfile",
  "testcontainers-modules",
  "tokio",
  "toml",

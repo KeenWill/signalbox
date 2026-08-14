@@ -24,7 +24,6 @@ mod session_creation_and_submit;
 mod session_plan;
 mod tool_round_lifecycle;
 mod turn_activation;
-mod workspace_instructions;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -1787,42 +1786,6 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
     Ok((container, pool, database_url))
 }
 
-async fn record_empty_instruction_manifest(
-    pool: &PgPool,
-    session: SessionId,
-) -> Result<(), Box<dyn Error>> {
-    let turn = TurnId::from_uuid(
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active'",
-        )
-        .bind(session.into_uuid())
-        .fetch_one(pool)
-        .await?,
-    );
-    let snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
-    let manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
-        signalbox_domain::TurnInstructionManifestId::from_uuid(turn.into_uuid()),
-        session,
-        turn,
-    );
-    let outcome =
-        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
-            pool.clone(),
-        )
-        .record_turn_start(
-            signalbox_domain::InstructionDiscoveryId::from_uuid(turn.into_uuid()),
-            manifest,
-            &snapshot,
-            || unreachable!("an empty discovery needs no bundle identity"),
-        )
-        .await?;
-    assert!(!matches!(
-        outcome,
-        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::TurnUnavailable
-    ));
-    Ok(())
-}
-
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>>
 {
     let container = Postgres::default()
@@ -2112,7 +2075,6 @@ async fn activate_earliest_queued_turn(
     else {
         panic!("the earliest queued origin must activate through the production service");
     };
-    record_empty_instruction_manifest(pool, SessionId::from_uuid(activation.session)).await?;
     match *activated {
         signalbox_domain::ActivatedTurn::Accepted(activated) => Ok(Box::new(activated)),
         signalbox_domain::ActivatedTurn::Delegated(_) => {
@@ -4309,7 +4271,6 @@ async fn activate_delegated_result_fixture(
     else {
         return Err("the delegated result fixture activation changed".into());
     };
-    record_empty_instruction_manifest(pool, child).await?;
     Ok((parent, child, child_turn, spawning_request, selection))
 }
 
@@ -4428,7 +4389,6 @@ async fn authorize_delegated_successor_model_call_fixture(
         },
     )
     .await?;
-    record_empty_instruction_manifest(pool, child).await?;
 
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
