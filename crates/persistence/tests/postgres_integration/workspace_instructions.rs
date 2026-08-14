@@ -92,26 +92,31 @@ fn assert_append_only_rejection(result: Result<sqlx::postgres::PgQueryResult, sq
     assert_eq!(database.code().as_deref(), Some("23514"));
 }
 
-async fn active_instruction_turn(pool: &PgPool) -> Result<(SessionId, TurnId), Box<dyn Error>> {
-    let session = SessionId::from_uuid(Uuid::from_u128(0x6201));
-    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x6202));
+async fn queued_instruction_turn(
+    pool: &PgPool,
+    identity_base: u128,
+) -> Result<(SessionId, TurnId), Box<dyn Error>> {
+    let session = SessionId::from_uuid(Uuid::from_u128(identity_base + 1));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(identity_base + 2));
     let mut create = CreateSessionService::new(
         FixedSessionIds::new([session]),
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
     );
     let CreateSessionOutcome::Applied(_) = create
         .execute(CreateSessionRequest::try_new(
-            DurableCommandId::from_uuid(Uuid::from_u128(0x6203)),
+            DurableCommandId::from_uuid(Uuid::from_u128(identity_base + 3)),
             SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
         )?)
         .await?
     else {
         panic!("the retry fixture session must be created");
     };
-    let turn = TurnId::from_uuid(Uuid::from_u128(0x6204));
+    let turn = TurnId::from_uuid(Uuid::from_u128(identity_base + 4));
     let mut submit = SubmitInputService::new(
         FixedSubmitInputIds::new(
-            [AcceptedInputId::from_uuid(Uuid::from_u128(0x6205))],
+            [AcceptedInputId::from_uuid(Uuid::from_u128(
+                identity_base + 5,
+            ))],
             [turn],
         ),
         SubmitInputRepository::new(pool.clone()),
@@ -122,7 +127,7 @@ async fn active_instruction_turn(pool: &PgPool) -> Result<(SessionId, TurnId), B
         SubmitInputAppliedResult::TurnOrigin(_),
     )) = submit
         .execute(SubmitInputRequest::try_new(
-            DurableCommandId::from_uuid(Uuid::from_u128(0x6206)),
+            DurableCommandId::from_uuid(Uuid::from_u128(identity_base + 6)),
             session,
             UserContent::try_text("retry workspace discovery".to_owned())
                 .expect("fixture user content is admitted"),
@@ -134,13 +139,23 @@ async fn active_instruction_turn(pool: &PgPool) -> Result<(SessionId, TurnId), B
     else {
         panic!("the retry fixture input must be accepted");
     };
+    Ok((session, turn))
+}
+
+async fn active_instruction_turn(
+    pool: &PgPool,
+    identity_base: u128,
+) -> Result<(SessionId, TurnId), Box<dyn Error>> {
+    let (session, turn) = queued_instruction_turn(pool, identity_base).await?;
     let mut activation = StartEligibleTurnService::new(
         FixedStartEligibleTurnIds::new(
             [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
-                0x6207,
+                identity_base + 7,
             ))],
-            [ContextFrontierId::from_uuid(Uuid::from_u128(0x6208))],
-            [TurnAttemptId::from_uuid(Uuid::from_u128(0x6209))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(
+                identity_base + 8,
+            ))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(identity_base + 9))],
         ),
         StartEligibleTurnRepository::new(pool.clone()),
     );
@@ -220,6 +235,11 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
     std::fs::write(
         root.join(".agents/skills/review/SKILL.md"),
         "---\nname: review\ndescription: Review one change\n---\nsteps\n",
+    )?;
+    std::fs::create_dir_all(root.join(".agents/skills/broken"))?;
+    std::fs::write(
+        root.join(".agents/skills/broken/SKILL.md"),
+        "missing frontmatter\n",
     )?;
     let root = signalbox_domain::InstructionPath::try_new(
         root.to_str().expect("temporary path is UTF-8").to_owned(),
@@ -353,6 +373,83 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
             manifest_id,
         )
     );
+    let discovery_update = sqlx::query(
+        "UPDATE instruction_discovery SET elapsed_millis = elapsed_millis
+          WHERE instruction_discovery_id = $1",
+    )
+    .bind(discovery.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(discovery_update);
+    let discovery_delete =
+        sqlx::query("DELETE FROM instruction_discovery WHERE instruction_discovery_id = $1")
+            .bind(discovery.into_uuid())
+            .execute(&pool)
+            .await;
+    assert_append_only_rejection(discovery_delete);
+    let root_update = sqlx::query(
+        "UPDATE instruction_discovery_root SET root_kind = root_kind
+          WHERE instruction_discovery_id = $1 AND root_ordinal = 1",
+    )
+    .bind(discovery.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(root_update);
+    let root_delete = sqlx::query(
+        "DELETE FROM instruction_discovery_root
+          WHERE instruction_discovery_id = $1 AND root_ordinal = 1",
+    )
+    .bind(discovery.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(root_delete);
+    let candidate_update = sqlx::query(
+        "UPDATE instruction_discovery_candidate
+            SET candidate_ordinal = candidate_ordinal
+          WHERE instruction_discovery_id = $1 AND candidate_ordinal = 1",
+    )
+    .bind(discovery.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(candidate_update);
+    let candidate_delete = sqlx::query(
+        "DELETE FROM instruction_discovery_candidate
+          WHERE instruction_discovery_id = $1 AND candidate_ordinal = 1",
+    )
+    .bind(discovery.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(candidate_delete);
+    let bundle_update = sqlx::query(
+        "UPDATE registered_instruction_bundle SET source_hash = source_hash
+          WHERE instruction_bundle_id = $1",
+    )
+    .bind(agent_document_id.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(bundle_update);
+    let bundle_delete =
+        sqlx::query("DELETE FROM registered_instruction_bundle WHERE instruction_bundle_id = $1")
+            .bind(agent_document_id.into_uuid())
+            .execute(&pool)
+            .await;
+    assert_append_only_rejection(bundle_delete);
+    let finding_update = sqlx::query(
+        "UPDATE instruction_discovery_finding SET finding_kind = finding_kind
+          WHERE instruction_discovery_id = $1 AND finding_ordinal = 1",
+    )
+    .bind(discovery.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(finding_update);
+    let finding_delete = sqlx::query(
+        "DELETE FROM instruction_discovery_finding
+          WHERE instruction_discovery_id = $1 AND finding_ordinal = 1",
+    )
+    .bind(discovery.into_uuid())
+    .execute(&pool)
+    .await;
+    assert_append_only_rejection(finding_delete);
     let mutation = sqlx::query(
         "UPDATE turn_instruction_manifest SET boundary_kind = 'turn_start' WHERE turn_instruction_manifest_id = $1",
     )
@@ -373,13 +470,156 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
     Ok(())
 }
 
+/// INV-061: counted activation records the empty manifest while the selected
+/// turn is still queued, and the active-turn boundary does not accept it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_counted_activation_records_a_queued_turn_manifest() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_instruction_turn(&pool, 0x6300).await?;
+    let snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
+    let repository =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        );
+    let discovery = signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6310));
+    let manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6311));
+    let manifest =
+        signalbox_domain::TurnInstructionManifest::empty_turn_start(manifest_id, session, turn);
+    let bundle_id = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6312));
+
+    assert!(snapshot.is_complete());
+    assert_eq!(
+        repository
+            .preflight_counted_activation(session, turn)
+            .await?,
+        signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::Absent
+    );
+    assert_eq!(
+        repository
+            .record_counted_activation(discovery, manifest, &snapshot, || bundle_id)
+            .await?,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
+            manifest_id,
+        )
+    );
+    assert_eq!(
+        repository
+            .preflight_counted_activation(session, turn)
+            .await?,
+        signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::Available(
+            manifest_id,
+        )
+    );
+    assert_eq!(
+        repository.preflight_turn_start(session, turn).await?,
+        signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::TurnUnavailable
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: a later complete scan of unchanged source evidence links its
+/// candidate to the first registration identity instead of minting another.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_unchanged_source_reuses_its_registered_bundle() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (first_session, first_turn) = active_instruction_turn(&pool, 0x6400).await?;
+    let (second_session, second_turn) = active_instruction_turn(&pool, 0x6500).await?;
+    let directory = tempfile::tempdir()?;
+    let root_path = directory.path().canonicalize()?;
+    std::fs::write(root_path.join("AGENTS.md"), "stable workspace rule\n")?;
+    let root = signalbox_domain::InstructionPath::try_new(
+        root_path
+            .to_str()
+            .expect("temporary path is UTF-8")
+            .to_owned(),
+    )?;
+    let snapshot = signalbox_application::discover_workspace_instructions(vec![
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+            root,
+        ),
+    ]);
+    let repository =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        );
+    let first_discovery =
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6610));
+    let first_manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6611));
+    let registered_bundle =
+        signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6612));
+    let first_outcome = repository
+        .record_turn_start(
+            first_discovery,
+            signalbox_domain::TurnInstructionManifest::empty_turn_start(
+                first_manifest_id,
+                first_session,
+                first_turn,
+            ),
+            &snapshot,
+            || registered_bundle,
+        )
+        .await?;
+    let second_discovery =
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6620));
+    let second_manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6621));
+    let unused_bundle = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6622));
+    let second_outcome = repository
+        .record_turn_start(
+            second_discovery,
+            signalbox_domain::TurnInstructionManifest::empty_turn_start(
+                second_manifest_id,
+                second_session,
+                second_turn,
+            ),
+            &snapshot,
+            || unused_bundle,
+        )
+        .await?;
+    let second_candidate = sqlx::query_scalar::<_, Uuid>(
+        "SELECT instruction_bundle_id
+           FROM instruction_discovery_candidate
+          WHERE instruction_discovery_id = $1 AND candidate_ordinal = 1",
+    )
+    .bind(second_discovery.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(snapshot.bundles().len(), 1);
+    assert_eq!(
+        first_outcome,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
+            first_manifest_id,
+        )
+    );
+    assert_eq!(
+        second_outcome,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
+            second_manifest_id,
+        )
+    );
+    assert_eq!(second_candidate, registered_bundle.into_uuid());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-061: an incomplete discovery remains durable diagnostic evidence but
 /// binds no manifest, so retry can record a later complete snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv061_incomplete_discovery_remains_unbound_for_retry() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let (session, turn) = active_instruction_turn(&pool).await?;
+    let (session, turn) = active_instruction_turn(&pool, 0x6200).await?;
     let directory = tempfile::tempdir()?;
     let root_path = directory.path().canonicalize()?;
     let source_path = root_path.join("AGENTS.md");
