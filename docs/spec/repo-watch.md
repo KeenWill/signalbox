@@ -17,14 +17,13 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
-(`agent/repo-watch-dispatch`). The polling and differ behavior below was
-verified against PR #614 (`agent/repo-watch-review-reliability`), and its
-request-envelope bounds were re-verified against this PR
-(`agent/daemon-ops-overnight`). The provider members the poller adopts as
-check-suite and check-run completion generations are verified against PR #541
-(`fix/check-run-updated-at`). The goal a dispatch commissions with its session,
-and the binding of the dispatched work turn to that goal's generation, are
-verified against this PR (`agent/commission-binding`).
+(`agent/repo-watch-dispatch`). The polling, differ, and request-envelope
+behavior below is verified against this PR (`agent/daemon-ops-overnight`). The
+provider members the poller adopts as check-suite and check-run completion
+generations are verified against PR #541 (`fix/check-run-updated-at`). The goal
+a dispatch commissions with its session, and the binding of the dispatched work
+turn to that goal's generation, are verified against this PR
+(`agent/commission-binding`).
 
 ## Configuration and credential boundary
 
