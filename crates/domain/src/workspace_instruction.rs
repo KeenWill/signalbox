@@ -22,6 +22,7 @@ crate::define_identity!(
 const MANIFEST_PREFIX: &[u8] = b"signalbox-turn-instruction-manifest-v1";
 const EMPTY_ELIGIBILITY_PREFIX: &[u8] = b"signalbox-instruction-eligibility-v1";
 const MAX_INSTRUCTION_PATH_BYTES: usize = 4096;
+const MAX_INSTRUCTION_SOURCE_PATH_BYTES: usize = MAX_INSTRUCTION_PATH_BYTES * 2 + 1;
 
 /// One versioned SHA-256 digest over instruction evidence.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -74,6 +75,44 @@ impl InstructionPath {
     }
 
     /// Borrows the exact path spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One canonical absolute UTF-8 candidate path admitted to durable evidence.
+///
+/// Its bound includes one independently bounded root and root-relative path,
+/// plus their separating slash.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct InstructionSourcePath(String);
+
+impl InstructionSourcePath {
+    /// Validates an absolute canonical source spelling without filesystem I/O.
+    pub fn try_new(value: String) -> Result<Self, InstructionPathError> {
+        if value.is_empty() {
+            return Err(InstructionPathError::Empty);
+        }
+        if value.len() > MAX_INSTRUCTION_SOURCE_PATH_BYTES {
+            return Err(InstructionPathError::TooLong);
+        }
+        if value.contains('\0') {
+            return Err(InstructionPathError::ContainsNull);
+        }
+        let Some(components) = value.strip_prefix('/') else {
+            return Err(InstructionPathError::NotAbsolute);
+        };
+        if components.is_empty()
+            || components
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(InstructionPathError::NotCanonical);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact source path spelling.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -217,7 +256,7 @@ pub struct InstructionBundleRegistrationInput {
     /// Canonical absolute path of the authorizing root.
     pub root_path: InstructionPath,
     /// Canonical absolute path of the candidate source file.
-    pub source_path: InstructionPath,
+    pub source_path: InstructionSourcePath,
     /// Exact source byte length.
     pub source_bytes: u64,
     /// Digest of the exact source bytes.
@@ -232,7 +271,7 @@ pub struct InstructionBundleRegistration {
     kind: InstructionBundleKind,
     root_kind: InstructionDiscoveryRootKind,
     root_path: InstructionPath,
-    source_path: InstructionPath,
+    source_path: InstructionSourcePath,
     source_bytes: u64,
     source_hash: InstructionDigest,
     skill: Option<InstructionSkillMetadata>,
@@ -265,10 +304,12 @@ impl InstructionBundleRegistration {
             }
             _ => false,
         };
-        let below_root = source_path
+        let relative_source = source_path
             .as_str()
             .strip_prefix(root_path.as_str())
-            .is_some_and(|suffix| suffix.starts_with('/'));
+            .and_then(|suffix| suffix.strip_prefix('/'));
+        let below_root =
+            relative_source.is_some_and(|relative| relative.len() <= MAX_INSTRUCTION_PATH_BYTES);
         (shape_matches && below_root).then_some(Self {
             kind,
             root_kind,
@@ -293,7 +334,7 @@ impl InstructionBundleRegistration {
         &self.root_path
     }
     /// Borrows the canonical source-file path.
-    pub const fn source_path(&self) -> &InstructionPath {
+    pub const fn source_path(&self) -> &InstructionSourcePath {
         &self.source_path
     }
     /// Returns the exact source byte length.
@@ -455,6 +496,25 @@ mod tests {
         assert!(registration.is_none());
     }
 
+    #[test]
+    fn source_path_bound_keeps_root_and_relative_budgets_independent() {
+        let root_text = format!("/{}", "a".repeat(MAX_INSTRUCTION_PATH_BYTES - 1));
+        let source_text = format!("{root_text}/AGENTS.md");
+        let registration = InstructionBundleRegistration::new(InstructionBundleRegistrationInput {
+            kind: InstructionBundleKind::AgentDocument,
+            root_kind: InstructionDiscoveryRootKind::Configured,
+            root_path: InstructionPath::try_new(root_text)
+                .expect("the fixture consumes the complete root-path budget"),
+            source_path: InstructionSourcePath::try_new(source_text)
+                .expect("a short relative source retains its own budget"),
+            source_bytes: 1,
+            source_hash: InstructionDigest::sha256(b"fixture"),
+            skill: None,
+        });
+
+        assert!(registration.is_some());
+    }
+
     fn review_skill() -> InstructionSkillMetadata {
         InstructionSkillMetadata::try_new(InstructionSkillMetadataInput {
             name: String::from("review"),
@@ -474,7 +534,7 @@ mod tests {
             root_kind: InstructionDiscoveryRootKind::Workspace,
             root_path: InstructionPath::try_new(String::from("/workspace"))
                 .expect("fixture root is valid"),
-            source_path: InstructionPath::try_new(source_path.to_owned())
+            source_path: InstructionSourcePath::try_new(source_path.to_owned())
                 .expect("fixture source is valid"),
             source_bytes: 1,
             source_hash: InstructionDigest::sha256(b"fixture"),
