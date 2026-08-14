@@ -85,6 +85,18 @@ identical trees yield candidates in identical order. Entries that cannot be read
 or classified produce typed discovery findings; they do not disappear as an
 empty successful result.
 
+The greedy walk is complete only within fixed daemon safety limits. Version one
+admits at most 100,000 classified directory entries, 4,096 findings, 64 MiB of
+candidate source bytes, and 30 seconds of elapsed scan time across all roots.
+These limits are not user-configurable discovery policy. The scan records the
+limit-set version, every consumed count, and a typed `limit_reached` finding
+naming the first exhausted dimension; it then stops without presenting the
+partial inventory as complete. Registration may retain the candidates already
+found, but session creation or turn preparation that requires a complete scan
+fails closed. Product ignore rules and configurable depth policy remain
+deferred. The 4,096-finding bound reserves its final slot for this terminal
+limit finding.
+
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.
 Workspace roots sort before configured roots and each kind sorts by canonical
@@ -127,8 +139,10 @@ version-one source content is the exact `SKILL.md` bytes. Supporting resources
 are neither enumerated nor registered until a later contract defines their
 relative identities, traversal, ordering, and hashes. Registration rejects a
 non-UTF-8 source, invalid frontmatter, a skill name that differs from its parent
-directory, or a path escaping its root. Rejection is a typed finding and creates
-no partial bundle.
+directory, or a path escaping its root. A candidate whose canonical or
+root-relative source path is not UTF-8 produces a typed `non_utf8_source_path`
+discovery finding and never reaches registration. Rejection is a typed finding
+and creates no partial bundle.
 
 SHA-256 is named in the representation rather than assumed. The MCP skill
 transfer proposal
@@ -190,8 +204,10 @@ document precedes a descendant document, so a deliberately admitted descendant
 is the later, more specific instruction; sibling scopes never apply to each
 other. `instructions.preview` returns bounded structure — headings for a
 document and validated metadata plus headings for a skill — with full source
-byte length and estimated model-token cost. Neither returns the full body or
-admits content.
+byte length and estimated model-token cost. Preview re-reads at most that one
+registered source under its authorizing root, revalidates the registered source
+hash, and returns typed stale-source evidence if the bytes changed or
+disappeared. It neither returns the full body nor admits content.
 
 `instructions.read` names one eligible bundle and requests deliberate admission.
 The daemon re-reads and validates it under its registered root, compares the
@@ -203,11 +219,12 @@ enters semantic tool-result history. A changed or missing source fails with
 stale-source evidence rather than admitting unregistered bytes. Skill-resource
 reads require a later resource-address and hash contract.
 
-List and preview read registration metadata rather than bundle bodies. Their
-bounds are independent of aggregate registered content. Catalog budgeting
-shortens descriptions before omitting identities, and every shortening or
-omission is explicit. This retains the Agent Skills progressive-disclosure
-economics without unrecorded selection or budget outcomes.
+List reads only registration metadata; preview performs the single-source
+revalidated read above. Their bounds are independent of aggregate registered
+content. Catalog budgeting shortens descriptions before omitting identities, and
+every shortening or omission is explicit. This retains the Agent Skills
+progressive-disclosure economics without unrecorded selection or budget
+outcomes.
 
 Nothing is admitted merely because it is eligible, heuristically relevant, near
 a touched file, or present in a template. Version one admits only by the closed
@@ -224,53 +241,63 @@ first slice.
 Each `instructions.read` request has a replay-stable tool-request identity. In
 the same transaction as its receipt-only tool result, a successful request
 appends one `InstructionAdmission` naming the prior admitted-set hash, bundle,
-rendered evidence, and request identity. Replaying that identity returns the
-same receipt; a conflicting replay is corruption. A failed request appends no
-admission and does not change the set.
+rendered evidence, exact rendered wrapper bytes, and request identity. The
+immutable admission or its content-addressed daemon blob remains the authority
+for later projections even if the workspace source changes or disappears.
+Replaying that identity returns the same receipt; a conflicting replay is
+corruption. A failed request appends no admission and does not change the set.
 
 After a tool batch, preparation folds successful admissions in durable request
-order, ignores idempotent repeats, and creates exactly one successor manifest
-for the next model call. The successor manifest and prepared call are committed
-atomically. Thus several reads in one batch aggregate into one boundary, and a
-crash after tool-result commit but before continuation leaves admissions that
-the next preparation deterministically folds. Process memory is never authority
-for the admitted set.
+order and ignores idempotent repeats. The owning continuation transaction in
+[tool-loop](tool-loop.md#result-authority-and-the-continuation-boundary) creates
+exactly one successor manifest with the next model call. Thus several reads in
+one batch aggregate into one boundary, and a crash after tool-result commit but
+before continuation leaves admissions that the next preparation
+deterministically folds. Process memory and the live workspace are never
+authority for the admitted set.
 
 ## Projection rather than transcript append
 
 Admitted instructions are a model-input **projection rebuilt each turn**, not
-semantic transcript entries. The daemon holds the declared admitted set, renders
-it beside the immutable context-frontier projection for a call, and records the
-exact result in the manifest below. Instruction text never advances a
-`ContextFrontier`, changes ancestry, or becomes user-role conversation.
+semantic transcript entries. The daemon holds the declared admitted set,
+rebuilds its region from the immutable rendered bytes retained by each
+admission, places it beside the context-frontier projection for a call, and
+records the exact result in the manifest below. Instruction text never advances
+a `ContextFrontier`, changes ancestry, or becomes user-role conversation.
 
-Prepared model input contains a typed `WorkspaceInstructionRegion` after the
-frozen daemon/session system prompt and before every actor-authored or
-tool-result frontier message. Adapters serialize that explicit region as
-instruction/system input supported by their provider; they may not reinterpret
-it as a user or tool message or invoke a native file loader. The frozen session
-system prompt and explicit user request remain higher priority than this
-repository-supplied region. When a provider exposes only a system-instruction
-transport, the daemon wrapper states that subordinate authority before the
-repository bytes rather than pretending they are daemon policy.
+Prepared model input contains exactly one typed `WorkspaceInstructionRegion`,
+after the frozen daemon/session system prompt and before the ordered sequence of
+actor-authored and tool-result frontier messages. Adapters serialize that region
+as instruction/system input supported by their provider; they may not
+reinterpret it as a user or tool message or invoke a native file loader. The
+frozen session system prompt and explicit user request remain higher priority
+than this repository-supplied region. When a provider exposes only a
+system-instruction transport, the daemon wrapper states that subordinate
+authority before the repository bytes rather than pretending they are daemon
+policy.
 
 The region orders admitted agent documents by authorizing root, increasing scope
 depth, and relative path, then skills by bundle identity bytes. Each bundle is
-wrapped as UTF-8 bytes:
+wrapped as UTF-8 bytes. `root` is the closed authorizing-root kind and `source`
+is its UTF-8 root-relative path; canonical absolute paths remain daemon-side
+manifest provenance and never enter provider input.
 
 ```text
 <signalbox_workspace_instruction>
-{"bundle_id":"<lowercase UUID>","kind":"<closed kind>","source":"<JSON-escaped canonical path>","source_sha256":"<lowercase hex>"}
+{"bundle_id":"<lowercase UUID>","kind":"<closed kind>","root":"<closed root kind>","source":"<JSON-escaped root-relative path>","source_sha256":"<lowercase hex>"}
 <content>
-<budgeted source bytes>
+<XML-escaped budgeted source bytes>
 </content>
 </signalbox_workspace_instruction>
 ```
 
 JSON string escaping follows RFC 8259, line endings shown above are LF, and
-there is no implicit leading or trailing byte. The rendered-content hash covers
-this complete wrapper. These labels distinguish untrusted repository text from
-daemon authority and make adapter output byte-stable.
+there is no implicit leading or trailing byte. After source-budget truncation,
+content escaping replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;` in
+that order; repository bytes therefore cannot terminate or fabricate an
+envelope. The rendered-content hash covers this complete escaped wrapper. These
+labels distinguish untrusted repository text from daemon authority and make
+adapter output byte-stable without disclosing host filesystem layout.
 
 Two designs were considered:
 
@@ -281,7 +308,7 @@ Two designs were considered:
 - **Rebuild a projection.** The live set is explicit and can later support
   whole-bundle unload at a turn boundary. Each turn directly records what was
   rendered. It costs cache invalidation when the set or rendered bytes change,
-  plus re-read or retained-byte work during preparation.
+  plus durable retained-byte storage and input work during preparation.
 
 Signalbox chooses projection. The decisive invariant is that a context frontier
 is immutable semantic conversation history (INV-015); instruction policy is
@@ -315,23 +342,33 @@ The eligibility hash is SHA-256 over `signalbox-instruction-eligibility-v1`
 followed by eligible bundle UUID bytes in ascending UUID-byte order. The empty
 hash is therefore the separator alone.
 
+The admitted-set hash is SHA-256 over `signalbox-instruction-admitted-set-v1`,
+an unsigned record count, then one record per effective admission in projection
+order. Each record is bundle UUID, admission UUID, and the 32-byte
+rendered-content hash. The empty-set vector is the separator followed by an
+all-zero eight-byte count. Including admission identity distinguishes two
+budgeted renderings of one registered bundle.
+
 The manifest hash begins with `signalbox-turn-instruction-manifest-v1`, then
 session UUID, turn UUID, the 32-byte eligibility hash, and its boundary: literal
 `turn_start`, or literal `model_call` plus model-call UUID. Rendered bundle
 records follow in projection order. Each is bundle UUID, length-framed kind,
-length-framed canonical source path, 32-byte source hash, 32-byte rendered hash,
-rendered byte length, length-framed admission route, then one byte `0` for no
-truncation or byte `1` plus the truncation boundary as an unsigned length.
+length-framed canonical source path, length-framed authorizing-root kind,
+length-framed root-relative source label, 32-byte source hash, 32-byte rendered
+hash, rendered byte length, length-framed admission route, then one byte `0` for
+no truncation or byte `1` plus the truncation boundary as an unsigned length.
 Fixed-width identities and digests plus length framing make the representation
 uniquely decodable. The empty turn-start vector ends immediately after literal
 `turn_start`.
 
 ## Budgets and rendered content
 
-Every admission has an explicit per-bundle byte budget. Rendering preserves
-UTF-8 and emits the complete source or truncates at a character boundary no
-later than the budget. It never borrows a shared pool whose earlier entries can
-starve later ones. Rendered byte length and truncation boundary are evidence.
+Every admission has an explicit per-bundle source-byte budget. Rendering
+preserves UTF-8 and emits the complete source or truncates at a character
+boundary no later than the budget before applying the required content escaping
+and wrapper. It never borrows a shared pool whose earlier entries can starve
+later ones. Rendered byte length, source truncation boundary, and retained exact
+wrapper bytes are evidence.
 
 The durable rendered-content hash is SHA-256 over the exact bytes placed in
 prepared model input **after** wrappers, labels, and budget truncation. It is
@@ -358,15 +395,16 @@ Each manifest records:
 - session and turn identities and the eligibility-set hash;
 - its call boundary, or `turn_start` before a call-specific successor;
 - for each rendered bundle in projection order, bundle identity, kind, canonical
-  source path, registered source hash, rendered hash, rendered byte length,
-  admission route, and optional truncation boundary; and
+  source path, provider-visible root kind and root-relative source label,
+  registered source hash, rendered hash, rendered byte length, admission route,
+  and optional truncation boundary; and
 - a versioned hash of the canonical manifest representation.
 
 The required audit tuple is source path, typed identity, and rendered hash; the
 source hash diagnoses registration-to-admission changes. Comparing manifests
-does not require the live workspace. Rendered plaintext may later move to blob
-storage; until then the manifest proves exact equality and provenance but does
-not claim offline plaintext reconstruction.
+does not require the live workspace. The manifest proves exact equality and
+provenance; the immutable admission or its content-addressed blob retains the
+rendered plaintext required to reconstruct later projections.
 
 Persistence is append-only. Constraints require every bundle row to name its
 manifest and registered bundle, prohibit duplicate bundle identities in one
@@ -404,5 +442,5 @@ recovery.
 - Whole-bundle unload is reserved by the projection decision but deferred.
 - Resource reads, file watching, rescans, ignore rules, symlink traversal,
   further vendor formats, search/ranking, eager and path-triggered admission,
-  and offline rendered-plaintext storage are undecided and tracked in
+  and alternate rendered-plaintext storage are undecided and tracked in
   [open questions](../open-questions.md), never inferred from this baseline.
