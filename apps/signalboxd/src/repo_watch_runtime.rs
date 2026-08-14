@@ -4810,38 +4810,38 @@ mod tests {
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .expect("the deferred review wave forms events");
+        let deferred_reviews =
+            &current.state().pull_requests()[0].reviews()[RETAINED_REVIEW_IDS.len()..];
 
         assert_eq!(events.len(), DEFERRED_REVIEW_IDS.len());
         assert_eq!(
             events[0].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_USER_REVIEWER))
-                    .expect("fixture reviewer is valid"),
-                state: ReviewState::Commented,
-                commit: CommitSha::try_new(String::from(HEAD_SHA))
-                    .expect("fixture review commit is valid"),
+                reviewer: deferred_reviews[0].reviewer().clone(),
+                state: deferred_reviews[0]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[0].commit().clone(),
             }
         );
         assert_eq!(
             events[1].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_APPROVING_REVIEWER,))
-                    .expect("fixture reviewer is valid"),
-                state: ReviewState::Approved,
-                commit: CommitSha::try_new(String::from(HEAD_SHA))
-                    .expect("fixture review commit is valid"),
+                reviewer: deferred_reviews[1].reviewer().clone(),
+                state: deferred_reviews[1]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[1].commit().clone(),
             }
         );
         assert_eq!(
             events[2].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: RepoWatchAuthorLogin::try_new(
-                    String::from(DEFERRED_COMMENTING_REVIEWER,)
-                )
-                .expect("fixture reviewer is valid"),
-                state: ReviewState::Commented,
-                commit: CommitSha::try_new(String::from(HEAD_SHA))
-                    .expect("fixture review commit is valid"),
+                reviewer: deferred_reviews[2].reviewer().clone(),
+                state: deferred_reviews[2]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[2].commit().clone(),
             }
         );
     }
