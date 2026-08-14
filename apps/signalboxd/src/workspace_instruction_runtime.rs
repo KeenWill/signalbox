@@ -24,6 +24,8 @@ use crate::daemon_tools::{SessionWorkspaceRoot, SessionWorkspaceRoots};
 pub enum WorkspaceInstructionRuntimeError {
     /// A deployment-owned workspace path cannot be represented durably.
     InvalidWorkspacePath,
+    /// The session's configured daemon-local workspace is misprovisioned.
+    UnresolvableWorkspace,
     /// The blocking filesystem scan task failed to join.
     DiscoveryTask(tokio::task::JoinError),
     /// A fixed scan safety limit prevented a complete inventory.
@@ -38,6 +40,8 @@ impl fmt::Display for WorkspaceInstructionRuntimeError {
             Self::InvalidWorkspacePath => {
                 formatter.write_str("workspace instruction root is not a canonical UTF-8 path")
             }
+            Self::UnresolvableWorkspace => formatter
+                .write_str("session workspace could not be resolved for instruction discovery"),
             Self::DiscoveryTask(error) => error.fmt(formatter),
             Self::DiscoveryIncomplete => {
                 formatter.write_str("workspace instruction discovery limit was reached")
@@ -51,6 +55,7 @@ impl Error for WorkspaceInstructionRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidWorkspacePath => None,
+            Self::UnresolvableWorkspace => None,
             Self::DiscoveryTask(error) => Some(error),
             Self::DiscoveryIncomplete => None,
             Self::Persistence(error) => Some(error),
@@ -62,6 +67,9 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRuntimeError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
             Self::InvalidWorkspacePath => OperatorFailureClass::CallerOrHubBug,
+            Self::UnresolvableWorkspace => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
             Self::DiscoveryTask(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -75,6 +83,7 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRuntimeError {
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::InvalidWorkspacePath => "workspace_instruction_path",
+            Self::UnresolvableWorkspace => "workspace_instruction_workspace_unresolvable",
             Self::DiscoveryTask(_) => "workspace_instruction_discovery_task",
             Self::DiscoveryIncomplete => "workspace_instruction_discovery_limit",
             Self::Persistence(error) => error.operator_failure_cause_code(),
@@ -118,7 +127,9 @@ impl WorkspaceInstructionRuntime {
             let path = match workspace_roots.resolve(session) {
                 SessionWorkspaceRoot::ConfiguredRoot => workspace_roots.configured().to_owned(),
                 SessionWorkspaceRoot::Derived { path, .. } => path,
-                SessionWorkspaceRoot::Unresolvable => workspace_roots.derived_path(session),
+                SessionWorkspaceRoot::Unresolvable => {
+                    return Err(WorkspaceInstructionRuntimeError::UnresolvableWorkspace);
+                }
             };
             roots.push(InstructionDiscoveryRoot::new(
                 InstructionDiscoveryRootKind::Workspace,
@@ -161,4 +172,38 @@ fn instruction_path(path: &Path) -> Result<InstructionPath, WorkspaceInstruction
         .ok_or(WorkspaceInstructionRuntimeError::InvalidWorkspacePath)?;
     InstructionPath::try_new(value.to_owned())
         .map_err(|_| WorkspaceInstructionRuntimeError::InvalidWorkspacePath)
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn misprovisioned_daemon_workspace_fails_before_persistence() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let configured = temporary.path().join("workspace");
+        std::fs::create_dir(&configured).expect("configured workspace exists");
+        let roots = SessionWorkspaceRoots::try_new(&configured).expect("root can be derived");
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let derived = roots.derived_path(session);
+        std::fs::create_dir(derived.parent().expect("derived root has a parent"))
+            .expect("derived parent exists");
+        std::fs::write(&derived, "not a directory").expect("derived path is misprovisioned");
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://unused:unused@127.0.0.1/unused")
+            .expect("lazy fixture pool is valid");
+        let runtime = WorkspaceInstructionRuntime::new(pool, Some(roots), Vec::new());
+
+        let error = runtime
+            .prepare(session, TurnId::from_uuid(Uuid::from_u128(2)))
+            .await
+            .expect_err("misprovisioning fails before persistence");
+
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "workspace_instruction_workspace_unresolvable"
+        );
+    }
 }
