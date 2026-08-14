@@ -57,6 +57,7 @@ def run_watchdog(*, pgrep_status: int, sleep_status: int) -> WatchdogRun:
             capture_output=True,
             text=True,
             env=environment,
+            timeout=5,
         )
         lifecycle_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
         return WatchdogRun(
@@ -86,7 +87,7 @@ class SuperviseLifecycleTests(unittest.TestCase):
         )
 
     def test_process_lookup_error_does_not_boot(self) -> None:
-        run = run_watchdog(pgrep_status=2, sleep_status=0)
+        run = run_watchdog(pgrep_status=2, sleep_status=9)
 
         self.assertEqual(run.result.returncode, 2)
         self.assertEqual(run.lifecycle_calls, "")
@@ -98,6 +99,7 @@ class SuperviseLifecycleTests(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            timeout=5,
         )
 
         self.assertEqual(result.returncode, 2)
