@@ -7743,8 +7743,16 @@ impl InstructionDiscoveryRoot {
 pub enum InstructionDiscoveryFindingKind {
     RootUnavailable,
     EntryUnreadable,
+    NonUtf8SourcePath,
     NonUtf8Source,
     InvalidSkill,
+    LimitReached(InstructionDiscoveryLimitKind),
+}
+pub enum InstructionDiscoveryLimitKind {
+    ClassifiedEntries,
+    Findings,
+    CandidateSourceBytes,
+    ElapsedTime,
 }
 pub struct InstructionDiscoveryFinding { /* private */ }
 impl InstructionDiscoveryFinding {
@@ -7752,7 +7760,8 @@ impl InstructionDiscoveryFinding {
 }
 pub struct InstructionDiscoverySnapshot { /* private */ }
 impl InstructionDiscoverySnapshot {
-    // accessors: roots(), bundles(), findings()
+    // accessors: roots(), bundles(), findings(), limit_set_version(),
+    // classified_entries(), candidate_source_bytes(), elapsed_millis(), is_complete()
 }
 pub fn discover_workspace_instructions(
     roots: Vec<InstructionDiscoveryRoot>,
@@ -10455,5 +10464,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| application: workspace_instructions                | 4 (+1 free fn)        |
-| **signalbox-application total**                    | **253 (+2 free fn)**  |
+| application: workspace_instructions                | 5 (+1 free fn)        |
+| **signalbox-application total**                    | **254 (+2 free fn)**  |

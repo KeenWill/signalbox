@@ -29,6 +29,11 @@ The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
 child stack.
 
+The workspace-instruction addition to the continuation transaction is committed
+unimplemented functionality from PR #796 (`agent/agent-docs-skills-spec`). No
+present tool can create an instruction admission, and the current transaction
+therefore still has the four implemented effects named below.
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -596,6 +601,14 @@ every request in the batch is executed or denied, one continuation transaction:
    appends its semantic entry after the tool results;
 3. derives the exact prefix-preserving frontier extension; and
 4. creates the next round's `Prepared` model call against that frontier.
+
+**Committed unimplemented functionality — instruction admission continuation.**
+When `instructions.read` is implemented, this transaction additionally folds the
+batch's durable successful instruction admissions in request order and creates
+exactly one successor turn-instruction manifest authenticated by the new
+`Prepared` model call. No present tool or transaction supplies this fifth
+effect; the compatibility constraint is that the four implemented effects and
+the successor manifest must eventually commit or roll back together.
 
 When at least one request entered execution, the continuation turn attempt
 already entered `Running` during tool authorization. It owns the new `Prepared`
