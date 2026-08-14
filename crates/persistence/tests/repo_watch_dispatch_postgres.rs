@@ -817,7 +817,10 @@ async fn corrupt_goal_does_not_leave_lifecycle_cutoff_pending() -> Result<(), Bo
     .fetch_one(&fixture.pool)
     .await?;
 
-    assert!(quarantined.is_err());
+    assert!(matches!(
+        quarantined,
+        Err(RepoWatchDispatchRepositoryError::GoalCutoff(_))
+    ));
     assert!(!pending);
     assert_eq!(cutoff_count, 1);
     Ok(())
