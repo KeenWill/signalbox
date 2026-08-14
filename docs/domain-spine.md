@@ -6114,6 +6114,58 @@ where
 }
 ```
 
+## application: runner_workspace_ready
+
+```rust
+pub struct RunnerReadyManifestDigest(/* private */);
+impl RunnerReadyManifestDigest {
+    pub fn try_new(value: String) -> Result<Self, InvalidRunnerReadyManifestDigest>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub struct InvalidRunnerReadyManifestDigest;
+
+pub struct RunnerWorkspaceReadyReceipt { /* private */ }
+impl RunnerWorkspaceReadyReceipt {
+    pub fn new(
+        authorization: WorkspaceProvisioningAuthorizationId,
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        runner: RunnerId,
+        manifest: WorkspaceManifestId,
+        manifest_digest: RunnerReadyManifestDigest,
+        repository: WorkspaceRepositoryKey,
+        canonical_clone_url_digest: CanonicalCloneUrlDigest,
+        credential_profile: Option<CredentialProfileName>,
+        sandbox: RunnerSandboxProfile,
+        relative_path: WorkspaceRelativePath,
+        recovery: WorkspaceRecovery,
+    ) -> Self;
+    // accessors: authorization(), session(), placement_revision(), runner(),
+    // manifest_id(), manifest_digest(), repository(), canonical_clone_url_digest(),
+    // credential_profile(), sandbox(), relative_path(), recovery()
+}
+
+pub trait RunnerWorkspaceReadyTransaction {
+    type Error;
+    fn record(
+        &mut self,
+        receipt: RunnerWorkspaceReadyReceipt,
+    ) -> impl Future<Output = Result<RunnerWorkspaceReadyReceipt, Self::Error>> + Send;
+}
+
+pub struct RunnerWorkspaceReadyService<Transaction> { /* private */ }
+impl<Transaction> RunnerWorkspaceReadyService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: RunnerWorkspaceReadyTransaction> RunnerWorkspaceReadyService<Transaction> {
+    pub async fn execute(
+        &mut self,
+        receipt: RunnerWorkspaceReadyReceipt,
+    ) -> Result<RunnerWorkspaceReadyReceipt, Transaction::Error>;
+}
+```
+
 ## application: runner_lease_claim
 
 ```rust
@@ -11239,6 +11291,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
 | application: pinned_runner_replacement             | 7 (incl. 2 traits)    |
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
+| application: runner_workspace_ready                | 5 (incl. 1 trait)     |
 | application: runner_lease_claim                    | 3 (incl. 1 trait)     |
 | application: runner_lease_result                   | 3 (incl. 1 trait)     |
 | application: pinned_runner_dispatch                | 11 (incl. 3 traits)   |
@@ -11261,4 +11314,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **305 (+1 free fn)**  |
+| **signalbox-application total**                    | **310 (+1 free fn)**  |

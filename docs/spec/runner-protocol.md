@@ -46,9 +46,11 @@ exact live acknowledgement and heartbeat projection are verified against this PR
 (`agent/runner-workspace-release-acknowledgements`). Managed predecessor
 workspace evidence for later durable release precondition checks is prepared by
 the exact domain candidate verified against this PR
-(`agent/runner-workspace-release-candidate`). Established-connection routing of
-those inbound claim and result frames through the durable transactions before
-acknowledgement is re-verified through this PR
+(`agent/runner-workspace-release-candidate`). Admission of an already validated
+replacement `workspace_ready` receipt under its exact durable authority is
+verified against this PR (`agent/runner-workspace-ready-admission`).
+Established-connection routing of those inbound claim and result frames through
+the durable transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -1835,13 +1837,22 @@ lease-row insert (INV-035, INV-045).
 ## Workspace provisioning and recovery
 
 **Committed unimplemented functionality.** No present runner provisions,
-recovers, releases, or reconciles a workspace, and no present durable daemon
-producer constructs a workspace operation. The outbound broker can transport a
+recovers, releases, or reconciles a workspace, and no present daemon producer
+constructs a workspace operation. The outbound broker can transport a
 caller-constructed closed frame but does not authorize or journal it. Every
-behavior in this section constrains that future implementation. The executable
-runner leaves a typed `RecoveryUnavailable` seam whose exact `RecoveryGap` is
-`UnbornHeadNotRepresentable`; it constructs no wire recovery fact because the
-current recovery union cannot represent an empty clone's unborn `HEAD`.
+remaining behavior in this section constrains that future implementation. The
+executable runner leaves a typed `RecoveryUnavailable` seam whose exact
+`RecoveryGap` is `UnbornHeadNotRepresentable`; it constructs no wire recovery
+fact because the current recovery union cannot represent an empty clone's unborn
+`HEAD`.
+
+The application receipt boundary accepts complete already-validated
+repository-workspace manifest facts without deriving an execution working
+directory. Its production persistence transaction authenticates those facts
+against the exact durable provisioning stage under the runner lock order,
+commits before acknowledgement, returns the canonical record on equal replay,
+and rejects conflicting reuse. No established-connection runtime invokes that
+boundary yet.
 
 The domain constructs a `WorkspaceProvisioningAuthorization` only for a
 repository-backed successor request that the selected current registration can
@@ -1851,16 +1862,15 @@ credential profile. A distinct successor uses the ordinary pinned-replacement
 check; the same runner additionally requires the exact registration-loss
 recovery evidence. A connection loss cannot authorize a same-runner successor,
 and a stale registration, unsupported request, or request with no repository
-produces no authorization. Durable command claim and authorization insertion,
-dispatch, receipt consumption, and restart recovery remain the unimplemented
-producer named above; the append-only relational representation and checked
-readback exist independently. The application service supplies the complete
+produces no authorization. Dispatch, receipt acknowledgement, receipt
+consumption into replacement terminalization, and restart recovery remain
+unimplemented. The application provisioning service supplies the complete
 replacement command and one fresh UUIDv7 authorization candidate to a single
 atomic transaction call. Its closed outcome distinguishes a stored retryable
 authorization, a recorded terminal refusal, conflicting command reuse, and a
-placement for which repository provisioning is not applicable. No present
-production transaction implements that port, so the service alone neither claims
-the command nor authorizes runner I/O.
+placement for which repository provisioning is not applicable. The production
+persistence transaction implements that staging port, but no present runtime
+dispatches the resulting authorization to a runner.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
