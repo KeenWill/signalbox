@@ -1823,45 +1823,6 @@ async fn record_empty_instruction_manifest(
     Ok(())
 }
 
-async fn record_queued_empty_instruction_manifest(
-    pool: &PgPool,
-    session: SessionId,
-    turn: TurnId,
-) -> Result<(), Box<dyn Error>> {
-    let manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
-        signalbox_domain::TurnInstructionManifestId::from_uuid(turn.into_uuid()),
-        session,
-        turn,
-    );
-    sqlx::query(
-        "INSERT INTO instruction_discovery
-            (instruction_discovery_id, session_id, turn_id)
-         VALUES ($1, $2, $3)",
-    )
-    .bind(turn.into_uuid())
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO turn_instruction_manifest
-            (turn_instruction_manifest_id, session_id, turn_id,
-             instruction_discovery_id, boundary_kind,
-             eligibility_hash_algorithm, eligibility_hash,
-             manifest_hash_algorithm, manifest_hash)
-         VALUES ($1, $2, $3, $4, 'turn_start', 'sha256_v1', $5, 'sha256_v1', $6)",
-    )
-    .bind(manifest.id().into_uuid())
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .bind(turn.into_uuid())
-    .bind(manifest.eligibility_hash().as_bytes().as_slice())
-    .bind(manifest.manifest_hash().as_bytes().as_slice())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>>
 {
     let container = Postgres::default()

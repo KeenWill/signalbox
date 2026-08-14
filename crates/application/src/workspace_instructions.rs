@@ -92,7 +92,13 @@ pub fn discover_workspace_instructions(
         walk_root(root, &mut bundles, &mut findings);
     }
     let mut seen_sources = BTreeSet::new();
-    bundles.retain(|bundle| seen_sources.insert((bundle.source_path().clone(), bundle.kind())));
+    bundles.retain(|bundle| {
+        seen_sources.insert((
+            bundle.source_path().clone(),
+            bundle.kind(),
+            bundle.source_hash(),
+        ))
+    });
     InstructionDiscoverySnapshot {
         roots: roots.into_boxed_slice(),
         bundles: bundles.into_boxed_slice(),
