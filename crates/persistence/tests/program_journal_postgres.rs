@@ -9,8 +9,8 @@
 use std::error::Error;
 
 use signalbox_domain::{
-    DeliveryKind, InlineFramePayload, JournalFrame, ProgramRunId, ReplayCursor, ReplayInstruction,
-    ReplayedRequest, RequestKind,
+    DeliveryKind, InlineFramePayload, JournalFrame, ProgramFault, ProgramRunId, ReplayCursor,
+    ReplayInstruction, ReplayedRequest, RequestKind,
 };
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -328,8 +328,11 @@ async fn nondeterminism_scope_evidence_requires_nonnull_operation() -> Result<()
     let repository = ProgramJournalRepository::new(pool.clone());
     let run = run_id();
     repository.create_stream(run).await?;
-    let request = repository
-        .append_request(run, None, RequestKind::Now(payload(b"ordinary-request")))
+    let fault = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Fault(ProgramFault::Timeout(payload(b"ordinary-fault"))),
+        )
         .await?;
 
     let insert = sqlx::query(
@@ -340,17 +343,20 @@ async fn nondeterminism_scope_evidence_requires_nonnull_operation() -> Result<()
              observed_request_ordinal, observed_kind, observed_payload_inline
          )
          SELECT run_id, journal_position,
-                request_ordinal, 'scope', 1, '',
-                request_ordinal, frame_kind, payload_inline
+                1, 'scope', 1, '',
+                1, 'now', ''
            FROM program_run_journal_entry
-          WHERE run_id = $1 AND request_ordinal = $2",
+          WHERE run_id = $1 AND delivery_ordinal = $2",
     )
     .bind(run.into_uuid())
-    .bind(rust_decimal::Decimal::from(request.ordinal().as_u64()))
+    .bind(rust_decimal::Decimal::from(fault.ordinal().as_u64()))
     .execute(&pool)
     .await;
 
-    assert!(insert.is_err());
+    assert_constraint_error(
+        insert.expect_err("scope evidence requires an operation"),
+        "program_run_journal_nondeterminism_expected_scope_shape",
+    );
 
     pool.close().await;
     drop(container);
