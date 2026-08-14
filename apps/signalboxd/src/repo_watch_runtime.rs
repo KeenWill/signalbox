@@ -4055,14 +4055,13 @@ mod tests {
         tasks.spawn(async { panic!("fixture repository task panics") });
         let (_sender, receiver) = watch::channel(false);
 
-        let result = supervise_repository_tasks(
-            tasks,
-            vec![Arc::clone(&fixture.poller)],
-            receiver,
-        )
-        .await;
+        let result =
+            supervise_repository_tasks(tasks, vec![Arc::clone(&fixture.poller)], receiver).await;
 
-        assert_eq!(result, Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked));
+        assert_eq!(
+            result,
+            Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked)
+        );
         assert_eq!(
             Arc::strong_count(&fixture.poller),
             1,
@@ -4644,9 +4643,7 @@ mod tests {
     async fn an_unchanged_pull_request_with_an_unsettled_check_suite_is_refetched() {
         let responses = responses_with_only_an_unsettled_check_suite()
             .into_iter()
-            .chain(revalidated(
-                responses_with_only_an_unsettled_check_suite(),
-            ))
+            .chain(revalidated(responses_with_only_an_unsettled_check_suite()))
             .collect();
         let server = ConcurrentScriptedServer::start(responses).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
@@ -4810,13 +4807,11 @@ mod tests {
         // Arbitrary: reuse authorization is keyed by the number alone, so any
         // listed pull number exercises it.
         let number = 7_u64;
-        fixture
-            .poller
-            .record_fetched_pull_request(
-                number,
-                PULL_UPDATED_AT,
-                PullRequestSettlement::Settled,
-            );
+        fixture.poller.record_fetched_pull_request(
+            number,
+            PULL_UPDATED_AT,
+            PullRequestSettlement::Settled,
+        );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -4851,13 +4846,11 @@ mod tests {
         let loaded_generation = published_generation
             .next()
             .expect("fixture cursor generation has a successor");
-        fixture
-            .poller
-            .record_fetched_pull_request(
-                number,
-                PULL_UPDATED_AT,
-                PullRequestSettlement::Settled,
-            );
+        fixture.poller.record_fetched_pull_request(
+            number,
+            PULL_UPDATED_AT,
+            PullRequestSettlement::Settled,
+        );
         fixture.poller.publish_freshness(published_generation);
 
         assert!(
