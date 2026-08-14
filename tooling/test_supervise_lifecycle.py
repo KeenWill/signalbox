@@ -57,7 +57,7 @@ class SuperviseLifecycleTests(unittest.TestCase):
 
         self.assertEqual(run.result.returncode, 9)
         self.assertEqual(run.lifecycle_calls, "boot\n")
-        self.assertIn("fixture-daemon is absent", run.result.stderr)
+        self.assertIn(f"{PROCESS_NAME} is absent", run.result.stderr)
 
     def test_present_process_is_only_observed(self) -> None:
         run = run_watchdog(pgrep_status=0, sleep_status=7)
