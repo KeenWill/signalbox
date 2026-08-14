@@ -335,6 +335,80 @@ impl fmt::Display for RepoWatchConvergenceAssessmentError {
 
 impl Error for RepoWatchConvergenceAssessmentError {}
 
+/// One stale blocking review eligible for conservative automatic dismissal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceCandidate {
+    number: PullRequestNumber,
+    current_head_sha: CommitSha,
+    review_node_id: Box<str>,
+    reviewer: RepoWatchAuthorLogin,
+    reviewed_head_sha: CommitSha,
+}
+
+impl RepoWatchStaleReviewClearanceCandidate {
+    /// Requires the aggregate review decision to be the exact head's only
+    /// remaining convergence blocker and the review to target an older head.
+    pub fn try_new(
+        assessment: &RepoWatchConvergenceAssessment,
+        review_node_id: String,
+        reviewer: RepoWatchAuthorLogin,
+        reviewed_head_sha: CommitSha,
+    ) -> Result<Self, RepoWatchStaleReviewClearanceCandidateError> {
+        if assessment.review_decision() != RepoWatchReviewDecision::ChangesRequested
+            || !assessment.unresolved_threads().is_empty()
+            || !assessment.non_green_gating_checks().is_empty()
+            || assessment.mergeable_state() == MergeableState::Conflicting
+            || &reviewed_head_sha == assessment.head_sha()
+            || review_node_id.is_empty()
+            || review_node_id.len() > 256
+            || review_node_id.contains('\0')
+        {
+            return Err(RepoWatchStaleReviewClearanceCandidateError);
+        }
+        Ok(Self {
+            number: assessment.number(),
+            current_head_sha: assessment.head_sha().clone(),
+            review_node_id: review_node_id.into_boxed_str(),
+            reviewer,
+            reviewed_head_sha,
+        })
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn current_head_sha(&self) -> &CommitSha {
+        &self.current_head_sha
+    }
+
+    pub const fn review_node_id(&self) -> &str {
+        &self.review_node_id
+    }
+
+    pub const fn reviewer(&self) -> &RepoWatchAuthorLogin {
+        &self.reviewer
+    }
+
+    pub const fn reviewed_head_sha(&self) -> &CommitSha {
+        &self.reviewed_head_sha
+    }
+}
+
+/// A review is not stale, or another exact-head convergence blocker remains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceCandidateError;
+
+impl fmt::Display for RepoWatchStaleReviewClearanceCandidateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "repository-watch stale review clearance requires an older-head review and no blocker except changes requested",
+        )
+    }
+}
+
+impl Error for RepoWatchStaleReviewClearanceCandidateError {}
+
 /// One current review-thread projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchThreadObservation {
@@ -1929,6 +2003,123 @@ mod tests {
             assessment.verdict(),
             RepoWatchConvergenceVerdict::NotConverged
         );
+        Ok(())
+    }
+
+    #[test]
+    fn older_head_review_is_clearable_when_it_is_the_only_blocker() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let candidate = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            format!("review-node-{REVIEW_ID}"),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        )?;
+
+        assert_eq!(candidate.number(), assessment.number());
+        assert_eq!(candidate.current_head_sha(), assessment.head_sha());
+        assert_eq!(
+            candidate.review_node_id(),
+            format!("review-node-{REVIEW_ID}")
+        );
+        assert_eq!(candidate.reviewer().as_str(), REVIEWER);
+        assert_eq!(candidate.reviewed_head_sha().as_str(), REVIEW_COMMIT);
+        Ok(())
+    }
+
+    #[test]
+    fn current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            format!("review-node-{REVIEW_ID}"),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            assessment.head_sha().clone(),
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_thread_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: vec![ReviewThreadId::try_new(String::from(THREAD_ID))?],
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            format!("review-node-{REVIEW_ID}"),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn non_green_check_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: vec![CheckRunName::try_new(String::from(CHECK_NAME))?],
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            format!("review-node-{REVIEW_ID}"),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_conflict_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Conflicting,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            format!("review-node-{REVIEW_ID}"),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
         Ok(())
     }
 
