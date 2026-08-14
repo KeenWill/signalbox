@@ -62,6 +62,7 @@ owned by a sibling page is linked, never restated.
 - [Credential availability](credential-availability.md)
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
+- [Workspace instructions and skills](workspace-instructions.md)
 
 ## ADR mapping
 

@@ -55,6 +55,33 @@ specification diff. Accepted cross-component and wire contracts live in the
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)
 
+### Workspace instructions and skills
+
+The accepted baseline in
+[workspace instructions and skills](spec/workspace-instructions.md) owns greedy
+candidate discovery, typed registration, session/template eligibility,
+deliberate admission, projection rather than transcript append, and exact
+per-turn provenance. The following extensions remain undecided:
+
+- **Discovery invalidation and expansion.** Whether the daemon watches or
+  explicitly rescans roots, which ignore language or depth bound applies,
+  whether and how symbolic links may be followed, and which additional vendor
+  instruction formats become candidates. Blocks only live refresh and those
+  additional sources.
+- **Retrieval and automatic activation.** Search or deterministic ranking over
+  eligible metadata, path-triggered admission, and any template-eager tier need
+  exact recorded trigger and budget contracts. The baseline remains deliberate
+  identity-addressed admission.
+- **Skill resources and offline reconstruction.** Addressing and hashing files
+  below a skill bundle, plus durable storage of rendered plaintext sufficient to
+  reconstruct historical instructions without the workspace, remain open. The
+  implemented manifest can prove equality and provenance without making that
+  stronger reconstruction claim.
+- **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
+  but unload authority, tombstone rendering, admitted-set history, and the
+  model-facing operation remain foundation work. Blocks unloading only; no
+  first-slice behavior depends on it.
+
 ## Conversation import
 
 - **Exact mappings for additional source formats.** Older backup formats have no
