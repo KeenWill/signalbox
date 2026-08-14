@@ -58,11 +58,19 @@ grants no session authority, and eligibility spends no model context.
 ## Discovery
 
 Discovery greedily walks the complete directory tree rooted at the session's
-resolved workspace and each instruction directory explicitly registered by
-daemon configuration. The workspace and every configured root are separate
-`DiscoveryRoot` values; a configured root is not silently folded into the
-workspace's authority or relative-path namespace. A session without a resolved
-workspace still discovers configured roots.
+daemon-local resolved workspace and each instruction directory explicitly
+registered by daemon configuration. The workspace and every configured root are
+separate `DiscoveryRoot` values; a configured root is not silently folded into
+the workspace's authority or relative-path namespace. A session without a
+daemon-local resolved workspace still discovers configured roots.
+
+A runner placement owns a different filesystem and is not a daemon-local
+resolved workspace. Version one records no workspace `DiscoveryRoot` and does
+not claim to scan that workspace; configured daemon roots remain discoverable,
+and the durable root inventory proves the omission. Runner discovery requires a
+later placement-revision-correlated protocol that returns bytes and findings
+from the pinned runner workspace. It may not be emulated by asking a
+model-runtime adapter to load ambient files.
 
 The walk considers every nested directory and yields an agent-document candidate
 for each `AGENTS.md` regular file. In the workspace it yields an agent-skill
@@ -76,6 +84,13 @@ links. It sorts directory entries by raw path spelling before descending, so
 identical trees yield candidates in identical order. Entries that cannot be read
 or classified produce typed discovery findings; they do not disappear as an
 empty successful result.
+
+One scan emits a canonical source path and source hash only once even when
+workspace and configured roots overlap. Roots sort by kind and canonical path;
+the first containing root is the primary authorizing root, while the complete
+ordered root inventory preserves every other containing authority. Registration
+therefore assigns one identity and admission cannot render the same source twice
+through root aliases.
 
 The greedy walk intentionally exceeds terminal clients' common
 root-to-working-directory behavior: a daemon owns the workspace and must make
@@ -100,16 +115,19 @@ Every registered bundle carries:
 
 - bundle identity and closed kind;
 - canonical absolute source path and the `DiscoveryRoot` authorizing the read;
+- root-relative source path and, for an agent document, its root-relative
+  directory scope;
 - for a skill, its validated portable name and description;
 - source byte length; and
 - a versioned SHA-256 source-content hash.
 
 For an agent document, source content is the file's exact bytes. For a skill,
-version-one source content is the exact `SKILL.md` bytes; resources are
-enumerated but do not enter that hash until a later contract admits them.
-Registration rejects a non-UTF-8 source, invalid frontmatter, a skill name that
-differs from its parent directory, or a path escaping its root. Rejection is a
-typed finding and creates no partial bundle.
+version-one source content is the exact `SKILL.md` bytes. Supporting resources
+are neither enumerated nor registered until a later contract defines their
+relative identities, traversal, ordering, and hashes. Registration rejects a
+non-UTF-8 source, invalid frontmatter, a skill name that differs from its parent
+directory, or a path escaping its root. Rejection is a typed finding and creates
+no partial bundle.
 
 SHA-256 is named in the representation rather than assumed. The MCP skill
 transfer proposal
@@ -129,13 +147,28 @@ Eligibility is an allow-list bound to a session template and copied into a
 session at creation, with optional later session-specific replacement owned by
 its own durable command. Two sessions using one checkout may therefore differ
 without editing shared files. An absent allow-list means no bundle is eligible,
-never every discovered bundle. Lists name bundle identities, not display names
-or globs, so a new file cannot silently widen authority.
+never every discovered bundle.
+
+A session allow-list names registered bundle identities. A template predates the
+workspace registrations, so it instead names exact `TemplateInstructionSelector`
+values: root kind, root-relative source path, bundle kind, and expected source
+hash. The checked session-creation operation scans and registers its
+daemon-local workspace, resolves each selector to exactly one identity, and then
+copies those identities. A missing, stale, or ambiguous selector grants nothing
+and is recorded as a typed resolution finding; it never degrades to a path glob
+or newest-content match. Runner-workspace selectors remain unresolved until the
+runner discovery protocol exists.
 
 The effective eligibility snapshot is immutable for one turn. A turn records a
 versioned SHA-256 hash of the canonical ordered bundle-identity list effective
 at start. Replacement affects only later turns. A registered bundle absent from
 that snapshot cannot be enumerated, previewed, or admitted.
+
+Until whole-bundle unload is implemented, a replacement command rejects removal
+of any currently admitted identity. This makes replacement neither an implicit
+unload nor an authority revocation that effective input ignores. Additions and
+removal of never-admitted identities can still take effect at the next turn
+boundary; the later unload transition owns removal from both sets.
 
 **Committed unimplemented functionality — eligibility control.** The first
 implementation slice records the empty snapshot and exposes no replacement
@@ -148,17 +181,26 @@ and frozen turn snapshot.
 
 Eligible inventory is progressively disclosed. `instructions.list` returns a
 bounded cursor-paginated catalog with bundle identity, kind, display name,
-description when present, source byte length, and source hash.
-`instructions.preview` returns bounded structure — headings for a document and
-validated metadata plus headings for a skill — with full source byte length and
-estimated model-token cost. Neither returns the full body or admits content.
+description when present, source byte length, source hash, authorizing root, and
+root-relative source and scope paths. For `AGENTS.md`, an empty scope means the
+root and a nested scope applies only to that directory and descendants. Catalog
+order is root, then increasing scope depth, then raw relative path. An ancestor
+document precedes a descendant document, so a deliberately admitted descendant
+is the later, more specific instruction; sibling scopes never apply to each
+other. `instructions.preview` returns bounded structure — headings for a
+document and validated metadata plus headings for a skill — with full source
+byte length and estimated model-token cost. Neither returns the full body or
+admits content.
 
 `instructions.read` names one eligible bundle and requests deliberate admission.
 The daemon re-reads and validates it under its registered root, compares the
 source hash with registration evidence, applies the per-bundle render budget,
-and returns rendered instructions as a typed tool result. A changed or missing
-source fails with stale-source evidence rather than admitting unregistered
-bytes. Skill-resource reads require a later resource-address and hash contract.
+and returns only a typed admission receipt containing identity, source hash,
+rendered hash, byte length, truncation evidence, and durable admission identity.
+The rendered instruction body is never tool-result content and therefore never
+enters semantic tool-result history. A changed or missing source fails with
+stale-source evidence rather than admitting unregistered bytes. Skill-resource
+reads require a later resource-address and hash contract.
 
 List and preview read registration metadata rather than bundle bodies. Their
 bounds are independent of aggregate registered content. Catalog budgeting
@@ -176,6 +218,23 @@ tool supplies list, preview, or read unless an implementing child explicitly
 advances this section's verified reference. Unloading is not implemented in the
 first slice.
 
+## Durable admission transition
+
+Each `instructions.read` request has a replay-stable tool-request identity. In
+the same transaction as its receipt-only tool result, a successful request
+appends one `InstructionAdmission` naming the prior admitted-set hash, bundle,
+rendered evidence, and request identity. Replaying that identity returns the
+same receipt; a conflicting replay is corruption. A failed request appends no
+admission and does not change the set.
+
+After a tool batch, preparation folds successful admissions in durable request
+order, ignores idempotent repeats, and creates exactly one successor manifest
+for the next model call. The successor manifest and prepared call are committed
+atomically. Thus several reads in one batch aggregate into one boundary, and a
+crash after tool-result commit but before continuation leaves admissions that
+the next preparation deterministically folds. Process memory is never authority
+for the admitted set.
+
 ## Projection rather than transcript append
 
 Admitted instructions are a model-input **projection rebuilt each turn**, not
@@ -183,6 +242,34 @@ semantic transcript entries. The daemon holds the declared admitted set, renders
 it beside the immutable context-frontier projection for a call, and records the
 exact result in the manifest below. Instruction text never advances a
 `ContextFrontier`, changes ancestry, or becomes user-role conversation.
+
+Prepared model input contains a typed `WorkspaceInstructionRegion` after the
+frozen daemon/session system prompt and before every actor-authored or
+tool-result frontier message. Adapters serialize that explicit region as
+instruction/system input supported by their provider; they may not reinterpret
+it as a user or tool message or invoke a native file loader. The frozen session
+system prompt and explicit user request remain higher priority than this
+repository-supplied region. When a provider exposes only a system-instruction
+transport, the daemon wrapper states that subordinate authority before the
+repository bytes rather than pretending they are daemon policy.
+
+The region orders admitted agent documents by authorizing root, increasing scope
+depth, and relative path, then skills by bundle identity bytes. Each bundle is
+wrapped as UTF-8 bytes:
+
+```text
+<signalbox_workspace_instruction>
+{"bundle_id":"<lowercase UUID>","kind":"<closed kind>","source":"<JSON-escaped canonical path>","source_sha256":"<lowercase hex>"}
+<content>
+<budgeted source bytes>
+</content>
+</signalbox_workspace_instruction>
+```
+
+JSON string escaping follows RFC 8259, line endings shown above are LF, and
+there is no implicit leading or trailing byte. The rendered-content hash covers
+this complete wrapper. These labels distinguish untrusted repository text from
+daemon authority and make adapter output byte-stable.
 
 Two designs were considered:
 
@@ -214,6 +301,30 @@ define unload authority, tombstone visibility, and admitted-set transition. Only
 whole bundles may leave later projections, and unloading must add durable
 history rather than delete an admission or manifest.
 
+## Canonical digest bytes
+
+All stored digests are the 32 raw SHA-256 bytes and display as lowercase
+64-character hexadecimal. Version-one domain separators are literal UTF-8 with
+no terminator. UUIDs are their 16 RFC 4122 network-order bytes; unsigned counts
+and lengths are eight-byte big-endian values; text is an eight-byte byte length
+followed by exact UTF-8 bytes; closed variants are the length-framed lowercase
+names written on this page.
+
+The eligibility hash is SHA-256 over `signalbox-instruction-eligibility-v1`
+followed by eligible bundle UUID bytes in ascending UUID-byte order. The empty
+hash is therefore the separator alone.
+
+The manifest hash begins with `signalbox-turn-instruction-manifest-v1`, then
+session UUID, turn UUID, the 32-byte eligibility hash, and its boundary: literal
+`turn_start`, or literal `model_call` plus model-call UUID. Rendered bundle
+records follow in projection order. Each is bundle UUID, length-framed kind,
+length-framed canonical source path, 32-byte source hash, 32-byte rendered hash,
+rendered byte length, length-framed admission route, then one byte `0` for no
+truncation or byte `1` plus the truncation boundary as an unsigned length.
+Fixed-width identities and digests plus length framing make the representation
+uniquely decodable. The empty turn-start vector ends immediately after literal
+`turn_start`.
+
 ## Budgets and rendered content
 
 Every admission has an explicit per-bundle byte budget. Rendering preserves
@@ -237,15 +348,15 @@ values, beginning with exactly one turn-start manifest even when the eligibility
 and admission sets are empty. The initial manifest is fixed before the first
 provider call and authenticated whenever that call is prepared or reconstituted.
 A model-requested admission during a tool round appends admission evidence and
-produces a successor manifest for the next call boundary; earlier call-boundary
-manifests remain addressable. The first implementation slice has no admission
-and stores only the turn-start manifest.
+the next preparation atomically produces a successor manifest with its model
+call; earlier call-boundary manifests remain addressable. The first
+implementation slice has no admission and stores only the turn-start manifest.
 
 Each manifest records:
 
 - session and turn identities and the eligibility-set hash;
 - its call boundary, or `turn_start` before a call-specific successor;
-- for each rendered bundle in identity order, bundle identity, kind, canonical
+- for each rendered bundle in projection order, bundle identity, kind, canonical
   source path, registered source hash, rendered hash, rendered byte length,
   admission route, and optional truncation boundary; and
 - a versioned hash of the canonical manifest representation.
