@@ -45,7 +45,7 @@ pub(crate) async fn read_blob_metadata(
 }
 
 pub(crate) async fn read_blob_chunk(
-    registry: Option<&BlobStoreRegistry>,
+    registry: &BlobStoreRegistry,
     repository: &BlobCatalogRepository,
     digest: BlobDigest,
     offset: u64,
@@ -66,8 +66,6 @@ pub(crate) async fn read_blob_chunk(
             blob_length: expected.byte_length(),
         });
     }
-    let registry = registry.ok_or(BlobReadError::Integrity)?;
-
     let mut saw_missing = false;
     let mut saw_corrupt = false;
     let mut saw_unavailable = false;
@@ -87,24 +85,27 @@ pub(crate) async fn read_blob_chunk(
                     usize::try_from(length.get()).map_err(|_| BlobReadError::Integrity)?;
                 let mut bytes = Vec::with_capacity(capacity);
                 let mut reader = opened.into_reader();
-                (&mut reader)
+                if (&mut reader)
                     .take(length.get())
                     .read_to_end(&mut bytes)
                     .await
-                    .map_err(|_| BlobReadError::Unavailable)?;
+                    .is_err()
+                {
+                    saw_unavailable = true;
+                    continue;
+                }
                 if bytes.len() != capacity {
                     return Err(BlobReadError::Integrity);
                 }
                 let mut trailing = [0_u8; 1];
-                if reader
-                    .read(&mut trailing)
-                    .await
-                    .map_err(|_| BlobReadError::Unavailable)?
-                    != 0
-                {
-                    return Err(BlobReadError::Integrity);
+                match reader.read(&mut trailing).await {
+                    Ok(0) => return Ok(bytes),
+                    Ok(_) => return Err(BlobReadError::Integrity),
+                    Err(_) => {
+                        saw_unavailable = true;
+                        continue;
+                    }
                 }
-                return Ok(bytes);
             }
             Err(error) => match error.kind() {
                 BlobStoreFailureKind::NotFound => saw_missing = true,

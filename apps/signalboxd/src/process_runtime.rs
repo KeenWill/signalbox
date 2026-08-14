@@ -161,8 +161,8 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
-    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
-    MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
+    ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_BLOB_READ_BYTES,
+    MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
     ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
     ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
     ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
@@ -201,9 +201,9 @@ use sqlx::{PgPool, Row};
 use tokio::{
     io::{
         AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
-        BufReader,
+        BufReader, Interest,
     },
-    net::UnixStream,
+    net::{UnixStream, unix::OwnedReadHalf},
     sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
     task::{JoinError, JoinSet},
     time::{Instant, sleep, sleep_until},
@@ -1408,8 +1408,8 @@ struct PendingConversationImport {
     clippy::too_many_arguments,
     reason = "request execution keeps connection I/O and durable correlation explicit"
 )]
-async fn handle_request<Reader, Writer>(
-    reader: &mut Reader,
+async fn handle_request<Writer>(
+    reader: &mut BufReader<OwnedReadHalf>,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -1419,7 +1419,6 @@ async fn handle_request<Reader, Writer>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
-    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
@@ -2038,6 +2037,7 @@ where
             length_bytes,
         } => {
             handle_read_blob_chunk(
+                reader,
                 writer,
                 version,
                 request_id,
@@ -2045,6 +2045,7 @@ where
                 offset_bytes,
                 length_bytes,
                 services,
+                shutdown,
             )
             .await
         }
@@ -5625,6 +5626,15 @@ async fn handle_read_blob_metadata<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    if services.blob_store_registry.is_none() {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    }
     let repository = BlobCatalogRepository::new(services.pool.clone());
     let outcome = tokio::time::timeout(
         BLOB_READ_TIMEOUT,
@@ -5646,7 +5656,7 @@ where
             )
             .await
         }
-        Err(error) => write_blob_read_error(writer, version, request_id, digest, None, error).await,
+        Err(error) => write_blob_read_error(writer, version, request_id, None, error).await,
     }
 }
 
@@ -5655,6 +5665,7 @@ where
     reason = "the wire boundary keeps correlation and exact range facts explicit"
 )]
 async fn handle_read_blob_chunk<Writer>(
+    reader: &BufReader<OwnedReadHalf>,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -5662,10 +5673,72 @@ async fn handle_read_blob_chunk<Writer>(
     offset_bytes: CanonicalU64,
     length_bytes: CanonicalU64,
     services: &ConnectionServices,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let Some(registry) = services.blob_store_registry.as_deref() else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    };
+    if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::invalid_blob_read(RejectionDetail::BlobReadLengthOutOfRange {
+                min_length_bytes: CanonicalU64::new(1),
+                max_length_bytes: CanonicalU64::new(MAX_BLOB_READ_BYTES as u64),
+                requested_length_bytes: length_bytes,
+            }),
+        )
+        .await;
+    }
+    let Some(length) = NonZeroU64::new(length_bytes.value()) else {
+        return Err(ProcessConnectionError::EncodeInvariant);
+    };
+    let repository = BlobCatalogRepository::new(services.pool.clone());
+    let metadata = tokio::time::timeout(
+        BLOB_READ_TIMEOUT,
+        read_blob_metadata(&repository, digest.into_digest()),
+    )
+    .await
+    .unwrap_or(Err(BlobReadError::Unavailable));
+    let metadata = match metadata {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return write_blob_read_error(
+                writer,
+                version,
+                request_id,
+                Some((offset_bytes, length_bytes)),
+                error,
+            )
+            .await;
+        }
+    };
+    if offset_bytes
+        .value()
+        .checked_add(length.get())
+        .is_none_or(|end| end > metadata.byte_length)
+    {
+        return write_blob_read_error(
+            writer,
+            version,
+            request_id,
+            Some((offset_bytes, length_bytes)),
+            BlobReadError::RangeOutOfBounds {
+                blob_length: metadata.byte_length,
+            },
+        )
+        .await;
+    }
     let Some(permit) = try_acquire_blob_read_permit(Arc::clone(&services.blob_read_budget)) else {
         return write_error(
             writer,
@@ -5675,26 +5748,26 @@ where
         )
         .await;
     };
-    let Some(length) = NonZeroU64::new(length_bytes.value()) else {
-        return Err(ProcessConnectionError::EncodeInvariant);
-    };
-    let repository = BlobCatalogRepository::new(services.pool.clone());
-    let outcome = tokio::time::timeout(
+    let traversal = tokio::time::timeout(
         BLOB_READ_TIMEOUT,
         read_blob_chunk(
-            services.blob_store_registry.as_deref(),
+            registry,
             &repository,
             digest.into_digest(),
             offset_bytes.value(),
             length,
         ),
-    )
-    .await
-    .unwrap_or(Err(BlobReadError::Unavailable));
+    );
+    let outcome = tokio::select! {
+        biased;
+        () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        () = wait_for_connection_loss(reader) => return Ok(()),
+        outcome = traversal => outcome.unwrap_or(Err(BlobReadError::Unavailable)),
+    };
     drop(permit);
     match outcome {
         Ok(bytes) => {
-            write_message(
+            write_message_via_spool(
                 writer,
                 version,
                 request_id,
@@ -5711,7 +5784,6 @@ where
                 writer,
                 version,
                 request_id,
-                digest,
                 Some((offset_bytes, length_bytes)),
                 error,
             )
@@ -5720,11 +5792,28 @@ where
     }
 }
 
+async fn wait_for_connection_loss(reader: &BufReader<OwnedReadHalf>) {
+    loop {
+        let Ok(readiness) = reader
+            .get_ref()
+            .ready(Interest::READABLE | Interest::WRITABLE)
+            .await
+        else {
+            return;
+        };
+        if readiness.is_read_closed() && readiness.is_write_closed() {
+            return;
+        }
+        // Unconsumed pipelined bytes and an orderly write-half close keep the
+        // socket ready, so back off before checking for full closure again.
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn write_blob_read_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    digest: CanonicalBlobDigest,
     range: Option<(CanonicalU64, CanonicalU64)>,
     error: BlobReadError,
 ) -> Result<(), ProcessConnectionError>
@@ -5738,7 +5827,6 @@ where
                 return Err(ProcessConnectionError::EncodeInvariant);
             };
             ProtocolError::invalid_blob_read(RejectionDetail::BlobReadRangeOutOfBounds {
-                digest,
                 offset_bytes,
                 length_bytes,
                 blob_length_bytes: CanonicalU64::new(blob_length),
@@ -14749,7 +14837,8 @@ mod tests {
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, duplex},
+        net::UnixStream,
         sync::{Semaphore, watch},
         time::{Duration, Instant, timeout},
     };
@@ -14784,10 +14873,10 @@ mod tests {
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, try_acquire_blob_read_permit,
-        unavailable_protocol_error, wire_goal_event, wire_metadata_last_writer,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_delegation_port_error,
-        write_snapshot_spool_error, write_transcript_entry,
+        unavailable_protocol_error, wait_for_connection_loss, wire_goal_event,
+        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -15540,6 +15629,21 @@ mod tests {
         assert!(try_acquire_blob_read_permit(Arc::clone(&budget)).is_none());
         drop(held);
         assert_eq!(budget.available_permits(), MAX_CONCURRENT_BLOB_READS);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_read_disconnect_detection_survives_pipelined_input() -> Result<(), Box<dyn Error>>
+    {
+        let (mut client, server) = UnixStream::pair()?;
+        let (reader, _writer) = server.into_split();
+        let mut reader = BufReader::new(reader);
+        client.write_all(b"pipelined request").await?;
+        assert_eq!(reader.fill_buf().await?, b"pipelined request");
+        drop(client);
+
+        timeout(Duration::from_secs(1), wait_for_connection_loss(&reader)).await?;
+        assert_eq!(reader.buffer(), b"pipelined request");
         Ok(())
     }
 
