@@ -82,7 +82,7 @@ pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,
     DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
     DaemonToolsConstructionError, MappedDaemonCredentialInputs, PinnedWorkspaceFileSystem,
-    SessionWorkspaceRoots,
+    SessionWorkspaceRoots, WorkspaceInstructionRootResolver,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};

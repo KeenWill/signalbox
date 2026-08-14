@@ -57,10 +57,10 @@ use signalboxd::{
     MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SessionWorkspaceRoots, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, WorkspaceInstructionRuntime,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    WorkspaceInstructionRuntime, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1231,28 +1231,6 @@ async fn run_hub(
             erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
         })?;
     let pool = database.pool().clone();
-    let session_workspace_roots = match daemon_tool_configuration
-        .map(|configuration| SessionWorkspaceRoots::try_new(configuration.workspace_root()))
-        .transpose()
-    {
-        Ok(roots) => roots,
-        Err(error) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Tools(&error),
-            );
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
-    let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
-        pool.clone(),
-        session_workspace_roots,
-        model_configuration
-            .workspace_instructions()
-            .roots()
-            .to_vec(),
-    );
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -1280,8 +1258,8 @@ async fn run_hub(
             model_configuration.web_fetch_egress_policy(),
         ),
     };
-    let (tool_catalog, tool_executor) = match tools {
-        Ok(tools) => tools.into_parts(),
+    let tools = match tools {
+        Ok(tools) => tools,
         Err(error) => {
             let failure = erase_startup_cause(
                 RuntimePhase::Configuration,
@@ -1291,6 +1269,15 @@ async fn run_hub(
             return Err(failure);
         }
     };
+    let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
+        pool.clone(),
+        tools.workspace_instruction_root_resolver(),
+        model_configuration
+            .workspace_instructions()
+            .roots()
+            .to_vec(),
+    );
+    let (tool_catalog, tool_executor) = tools.into_parts();
 
     let tool_catalog =
         match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {

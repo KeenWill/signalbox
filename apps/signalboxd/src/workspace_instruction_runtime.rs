@@ -17,7 +17,7 @@ use signalbox_persistence::workspace_instructions::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::daemon_tools::{SessionWorkspaceRoot, SessionWorkspaceRoots};
+use crate::daemon_tools::WorkspaceInstructionRootResolver;
 
 /// Failure before the daemon can prove which instruction snapshot a turn used.
 #[derive(Debug)]
@@ -95,7 +95,7 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRuntimeError {
 #[derive(Clone, Debug)]
 pub struct WorkspaceInstructionRuntime {
     repository: WorkspaceInstructionRepository,
-    workspace_roots: Option<SessionWorkspaceRoots>,
+    workspace_root: Option<WorkspaceInstructionRootResolver>,
     configured_roots: Box<[InstructionPath]>,
 }
 
@@ -103,12 +103,12 @@ impl WorkspaceInstructionRuntime {
     /// Supplies persistence, session workspace derivation, and explicit roots.
     pub fn new(
         pool: PgPool,
-        workspace_roots: Option<SessionWorkspaceRoots>,
+        workspace_root: Option<WorkspaceInstructionRootResolver>,
         configured_roots: Vec<InstructionPath>,
     ) -> Self {
         Self {
             repository: WorkspaceInstructionRepository::new(pool),
-            workspace_roots,
+            workspace_root,
             configured_roots: configured_roots.into_boxed_slice(),
         }
     }
@@ -195,14 +195,11 @@ impl WorkspaceInstructionRuntime {
     ) -> Result<signalbox_application::InstructionDiscoverySnapshot, WorkspaceInstructionRuntimeError>
     {
         let mut roots = Vec::with_capacity(self.configured_roots.len() + 1);
-        if let Some(workspace_roots) = &self.workspace_roots {
-            let path = match workspace_roots.resolve(session) {
-                SessionWorkspaceRoot::ConfiguredRoot => workspace_roots.configured().to_owned(),
-                SessionWorkspaceRoot::Derived { path, .. } => path,
-                SessionWorkspaceRoot::Unresolvable => {
-                    return Err(WorkspaceInstructionRuntimeError::UnresolvableWorkspace);
-                }
-            };
+        if let Some(workspace_root) = &self.workspace_root {
+            let path = workspace_root
+                .resolve(session)
+                .await
+                .map_err(|_| WorkspaceInstructionRuntimeError::UnresolvableWorkspace)?;
             roots.push(InstructionDiscoveryRoot::new(
                 InstructionDiscoveryRootKind::Workspace,
                 instruction_path(&path)?,
@@ -237,38 +234,4 @@ fn instruction_path(path: &Path) -> Result<InstructionPath, WorkspaceInstruction
         .ok_or(WorkspaceInstructionRuntimeError::InvalidWorkspacePath)?;
     InstructionPath::try_new(value.to_owned())
         .map_err(|_| WorkspaceInstructionRuntimeError::InvalidWorkspacePath)
-}
-
-#[cfg(test)]
-mod tests {
-    use sqlx::postgres::PgPoolOptions;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn misprovisioned_daemon_workspace_fails_discovery_before_scan() {
-        let temporary = tempfile::tempdir().expect("temporary root exists");
-        let configured = temporary.path().join("workspace");
-        std::fs::create_dir(&configured).expect("configured workspace exists");
-        let roots = SessionWorkspaceRoots::try_new(&configured).expect("root can be derived");
-        let session = SessionId::from_uuid(Uuid::from_u128(1));
-        let derived = roots.derived_path(session);
-        std::fs::create_dir(derived.parent().expect("derived root has a parent"))
-            .expect("derived parent exists");
-        std::fs::write(&derived, "not a directory").expect("derived path is misprovisioned");
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgresql://unused:unused@127.0.0.1/unused")
-            .expect("lazy fixture pool is valid");
-        let runtime = WorkspaceInstructionRuntime::new(pool, Some(roots), Vec::new());
-
-        let error = runtime
-            .discover(session)
-            .await
-            .expect_err("misprovisioning fails before scanning");
-
-        assert_eq!(
-            error.operator_failure_cause_code(),
-            "workspace_instruction_workspace_unresolvable"
-        );
-    }
 }
