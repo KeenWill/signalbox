@@ -846,6 +846,7 @@ async fn commit_blob_upload(
 struct CommittedBlobReadFixture {
     runtime: RunningRuntime,
     connection: Connection,
+    bytes: &'static [u8],
     digest: BlobDigest,
     wire_digest: CanonicalBlobDigest,
     expected_length: CanonicalU64,
@@ -862,6 +863,7 @@ impl CommittedBlobReadFixture {
         Ok(Self {
             runtime,
             connection,
+            bytes,
             digest,
             wire_digest,
             expected_length,
@@ -879,6 +881,23 @@ impl CommittedBlobReadFixture {
 
     fn expected_replica_count(&self) -> CanonicalU64 {
         CanonicalU64::new(1)
+    }
+
+    fn expected_range(
+        &self,
+        offset_bytes: CanonicalU64,
+        length_bytes: CanonicalU64,
+    ) -> &'static [u8] {
+        let offset =
+            usize::try_from(offset_bytes.value()).expect("the fixture range offset fits in usize");
+        let length =
+            usize::try_from(length_bytes.value()).expect("the fixture range length fits in usize");
+        let end = offset
+            .checked_add(length)
+            .expect("the fixture range end is representable");
+        self.bytes
+            .get(offset..end)
+            .expect("the fixture contains the expected range")
     }
 
     async fn stop(self) -> Result<(), Box<dyn Error>> {
@@ -1044,7 +1063,7 @@ async fn inv060_blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn 
     let mut fixture = CommittedBlobReadFixture::start(b"verified direct blob range").await?;
     let offset_bytes = CanonicalU64::new(9);
     let length_bytes = CanonicalU64::new(6);
-    let expected_bytes = b"direct";
+    let expected_bytes = fixture.expected_range(offset_bytes, length_bytes);
 
     fixture
         .connection

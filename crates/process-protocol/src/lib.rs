@@ -7717,8 +7717,15 @@ impl ServerMessage {
             {
                 return Err(FrameValidationError::BlobReadShape);
             }
-            Self::BlobChunkRead { bytes, .. }
-                if bytes.as_bytes().is_empty() || bytes.as_bytes().len() > MAX_BLOB_READ_BYTES =>
+            Self::BlobChunkRead {
+                offset_bytes,
+                bytes,
+                ..
+            } if bytes.as_bytes().is_empty()
+                || bytes.as_bytes().len() > MAX_BLOB_READ_BYTES
+                || u64::try_from(bytes.as_bytes().len()).map_or(true, |length_bytes| {
+                    offset_bytes.value().checked_add(length_bytes).is_none()
+                }) =>
             {
                 return Err(FrameValidationError::BlobReadShape);
             }
@@ -11073,6 +11080,25 @@ mod tests {
                 "{{\"type\":\"blob_chunk\",\"digest\":\"{digest}\",\"offset_bytes\":\"{offset}\",\"bytes\":\"AP8=\"}}"
             ),
         )?;
+        Ok(())
+    }
+
+    /// INV-060: a successful range response must represent its exact
+    /// half-open byte range.
+    #[test]
+    fn inv060_blob_range_response_rejects_overflowing_end() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let result = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(1)?,
+            ServerMessage::BlobChunkRead {
+                digest: CanonicalBlobDigest::from_bytes([0xab; 32]),
+                offset_bytes: CanonicalU64::new(u64::MAX),
+                bytes: BlobChunk::new(vec![0]),
+            },
+        );
+
+        assert_eq!(result, Err(FrameValidationError::BlobReadShape));
         Ok(())
     }
 
