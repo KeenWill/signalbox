@@ -4,8 +4,8 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ClassifyOperatorFailure, InstructionDiscoveryFindingKind, InstructionDiscoverySnapshot,
-    OperatorFailureClass,
+    ClassifyOperatorFailure, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
+    InstructionDiscoverySnapshot, OperatorFailureClass,
 };
 use signalbox_domain::{
     InstructionBundleId, InstructionBundleKind, InstructionDigest, InstructionDiscoveryId,
@@ -19,6 +19,7 @@ use sqlx::{PgPool, Row, types::Uuid};
 pub enum RecordTurnInstructionSnapshotOutcome {
     Recorded(TurnInstructionManifestId),
     AlreadyRecorded(TurnInstructionManifestId),
+    DiscoveryIncomplete(TurnInstructionManifestId),
     TurnUnavailable,
 }
 
@@ -107,22 +108,44 @@ impl WorkspaceInstructionRepository {
             transaction.rollback().await?;
             return Ok(RecordTurnInstructionSnapshotOutcome::TurnUnavailable);
         }
-        if let Some(existing) =
+        if let Some((existing, complete)) =
             load_manifest(&mut transaction, manifest.session(), manifest.turn()).await?
         {
             transaction.rollback().await?;
-            return Ok(RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(
-                existing.id(),
-            ));
+            return Ok(if complete {
+                RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(existing.id())
+            } else {
+                RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(existing.id())
+            });
         }
+        let classified_entries = i64::try_from(snapshot.classified_entries())
+            .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("entry count"))?;
+        let finding_count = i64::try_from(snapshot.findings().len())
+            .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("finding count"))?;
+        let candidate_source_bytes = i64::try_from(snapshot.candidate_source_bytes())
+            .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("source byte count"))?;
+        let elapsed_millis = i64::try_from(snapshot.elapsed_millis())
+            .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("elapsed time"))?;
         sqlx::query(
             "INSERT INTO instruction_discovery
-                (instruction_discovery_id, session_id, turn_id)
-             VALUES ($1, $2, $3)",
+                (instruction_discovery_id, session_id, turn_id,
+                 limit_set_version, classified_entry_count, finding_count,
+                 candidate_source_byte_count, elapsed_millis, scan_complete)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(discovery.into_uuid())
         .bind(manifest.session().into_uuid())
         .bind(manifest.turn().into_uuid())
+        .bind(
+            i16::try_from(snapshot.limit_set_version()).map_err(|_| {
+                WorkspaceInstructionRepositoryError::Corruption("limit set version")
+            })?,
+        )
+        .bind(classified_entries)
+        .bind(finding_count)
+        .bind(candidate_source_bytes)
+        .bind(elapsed_millis)
+        .bind(snapshot.is_complete())
         .execute(&mut *transaction)
         .await?;
         for (index, root) in snapshot.roots().iter().enumerate() {
@@ -219,9 +242,11 @@ impl WorkspaceInstructionRepository {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(RecordTurnInstructionSnapshotOutcome::Recorded(
-            manifest.id(),
-        ))
+        Ok(if snapshot.is_complete() {
+            RecordTurnInstructionSnapshotOutcome::Recorded(manifest.id())
+        } else {
+            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(manifest.id())
+        })
     }
 }
 
@@ -229,11 +254,14 @@ async fn load_manifest(
     connection: &mut sqlx::PgConnection,
     session: SessionId,
     turn: TurnId,
-) -> Result<Option<TurnInstructionManifest>, WorkspaceInstructionRepositoryError> {
+) -> Result<Option<(TurnInstructionManifest, bool)>, WorkspaceInstructionRepositoryError> {
     let row = sqlx::query(
-        "SELECT turn_instruction_manifest_id, eligibility_hash, manifest_hash
-           FROM turn_instruction_manifest
-          WHERE session_id = $1 AND turn_id = $2 AND boundary_kind = 'turn_start'",
+        "SELECT m.turn_instruction_manifest_id, m.eligibility_hash, m.manifest_hash,
+                d.scan_complete
+           FROM turn_instruction_manifest AS m
+           JOIN instruction_discovery AS d
+             ON d.instruction_discovery_id = m.instruction_discovery_id
+          WHERE m.session_id = $1 AND m.turn_id = $2 AND m.boundary_kind = 'turn_start'",
     )
     .bind(session.into_uuid())
     .bind(turn.into_uuid())
@@ -245,17 +273,17 @@ async fn load_manifest(
     let id = TurnInstructionManifestId::from_uuid(row.try_get("turn_instruction_manifest_id")?);
     let eligibility_hash = digest(row.try_get("eligibility_hash")?)?;
     let manifest_hash = digest(row.try_get("manifest_hash")?)?;
-    TurnInstructionManifest::reconstitute_empty_turn_start(
+    let manifest = TurnInstructionManifest::reconstitute_empty_turn_start(
         id,
         session,
         turn,
         eligibility_hash,
         manifest_hash,
     )
-    .map(Some)
     .ok_or(WorkspaceInstructionRepositoryError::Corruption(
         "manifest hash",
-    ))
+    ))?;
+    Ok(Some((manifest, row.try_get("scan_complete")?)))
 }
 
 fn digest(bytes: Vec<u8>) -> Result<InstructionDigest, WorkspaceInstructionRepositoryError> {
@@ -283,7 +311,14 @@ const fn finding_kind(kind: InstructionDiscoveryFindingKind) -> &'static str {
     match kind {
         InstructionDiscoveryFindingKind::RootUnavailable => "root_unavailable",
         InstructionDiscoveryFindingKind::EntryUnreadable => "entry_unreadable",
+        InstructionDiscoveryFindingKind::NonUtf8SourcePath => "non_utf8_source_path",
         InstructionDiscoveryFindingKind::NonUtf8Source => "non_utf8_source",
         InstructionDiscoveryFindingKind::InvalidSkill => "invalid_skill",
+        InstructionDiscoveryFindingKind::LimitReached(limit) => match limit {
+            InstructionDiscoveryLimitKind::ClassifiedEntries => "limit_classified_entries",
+            InstructionDiscoveryLimitKind::Findings => "limit_findings",
+            InstructionDiscoveryLimitKind::CandidateSourceBytes => "limit_candidate_source_bytes",
+            InstructionDiscoveryLimitKind::ElapsedTime => "limit_elapsed_time",
+        },
     }
 }

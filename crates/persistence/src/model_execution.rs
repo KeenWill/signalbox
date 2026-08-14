@@ -1009,12 +1009,15 @@ impl PostgresModelCallRepository {
                         manifest.turn_instruction_manifest_id,
                         manifest.boundary_kind AS instruction_manifest_boundary_kind,
                         manifest.eligibility_hash AS instruction_eligibility_hash,
-                        manifest.manifest_hash AS instruction_manifest_hash
+                        manifest.manifest_hash AS instruction_manifest_hash,
+                        discovery.scan_complete AS instruction_discovery_complete
                    FROM model_call AS call
               LEFT JOIN turn_instruction_manifest AS manifest
                      ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
                     AND manifest.session_id = call.session_id
                     AND manifest.turn_id = call.turn_id
+              LEFT JOIN instruction_discovery AS discovery
+                     ON discovery.instruction_discovery_id = manifest.instruction_discovery_id
                   WHERE call.session_id = $1
                     AND call.model_call_id = $2",
             )
@@ -4355,12 +4358,15 @@ async fn load_live_turn_calls(
                 manifest.turn_instruction_manifest_id,
                 manifest.boundary_kind AS instruction_manifest_boundary_kind,
                 manifest.eligibility_hash AS instruction_eligibility_hash,
-                manifest.manifest_hash AS instruction_manifest_hash
+                manifest.manifest_hash AS instruction_manifest_hash,
+                discovery.scan_complete AS instruction_discovery_complete
            FROM model_call AS call
       LEFT JOIN turn_instruction_manifest AS manifest
              ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
             AND manifest.session_id = call.session_id
             AND manifest.turn_id = call.turn_id
+      LEFT JOIN instruction_discovery AS discovery
+             ON discovery.instruction_discovery_id = manifest.instruction_discovery_id
          WHERE call.session_id = $1
             AND call.turn_id = $2
             AND (
@@ -4437,6 +4443,9 @@ fn authenticate_model_call_instruction_manifest(
     let boundary_kind: String = required(row, "instruction_manifest_boundary_kind")?;
     if boundary_kind != "turn_start" {
         return Err(ModelCallCorruption::Inconsistent("turn instruction manifest boundary").into());
+    }
+    if !required::<bool>(row, "instruction_discovery_complete")? {
+        return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
     }
     let eligibility_hash: Vec<u8> = required(row, "instruction_eligibility_hash")?;
     let manifest_hash: Vec<u8> = required(row, "instruction_manifest_hash")?;
@@ -4607,17 +4616,23 @@ pub(crate) async fn insert_prepared_call(
     .rows_affected();
     require_single(pinned_rows, "turn-level provider target pin")?;
     let instruction_manifest = sqlx::query(
-        "SELECT turn_instruction_manifest_id, eligibility_hash, manifest_hash
-           FROM turn_instruction_manifest
-          WHERE session_id = $1
-            AND turn_id = $2
-            AND boundary_kind = 'turn_start'",
+        "SELECT m.turn_instruction_manifest_id, m.eligibility_hash, m.manifest_hash,
+                d.scan_complete
+           FROM turn_instruction_manifest AS m
+           JOIN instruction_discovery AS d
+             ON d.instruction_discovery_id = m.instruction_discovery_id
+          WHERE m.session_id = $1
+            AND m.turn_id = $2
+            AND m.boundary_kind = 'turn_start'",
     )
     .bind(session_id_to_uuid(prepared.session()))
     .bind(turn_id_to_uuid(prepared.turn()))
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(ModelCallCorruption::Missing("turn instruction manifest"))?;
+    if !instruction_manifest.try_get::<bool, _>("scan_complete")? {
+        return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
+    }
     let instruction_manifest_id = TurnInstructionManifestId::from_uuid(
         instruction_manifest.try_get("turn_instruction_manifest_id")?,
     );

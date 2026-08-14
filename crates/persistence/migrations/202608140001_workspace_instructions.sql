@@ -5,6 +5,23 @@ CREATE TABLE instruction_discovery (
     instruction_discovery_id uuid PRIMARY KEY,
     session_id uuid NOT NULL,
     turn_id uuid NOT NULL,
+    limit_set_version smallint NOT NULL,
+    classified_entry_count bigint NOT NULL,
+    finding_count bigint NOT NULL,
+    candidate_source_byte_count bigint NOT NULL,
+    elapsed_millis bigint NOT NULL,
+    scan_complete boolean NOT NULL,
+
+    CONSTRAINT instruction_discovery_limit_version_v1
+        CHECK (limit_set_version = 1),
+    CONSTRAINT instruction_discovery_entry_count_bounded
+        CHECK (classified_entry_count BETWEEN 0 AND 100000),
+    CONSTRAINT instruction_discovery_finding_count_bounded
+        CHECK (finding_count BETWEEN 0 AND 4096),
+    CONSTRAINT instruction_discovery_source_bytes_bounded
+        CHECK (candidate_source_byte_count BETWEEN 0 AND 67108864),
+    CONSTRAINT instruction_discovery_elapsed_nonnegative
+        CHECK (elapsed_millis >= 0),
 
     CONSTRAINT instruction_discovery_turn_fk
         FOREIGN KEY (turn_id, session_id)
@@ -134,7 +151,17 @@ CREATE TABLE instruction_discovery_finding (
     CONSTRAINT instruction_discovery_finding_ordinal_positive
         CHECK (finding_ordinal > 0),
     CONSTRAINT instruction_discovery_finding_kind_closed
-        CHECK (finding_kind IN ('root_unavailable', 'entry_unreadable', 'non_utf8_source', 'invalid_skill')),
+        CHECK (finding_kind IN (
+            'root_unavailable',
+            'entry_unreadable',
+            'non_utf8_source_path',
+            'non_utf8_source',
+            'invalid_skill',
+            'limit_classified_entries',
+            'limit_findings',
+            'limit_candidate_source_bytes',
+            'limit_elapsed_time'
+        )),
     CONSTRAINT instruction_discovery_finding_path_bounded
         CHECK (octet_length(source_path) BETWEEN 2 AND 4096 AND source_path LIKE '/%'),
     CONSTRAINT instruction_discovery_finding_scan_fk
@@ -210,8 +237,18 @@ BEFORE UPDATE OR DELETE ON turn_instruction_manifest
 FOR EACH ROW EXECUTE FUNCTION reject_instruction_evidence_change();
 
 -- Existing pre-alpha turns receive the same empty evidence new turns record.
-INSERT INTO instruction_discovery (instruction_discovery_id, session_id, turn_id)
-SELECT turn_id, session_id, turn_id
+INSERT INTO instruction_discovery (
+    instruction_discovery_id,
+    session_id,
+    turn_id,
+    limit_set_version,
+    classified_entry_count,
+    finding_count,
+    candidate_source_byte_count,
+    elapsed_millis,
+    scan_complete
+)
+SELECT turn_id, session_id, turn_id, 1, 0, 0, 0, 0, false
   FROM turn_lifecycle;
 
 INSERT INTO turn_instruction_manifest (

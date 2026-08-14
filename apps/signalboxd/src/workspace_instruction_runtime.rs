@@ -26,6 +26,8 @@ pub enum WorkspaceInstructionRuntimeError {
     InvalidWorkspacePath,
     /// The blocking filesystem scan task failed to join.
     DiscoveryTask(tokio::task::JoinError),
+    /// A fixed scan safety limit prevented a complete inventory.
+    DiscoveryIncomplete,
     /// Durable snapshot recording or authentication failed.
     Persistence(WorkspaceInstructionRepositoryError),
 }
@@ -37,6 +39,9 @@ impl fmt::Display for WorkspaceInstructionRuntimeError {
                 formatter.write_str("workspace instruction root is not a canonical UTF-8 path")
             }
             Self::DiscoveryTask(error) => error.fmt(formatter),
+            Self::DiscoveryIncomplete => {
+                formatter.write_str("workspace instruction discovery limit was reached")
+            }
             Self::Persistence(error) => error.fmt(formatter),
         }
     }
@@ -47,6 +52,7 @@ impl Error for WorkspaceInstructionRuntimeError {
         match self {
             Self::InvalidWorkspacePath => None,
             Self::DiscoveryTask(error) => Some(error),
+            Self::DiscoveryIncomplete => None,
             Self::Persistence(error) => Some(error),
         }
     }
@@ -59,6 +65,9 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRuntimeError {
             Self::DiscoveryTask(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
+            Self::DiscoveryIncomplete => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
             Self::Persistence(error) => error.operator_failure_class(),
         }
     }
@@ -67,6 +76,7 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRuntimeError {
         match self {
             Self::InvalidWorkspacePath => "workspace_instruction_path",
             Self::DiscoveryTask(_) => "workspace_instruction_discovery_task",
+            Self::DiscoveryIncomplete => "workspace_instruction_discovery_limit",
             Self::Persistence(error) => error.operator_failure_cause_code(),
         }
     }
@@ -134,10 +144,14 @@ impl WorkspaceInstructionRuntime {
             })
             .await
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
-        Ok(!matches!(
-            outcome,
-            RecordTurnInstructionSnapshotOutcome::TurnUnavailable
-        ))
+        match outcome {
+            RecordTurnInstructionSnapshotOutcome::Recorded(_)
+            | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => Ok(true),
+            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(_) => {
+                Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
+            }
+            RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(false),
+        }
     }
 }
 

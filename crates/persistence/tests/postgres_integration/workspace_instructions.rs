@@ -105,6 +105,37 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
             manifest_id,
         )
     );
+    let persisted_usage = sqlx::query_as::<_, (i16, i64, i64, i64, i64, bool)>(
+        "SELECT limit_set_version, classified_entry_count, finding_count,
+                candidate_source_byte_count, elapsed_millis, scan_complete
+           FROM instruction_discovery
+          WHERE instruction_discovery_id = $1",
+    )
+    .bind(discovery.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        persisted_usage.0,
+        i16::try_from(snapshot.limit_set_version()).expect("fixture limit version fits smallint")
+    );
+    assert_eq!(
+        persisted_usage.1,
+        i64::try_from(snapshot.classified_entries()).expect("fixture entry count fits bigint")
+    );
+    assert_eq!(
+        persisted_usage.2,
+        i64::try_from(snapshot.findings().len()).expect("fixture finding count fits bigint")
+    );
+    assert_eq!(
+        persisted_usage.3,
+        i64::try_from(snapshot.candidate_source_bytes())
+            .expect("fixture source byte count fits bigint")
+    );
+    assert_eq!(
+        persisted_usage.4,
+        i64::try_from(snapshot.elapsed_millis()).expect("fixture elapsed time fits bigint")
+    );
+    assert_eq!(persisted_usage.5, snapshot.is_complete());
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM instruction_discovery_candidate WHERE instruction_discovery_id = $1",
