@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The program-journal append transaction, reconstitution boundary, lock inventory,
+and migration were verified against this PR (`agent/program-substrate-journal`).
+
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
 (`agent/judge-denial-reason`).
@@ -663,8 +666,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-three explicit lock
-statements live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-four explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -713,13 +716,22 @@ statements live in the schema instead:
   migration `202608110006` adds a transaction-level runner-identity advisory
   lock between the scheduler and enrollment locks, and enrollment insertion and
   loss-cursor completion take that same identity lock before they can publish
-  the competing fact.
+  the competing fact; and
+- the program-journal append-sequence trigger in migration `202608140002` takes
+  `FOR UPDATE` on the run's sequence row before admitting the next contiguous
+  global and direction-specific ordinal.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
 because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
+
+- **Program journal append**: the adapter locks the run's sequence row
+  `FOR UPDATE`, inserts the immutable frame, then advances that same sequence
+  row. The insert trigger reacquires the already-held row lock to reject a frame
+  that does not extend the committed global position and its applicable request
+  or delivery ordinal by exactly one.
 
 - **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
   insertion and the command/session uniqueness constraints serialize competing

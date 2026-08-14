@@ -13,6 +13,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 
 use crate::{
     commit_failure_is_ambiguous,
+    lock_inventory::PROGRAM_JOURNAL_SEQUENCE,
     mapping::{
         ProgramDeliveryStorageKind, ProgramRequestStorageKind, positive_u64_from_numeric,
         program_capability_from_str, program_capability_to_str, program_delivery_kind_from_str,
@@ -307,16 +308,11 @@ async fn lock_sequence(
     transaction: &mut Transaction<'_, Postgres>,
     run: ProgramRunId,
 ) -> Result<SequenceState, ProgramJournalRepositoryError> {
-    let row = sqlx::query(
-        "SELECT last_position, last_request_ordinal, last_delivery_ordinal
-           FROM program_run_journal_sequence_state
-          WHERE run_id = $1
-          FOR UPDATE",
-    )
-    .bind(run.into_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(ProgramJournalCorruption::MissingSequenceState)?;
+    let row = sqlx::query(PROGRAM_JOURNAL_SEQUENCE)
+        .bind(run.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(ProgramJournalCorruption::MissingSequenceState)?;
     Ok(SequenceState {
         last_position: nonnegative_u64(row.try_get("last_position")?, "sequence last position")?,
         last_request: nonnegative_u64(
