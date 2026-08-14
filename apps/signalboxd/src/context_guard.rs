@@ -350,8 +350,8 @@ where
                         compacted = true;
                         continue;
                     }
-                    if let Some(workspace_instructions) = &workspace_instructions
-                        && !workspace_instructions
+                    let prepared_instructions = if let Some(workspace_instructions) = &workspace_instructions {
+                        let Some(prepared) = workspace_instructions
                             .prepare_counted_activation(session, turn)
                             .await
                             .map_err(|source| {
@@ -360,11 +360,20 @@ where
                                     source,
                                 }
                             })?
-                    {
-                        continue;
-                    }
+                        else {
+                            continue;
+                        };
+                        Some(prepared)
+                    } else {
+                        None
+                    };
                     let committed = activation
-                        .commit_counted_preview(preview, call, &model_calls)
+                        .commit_counted_preview(
+                            preview,
+                            call,
+                            &model_calls,
+                            prepared_instructions.as_ref().map(|prepared| prepared.evidence()),
+                        )
                         .await
                         .map_err(|error| match error {
                             CommitActivationPreviewError::Activation(error) => {
@@ -372,6 +381,12 @@ where
                             }
                             CommitActivationPreviewError::ModelCall(error) => {
                                 ContextGuardedTurnPassError::Operation { turn, source: error }
+                            }
+                            CommitActivationPreviewError::WorkspaceInstructions(error) => {
+                                ContextGuardedTurnPassError::WorkspaceInstructions {
+                                    turn,
+                                    source: WorkspaceInstructionRuntimeError::Persistence(error),
+                                }
                             }
                         })?;
                     match committed {

@@ -24,6 +24,8 @@ mod session_creation_and_submit;
 mod session_plan;
 mod tool_round_lifecycle;
 mod turn_activation;
+mod workspace_instruction_authority;
+mod workspace_instruction_migration;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -153,6 +155,7 @@ use signalbox_persistence::{
         SubmitInputRepositoryError,
     },
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
+    workspace_instructions::CountedActivationInstructionEvidence,
 };
 use signalbox_tools_plan::{
     PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanDependencyCycle, PlanEntryId,
@@ -1822,47 +1825,6 @@ async fn record_empty_instruction_manifest(
     Ok(())
 }
 
-async fn record_queued_empty_instruction_manifest(
-    pool: &PgPool,
-    session: SessionId,
-    turn: TurnId,
-) -> Result<(), Box<dyn Error>> {
-    let manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
-        signalbox_domain::TurnInstructionManifestId::from_uuid(turn.into_uuid()),
-        session,
-        turn,
-    );
-    sqlx::query(
-        "INSERT INTO instruction_discovery
-            (instruction_discovery_id, session_id, turn_id,
-             limit_set_version, classified_entry_count, finding_count,
-             candidate_source_byte_count, elapsed_millis, scan_complete)
-         VALUES ($1, $2, $3, 1, 0, 0, 0, 0, true)",
-    )
-    .bind(turn.into_uuid())
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO turn_instruction_manifest
-            (turn_instruction_manifest_id, session_id, turn_id,
-             instruction_discovery_id, boundary_kind,
-             eligibility_hash_algorithm, eligibility_hash,
-             manifest_hash_algorithm, manifest_hash)
-         VALUES ($1, $2, $3, $4, 'turn_start', 'sha256_v1', $5, 'sha256_v1', $6)",
-    )
-    .bind(manifest.id().into_uuid())
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .bind(turn.into_uuid())
-    .bind(manifest.eligibility_hash().as_bytes().as_slice())
-    .bind(manifest.manifest_hash().as_bytes().as_slice())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>>
 {
     let container = Postgres::default()
@@ -1918,6 +1880,37 @@ async fn postgres_before_approval_event_migration()
     }
     drop(connection);
     Ok((container, pool, database_url))
+}
+
+async fn postgres_before_workspace_instruction_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608140001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
+async fn apply_workspace_instruction_migration(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version >= 202608140001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    Ok(())
 }
 
 async fn insert_pre_approval_tool_request(

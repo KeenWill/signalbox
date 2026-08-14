@@ -34,6 +34,33 @@ pub enum TurnInstructionManifestPreflight {
     TurnUnavailable,
 }
 
+/// One complete queued-turn snapshot prepared for the activation transaction.
+#[derive(Debug)]
+pub struct CountedActivationInstructionEvidence<'a> {
+    discovery: InstructionDiscoveryId,
+    manifest: &'a TurnInstructionManifest,
+    snapshot: &'a InstructionDiscoverySnapshot,
+    bundle_ids: &'a [InstructionBundleId],
+}
+
+impl<'a> CountedActivationInstructionEvidence<'a> {
+    /// Binds exact discovery content and registration identities for atomic
+    /// counted activation.
+    pub const fn new(
+        discovery: InstructionDiscoveryId,
+        manifest: &'a TurnInstructionManifest,
+        snapshot: &'a InstructionDiscoverySnapshot,
+        bundle_ids: &'a [InstructionBundleId],
+    ) -> Self {
+        Self {
+            discovery,
+            manifest,
+            snapshot,
+            bundle_ids,
+        }
+    }
+}
+
 /// Storage or authentication failure at the instruction boundary.
 #[derive(Debug)]
 pub enum WorkspaceInstructionRepositoryError {
@@ -159,6 +186,91 @@ impl WorkspaceInstructionRepository {
             .await
     }
 
+    /// Reports whether durable runner-placement authority owns the session's
+    /// workspace rather than this daemon.
+    pub async fn session_has_runner_placement(
+        &self,
+        session: SessionId,
+    ) -> Result<bool, WorkspaceInstructionRepositoryError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM runner_current_session_placement
+                  WHERE session_id = $1
+             )",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Inserts one complete instruction snapshot inside the transaction that
+    /// has already revalidated and activated its counted preview.
+    pub(crate) async fn record_counted_activation_in_transaction(
+        connection: &mut sqlx::PgConnection,
+        evidence: CountedActivationInstructionEvidence<'_>,
+    ) -> Result<(), WorkspaceInstructionRepositoryError> {
+        let CountedActivationInstructionEvidence {
+            discovery,
+            manifest,
+            snapshot,
+            bundle_ids,
+        } = evidence;
+        if !snapshot.is_complete() {
+            return Err(WorkspaceInstructionRepositoryError::Corruption(
+                "counted activation discovery incomplete",
+            ));
+        }
+        if bundle_ids.len() != snapshot.bundles().len() {
+            return Err(WorkspaceInstructionRepositoryError::Corruption(
+                "counted activation bundle identities",
+            ));
+        }
+        let mut bundle_ids = bundle_ids.iter().copied();
+        let outcome = Self::record_for_state_in_connection(
+            connection,
+            discovery,
+            manifest,
+            snapshot,
+            || {
+                bundle_ids
+                    .next()
+                    .ok_or(WorkspaceInstructionRepositoryError::Corruption(
+                        "counted activation bundle identity exhausted",
+                    ))
+            },
+            "active",
+        )
+        .await?;
+        match outcome {
+            RecordTurnInstructionSnapshotOutcome::Recorded(recorded)
+                if recorded == manifest.id() =>
+            {
+                Ok(())
+            }
+            RecordTurnInstructionSnapshotOutcome::Recorded(_) => {
+                Err(WorkspaceInstructionRepositoryError::Corruption(
+                    "counted activation manifest identity",
+                ))
+            }
+            RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => {
+                Err(WorkspaceInstructionRepositoryError::Corruption(
+                    "counted activation manifest preexisted",
+                ))
+            }
+            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
+                Err(WorkspaceInstructionRepositoryError::Corruption(
+                    "counted activation discovery completeness",
+                ))
+            }
+            RecordTurnInstructionSnapshotOutcome::TurnUnavailable => {
+                Err(WorkspaceInstructionRepositoryError::Corruption(
+                    "counted activation turn unavailable",
+                ))
+            }
+        }
+    }
+
     async fn record_for_state<NextBundleId>(
         &self,
         discovery: InstructionDiscoveryId,
@@ -171,21 +283,53 @@ impl WorkspaceInstructionRepository {
         NextBundleId: FnMut() -> InstructionBundleId,
     {
         let mut transaction = self.pool.begin().await?;
-        if !turn_is_available(
+        let outcome = Self::record_for_state_in_connection(
             &mut transaction,
+            discovery,
+            &manifest,
+            snapshot,
+            || Ok(next_bundle_id()),
+            required_state,
+        )
+        .await?;
+        match outcome {
+            RecordTurnInstructionSnapshotOutcome::Recorded(_)
+            | RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => transaction
+                .commit()
+                .await
+                .map_err(WorkspaceInstructionRepositoryError::ambiguous_commit)?,
+            RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_)
+            | RecordTurnInstructionSnapshotOutcome::TurnUnavailable => {
+                transaction.rollback().await?;
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn record_for_state_in_connection<NextBundleId>(
+        connection: &mut sqlx::PgConnection,
+        discovery: InstructionDiscoveryId,
+        manifest: &TurnInstructionManifest,
+        snapshot: &InstructionDiscoverySnapshot,
+        mut next_bundle_id: NextBundleId,
+        required_state: &'static str,
+    ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
+    where
+        NextBundleId: FnMut() -> Result<InstructionBundleId, WorkspaceInstructionRepositoryError>,
+    {
+        if !turn_is_available(
+            connection,
             manifest.session(),
             manifest.turn(),
             required_state,
         )
         .await?
         {
-            transaction.rollback().await?;
             return Ok(RecordTurnInstructionSnapshotOutcome::TurnUnavailable);
         }
         if let Some((existing, complete)) =
-            load_manifest(&mut transaction, manifest.session(), manifest.turn()).await?
+            load_manifest(connection, manifest.session(), manifest.turn()).await?
         {
-            transaction.rollback().await?;
             return Ok(if complete {
                 RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(existing.id())
             } else {
@@ -220,7 +364,7 @@ impl WorkspaceInstructionRepository {
         .bind(candidate_source_bytes)
         .bind(elapsed_millis)
         .bind(snapshot.is_complete())
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
         for (index, root) in snapshot.roots().iter().enumerate() {
             sqlx::query(
@@ -232,11 +376,11 @@ impl WorkspaceInstructionRepository {
             .bind((index + 1) as i64)
             .bind(root_kind(root.kind()))
             .bind(root.path().as_str())
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
         }
         for (index, bundle) in snapshot.bundles().iter().enumerate() {
-            let candidate = next_bundle_id();
+            let candidate = next_bundle_id()?;
             let skill = bundle.skill();
             let registered = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO registered_instruction_bundle
@@ -256,7 +400,7 @@ impl WorkspaceInstructionRepository {
             .bind(skill.map(signalbox_domain::InstructionSkillMetadata::description))
             .bind(Decimal::from(bundle.source_bytes()))
             .bind(bundle.source_hash().as_bytes().as_slice())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut *connection)
             .await?;
             let registered = match registered {
                 Some(registered) => registered,
@@ -271,7 +415,7 @@ impl WorkspaceInstructionRepository {
                     .bind(bundle.root_path().as_str())
                     .bind(bundle.source_path().as_str())
                     .bind(bundle.source_hash().as_bytes().as_slice())
-                    .fetch_one(&mut *transaction)
+                    .fetch_one(&mut *connection)
                     .await?
                 }
             };
@@ -283,7 +427,7 @@ impl WorkspaceInstructionRepository {
             .bind(discovery.into_uuid())
             .bind((index + 1) as i64)
             .bind(registered)
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
         }
         for (index, finding) in snapshot.findings().iter().enumerate() {
@@ -296,14 +440,10 @@ impl WorkspaceInstructionRepository {
             .bind((index + 1) as i64)
             .bind(finding.path().as_str())
             .bind(finding_kind(finding.kind()))
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
         }
         if !snapshot.is_complete() {
-            transaction
-                .commit()
-                .await
-                .map_err(WorkspaceInstructionRepositoryError::ambiguous_commit)?;
             return Ok(RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete);
         }
         sqlx::query(
@@ -320,12 +460,8 @@ impl WorkspaceInstructionRepository {
         .bind(discovery.into_uuid())
         .bind(manifest.eligibility_hash().as_bytes().as_slice())
         .bind(manifest.manifest_hash().as_bytes().as_slice())
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(WorkspaceInstructionRepositoryError::ambiguous_commit)?;
         Ok(RecordTurnInstructionSnapshotOutcome::Recorded(
             manifest.id(),
         ))
@@ -357,14 +493,14 @@ impl WorkspaceInstructionRepository {
 }
 
 async fn turn_is_available(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    connection: &mut sqlx::PgConnection,
     session: SessionId,
     turn: TurnId,
     required_state: &'static str,
 ) -> Result<bool, sqlx::Error> {
     let scheduler = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
         .bind(session.into_uuid())
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *connection)
         .await?;
     if scheduler.is_none() {
         return Ok(false);
@@ -376,7 +512,7 @@ async fn turn_is_available(
     )
     .bind(session.into_uuid())
     .bind(turn.into_uuid())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await?;
     Ok(state.as_deref() == Some(required_state))
 }
