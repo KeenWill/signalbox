@@ -531,12 +531,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e1));
     let turn = TurnId::from_uuid(Uuid::from_u128(0x1ae1));
+    let initial_content = "service user request";
     SubmitInputRepository::new(pool.clone())
         .handle(
             start_input(
                 0x14e2,
                 0x18e1,
-                "service user request",
+                initial_content,
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
@@ -565,10 +566,11 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e3)),
     ];
     let submit_repository = SubmitInputRepository::new(pool.clone());
+    let first_steering_content = "first steering";
     let first_steering_command = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0x14e3)),
         session,
-        UserContent::try_text(String::from("first steering"))
+        UserContent::try_text(String::from(first_steering_content))
             .expect("fixture steering content is admitted"),
         DeliveryRequest::NextSafePoint {
             expected_active_turn: turn,
@@ -583,10 +585,11 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             SubmitInputAppliedResult::PendingSteering(_)
         ))
     ));
+    let second_steering_content = "second steering";
     let second_steering_command = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0x14e4)),
         session,
-        UserContent::try_text(String::from("second steering"))
+        UserContent::try_text(String::from(second_steering_content))
             .expect("fixture steering content is admitted"),
         DeliveryRequest::NextSafePoint {
             expected_active_turn: turn,
@@ -764,13 +767,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         &prepared_snapshot.entries()[1],
         steering_inputs[0],
         turn,
-        "first steering",
+        first_steering_content,
     );
     assert_projected_steering_entry(
         &prepared_snapshot.entries()[2],
         steering_inputs[1],
         turn,
-        "second steering",
+        second_steering_content,
     );
     sqlx::query("ALTER TABLE context_frontier_delta DISABLE TRIGGER USER")
         .execute(&pool)
@@ -844,33 +847,36 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         .last_prepared_messages()
         .expect("the scripted provider observed the prepared messages");
     assert_eq!(messages.len(), 3);
-    assert!(matches!(
-        &messages[0],
-        ModelConversationMessage::User {
-            accepted_input: message_input,
-            content,
-            ..
-        } if *message_input == accepted_input
-            && content.text().as_str() == "service user request"
-    ));
-    assert!(matches!(
-        &messages[1],
-        ModelConversationMessage::User {
-            accepted_input: message_input,
-            content,
-            ..
-        } if *message_input == steering_inputs[0]
-            && content.text().as_str() == "first steering"
-    ));
-    assert!(matches!(
-        &messages[2],
-        ModelConversationMessage::User {
-            accepted_input: message_input,
-            content,
-            ..
-        } if *message_input == steering_inputs[1]
-            && content.text().as_str() == "second steering"
-    ));
+    let ModelConversationMessage::User {
+        accepted_input: message_input,
+        content,
+        ..
+    } = &messages[0]
+    else {
+        panic!("the first provider message is the turn-origin user input");
+    };
+    assert_eq!(*message_input, accepted_input);
+    assert_eq!(content.text().as_str(), initial_content);
+    let ModelConversationMessage::User {
+        accepted_input: message_input,
+        content,
+        ..
+    } = &messages[1]
+    else {
+        panic!("the second provider message is the first steering input");
+    };
+    assert_eq!(*message_input, steering_inputs[0]);
+    assert_eq!(content.text().as_str(), first_steering_content);
+    let ModelConversationMessage::User {
+        accepted_input: message_input,
+        content,
+        ..
+    } = &messages[2]
+    else {
+        panic!("the third provider message is the second steering input");
+    };
+    assert_eq!(*message_input, steering_inputs[1]);
+    assert_eq!(content.text().as_str(), second_steering_content);
 
     let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
