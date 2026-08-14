@@ -564,12 +564,9 @@ impl PostgresModelCallRepository {
                         .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
-                        let armed_user_overrides = load_call_user_overrides(
-                            &mut transaction,
-                            session,
-                            current_call_id,
-                        )
-                        .await?;
+                        let armed_user_overrides =
+                            load_call_user_overrides(&mut transaction, session, current_call_id)
+                                .await?;
                         Ok((
                             false,
                             PrepareInitialModelCallOutcome::Ready {

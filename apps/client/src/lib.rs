@@ -701,6 +701,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportBegun { .. }
         | ServerMessage::ConversationImportAppended { .. }
@@ -3986,6 +3987,12 @@ async fn decide(
             tool_request_id: decided_request,
             decision: recorded_decision,
         } if decided_request == tool_request_id && recorded_decision == decision => {
+            output.tool_request_decided(tool_request_id, &decision)?;
+            Ok(())
+        }
+        ServerMessage::ToolDenialOverridden {
+            tool_request_id: overridden_request,
+        } if overridden_request == tool_request_id && decision == ToolDecision::Approve {} => {
             output.tool_request_decided(tool_request_id, &decision)?;
             Ok(())
         }
