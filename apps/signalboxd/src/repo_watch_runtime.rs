@@ -383,7 +383,9 @@ impl RepositoryWatchTask {
             {
                 Ok(true) => {}
                 Ok(false) => return Ok(()),
-                Err(RepoWatchDispatchRepositoryError::GoalCutoff(error)) => {
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
+                )) => {
                     tracing::error!(
                         repository = %self.repository.as_str(),
                         cause_code = "repository_watch_cutoff_corruption",
