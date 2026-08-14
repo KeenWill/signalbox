@@ -49,7 +49,10 @@ verified against this PR
 (`agent/runner-pending-workspace-free-replacement-finalization`). The pending
 managed-workspace release representation and independently checked readback are
 verified against this PR
-(`agent/runner-workspace-release-authority-persistence`). Existing-pin
+(`agent/runner-workspace-release-authority-persistence`). The immutable
+repository replacement workspace-receipt representation and typed replay are
+verified against this PR
+(`agent/runner-replacement-workspace-receipt-persistence`). Existing-pin
 attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
@@ -733,6 +736,22 @@ Representation rules, all enforced in the schema:
   transaction inserts, acknowledges, refuses, or retires this release; those
   transitions must consume this exact representation rather than presenting
   `RunnerWorkspaceReleaseCandidate` as cleanup authority.
+- Migration `202608110028` retains one immutable repository-replacement
+  workspace receipt under its single-use provisioning authorization. The row
+  preserves the successor revision, runner, stable manifest identity,
+  canonical-shaped ready-manifest digest, repository and clone-URL digest,
+  optional credential profile, sandbox, relative workspace path, and exact
+  commit-or-branch recovery facts. Its deferred check accepts the receipt only
+  while the authorization's lost placement remains current, the selected
+  registration and connection are current, the target enrollment retains its
+  active or provisioning-only state, and no terminal replacement result exists.
+  Typed readback rejoins the immutable authorization, command, lost placement,
+  registration, historical connected event, and pending relation before
+  returning the manifest facts. **Committed unimplemented functionality.** No
+  present production transaction admits `workspace_ready`, sends
+  `workspace_recorded`, maps the runner-relative manifest path into execution
+  placement facts, or consumes the receipt to terminalize the repository-backed
+  replacement.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
