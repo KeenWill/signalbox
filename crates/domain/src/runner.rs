@@ -886,6 +886,11 @@ pub enum WorkspaceRecovery {
         /// The exact revision the branch must name.
         revision: WorkspaceRevision,
     },
+    /// Recovery creates the named branch whose first commit has not yet been born.
+    UnbornBranch {
+        /// The validated branch name without `refs/heads/`.
+        name: WorkspaceBranchName,
+    },
 }
 
 /// Class-or-identity runner targeting.

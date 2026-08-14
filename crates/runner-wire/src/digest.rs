@@ -219,6 +219,11 @@ pub enum Recovery {
         /// Full lowercase Git object identity.
         revision: String,
     },
+    /// Validated branch whose first commit has not yet been born.
+    UnbornBranch {
+        /// Name without `refs/heads/`.
+        name: String,
+    },
 }
 
 impl Recovery {
@@ -232,6 +237,9 @@ impl Recovery {
                 WorkspaceRevision::try_new(revision.clone()).map_err(|_| ValueError::Result)?;
                 Ok(())
             }
+            Self::UnbornBranch { name } => WorkspaceBranchName::try_new(name.clone())
+                .map(|_| ())
+                .map_err(|_| ValueError::Result),
         }
     }
 }
@@ -318,6 +326,9 @@ impl WorkspaceManifest {
             WorkspaceRecovery::Branch { name, revision } => Recovery::Branch {
                 name: name.as_str().to_owned(),
                 revision: revision.as_str().to_owned(),
+            },
+            WorkspaceRecovery::UnbornBranch { name } => Recovery::UnbornBranch {
+                name: name.as_str().to_owned(),
             },
         });
         let manifest = Self {
@@ -621,6 +632,10 @@ fn recovery_record(value: &Recovery) -> Vec<u8> {
             push_field(&mut record, b"branch");
             push_field(&mut record, name.as_bytes());
             push_field(&mut record, revision.as_bytes());
+        }
+        Recovery::UnbornBranch { name } => {
+            push_field(&mut record, b"unborn_branch");
+            push_field(&mut record, name.as_bytes());
         }
     }
     record

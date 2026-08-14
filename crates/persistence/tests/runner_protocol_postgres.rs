@@ -1925,6 +1925,29 @@ fn workspace_ready_receipt(
     )
 }
 
+fn unborn_workspace_ready_receipt(
+    fixture: &WorkspaceReceiptProjectionFixture,
+) -> RunnerWorkspaceReadyReceipt {
+    let receipt = workspace_ready_receipt(fixture);
+    RunnerWorkspaceReadyReceipt::new(
+        receipt.authorization(),
+        receipt.session(),
+        receipt.placement_revision(),
+        receipt.runner(),
+        receipt.manifest_id(),
+        receipt.manifest_digest().clone(),
+        receipt.repository().clone(),
+        receipt.canonical_clone_url_digest().clone(),
+        receipt.credential_profile().cloned(),
+        receipt.sandbox(),
+        receipt.relative_path().clone(),
+        WorkspaceRecovery::UnbornBranch {
+            name: WorkspaceBranchName::try_new("main".to_owned())
+                .expect("the unborn receipt fixture branch is checked"),
+        },
+    )
+}
+
 fn conflicting_workspace_ready_receipt(
     fixture: &WorkspaceReceiptProjectionFixture,
 ) -> RunnerWorkspaceReadyReceipt {
@@ -10012,6 +10035,84 @@ async fn s31_inv042_current_registration_preserves_profile() -> Result<(), Box<d
         .expect_err("current registration must retain the pinned profile");
 
     assert_eq!(profile_stale, RunnerDomainError::RegistrationChanged);
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-044: a pinned empty repository independently round-trips the
+/// unborn branch that owns its first future commit.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv044_unborn_workspace_placement_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let repository = WorkspaceRepositoryKey::try_new("signalbox".to_owned())
+        .expect("the repository key is valid");
+    let directory = RunnerWorkingDirectory::try_new("/workspace/unborn-session".to_owned())
+        .expect("the fixture working directory is valid");
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: repository.clone(),
+            },
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            directory.clone(),
+            Some(ProvisionedWorkspace {
+                session: SessionId::from_uuid(uuid(SESSION)),
+                placement_revision: RunnerGeneration::one(),
+                runner: expected_enrollment.runner(),
+                repository: Some(repository),
+                canonical_clone_url_digest: Some(
+                    CanonicalCloneUrlDigest::try_new("b".repeat(64))
+                        .expect("the fixture clone URL digest is canonical"),
+                ),
+                credential_profile: None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                working_directory: directory,
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/1/repo",
+                    uuid(SESSION)
+                ))
+                .expect("the fixture workspace path is relative"),
+                manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x81)),
+                recovery: Some(WorkspaceRecovery::UnbornBranch {
+                    name: WorkspaceBranchName::try_new("main".to_owned())
+                        .expect("the unborn branch is checked"),
+                }),
+            }),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the worktree capability satisfies the unborn initial pin");
+    store.store_pin(&pin, &registration).await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the unborn workspace placement reads back");
+
+    assert_eq!(loaded.placement(), &pin.placement);
     drop(pool);
     Ok(())
 }
@@ -23133,6 +23234,86 @@ async fn s32_inv044_replacement_workspace_receipt_round_trips() -> Result<(), Bo
     assert_eq!(loaded.sandbox(), fixture.workspace.sandbox);
     assert_eq!(loaded.relative_path(), &fixture.workspace.relative_path);
     assert_eq!(loaded.recovery(), expected_recovery);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: an empty repository receipt independently round-trips its
+/// unborn branch without fabricating an object revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_unborn_workspace_receipt_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    let expected = unborn_workspace_ready_receipt(&fixture);
+    let recorded = fixture
+        .store
+        .record_workspace_ready_receipt(expected.clone())
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_provisioning_receipt(fixture.authorization)
+        .await?
+        .expect("the unborn ready-workspace receipt reads back");
+
+    assert_eq!(recorded, expected);
+    assert_eq!(loaded.authorization(), expected.authorization());
+    assert_eq!(loaded.session(), expected.session());
+    assert_eq!(loaded.placement_revision(), expected.placement_revision());
+    assert_eq!(loaded.runner(), expected.runner());
+    assert_eq!(loaded.manifest_id(), expected.manifest_id());
+    assert_eq!(
+        loaded.manifest_digest(),
+        expected.manifest_digest().as_str()
+    );
+    assert_eq!(loaded.repository(), expected.repository());
+    assert_eq!(
+        loaded.canonical_clone_url_digest(),
+        expected.canonical_clone_url_digest()
+    );
+    assert_eq!(loaded.credential_profile(), expected.credential_profile());
+    assert_eq!(loaded.sandbox(), expected.sandbox());
+    assert_eq!(loaded.relative_path(), expected.relative_path());
+    assert_eq!(loaded.recovery(), expected.recovery());
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: relational recovery shape rejects an object revision on an
+/// unborn branch instead of silently recasting it as a populated branch.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_unborn_workspace_receipt_rejects_a_revision() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .record_workspace_ready_receipt(unborn_workspace_ready_receipt(&fixture))
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_replacement_workspace_receipt
+         DISABLE TRIGGER runner_replacement_workspace_receipt_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let rejected = sqlx::query(
+        "UPDATE runner_replacement_workspace_receipt
+            SET revision = $2
+          WHERE authorization_id = $1",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .bind("f".repeat(40))
+    .execute(&pool)
+    .await
+    .expect_err("an unborn branch cannot carry an object revision");
+    sqlx::query(
+        "ALTER TABLE runner_replacement_workspace_receipt
+         ENABLE TRIGGER runner_replacement_workspace_receipt_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }

@@ -3239,16 +3239,20 @@ impl RunnerProtocolStore {
             .map_err(RunnerProtocolStoreError::Domain)?;
         let recovery_kind: String = row.decode_column("recovery_kind")?;
         let branch_name: Option<String> = row.decode_column("branch_name")?;
-        let revision = row.decode_column::<String>("revision")?;
-        let recovery = match (recovery_kind.as_str(), branch_name) {
-            ("commit", None) => WorkspaceRecovery::Commit {
+        let revision = row.decode_column::<Option<String>>("revision")?;
+        let recovery = match (recovery_kind.as_str(), branch_name, revision) {
+            ("commit", None, Some(revision)) => WorkspaceRecovery::Commit {
                 revision: WorkspaceRevision::try_new(revision)
                     .map_err(RunnerProtocolStoreError::Domain)?,
             },
-            ("branch", Some(name)) => WorkspaceRecovery::Branch {
+            ("branch", Some(name), Some(revision)) => WorkspaceRecovery::Branch {
                 name: WorkspaceBranchName::try_new(name)
                     .map_err(RunnerProtocolStoreError::Domain)?,
                 revision: WorkspaceRevision::try_new(revision)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+            },
+            ("unborn_branch", Some(name), None) => WorkspaceRecovery::UnbornBranch {
+                name: WorkspaceBranchName::try_new(name)
                     .map_err(RunnerProtocolStoreError::Domain)?,
             },
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
@@ -3517,9 +3521,12 @@ impl RunnerProtocolStore {
                 RunnerDomainError::InvalidState,
             ))?;
         let (recovery_kind, branch_name, revision) = match recovery {
-            WorkspaceRecovery::Commit { revision } => ("commit", None, revision.as_str()),
+            WorkspaceRecovery::Commit { revision } => ("commit", None, Some(revision.as_str())),
             WorkspaceRecovery::Branch { name, revision } => {
-                ("branch", Some(name.as_str()), revision.as_str())
+                ("branch", Some(name.as_str()), Some(revision.as_str()))
+            }
+            WorkspaceRecovery::UnbornBranch { name } => {
+                ("unborn_branch", Some(name.as_str()), None)
             }
         };
         sqlx::query(
@@ -7799,10 +7806,11 @@ async fn insert_workspace_ready_receipt(
     receipt: &RunnerWorkspaceReadyReceipt,
 ) -> Result<(), RunnerProtocolStoreError> {
     let (recovery_kind, branch_name, revision) = match receipt.recovery() {
-        WorkspaceRecovery::Commit { revision } => ("commit", None, revision.as_str()),
+        WorkspaceRecovery::Commit { revision } => ("commit", None, Some(revision.as_str())),
         WorkspaceRecovery::Branch { name, revision } => {
-            ("branch", Some(name.as_str()), revision.as_str())
+            ("branch", Some(name.as_str()), Some(revision.as_str()))
         }
+        WorkspaceRecovery::UnbornBranch { name } => ("unborn_branch", Some(name.as_str()), None),
     };
     sqlx::query(
         "INSERT INTO runner_replacement_workspace_receipt
@@ -12741,6 +12749,9 @@ fn decode_provisioned_workspace(
             revision: WorkspaceRevision::try_new(revision)
                 .map_err(RunnerProtocolStoreError::Domain)?,
         }),
+        (Some("unborn_branch"), Some(name), None) => Some(WorkspaceRecovery::UnbornBranch {
+            name: WorkspaceBranchName::try_new(name).map_err(RunnerProtocolStoreError::Domain)?,
+        }),
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
     Ok(Some(ProvisionedWorkspace {
@@ -13928,6 +13939,9 @@ fn encode_workspace_recovery(
         WorkspaceRecovery::Commit { revision } => (Some("commit"), None, Some(revision.as_str())),
         WorkspaceRecovery::Branch { name, revision } => {
             (Some("branch"), Some(name.as_str()), Some(revision.as_str()))
+        }
+        WorkspaceRecovery::UnbornBranch { name } => {
+            (Some("unborn_branch"), Some(name.as_str()), None)
         }
     }
 }

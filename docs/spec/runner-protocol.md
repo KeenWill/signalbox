@@ -58,9 +58,11 @@ resume classification of one retained `ready_unrecorded` workspace and its exact
 ready frame and its exact recorded/stale state transitions are verified against
 this PR (`agent/runner-workspace-ready-spool`). Exact ready-frame replay and
 recorded acknowledgement consumption are verified against this PR
-(`agent/runner-workspace-ready-replay`). Established-connection routing of those
-inbound claim and result frames through the durable transactions before
-acknowledgement is re-verified through this PR
+(`agent/runner-workspace-ready-replay`). The recovery union's explicit
+unborn-branch arm, its canonical manifest digest, and durable readback are
+verified against this PR (`agent/runner-unborn-workspace-recovery`).
+Established-connection routing of those inbound claim and result frames through
+the durable transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -1872,10 +1874,11 @@ The runner state root can retain a caller-supplied complete ready frame beside
 its exact reconnect correlation, and the live protocol replays it exactly until
 the matching recorded acknowledgement. The outbound broker can transport a
 caller-constructed closed frame but does not authorize or journal it. The
-executable runner leaves a typed `RecoveryUnavailable` seam whose exact
-`RecoveryGap` is `UnbornHeadNotRepresentable`; it constructs no wire recovery
-fact because the current recovery union cannot represent an empty clone's unborn
-`HEAD`.
+workspace recovery union represents an exact detached commit, an exact branch
+and revision, or an unborn branch naming where the repository's first commit
+will be born. The executable runner still leaves a typed `RecoveryUnavailable`
+seam because it has no filesystem producer from which to construct any of those
+facts.
 
 **Committed unimplemented functionality.** No present runner provisions or
 deletes a workspace, no filesystem producer populates the retained ready frame,

@@ -19,6 +19,8 @@ const EXPECTED_CLONE_URL_DIGEST: &str =
     "1a65f9f5977dc0dcfaae9165099f5639eaa3562991fa3242153f363c868ce930";
 const EXPECTED_MANIFEST_DIGEST: &str =
     "3eb9e28c4ff2c0bc069a3064a8eebe4a1ab8b1169bb3c8b3ed388ba7d232e3ef";
+const EXPECTED_UNBORN_MANIFEST_DIGEST: &str =
+    "654ee9e8b849a80ed819214c5188615d521a229e28802fd3a6271512e280e374";
 
 fn uuid(value: &str) -> CanonicalUuid {
     CanonicalUuid::from_uuid(
@@ -213,6 +215,29 @@ fn frame_round_trip_preserves_closed_message() {
         encode_line(&expected).unwrap_or_else(|error| panic!("heartbeat frame encodes: {error}"));
     let actual =
         decode_line(&encoded).unwrap_or_else(|error| panic!("heartbeat frame decodes: {error}"));
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn frame_round_trip_preserves_unborn_workspace_recovery() {
+    let mut ready_manifest = manifest();
+    ready_manifest.recovery = Some(Recovery::UnbornBranch {
+        name: "main".to_owned(),
+    });
+    let ready_digest = workspace_manifest_digest(&ready_manifest)
+        .unwrap_or_else(|error| panic!("unborn manifest digests: {error}"));
+    let expected = frame(Message::WorkspaceReady(WorkspaceReady {
+        correlation: provision_correlation(),
+        ready: ReadyManifest {
+            manifest: ready_manifest,
+            manifest_digest: ready_digest,
+        },
+    }));
+    let encoded = encode_line(&expected)
+        .unwrap_or_else(|error| panic!("unborn ready frame encodes: {error}"));
+    let actual =
+        decode_line(&encoded).unwrap_or_else(|error| panic!("unborn ready frame decodes: {error}"));
 
     assert_eq!(actual, expected);
 }
@@ -680,6 +705,18 @@ fn workspace_manifest_digest_preimage_is_pinned() {
         .unwrap_or_else(|error| panic!("manifest digests: {error}"));
 
     assert_eq!(actual.as_str(), EXPECTED_MANIFEST_DIGEST);
+}
+
+#[test]
+fn unborn_workspace_manifest_digest_preimage_is_pinned() {
+    let mut fixture = manifest();
+    fixture.recovery = Some(Recovery::UnbornBranch {
+        name: "main".to_owned(),
+    });
+    let actual = workspace_manifest_digest(&fixture)
+        .unwrap_or_else(|error| panic!("unborn manifest digests: {error}"));
+
+    assert_eq!(actual.as_str(), EXPECTED_UNBORN_MANIFEST_DIGEST);
 }
 
 #[test]
