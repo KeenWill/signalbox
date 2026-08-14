@@ -59,6 +59,23 @@ fn payload(value: &'static [u8]) -> InlineFramePayload {
     InlineFramePayload::new(value)
 }
 
+fn assert_constraint_error(error: sqlx::Error, expected_constraint: &str) {
+    let sqlx::Error::Database(database) = error else {
+        panic!("expected a PostgreSQL constraint error, got {error:?}");
+    };
+
+    assert_eq!(database.constraint(), Some(expected_constraint));
+}
+
+fn assert_trigger_error(error: sqlx::Error, expected_message: &str) {
+    let sqlx::Error::Database(database) = error else {
+        panic!("expected a PostgreSQL trigger error, got {error:?}");
+    };
+
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert_eq!(database.message(), expected_message);
+}
+
 /// INV-064: durable request and delivery projections retain one exact interleaving.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -188,7 +205,10 @@ async fn inv066_journal_frames_are_append_only() -> Result<(), Box<dyn Error>> {
     .execute(&pool)
     .await;
 
-    assert!(update.is_err());
+    assert_trigger_error(
+        update.expect_err("updating a journal entry is rejected"),
+        "program_run_journal_entry is append-only",
+    );
 
     let delete = sqlx::query(
         "DELETE FROM program_run_journal_entry
@@ -199,7 +219,10 @@ async fn inv066_journal_frames_are_append_only() -> Result<(), Box<dyn Error>> {
     .execute(&pool)
     .await;
 
-    assert!(delete.is_err());
+    assert_trigger_error(
+        delete.expect_err("deleting a journal entry is rejected"),
+        "program_run_journal_entry is append-only",
+    );
 
     pool.close().await;
     drop(container);
@@ -222,7 +245,10 @@ async fn sequence_state_row_cannot_be_deleted() -> Result<(), Box<dyn Error>> {
     .execute(&pool)
     .await;
 
-    assert!(delete.is_err());
+    assert_trigger_error(
+        delete.expect_err("deleting sequence state is rejected"),
+        "program_run_journal_sequence_state is append-only",
+    );
 
     pool.close().await;
     drop(container);
@@ -256,7 +282,10 @@ async fn sequence_state_run_identity_cannot_change() -> Result<(), Box<dyn Error
     .execute(&mut *transaction)
     .await;
 
-    assert!(update.is_err());
+    assert_trigger_error(
+        update.expect_err("changing sequence-state identity is rejected"),
+        "program_run_journal_sequence_state is append-only",
+    );
     transaction.rollback().await?;
 
     pool.close().await;
@@ -282,7 +311,10 @@ async fn payloadless_scope_request_rejects_inline_bytes() -> Result<(), Box<dyn 
     .execute(&pool)
     .await;
 
-    assert!(insert.is_err());
+    assert_constraint_error(
+        insert.expect_err("scope requests cannot carry inline bytes"),
+        "program_run_journal_entry_payload_shape",
+    );
 
     pool.close().await;
     drop(container);
@@ -374,7 +406,10 @@ async fn nondeterminism_evidence_cannot_attach_to_request() -> Result<(), Box<dy
     .execute(&pool)
     .await;
 
-    assert!(insert.is_err());
+    assert_trigger_error(
+        insert.expect_err("evidence cannot attach to a request"),
+        "nondeterminism fault and its complete twin frames must commit together",
+    );
 
     pool.close().await;
     drop(container);
