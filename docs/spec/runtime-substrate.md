@@ -19,17 +19,19 @@ compatibility-smoke automation was verified through PR #333
 probe, and pinned version were verified against the `0.146.0` executable through
 PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
 workflow-self-change trigger were verified through PR #471
-(`agent/codex-smoke-schedule`). The `signalboxd` names this page states for the
-composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
-adapter-scoped file catalogs are verified against this PR
-(`agent/credential-pools-parser`). The Anthropic adapter's server-side
-`fallback`-block recognition was verified through PR #280
-(`agent/provider-identity-normalization`). The HTTP fallback-body redaction
-ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
-persistence-repository families in the operator-failure inventory were verified
-through PR #288 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge
-and ephemeral text-delta projection were verified through PR #300
+(`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt tool-authority
+preamble is verified against this PR (`agent/phantom-prohibition`). The
+`signalboxd` names this page states for the composition root, its telemetry, and
+the production `FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
+catalogs are verified against this PR (`agent/credential-pools-parser`). The
+Anthropic adapter's server-side `fallback`-block recognition was verified
+through PR #280 (`agent/provider-identity-normalization`). The HTTP
+fallback-body redaction ordering was verified through PR #330
+(`agent/audit-verified-fixes`). The five persistence-repository families in the
+operator-failure inventory were verified through PR #288
+(`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
+text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
@@ -757,6 +759,25 @@ creates, so construction rejects hosts where process-group control is
 unavailable; a descendant that deliberately leaves that group is outside the
 adapter's boundary. Host isolation owns containment beyond the created group —
 specifically the runner sandbox in build-out — and is not an adapter claim.
+
+The rendered prompt opens with a preamble whose tool-authority statement is
+singular and positionally first: the serialized `tools` array is named the
+single authority on which tools exist, `tool_choice` and `structured_output` are
+carved out as the only statements that narrow or add to what may be proposed,
+the harness's own disabled facilities are distinguished from the declared tools,
+and the preamble states no categorical tool prohibition. Why: an earlier
+preamble opened with "Do not use shell, file, web, MCP, or collaboration tools"
+— aimed at the wrapped CLI's native facilities — and the prohibited categories
+are exactly the categories a caller's tool catalog populates, so the prompt
+carried two competing authority statements and a model could obey the wrong one,
+refusing work its declared tools authorized. The native facilities need no
+prompt-level prohibition because the invocation disables them mechanically, and
+prompt text is never a capability boundary. The residual the adapter cannot
+remove: the pinned CLI injects its own agent-identity instructions around the
+stdin prompt at runtime, so the preamble's authority statement is the first tool
+statement the adapter controls rather than the first text the model sees. The
+translation unit test pins the rendered prompt — no categorical prohibition,
+exactly one authority statement, positioned before the serialized request.
 
 **Committed unimplemented functionality — Codex file delivery.** The present
 adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
