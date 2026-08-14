@@ -193,7 +193,7 @@ public struct SignalboxUserInputContent: Codable, Equatable, Sendable {
       case .text(let text):
         return text
       case .attachment(let digest, let kind, _, let filename):
-        let label = filename.map { " \($0)" } ?? ""
+        let label = filename.map { " \(String(reflecting: $0))" } ?? ""
         return "[attachment \(kind.rawValue)\(label) \(digest.rawValue)]"
       }
     }.joined(separator: "\n")

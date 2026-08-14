@@ -159,6 +159,22 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testUserInputContentDisplayTextEscapesFilenameLineBreaks() throws {
+    let content = try SignalboxUserInputContent(validating: [
+      .attachment(
+        digest: try SignalboxCanonicalBlobDigest(validating: blobDigest),
+        kind: .document,
+        mediaType: "application/pdf",
+        displayFilename: "brief.pdf\n[trusted-looking transcript line]"
+      )
+    ])
+
+    XCTAssertEqual(
+      content.displayText,
+      "[attachment document \"brief.pdf\\n[trusted-looking transcript line]\" \(blobDigest)]"
+    )
+  }
+
   func testNewerProtocolVersionRemainsClassifiable() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.newerVersionFrame()
