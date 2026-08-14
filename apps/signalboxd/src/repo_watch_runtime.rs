@@ -5081,7 +5081,7 @@ mod tests {
         let observation = complete_typed_observation().await;
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
-        let number = 7_u64;
+        let number = previous.context().number().get();
         fixture
             .poller
             .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
