@@ -66,8 +66,8 @@ per-turn provenance. The following extensions remain undecided:
 - **Discovery invalidation and expansion.** Whether the daemon watches or
   explicitly rescans roots, which ignore language or depth bound applies,
   whether and how symbolic links may be followed, and which additional vendor
-  instruction formats become candidates. Blocks only live refresh and those
-  additional sources.
+  instruction formats become candidates. See the owning
+  [discovery contract](spec/workspace-instructions.md#discovery).
 - **Runner-workspace discovery.** The accepted daemon-local refusal needs a
   placement-revision-correlated runner operation for greedy discovery, typed
   findings, and exact source reads before runner-provisioned workspaces can
@@ -77,15 +77,12 @@ per-turn provenance. The following extensions remain undecided:
   eligible metadata, path-triggered admission, and any template-eager tier need
   exact recorded trigger and budget contracts. The baseline remains deliberate
   identity-addressed admission.
-- **Skill resources and offline reconstruction.** Addressing and hashing files
-  below a skill bundle, plus durable storage of rendered plaintext sufficient to
-  reconstruct historical instructions without the workspace, remain open. The
-  implemented manifest can prove equality and provenance without making that
-  stronger reconstruction claim.
+- **Skill resources and archive export.** Addressing and hashing files below a
+  skill bundle, plus export policy for retained rendered plaintext, remain open.
 - **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
   but unload authority, tombstone rendering, admitted-set history, and the
-  model-facing operation remain foundation work. Blocks unloading only; no
-  first-slice behavior depends on it.
+  model-facing operation remain foundation work. See the owning
+  [projection contract](spec/workspace-instructions.md#projection-rather-than-transcript-append).
 
 ## Conversation import
 
