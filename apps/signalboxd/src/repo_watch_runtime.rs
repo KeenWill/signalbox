@@ -773,6 +773,12 @@ struct PullRequestFreshness {
     published_generation: Option<RepoWatchCursorGeneration>,
 }
 
+#[derive(Clone)]
+struct ListedPullRequest {
+    updated_at: String,
+    head_sha: CommitSha,
+}
+
 struct FetchedPullRequest {
     state: RepoWatchPullRequestState,
     settlement: PullRequestSettlement,
@@ -908,7 +914,7 @@ impl GitHubRepositoryPoller {
     async fn fetch_pull_requests(
         self: &Arc<Self>,
         pull_numbers: BTreeSet<u64>,
-        listed: &BTreeMap<u64, String>,
+        listed: &BTreeMap<u64, ListedPullRequest>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
@@ -950,7 +956,7 @@ impl GitHubRepositoryPoller {
     async fn collect_pull_request_fetches(
         self: &Arc<Self>,
         pull_numbers: BTreeSet<u64>,
-        listed: &BTreeMap<u64, String>,
+        listed: &BTreeMap<u64, ListedPullRequest>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
         fetches: &mut JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>,
@@ -963,7 +969,7 @@ impl GitHubRepositoryPoller {
                     break;
                 };
                 let poller = Arc::clone(self);
-                let listed_updated_at = listed.get(&number).cloned();
+                let listed_pull_request = listed.get(&number).cloned();
                 let previous_pull_request = previous
                     .and_then(|observation| previous_pull_request(observation, number))
                     .cloned();
@@ -971,7 +977,7 @@ impl GitHubRepositoryPoller {
                     poller
                         .fetch_or_reuse_pull_request(
                             number,
-                            listed_updated_at.as_deref(),
+                            listed_pull_request.as_ref(),
                             previous_pull_request.as_ref(),
                             cursor_generation,
                         )
@@ -990,7 +996,7 @@ impl GitHubRepositoryPoller {
 
     async fn fetch_open_pull_numbers(
         &self,
-    ) -> Result<BTreeMap<u64, String>, RepositoryWatchAttemptError> {
+    ) -> Result<BTreeMap<u64, ListedPullRequest>, RepositoryWatchAttemptError> {
         let mut numbers = BTreeMap::new();
         let mut page = 1_u16;
         loop {
@@ -1008,7 +1014,15 @@ impl GitHubRepositoryPoller {
             let has_next = response.has_next_page;
             for value in response.value {
                 positive(value.number)?;
-                numbers.insert(value.number, value.updated_at);
+                let head_sha = CommitSha::try_new(value.head.sha)
+                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                numbers.insert(
+                    value.number,
+                    ListedPullRequest {
+                        updated_at: value.updated_at,
+                        head_sha,
+                    },
+                );
             }
             if !has_next {
                 return Ok(numbers);
@@ -1020,42 +1034,45 @@ impl GitHubRepositoryPoller {
     async fn fetch_or_reuse_pull_request(
         &self,
         number: u64,
-        listed_updated_at: Option<&str>,
+        listed_pull_request: Option<&ListedPullRequest>,
         previous_pull_request: Option<&RepoWatchPullRequestState>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
-        if let (Some(listed_updated_at), Some(previous)) =
-            (listed_updated_at, previous_pull_request)
-            && self.pull_request_is_unchanged(number, listed_updated_at, cursor_generation)
+        if let (Some(listed), Some(previous)) = (listed_pull_request, previous_pull_request)
+            && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
+            let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
+            let threads = self.fetch_threads(number).await?;
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
                 .await?;
             self.record_skipped_poll(number);
-            return reuse_pull_request(previous, reactions);
+            return reuse_pull_request(previous, reviews, threads, reactions);
         }
         let fetched = self
             .fetch_pull_request(number, previous_pull_request)
             .await?;
-        match listed_updated_at {
-            Some(listed_updated_at) => {
-                self.record_fetched_pull_request(number, listed_updated_at, fetched.settlement);
+        match listed_pull_request {
+            Some(listed) => {
+                self.record_fetched_pull_request(number, listed, fetched.settlement);
             }
             None => self.forget_pull_request(number),
         }
         Ok(fetched.state)
     }
 
-    fn pull_request_is_unchanged(
+    fn pull_request_detail_is_reusable(
         &self,
         number: u64,
-        listed_updated_at: &str,
+        listed: &ListedPullRequest,
+        previous: &RepoWatchPullRequestState,
         cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> bool {
         self.freshness().get(&number).is_some_and(|freshness| {
             freshness.published_generation == cursor_generation
                 && cursor_generation.is_some()
-                && freshness.updated_at == listed_updated_at
+                && freshness.updated_at == listed.updated_at
+                && previous.context().head_sha() == &listed.head_sha
                 && freshness.settlement == PullRequestSettlement::Settled
                 && freshness.skipped_polls < MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS
         })
@@ -1070,13 +1087,13 @@ impl GitHubRepositoryPoller {
     fn record_fetched_pull_request(
         &self,
         number: u64,
-        updated_at: &str,
+        listed: &ListedPullRequest,
         settlement: PullRequestSettlement,
     ) {
         self.freshness().insert(
             number,
             PullRequestFreshness {
-                updated_at: updated_at.to_owned(),
+                updated_at: listed.updated_at.clone(),
                 settlement,
                 skipped_polls: 0,
                 published_generation: None,
@@ -2209,6 +2226,8 @@ const fn remaining_interval(timing: PollCycleTiming) -> Duration {
 
 fn reuse_pull_request(
     previous: &RepoWatchPullRequestState,
+    reviews: Vec<RepoWatchReviewObservation>,
+    threads: Vec<RepoWatchThreadObservation>,
     reactions: Vec<RepoWatchReactionObservation>,
 ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
     RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
@@ -2217,8 +2236,8 @@ fn reuse_pull_request(
         mergeable_state: previous.mergeable_state(),
         completed_check_suites: previous.completed_check_suites().to_vec(),
         completed_check_runs: previous.completed_check_runs().to_vec(),
-        reviews: previous.reviews().to_vec(),
-        threads: previous.threads().to_vec(),
+        reviews,
+        threads,
         reactions,
     })
     .map_err(|_| RepositoryWatchAttemptError::Normalization)
@@ -2367,6 +2386,12 @@ fn normalize_review_state(state: &str) -> Result<ProviderReviewState, Repository
 struct PullNumberResponse {
     number: u64,
     updated_at: String,
+    head: ListedPullHeadResponse,
+}
+
+#[derive(Clone, Deserialize)]
+struct ListedPullHeadResponse {
+    sha: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2607,14 +2632,15 @@ mod tests {
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
+        ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
         PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse,
+        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
+        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
         dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
         remaining_interval, rule_activation_error, supervise_repository_tasks,
     };
@@ -2702,6 +2728,7 @@ mod tests {
     const EXPECTED_MAIN_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Success;
     const PULL_NUMBER: u64 = 7;
     const HEAD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CHANGED_LISTED_HEAD_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
     const BASE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HEAD_REPOSITORY: &str = "fork/repository";
     const HEAD_BRANCH: &str = "feature/watch";
@@ -2731,6 +2758,12 @@ mod tests {
     const IN_PROGRESS_CHECK_RUN_NAME: &str = "lint";
     const RETAINED_REVIEW_IDS: [u64; 2] = [31, 32];
     const PENDING_REVIEW_ID: u64 = 33;
+    // Public provider identities from the deferred-refresh reproduction. The
+    // surrounding actors and content stay synthetic test data.
+    const DEFERRED_REVIEW_IDS: [u64; 3] = [4_922_903_072, 4_922_910_037, 4_922_938_791];
+    const DEFERRED_USER_REVIEWER: &str = "watch-user";
+    const DEFERRED_APPROVING_REVIEWER: &str = "review-agent-one[bot]";
+    const DEFERRED_COMMENTING_REVIEWER: &str = "review-agent-two[bot]";
     const REVIEW_THREADS: [&str; 2] = [REVIEW_THREAD, RESOLVED_REVIEW_THREAD];
     const SIGNAL_REACTION_CONTENTS: [&str; 3] = ["+1", "rocket", "eyes"];
     const AMBIENT_REACTOR: &str = "ambient-user";
@@ -2749,8 +2782,20 @@ mod tests {
     const SCRIPTED_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn pulls_with_one() -> String {
-        serde_json::json!([{ "number": PULL_NUMBERS[0], "updated_at": PULL_UPDATED_AT }])
-            .to_string()
+        serde_json::json!([{
+            "number": PULL_NUMBERS[0],
+            "updated_at": PULL_UPDATED_AT,
+            "head": { "sha": HEAD_SHA }
+        }])
+        .to_string()
+    }
+
+    fn listed_pull_request(head_sha: &str) -> ListedPullRequest {
+        ListedPullRequest {
+            updated_at: PULL_UPDATED_AT.to_owned(),
+            head_sha: CommitSha::try_new(head_sha.to_owned())
+                .expect("fixture listed head is valid"),
+        }
     }
 
     fn pull_detail() -> String {
@@ -2948,6 +2993,48 @@ mod tests {
                 "id": PENDING_REVIEW_ID,
                 "user": { "login": PROVIDER_REVIEWER },
                 "state": "PENDING",
+                "commit_id": HEAD_SHA
+            }
+        ])
+        .to_string()
+    }
+
+    fn reviews_with_deferred_wave() -> String {
+        serde_json::json!([
+            {
+                "id": RETAINED_REVIEW_IDS[0],
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "APPROVED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": RETAINED_REVIEW_IDS[1],
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "DISMISSED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": PENDING_REVIEW_ID,
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "PENDING",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[0],
+                "user": { "login": DEFERRED_USER_REVIEWER },
+                "state": "COMMENTED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[1],
+                "user": { "login": DEFERRED_APPROVING_REVIEWER },
+                "state": "APPROVED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[2],
+                "user": { "login": DEFERRED_COMMENTING_REVIEWER },
+                "state": "COMMENTED",
                 "commit_id": HEAD_SHA
             }
         ])
@@ -3807,10 +3894,26 @@ mod tests {
     }
 
     fn skipped_pull_request_responses() -> Vec<ScriptedResponse> {
+        skipped_pull_request_responses_with_reviews(reviews())
+    }
+
+    fn skipped_pull_request_responses_with_deferred_reviews() -> Vec<ScriptedResponse> {
+        skipped_pull_request_responses_with_reviews(reviews_with_deferred_wave())
+    }
+
+    fn skipped_pull_request_responses_with_reviews(reviews: String) -> Vec<ScriptedResponse> {
         vec![
             ScriptedResponse::conditional_ok(
                 RequestTarget(PULLS_TARGET.to_owned()),
                 ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(threads()),
             ),
             ScriptedResponse::conditional_ok(
                 RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
@@ -4038,7 +4141,10 @@ mod tests {
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let poller = Arc::clone(&fixture.poller);
@@ -4084,7 +4190,10 @@ mod tests {
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let poller = Arc::clone(&fixture.poller);
@@ -4610,7 +4719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unchanged_pull_request_with_settled_checks_refetches_only_its_reactions() {
+    async fn an_unchanged_pull_request_refetches_dispatch_signals() {
         let responses = settled_typed_observation_responses()
             .into_iter()
             .chain(skipped_pull_request_responses())
@@ -4634,6 +4743,72 @@ mod tests {
         server.finish().await;
 
         assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn a_reused_pull_request_emits_every_deferred_review_once() {
+        let responses = settled_typed_observation_responses()
+            .into_iter()
+            .chain(skipped_pull_request_responses_with_deferred_reviews())
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let previous = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("the prior cursor observation is fetched");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let current = fixture
+            .poller
+            .poll(Some(&previous))
+            .await
+            .expect("the deferred remote state is fetched");
+        server.finish().await;
+        let events = derive_repo_watch_events(
+            &fixture.poller.repository,
+            Some(&previous),
+            &current,
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .expect("the deferred review wave forms events");
+
+        assert_eq!(events.len(), DEFERRED_REVIEW_IDS.len());
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_USER_REVIEWER))
+                    .expect("fixture reviewer is valid"),
+                state: ReviewState::Commented,
+                commit: CommitSha::try_new(String::from(HEAD_SHA))
+                    .expect("fixture review commit is valid"),
+            }
+        );
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_APPROVING_REVIEWER,))
+                    .expect("fixture reviewer is valid"),
+                state: ReviewState::Approved,
+                commit: CommitSha::try_new(String::from(HEAD_SHA))
+                    .expect("fixture review commit is valid"),
+            }
+        );
+        assert_eq!(
+            events[2].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(
+                    String::from(DEFERRED_COMMENTING_REVIEWER,)
+                )
+                .expect("fixture reviewer is valid"),
+                state: ReviewState::Commented,
+                commit: CommitSha::try_new(String::from(HEAD_SHA))
+                    .expect("fixture review commit is valid"),
+            }
+        );
     }
 
     #[tokio::test]
@@ -4749,9 +4924,18 @@ mod tests {
             .collect();
         let server = ConcurrentScriptedServer::start(responses).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed: BTreeMap<u64, String> = numbers
+        let listed: BTreeMap<u64, ListedPullRequest> = numbers
             .iter()
-            .map(|number| (*number, PULL_UPDATED_AT.to_owned()))
+            .map(|number| {
+                (
+                    *number,
+                    ListedPullRequest {
+                        updated_at: PULL_UPDATED_AT.to_owned(),
+                        head_sha: CommitSha::try_new(minimal_pull_head_sha(*number))
+                            .expect("fixture listed head is valid"),
+                    },
+                )
+            })
             .collect();
 
         let pull_requests = fixture
@@ -4809,7 +4993,14 @@ mod tests {
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let poller = Arc::clone(&fixture.poller);
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            ListedPullRequest {
+                updated_at: PULL_UPDATED_AT.to_owned(),
+                head_sha: CommitSha::try_new(minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER))
+                    .expect("fixture listed head is valid"),
+            },
+        )]);
         let fetch = tokio::spawn(async move {
             poller
                 .fetch_pull_requests(
@@ -4846,27 +5037,27 @@ mod tests {
     /// After a commit conflict the durable baseline belongs to a competing
     /// watcher, so entries recorded and published against the superseded
     /// baseline must authorize no further reuse.
-    #[test]
-    fn invalidated_freshness_authorizes_no_reuse() {
+    #[tokio::test]
+    async fn invalidated_freshness_authorizes_no_reuse() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        // Arbitrary: reuse authorization is keyed by the number alone, so any
-        // listed pull number exercises it.
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
         let number = 7_u64;
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
         assert!(
-            fixture.poller.pull_request_is_unchanged(
+            fixture.poller.pull_request_detail_is_reusable(
                 number,
-                PULL_UPDATED_AT,
+                &listed,
+                previous,
                 Some(RepoWatchCursorGeneration::INITIAL),
             ),
             "a published settled entry authorizes reuse against its cursor generation"
@@ -4874,17 +5065,18 @@ mod tests {
         fixture.poller.invalidate_freshness();
 
         assert!(
-            !fixture.poller.pull_request_is_unchanged(
+            !fixture.poller.pull_request_detail_is_reusable(
                 number,
-                PULL_UPDATED_AT,
+                &listed,
+                previous,
                 Some(RepoWatchCursorGeneration::INITIAL),
             ),
             "an invalidated record authorizes nothing"
         );
     }
 
-    #[test]
-    fn freshness_published_against_another_cursor_authorizes_no_reuse() {
+    #[tokio::test]
+    async fn freshness_published_against_another_cursor_authorizes_no_reuse() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
@@ -4894,58 +5086,67 @@ mod tests {
         let loaded_generation = published_generation
             .next()
             .expect("fixture cursor generation has a successor");
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture.poller.publish_freshness(published_generation);
 
         assert!(
-            !fixture.poller.pull_request_is_unchanged(
+            !fixture.poller.pull_request_detail_is_reusable(
                 number,
-                PULL_UPDATED_AT,
+                &listed,
+                previous,
                 Some(loaded_generation),
             ),
             "freshness published against another durable cursor must not authorize reuse"
         );
     }
 
-    #[test]
-    fn changed_pull_request_timestamp_authorizes_no_reuse() {
+    #[tokio::test]
+    async fn changed_pull_request_timestamp_authorizes_no_reuse() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
         let number = 7_u64;
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
 
-        assert!(!fixture.poller.pull_request_is_unchanged(
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
-            "2026-08-03T12:30:01Z",
+            &ListedPullRequest {
+                updated_at: "2026-08-03T12:30:01Z".to_owned(),
+                head_sha:
+                    CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture listed head is valid"),
+            },
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
     }
 
-    #[test]
-    fn pull_request_reuse_stops_at_the_skipped_poll_limit() {
+    #[tokio::test]
+    async fn pull_request_reuse_stops_at_the_skipped_poll_limit() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
         let number = 7_u64;
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -4956,23 +5157,57 @@ mod tests {
             .expect("fixture freshness is recorded")
             .skipped_polls = MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS - 1;
 
-        assert!(fixture.poller.pull_request_is_unchanged(
+        assert!(fixture.poller.pull_request_detail_is_reusable(
             number,
-            PULL_UPDATED_AT,
+            &listed,
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
         fixture.poller.record_skipped_poll(number);
-        assert!(!fixture.poller.pull_request_is_unchanged(
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
-            PULL_UPDATED_AT,
+            &listed,
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
         fixture.poller.record_skipped_poll(number);
-        assert!(!fixture.poller.pull_request_is_unchanged(
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
-            PULL_UPDATED_AT,
+            &listed,
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
+    }
+
+    #[tokio::test]
+    async fn a_listed_head_change_forbids_pull_request_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let previously_listed = listed_pull_request(HEAD_SHA);
+        let changed_listing = listed_pull_request(CHANGED_LISTED_HEAD_SHA);
+        let number = previous.context().number().get();
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &previously_listed,
+            PullRequestSettlement::Settled,
+        );
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+
+        assert!(
+            !fixture.poller.pull_request_detail_is_reusable(
+                number,
+                &changed_listing,
+                previous,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            ),
+            "a head change is never hidden by unchanged listing metadata"
+        );
     }
 
     #[tokio::test]
