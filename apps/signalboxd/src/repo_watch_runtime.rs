@@ -388,9 +388,9 @@ impl RepositoryWatchTask {
                         repository = %self.repository.as_str(),
                         cause_code = "repository_watch_cutoff_corruption",
                         error = %error,
-                        "repository-watch lifecycle cutoff is corrupt; dispatch processing continues"
+                        "repository-watch lifecycle cutoff quarantined a corrupt goal; dispatch processing continues"
                     );
-                    return Ok(());
+                    continue;
                 }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }

@@ -58,6 +58,7 @@ const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
 const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
 const FIRST_TERMINAL_IDENTITY_SEED: u128 = 0x10_000;
+const CORRUPT_GOAL_GENERATION: i64 = 2;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -666,6 +667,21 @@ async fn commit_merge(fixture: &DispatchFixture, event_id: u128) -> Result<(), B
     Ok(())
 }
 
+async fn corrupt_goal_generation(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
+    sqlx::query("ALTER TABLE goal_event DISABLE TRIGGER goal_event_is_append_only")
+        .execute(pool)
+        .await?;
+    sqlx::query("UPDATE goal_event SET generation = $2 WHERE session_id = $1")
+        .bind(session.as_uuid())
+        .bind(CORRUPT_GOAL_GENERATION)
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE goal_event ENABLE TRIGGER goal_event_is_append_only")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn evaluate_obligation(
     fixture: &DispatchFixture,
     obligation: RepoWatchDispatchObligation,
@@ -772,6 +788,38 @@ async fn merged_pull_request_ends_the_commissioned_goal() -> Result<(), Box<dyn 
     assert_eq!(goal.current().state(), &GoalState::UserStopped);
     assert_eq!(cutoff_goal_count, 1);
     assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn corrupt_goal_does_not_leave_lifecycle_cutoff_pending() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    corrupt_goal_generation(&fixture.pool, fixture.session(0)).await?;
+    commit_merge(&fixture, 0x51_200).await?;
+
+    let quarantined = fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x51_300))
+        })
+        .await;
+    let pending = fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x51_400))
+        })
+        .await?;
+    let cutoff_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_lifecycle_cutoff",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(quarantined.is_err());
+    assert!(!pending);
+    assert_eq!(cutoff_count, 1);
     Ok(())
 }
 

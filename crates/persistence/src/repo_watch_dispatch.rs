@@ -17,7 +17,7 @@ use signalbox_domain::{
     RepoWatchEventId, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion,
     RepositorySlug, SessionId,
 };
-use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
+use sqlx::{Acquire, PgPool, Postgres, Row, Transaction, types::Uuid};
 
 use crate::{
     commit_failure_is_ambiguous,
@@ -197,6 +197,7 @@ impl PostgresRepoWatchDispatchStore {
         .bind(disposition)
         .execute(&mut *transaction)
         .await?;
+        let mut cutoff_corruption = None;
         if disposition == "terminal" {
             crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
                 &mut transaction,
@@ -230,24 +231,41 @@ impl PostgresRepoWatchDispatchStore {
                         descendant_scope: DescendantTerminationScope::ParentAlone,
                     },
                 );
-                if crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+                let mut savepoint = transaction.begin().await?;
+                match crate::goal::insert_repo_watch_composed_stop(&mut savepoint, command.clone())
                     .await
-                    .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?
                 {
-                    sqlx::query(
-                        "INSERT INTO repo_watch_lifecycle_cutoff_goal
-                            (event_id, session_id, goal_command_id)
-                         VALUES ($1, $2, $3)",
-                    )
-                    .bind(event_id)
-                    .bind(session_id)
-                    .bind(command.command_id().as_uuid())
-                    .execute(&mut *transaction)
-                    .await?;
+                    Ok(stopped) => {
+                        if stopped {
+                            sqlx::query(
+                                "INSERT INTO repo_watch_lifecycle_cutoff_goal
+                                    (event_id, session_id, goal_command_id)
+                                 VALUES ($1, $2, $3)",
+                            )
+                            .bind(event_id)
+                            .bind(session_id)
+                            .bind(command.command_id().as_uuid())
+                            .execute(&mut *savepoint)
+                            .await?;
+                        }
+                        savepoint.commit().await?;
+                    }
+                    Err(crate::goal::GoalRepositoryError::Corruption(error)) => {
+                        savepoint.rollback().await?;
+                        cutoff_corruption
+                            .get_or_insert(crate::goal::GoalRepositoryError::Corruption(error));
+                    }
+                    Err(error) => {
+                        savepoint.rollback().await?;
+                        return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+                    }
                 }
             }
         }
         commit(transaction).await?;
+        if let Some(error) = cutoff_corruption {
+            return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+        }
         Ok(true)
     }
 
