@@ -59,10 +59,12 @@ grants no session authority, and eligibility spends no model context.
 
 Discovery greedily walks the complete directory tree rooted at the session's
 daemon-local resolved workspace and each instruction directory explicitly
-registered by daemon configuration. The workspace and every configured root are
-separate `DiscoveryRoot` values; a configured root is not silently folded into
-the workspace's authority or relative-path namespace. A session without a
-daemon-local resolved workspace still discovers configured roots.
+registered by the owning
+[configuration grammar](configuration-and-credentials.md#workspace-instruction-roots).
+The workspace and every configured root are separate `DiscoveryRoot` values; a
+configured root is not silently folded into the workspace's authority or
+relative-path namespace. A session without a daemon-local resolved workspace
+still discovers configured roots.
 
 Version one has exactly two root kinds and canonical lowercase spellings:
 `workspace` for the session's daemon-local resolved workspace and `configured`
@@ -173,12 +175,15 @@ never every discovered bundle.
 
 A session allow-list names registered bundle identities. A template predates the
 workspace registrations, so it instead names exact `TemplateInstructionSelector`
-values: root kind, root-relative source path, bundle kind, and expected source
-hash. The checked session-creation operation scans and registers its
-daemon-local workspace, resolves each selector to exactly one identity, and then
-copies those identities. A missing, stale, or ambiguous selector grants nothing
-and is recorded as a typed resolution finding; it never degrades to a path glob
-or newest-content match. Runner-workspace selectors remain unresolved until the
+values: a root reference, root-relative source path, bundle kind, and expected
+source hash. The root reference is exactly `workspace`, or `configured` plus the
+configured root's stable `ConfiguredInstructionRootId` defined by the
+[configuration contract](configuration-and-credentials.md#workspace-instruction-roots).
+The checked session-creation operation scans and registers its daemon-local
+workspace, resolves each selector to exactly one identity, and then copies those
+identities. A missing, stale, or ambiguous selector grants nothing and is
+recorded as a typed resolution finding; it never degrades to a path glob or
+newest-content match. Runner-workspace selectors remain unresolved until the
 runner discovery protocol exists.
 
 The effective eligibility snapshot is immutable for one turn. A turn records a
