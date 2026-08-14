@@ -32,6 +32,21 @@ struct PersistedManifestHashes {
     manifest_hash: Vec<u8>,
 }
 
+#[derive(sqlx::FromRow)]
+struct PersistedDiscoveryRoot {
+    root_ordinal: i64,
+    root_kind: String,
+    root_path: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct PersistedDiscoveryFinding {
+    finding_ordinal: i64,
+    source_path: String,
+    finding_kind: String,
+}
+
+#[track_caller]
 fn assert_persisted_candidate(
     persisted: &PersistedCandidate,
     ordinal: i64,
@@ -66,6 +81,15 @@ fn assert_persisted_candidate(
         persisted.source_hash,
         expected.source_hash().as_bytes().as_slice()
     );
+}
+
+#[track_caller]
+fn assert_append_only_rejection(result: Result<sqlx::postgres::PgQueryResult, sqlx::Error>) {
+    let error = result.expect_err("append-only evidence rejects mutation");
+    let database = error
+        .as_database_error()
+        .expect("append-only rejection is a database error");
+    assert_eq!(database.code().as_deref(), Some("23514"));
 }
 
 async fn active_instruction_turn(pool: &PgPool) -> Result<(SessionId, TurnId), Box<dyn Error>> {
@@ -335,14 +359,14 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
     .bind(manifest_id.into_uuid())
     .execute(&pool)
     .await;
-    assert!(mutation.is_err());
+    assert_append_only_rejection(mutation);
     let deletion = sqlx::query(
         "DELETE FROM turn_instruction_manifest WHERE turn_instruction_manifest_id = $1",
     )
     .bind(manifest_id.into_uuid())
     .execute(&pool)
     .await;
-    assert!(deletion.is_err());
+    assert_append_only_rejection(deletion);
 
     pool.close().await;
     drop(container);
@@ -408,6 +432,89 @@ async fn inv061_incomplete_discovery_remains_unbound_for_retry() -> Result<(), B
         .fetch_one(&pool)
         .await?,
         0
+    );
+    let persisted_usage = sqlx::query_as::<_, PersistedDiscoveryUsage>(
+        "SELECT limit_set_version, classified_entry_count, finding_count,
+                candidate_source_byte_count, elapsed_millis, scan_complete
+           FROM instruction_discovery
+          WHERE instruction_discovery_id = $1",
+    )
+    .bind(first_discovery.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        persisted_usage.limit_set_version,
+        i16::try_from(incomplete.limit_set_version()).expect("fixture limit version fits smallint")
+    );
+    assert_eq!(
+        persisted_usage.classified_entry_count,
+        i64::try_from(incomplete.classified_entries()).expect("fixture entry count fits bigint")
+    );
+    assert_eq!(
+        persisted_usage.finding_count,
+        i64::try_from(incomplete.findings().len()).expect("fixture finding count fits bigint")
+    );
+    assert_eq!(
+        persisted_usage.candidate_source_byte_count,
+        i64::try_from(incomplete.candidate_source_bytes())
+            .expect("fixture source byte count fits bigint")
+    );
+    assert_eq!(
+        persisted_usage.elapsed_millis,
+        i64::try_from(incomplete.elapsed_millis()).expect("fixture elapsed time fits bigint")
+    );
+    assert_eq!(persisted_usage.scan_complete, incomplete.is_complete());
+    let persisted_roots = sqlx::query_as::<_, PersistedDiscoveryRoot>(
+        "SELECT root_ordinal, root_kind, root_path
+           FROM instruction_discovery_root
+          WHERE instruction_discovery_id = $1
+          ORDER BY root_ordinal",
+    )
+    .bind(first_discovery.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let persisted_root = persisted_roots
+        .first()
+        .expect("the incomplete discovery root is persisted");
+    let expected_root = incomplete
+        .roots()
+        .first()
+        .expect("the incomplete discovery names its workspace root");
+    assert_eq!(persisted_roots.len(), incomplete.roots().len());
+    assert_eq!(persisted_root.root_ordinal, 1);
+    assert_eq!(persisted_root.root_kind, "workspace");
+    assert_eq!(persisted_root.root_path, expected_root.path().as_str());
+    let persisted_findings = sqlx::query_as::<_, PersistedDiscoveryFinding>(
+        "SELECT finding_ordinal, source_path, finding_kind
+           FROM instruction_discovery_finding
+          WHERE instruction_discovery_id = $1
+          ORDER BY finding_ordinal",
+    )
+    .bind(first_discovery.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let persisted_finding = persisted_findings
+        .first()
+        .expect("the incomplete discovery finding is persisted");
+    let expected_finding = incomplete
+        .findings()
+        .first()
+        .expect("the incomplete discovery carries its limit finding");
+    assert_eq!(persisted_findings.len(), incomplete.findings().len());
+    assert_eq!(persisted_finding.finding_ordinal, 1);
+    assert_eq!(
+        persisted_finding.source_path,
+        expected_finding.path().as_str()
+    );
+    assert_eq!(
+        expected_finding.kind(),
+        signalbox_application::InstructionDiscoveryFindingKind::LimitReached(
+            signalbox_application::InstructionDiscoveryLimitKind::CandidateSourceBytes,
+        )
+    );
+    assert_eq!(
+        persisted_finding.finding_kind,
+        "limit_candidate_source_bytes"
     );
 
     std::fs::write(&source_path, "retry rule\n")?;
