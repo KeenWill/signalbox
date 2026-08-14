@@ -17,14 +17,14 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
-(`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against PR #614 (`agent/repo-watch-review-reliability`), and the
-request-envelope behavior is verified against this PR
-(`agent/daemon-ops-overnight`). The provider members the poller adopts as
-check-suite and check-run completion generations are verified against PR #541
-(`fix/check-run-updated-at`). The goal a dispatch commissions with its session,
-and the binding of the dispatched work turn to that goal's generation, are
-verified against this PR (`agent/commission-binding`).
+(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
+dispatch commissions with its session, the binding of the dispatched work turn
+to that goal's generation, and the occupied-refusal obligation and collapsed
+current-state delivery are verified against PR #812
+(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
+against this PR (`agent/daemon-ops-overnight`). The provider members the poller
+adopts as check-suite and check-run completion generations are verified against
+PR #541 (`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
 
@@ -360,7 +360,10 @@ tagged action variants. Version one ships exactly one configured variant,
 
 **Implemented behavior.** When a fact matches, every configured action produces
 one emitted `dispatch_session { template, params }` action in list order, where
-`params` is the exact injected tagged context for that event.
+`params` is the exact injected tagged context for that event. When an occupied
+match joins an outstanding delivery obligation, the eventual action uses the
+latest joined event and adds the current-state delivery member defined below; it
+never emits each joined event as a separate action.
 
 **Implemented behavior.** Dispatch context is the ratified tagged union:
 
@@ -370,6 +373,19 @@ one emitted `dispatch_session { template, params }` action in list order, where
 **Implemented behavior.** The embedded event is the complete triggering durable
 fact, not reconstructed API state. A pull-request event always produces the
 first shape and `BranchWorkflowRunCompleted` always produces the second.
+
+**Implemented behavior.** A fresh dispatch carries no `delivery` member. A
+dispatch settling an occupied-refusal obligation adds
+`delivery { mode = "owed_current_state", obligation_id, matched_event_count, first_event_id, latest_event_id, current }`.
+Its embedded event is the latest matched fact joined to that obligation, while
+`current` is projected from the durable cursor read for dispatch. Pull-request
+current state carries `type`, `present`, and, when present, the complete current
+target, lifecycle, mergeability, completed check suites and runs, retained
+reviews, review threads, and configured-reviewer reactions. An absent pull
+request retains its number and `present = false`. Branch current state carries
+the branch, its optional current head, the triggering workflow name, and that
+workflow's latest completed runs. The count and boundary identities summarize
+collapse; intermediate facts are not replayed into the session.
 
 **Implemented behavior.** A session-template context declaration requires a
 nonempty set containing pull-request context, branch context, or both. Rule
@@ -474,34 +490,50 @@ back the whole batch. Each record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and newly
 created session. The action ordinal distinguishes sibling sessions without
 letting the first action suppress later actions from the same match. An occupied
-singleton refuses another match. The batch releases it at the terminal
-transition that makes every dispatched session in that batch terminal; cooldown
-is measured from that recorded transition rather than from later watcher work
-and suppresses a successor until its interval has elapsed. Equal recovery cannot
-create a second session for the same admitted action. A session whose current
-goal is pursuing remains nonterminal for singleton ownership across the gap
-between a completed goal turn and its durably queued continuation. Goal
+singleton refuses another match and atomically opens one durable delivery
+obligation for that singleton. Further matching facts join its latest-event
+projection and increment its count, including a match racing with release, so
+one singleton has at most one outstanding obligation. Their individual terminal
+evaluations remain append-only audit facts. The batch releases the singleton at
+the terminal transition that makes every dispatched session in that batch
+terminal. The obligation becomes eligible only after that release and the same
+cooldown that would suppress a fresh successor; cooldown suppression without an
+existing obligation does not create one. Eligibility settles the obligation and
+creates its one current-state batch atomically. Equal recovery cannot create a
+second session for the same admitted action or obligation. A session whose
+current goal is pursuing remains nonterminal for singleton ownership across the
+gap between a completed goal turn and its durably queued continuation. Goal
 blocking, achievement, or user stop rechecks release after pursuit ends. The
 append-only dispatch records identify the sessions responsible for the PR; no
 mutable assignment flag replaces them.
+
+**Implemented behavior.** Outstanding obligations are directly observable in the
+`repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
+repository, rule, singleton and pull request or stack root, first and latest
+matched events, collapsed count and timestamps, any occupying dispatch and its
+sessions, cooldown eligibility, and present readiness. Rule deactivation settles
+an obligation without dispatch rather than leaving permanently owed work for
+semantics that are no longer configured.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes
 later events in cursor and event-ordinal order. Activation and each terminal
 evaluation outcome are append-only. Restart resumes the oldest unevaluated fact
-for that rule version; it neither redispatches an evaluated fact nor treats
-pre-activation history as a new live signal. Reconciliation records an
-append-only deactivation when a configured identity or its repository
-disappears. Guarded daemon startup reconciles the complete repository set before
-any watch task starts, including the empty set when the repository-watch section
-is absent; the absent section still starts no watch runtime or polling task.
-Configuration reconciliation and evaluation are serialized per repository: an
-evaluation already committed may replay, but an already-loaded event cannot
-create a dispatch after deactivation commits. Activation stores a digest of the
-complete versioned matcher, ordered action list, singleton scope, and cooldown;
-changing any of those semantics while retaining an active identity is a
-permanent configuration failure. A deactivated rule identity and version cannot
-be configured again; either kind of replacement uses a new identity so no events
+and the oldest eligible obligation for that rule version; it neither
+redispatches an evaluated fact nor treats pre-activation history as a new live
+signal. An obligation is a separate collapsed delivery identity, not a request
+to reevaluate its occupied facts. Reconciliation records an append-only
+deactivation when a configured identity or its repository disappears. Guarded
+daemon startup reconciles the complete repository set before any watch task
+starts, including the empty set when the repository-watch section is absent; the
+absent section still starts no watch runtime or polling task. Configuration
+reconciliation and evaluation are serialized per repository: an evaluation
+already committed may replay, but an already-loaded event cannot create a
+dispatch after deactivation commits. Activation stores a digest of the complete
+versioned matcher, ordered action list, singleton scope, and cooldown; changing
+any of those semantics while retaining an active identity is a permanent
+configuration failure. A deactivated rule identity and version cannot be
+configured again; either kind of replacement uses a new identity so no events
 can be evaluated under semantics different from the activation that admitted
 them.
 
