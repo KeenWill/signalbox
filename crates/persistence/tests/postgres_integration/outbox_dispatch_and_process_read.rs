@@ -3259,6 +3259,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
         .frontier_entries()
         .map(signalbox_domain::SemanticTranscriptEntry::reference)
         .collect::<Vec<_>>();
+    record_queued_empty_instruction_manifest(&pool, session, turn).await?;
 
     let committed = activation
         .commit_counted_preview(preview, counted_call, &model_calls)
@@ -3267,7 +3268,6 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
         panic!("the unchanged counted activation must commit");
     };
     assert_eq!(activated.turn(), turn);
-    record_empty_instruction_manifest(&pool, session).await?;
 
     let steering = input_with_delivery(
         0xcd0d,
