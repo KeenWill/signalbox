@@ -515,13 +515,13 @@ attempt. For mutable thread resolutions, receipt ordering is compared with the
 database-clock instant immediately after the provider snapshot is observed, not
 with the start of the whole poll. A receipt completed during the poll but before
 that instant can therefore cause the state contained in the snapshot, while a
-receipt completed after the snapshot cannot suppress an earlier user
-resolution. Each receipt records its first matching cursor once. A published
-review's immutable receipt remains directly correlatable to each exact child
-thread without recurring per-generation observation rows, so the review and a
-delayed inline-thread event carry the same cause once each. An unchanged poll
-still consumes a mutable thread receipt when it is the first cursor containing
-that exact thread, whether or not the requested transition remains visible, so a
+receipt completed after the snapshot cannot suppress an earlier user resolution.
+Each receipt records its first matching cursor once. A published review's
+immutable receipt remains directly correlatable to each exact child thread
+without recurring per-generation observation rows, so the review and a delayed
+inline-thread event carry the same cause once each. An unchanged poll still
+consumes a mutable thread receipt when it is the first cursor containing that
+exact thread, whether or not the requested transition remains visible, so a
 later user transition remains dispatchable.
 
 Evaluation defers an event without recording an outcome while a potentially
