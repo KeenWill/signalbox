@@ -2029,7 +2029,10 @@ where
             handle_abort_blob_upload(writer, version, request_id, pending_blob_upload).await
         }
         ClientRequest::ReadBlobMetadata { digest } => {
-            handle_read_blob_metadata(writer, version, request_id, digest, services).await
+            handle_read_blob_metadata(
+                reader, writer, version, request_id, digest, services, shutdown,
+            )
+            .await
         }
         ClientRequest::ReadBlobChunk {
             digest,
@@ -5617,11 +5620,13 @@ where
 }
 
 async fn handle_read_blob_metadata<Writer>(
+    reader: &BufReader<OwnedReadHalf>,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
     digest: CanonicalBlobDigest,
     services: &ConnectionServices,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -5635,13 +5640,31 @@ where
         )
         .await;
     }
+    let deadline = Instant::now() + BLOB_READ_TIMEOUT;
+    let snapshot_permit = tokio::select! {
+        biased;
+        () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        () = wait_for_connection_loss(reader) => return Ok(()),
+        () = sleep_until(deadline) => return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        ).await,
+        permit = Arc::clone(&services.snapshot_reader_budget).acquire_owned() => permit
+            .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed)?,
+    };
     let repository = BlobCatalogRepository::new(services.pool.clone());
-    let outcome = tokio::time::timeout(
-        BLOB_READ_TIMEOUT,
-        read_blob_metadata(&repository, digest.into_digest()),
-    )
-    .await
-    .unwrap_or(Err(BlobReadError::Unavailable));
+    let outcome = tokio::select! {
+        biased;
+        () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        () = wait_for_connection_loss(reader) => return Ok(()),
+        outcome = tokio::time::timeout_at(
+            deadline,
+            read_blob_metadata(&repository, digest.into_digest()),
+        ) => outcome.unwrap_or(Err(BlobReadError::Unavailable)),
+    };
+    drop(snapshot_permit);
     match outcome {
         Ok(metadata) => {
             write_message(
@@ -5703,16 +5726,34 @@ where
     let Some(length) = NonZeroU64::new(length_bytes.value()) else {
         return Err(ProcessConnectionError::EncodeInvariant);
     };
+    let deadline = Instant::now() + BLOB_READ_TIMEOUT;
+    let snapshot_permit = tokio::select! {
+        biased;
+        () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        () = wait_for_connection_loss(reader) => return Ok(()),
+        () = sleep_until(deadline) => return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        ).await,
+        permit = Arc::clone(&services.snapshot_reader_budget).acquire_owned() => permit
+            .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed)?,
+    };
     let repository = BlobCatalogRepository::new(services.pool.clone());
-    let metadata = tokio::time::timeout(
-        BLOB_READ_TIMEOUT,
-        read_blob_metadata(&repository, digest.into_digest()),
-    )
-    .await
-    .unwrap_or(Err(BlobReadError::Unavailable));
+    let metadata = tokio::select! {
+        biased;
+        () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        () = wait_for_connection_loss(reader) => return Ok(()),
+        outcome = tokio::time::timeout_at(
+            deadline,
+            read_blob_metadata(&repository, digest.into_digest()),
+        ) => outcome.unwrap_or(Err(BlobReadError::Unavailable)),
+    };
     let metadata = match metadata {
         Ok(metadata) => metadata,
         Err(error) => {
+            drop(snapshot_permit);
             return write_blob_read_error(
                 writer,
                 version,
@@ -5728,6 +5769,7 @@ where
         .checked_add(length.get())
         .is_none_or(|end| end > metadata.byte_length)
     {
+        drop(snapshot_permit);
         return write_blob_read_error(
             writer,
             version,
@@ -5740,6 +5782,7 @@ where
         .await;
     }
     let Some(permit) = try_acquire_blob_read_permit(Arc::clone(&services.blob_read_budget)) else {
+        drop(snapshot_permit);
         return write_error(
             writer,
             version,
@@ -5748,8 +5791,8 @@ where
         )
         .await;
     };
-    let traversal = tokio::time::timeout(
-        BLOB_READ_TIMEOUT,
+    let traversal = tokio::time::timeout_at(
+        deadline,
         read_blob_chunk(
             registry,
             &repository,
@@ -5764,22 +5807,39 @@ where
         () = wait_for_connection_loss(reader) => return Ok(()),
         outcome = traversal => outcome.unwrap_or(Err(BlobReadError::Unavailable)),
     };
-    drop(permit);
     match outcome {
         Ok(bytes) => {
-            write_message_via_spool(
-                writer,
-                version,
-                request_id,
-                ServerMessage::BlobChunkRead {
-                    digest,
-                    offset_bytes,
-                    bytes: BlobChunk::new(bytes),
-                },
-            )
-            .await
+            let spool = tokio::select! {
+                biased;
+                () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                () = wait_for_connection_loss(reader) => return Ok(()),
+                spool = spool_single_message(
+                    version,
+                    request_id,
+                    ServerMessage::BlobChunkRead {
+                        digest,
+                        offset_bytes,
+                        bytes: BlobChunk::new(bytes),
+                    },
+                ) => spool,
+            };
+            drop(permit);
+            drop(snapshot_permit);
+            let mut spool = match spool {
+                Ok(spool) => spool,
+                Err(error) => {
+                    return write_snapshot_spool_error(writer, version, request_id, error).await;
+                }
+            };
+            tokio::select! {
+                biased;
+                () = wait_for_shutdown(&mut shutdown) => Ok(()),
+                result = write_spooled_file(writer, &mut spool) => result,
+            }
         }
         Err(error) => {
+            drop(permit);
+            drop(snapshot_permit);
             write_blob_read_error(
                 writer,
                 version,
@@ -5835,7 +5895,9 @@ where
         BlobReadError::Missing => ProtocolError::without_detail(ErrorCode::BlobMissing),
         BlobReadError::Corrupt => ProtocolError::without_detail(ErrorCode::BlobCorrupt),
         BlobReadError::Unavailable => ProtocolError::without_detail(ErrorCode::Unavailable),
-        BlobReadError::Integrity => ProtocolError::without_detail(ErrorCode::Internal),
+        BlobReadError::Integrity => {
+            internal_protocol_error(None, InternalDiagnostic::BlobReadIntegrity)
+        }
     };
     write_error(writer, version, request_id, protocol_error).await
 }
@@ -13027,6 +13089,7 @@ where
 /// from pairing independent positional labels. No variant carries payload text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InternalDiagnostic {
+    BlobReadIntegrity,
     ReviewWorkflowProjectionCorruption,
     ReviewOrchestrationStoreCorruption,
     ReviewOrchestrationWorkflowCorruption,
@@ -13127,7 +13190,8 @@ impl InternalDiagnostic {
             | Self::SubmitInputIdentityCollision
             | Self::SubmitInputModelExecutionIdentityCollision
             | Self::ToolLoopIdentityCollision => OperatorFailureClass::IdentityCollision,
-            Self::ReviewWorkflowProjectionCorruption
+            Self::BlobReadIntegrity
+            | Self::ReviewWorkflowProjectionCorruption
             | Self::ReviewOrchestrationStoreCorruption
             | Self::ReviewOrchestrationWorkflowCorruption
             | Self::ReviewOrchestrationSessionCorruption
@@ -13155,6 +13219,7 @@ impl InternalDiagnostic {
 
     const fn cause_code(self) -> &'static str {
         match self {
+            Self::BlobReadIntegrity => "blob_read_integrity",
             Self::ReviewWorkflowProjectionCorruption => "review_workflow_projection_corruption",
             Self::ReviewOrchestrationStoreCorruption => "review_orchestration_store_corruption",
             Self::ReviewOrchestrationWorkflowCorruption => {
