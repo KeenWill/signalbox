@@ -211,6 +211,18 @@ struct ObligationTransaction {
     obligation: Option<RepoWatchDispatchObligation>,
 }
 
+struct EvaluatedConflict {
+    outcome: RepoWatchRuleEvaluationOutcome,
+    event_id: RepoWatchEventId,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct OutstandingCooldownVisibility {
+    matched_event_count: i64,
+    eligible_at_is_future: bool,
+    ready: bool,
+}
+
 impl RepoWatchDispatchTransaction for ObligationTransaction {
     type Error = RepoWatchDispatchRepositoryError;
 
@@ -542,16 +554,17 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
 async fn evaluate_second_conflict(
     fixture: &DispatchFixture,
 ) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
-    evaluate_conflict(fixture, 102, SECOND_HEAD).await
+    Ok(evaluate_conflict(fixture, 102, SECOND_HEAD).await?.outcome)
 }
 
 async fn evaluate_conflict(
     fixture: &DispatchFixture,
     event_id: u128,
     head: &str,
-) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+) -> Result<EvaluatedConflict, Box<dyn Error>> {
     let (loaded, observation) = load_conflict(fixture, event_id, head).await?;
-    Ok(
+    let event_id = loaded.id();
+    let outcome =
         RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
             .evaluate(
                 loaded,
@@ -560,8 +573,8 @@ async fn evaluate_conflict(
                 &TemplateResolver,
                 dispatch_context(),
             )
-            .await?,
-    )
+            .await?;
+    Ok(EvaluatedConflict { outcome, event_id })
 }
 
 async fn load_second_conflict(
@@ -1116,9 +1129,9 @@ async fn occupied_matches_collapse_into_one_visible_dispatch_obligation()
     .await?;
 
     assert_eq!(second, RepoWatchRuleEvaluationOutcome::Occupied);
-    assert_eq!(third, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(third.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
     assert_eq!(visible.0, 2);
-    assert_eq!(visible.1, *conflict_event(103, THIRD_HEAD)?.id().as_uuid());
+    assert_eq!(visible.1, *third.event_id.as_uuid());
     assert_eq!(
         visible.2,
         pull_request_number(&fixture.event).get().to_string()
@@ -1158,12 +1171,9 @@ async fn released_obligation_dispatches_latest_state_once_and_replays_that_deliv
         .expect("released obligation is ready");
     let replay_candidate = obligation.clone();
 
-    assert_eq!(third, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(third.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
     assert_eq!(obligation.matched_event_count(), 2);
-    assert_eq!(
-        obligation.latest_event().id(),
-        conflict_event(103, THIRD_HEAD)?.id()
-    );
+    assert_eq!(obligation.latest_event().id(), third.event_id);
     let (dispatch_id, sessions) = dispatched(
         evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
     );
@@ -1194,7 +1204,8 @@ async fn released_obligation_dispatches_latest_state_once_and_replays_that_deliv
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatch_obligation_waits_visibly_through_configured_cooldown()
 -> Result<(), Box<dyn Error>> {
-    let fixture = dispatch_fixture_for(cooldown_rule()?).await?;
+    let fixture =
+        dispatch_fixture_for(one_action_rule(Duration::from_secs(i64::MAX as u64))?).await?;
     let _outcome = evaluate_second_conflict(&fixture).await?;
     sqlx::query(
         "INSERT INTO repo_watch_dispatch_release (dispatch_id)
@@ -1211,17 +1222,18 @@ async fn dispatch_obligation_waits_visibly_through_configured_cooldown()
             fixture.rule.version(),
         )
         .await?;
-    let visible: (i64, bool, bool) = sqlx::query_as(
-        "SELECT matched_event_count, eligible_at > clock_timestamp(), ready
+    let visible: OutstandingCooldownVisibility = sqlx::query_as(
+        "SELECT matched_event_count,
+                eligible_at > clock_timestamp() AS eligible_at_is_future, ready
            FROM repo_watch_outstanding_dispatch_obligation",
     )
     .fetch_one(&fixture.pool)
     .await?;
 
     assert!(obligation.is_none());
-    assert_eq!(visible.0, 1);
-    assert!(visible.1);
-    assert!(!visible.2);
+    assert_eq!(visible.matched_event_count, 1);
+    assert!(visible.eligible_at_is_future);
+    assert!(!visible.ready);
     Ok(())
 }
 
