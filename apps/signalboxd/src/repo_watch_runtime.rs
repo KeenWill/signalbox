@@ -2739,6 +2739,7 @@ mod tests {
     // and the fetch set on the same pull request.
     const CANCELLED_FETCH_PULL_NUMBER: u64 = 7;
     const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
+    const CHANGED_PULL_UPDATED_AT: &str = "2026-08-03T12:30:01Z";
     const POLL_INTERVAL: Duration = Duration::from_secs(300);
     const SHORT_CYCLE: Duration = Duration::from_secs(75);
     const SHORT_CYCLE_REMAINDER: Duration = Duration::from_secs(225);
@@ -5150,7 +5151,7 @@ mod tests {
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
         let changed_listing = ListedPullRequest {
-            updated_at: String::from("2026-08-03T12:30:01Z"),
+            updated_at: String::from(CHANGED_PULL_UPDATED_AT),
             head_sha: listed.head_sha.clone(),
         };
         let number = previous.context().number().get();
