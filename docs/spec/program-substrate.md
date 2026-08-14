@@ -23,28 +23,31 @@ executes programs. A program is one TypeScript module whose imports resolve only
 to the versioned in-repo SDK package; any other import — including relative
 files — is a registration error, so the stripped artifact is complete and
 executable with no bundler, no module graph, and no filesystem in the isolate.
-The SDK has one canonical bare module specifier containing its version. Before
-loading an artifact, the host registers a synthetic module under that exact
-specifier which exports only the frame-producing SDK surface for the run's
-recorded SDK version. Registration rejects every other specifier, including an
-unversioned SDK name; type stripping preserves the canonical import, and isolate
-loading resolves it only to this host-supplied module, never through a filesystem
-or ambient module loader. Why: a single-module contract keeps artifact identity
-one digest over one file's bytes; multi-module programs are a future
+The SDK's canonical bare-module specifier is
+`@signalbox/program-sdk/v<version>`, where `<version>` is a positive canonical
+decimal integer with no leading zero; the first frame-contract release admits
+exactly `@signalbox/program-sdk/v1`. Before loading an artifact, the host
+registers a synthetic module under that exact specifier which exports only the
+frame-producing SDK surface for the run's recorded SDK version. Registration
+rejects every other specifier, including an unversioned `@signalbox/program-sdk`
+name; type stripping preserves the canonical import, and isolate loading
+resolves it only to this host-supplied module, never through a filesystem or
+ambient module loader. Why: a single-module contract keeps artifact identity one
+digest over one file's bytes; multi-module programs are a future
 registration-format decision, not a present admission. Registration stores the
-exact TypeScript source, the stripped JavaScript artifact, a digest of each, the SDK version, the frame-contract
-version, and an explicit capability grant list, as immutable rows keyed by
-unique program name and revision. Each digest is SHA-256 in lowercase
-hexadecimal over an exact preimage: for the artifact, the stripped JavaScript
-bytes; for the source, the module's UTF-8 bytes. Both registration paths and
-every later verifier compute identity from these preimages alone, so two correct
-implementations cannot disagree about what a program is. Execution uses only the
-stripped artifact; the TypeScript source is retained for reading and
-re-verification. This constrains present schema planning: program identity is
-`(name, revision)` plus content digests, and nothing may treat a mutable
-location — a repository path, a branch, a file — as what a program *is*. Why:
-digest identity is what lets an in-flight run keep meaning the code it started
-with.
+exact TypeScript source, the stripped JavaScript artifact, a digest of each, the
+SDK version, the frame-contract version, and an explicit capability grant list,
+as immutable rows keyed by unique program name and revision. Each digest is
+SHA-256 in lowercase hexadecimal over an exact preimage: for the artifact, the
+stripped JavaScript bytes; for the source, the module's UTF-8 bytes. Both
+registration paths and every later verifier compute identity from these
+preimages alone, so two correct implementations cannot disagree about what a
+program is. Execution uses only the stripped artifact; the TypeScript source is
+retained for reading and re-verification. This constrains present schema
+planning: program identity is `(name, revision)` plus content digests, and
+nothing may treat a mutable location — a repository path, a branch, a file — as
+what a program *is*. Why: digest identity is what lets an in-flight run keep
+meaning the code it started with.
 
 **Committed unimplemented functionality.** No present surface pins program
 revisions to runs. Every run records the exact program registration it executes
@@ -118,20 +121,19 @@ execution points. Exhaustion produces the journaled `memory` or `timeout` fault
 under the recorded limits regardless of later configuration, host load, or
 machine speed. External operations use capability-specific deadlines whose
 expiry is an ordinary journaled answer. No engine runtime is retained across
-upgrades — per the pre-alpha rule in `AGENTS.md`, keeping superseded
-engines resident would be compatibility machinery for deployments that do not
-exist — so a run that wakes under a newer engine replays under it, protected by
-the fault-not-diverge rule below. Replay under a different engine may compare
+upgrades — per the pre-alpha rule in `AGENTS.md`, keeping superseded engines
+resident would be compatibility machinery for deployments that do not exist — so
+a run that wakes under a newer engine replays under it, protected by the
+fault-not-diverge rule below. Replay under a different engine may compare
 requests only while journaled twins remain; if it reaches the journal tail
 without an earlier mismatch, the host journals a `nondeterminism` fault whose
 payload names both engine versions and does not permit that run to emit a new
 live request or terminal result. Thus an engine-semantics change surfaces as a
 fault even when its first observable difference would occur after the prior
 journal tail, never as silent divergence. A native engine failure is accepted as
-a daemon failure while every
-registered program is the operator's own. Why: the isolate's closure is what
-makes deterministic replay a structural property instead of an authoring
-discipline.
+a daemon failure while every registered program is the operator's own. Why: the
+isolate's closure is what makes deterministic replay a structural property
+instead of an authoring discipline.
 
 **Committed unimplemented functionality.** No present surface journals program
 effects. Every nondeterministic act crosses the frame protocol and is recorded
@@ -147,23 +149,23 @@ execution and replay. The frame vocabulary is: `now`, `random`, `sleep`,
 request ordinal whose frame the host refused, carries a reason from that request
 kind's closed rejection vocabulary, and leaves the run live; it records a
 protocol-level refusal before the requested transition, not an answer to an
-effect. A request-scoped `cancel` always
-names the one affected request ordinal and cannot terminalize a run;
-`run_cancel` has no request ordinal and terminalizes the whole run. A `scope`
-request is a journaled declaration, never answered: it carries an operation
-(`open` or `close`), its own per-run scope ordinal, and its parent scope
-ordinal, recording the structured-concurrency tree so that cancellation of a scope deterministically cancels
-exactly the outstanding requests opened under it (each such cancellation is a
-`cancel` delivery naming the affected request ordinal), and replay reproduces
-the same tree from the same frames. Requests made outside any opened scope
-belong to the root scope. Capability calls are `effect` frames named by
-capability and method, so capability growth never changes the frame contract.
-Effect failures are ordinary answer values a program branches on; only `fault`
-terminates a run from outside, from its own closed cause set: `timeout`,
-`memory`, `nondeterminism`, `program_error` (an uncaught exception or unhandled
-promise rejection before `terminal`, carrying bounded, replay-stable evidence of
-the error), `contract_retired`, `journal_bound`, and `payload_too_large`. Faults
-are themselves journaled so even a kill replays.
+effect. A request-scoped `cancel` always names the one affected request ordinal
+and cannot terminalize a run; `run_cancel` has no request ordinal and
+terminalizes the whole run. A `scope` request is a journaled declaration, never
+answered: it carries an operation (`open` or `close`), its own per-run scope
+ordinal, and its parent scope ordinal, recording the structured-concurrency tree
+so that cancellation of a scope deterministically cancels exactly the
+outstanding requests opened under it (each such cancellation is a `cancel`
+delivery naming the affected request ordinal), and replay reproduces the same
+tree from the same frames. Requests made outside any opened scope belong to the
+root scope. Capability calls are `effect` frames named by capability and method,
+so capability growth never changes the frame contract. Effect failures are
+ordinary answer values a program branches on; only `fault` terminates a run from
+outside, from its own closed cause set: `timeout`, `memory`, `nondeterminism`,
+`program_error` (an uncaught exception or unhandled promise rejection before
+`terminal`, carrying bounded, replay-stable evidence of the error),
+`contract_retired`, `journal_bound`, and `payload_too_large`. Faults are
+themselves journaled so even a kill replays.
 
 **Committed unimplemented functionality.** No present surface synchronizes
 journal rows with effects, and the synchronization guarantee differs by effect
@@ -210,23 +212,23 @@ deterministic `reject` delivery naming that terminal request and reason
 await or cancel the outstanding requests and submit another terminal request;
 `program_error` remains exclusively the terminal fault defined above. Thus no
 external effect can complete after the journal closes. For `continue`, one
-database
-transaction commits the terminal frame, the predecessor's terminal state, and
-exactly one successor row. The successor has a unique predecessor reference, so
-retry after an ambiguous commit returns the already-created row rather than
-losing or duplicating the continuation. The built-in dispatch program described
-below continues after each handled event. Continuation is voluntary,
-so the bound is enforced by the host, not assumed of the program: each run
-records at creation the frame bound selected from configuration, that recorded
-bound governs the run for its whole life regardless of later configuration
-changes — a run's terminal outcome is determined by its own durable facts, never
-by which configuration was live at its final wake — and a run reaching its
-recorded bound terminates with a deterministic, journaled `journal_bound` fault,
-making the per-run replay bound a property of every program, cooperative or not.
-No checkpointing or journal truncation exists, because a journal that can be
-rewritten is not a journal. Why: continuation keeps replay linear in one run's
-work while every historical run remains a complete, immutable record, and the
-fault keeps that claim true for programs that never continue.
+database transaction commits the terminal frame, the predecessor's terminal
+state, and exactly one successor row. The successor has a unique predecessor
+reference, so retry after an ambiguous commit returns the already-created row
+rather than losing or duplicating the continuation. The built-in dispatch
+program described below continues after each handled event. Continuation is
+voluntary, so the bound is enforced by the host, not assumed of the program:
+each run records at creation the frame bound selected from configuration, that
+recorded bound governs the run for its whole life regardless of later
+configuration changes — a run's terminal outcome is determined by its own
+durable facts, never by which configuration was live at its final wake — and a
+run reaching its recorded bound terminates with a deterministic, journaled
+`journal_bound` fault, making the per-run replay bound a property of every
+program, cooperative or not. No checkpointing or journal truncation exists,
+because a journal that can be rewritten is not a journal. Why: continuation
+keeps replay linear in one run's work while every historical run remains a
+complete, immutable record, and the fault keeps that claim true for programs
+that never continue.
 
 **Committed unimplemented functionality.** No present surface parks program
 runs. A run sleeping on a timer or subscription holds no isolate and no memory
@@ -244,12 +246,11 @@ and any request or delivery whose canonical payload encoding exceeds the
 recorded ceiling is replaced before journal insertion or blob ingest by a
 bounded, journaled `payload_too_large` fault carrying the recorded maximum and
 observed byte length. The recorded ceiling governs replay despite later
-configuration changes. A session outcome journals as
-the session identity, the exact turn and accepted-input identity that produced
-it, and an outcome digest — never transcript content — because sessions are
-already durable and the journal is thin coordination state only; the recorded
-turn identity is what lets replay authenticate which of a session's turns
-supplied a delivered answer.
+configuration changes. A session outcome journals as the session identity, the
+exact turn and accepted-input identity that produced it, and an outcome digest —
+never transcript content — because sessions are already durable and the journal
+is thin coordination state only; the recorded turn identity is what lets replay
+authenticate which of a session's turns supplied a delivered answer.
 
 **Committed unimplemented functionality.** No present surface re-executes
 evaluation trials. Replay of a run's own journal (resume) and a sibling run with
@@ -267,8 +268,7 @@ already stores durably, together with an activation frontier fixed at
 registration strictly after the current durable event tail, except for the
 built-in dispatch continuation handoff defined below. An ordinary subscription
 therefore can never match an event at or before its activation. After a poll's
-events commit,
-matching subscriptions produce wake rows keyed by the unique
+events commit, matching subscriptions produce wake rows keyed by the unique
 subscription-and-event identity. An `await_event` subscription is one-shot: the
 transaction inserting its first wake also atomically marks the subscription
 consumed, and matching excludes consumed subscriptions. A uniqueness constraint
@@ -276,16 +276,16 @@ permits at most one wake for the subscription itself, so concurrent matching of
 two events chooses the first in durable event order and cannot resolve one
 request ordinal twice. Recovery re-matching is therefore idempotent, with no
 historical, missed, stale, or duplicate wake at the registration or recovery
-boundary. The scheduler resumes the woken runs.
-Program subscription identity, delivery, and cancellation are decided by this
-page; the previously open standing-subscription foundation question is narrowed
-in the same diff to the client-facing callback surface it still owns. This
-constrains repository-watch storage now: its cursor and event rows are the
-substrate's event source and must remain readable by subscription matching. The
-present structured-rule dispatch surface is committed to converge onto this
-mechanism — the dispatch action becomes a built-in program. Shadowing is only a
-validation step and never owns delivery. The authoritative rule-to-program
-cutover and frontier-ownership contract is owned by
+boundary. The scheduler resumes the woken runs. Program subscription identity,
+delivery, and cancellation are decided by this page; the previously open
+standing-subscription foundation question is narrowed in the same diff to the
+client-facing callback surface it still owns. This constrains repository-watch
+storage now: its cursor and event rows are the substrate's event source and must
+remain readable by subscription matching. The present structured-rule dispatch
+surface is committed to converge onto this mechanism — the dispatch action
+becomes a built-in program. Shadowing is only a validation step and never owns
+delivery. The authoritative rule-to-program cutover and frontier-ownership
+contract is owned by
 [repository watch](repo-watch.md#deduplication-concurrency-and-audit); this page
 only consumes the resulting subscription and transferred dispatch state. For
 each handled event, the built-in program's `continue` transaction records the

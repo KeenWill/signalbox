@@ -478,15 +478,15 @@ in one durable transaction at an event frontier after requiring a terminal
 evaluation outcome for every old-rule event through that frontier: it records
 deactivation of the old rule after the frontier, activation of the replacement
 subscription strictly after it, and the mapping from rule identity and version
-to the exact program registration. The same transaction transfers every
-occupied singleton batch, its responsible sessions, and any recorded cooldown
-boundary to substrate-owned dispatch state without recreating sessions or
-changing append-only audit identities. Events at or before the frontier remain
-owned only by rule evaluation; later events are owned only by subscription
-matching. Reconciliation, rule evaluation, event commit, and subscription
-matching serialize against this transaction, so a crash or concurrent poll may
-retry it but cannot omit or dispatch a boundary event twice or release an
-occupied singleton. After this transaction, the mapped rule is a subscription;
+to the exact program registration. The same transaction transfers every occupied
+singleton batch, its responsible sessions, and any recorded cooldown boundary to
+substrate-owned dispatch state without recreating sessions or changing
+append-only audit identities. Events at or before the frontier remain owned only
+by rule evaluation; later events are owned only by subscription matching.
+Reconciliation, rule evaluation, event commit, and subscription matching
+serialize against this transaction, so a crash or concurrent poll may retry it
+but cannot omit or dispatch a boundary event twice or release an occupied
+singleton. After this transaction, the mapped rule is a subscription;
 subscription identity, delivery, continuation cursor inheritance, and
 cancellation follow the [program substrate](program-substrate.md).
 
