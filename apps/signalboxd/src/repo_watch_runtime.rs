@@ -1789,6 +1789,7 @@ impl GitHubRepositoryPoller {
     // fail an attempt whose true total fits.
     async fn read_bounded(
         &self,
+        resource_kind: &'static str,
         mut response: Response,
     ) -> Result<Vec<u8>, RepositoryWatchAttemptError> {
         let mut body = Vec::new();
@@ -1804,7 +1805,8 @@ impl GitHubRepositoryPoller {
             if next > MAX_RESPONSE_BYTES {
                 return Err(RepositoryWatchAttemptError::ResponseTooLarge);
             }
-            self.cache().record_poll_wire_bytes(chunk.len())?;
+            self.cache()
+                .record_poll_wire_bytes(resource_kind, chunk.len())?;
             body.extend_from_slice(&chunk);
         }
         Ok(body)
@@ -1914,7 +1916,7 @@ impl GitHubRepositoryPoller {
         // invalidates it.
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
         let has_next_page = has_next_link(&response)?;
-        let bytes = self.read_bounded(response).await?;
+        let bytes = self.read_bounded(resource_kind, response).await?;
         let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
             self.cache().remove(&key);
             return Err(RepositoryWatchAttemptError::InvalidResponse);
@@ -2091,6 +2093,7 @@ impl PollCache {
 
     fn record_poll_wire_bytes(
         &mut self,
+        resource_kind: &'static str,
         wire_bytes: usize,
     ) -> Result<(), RepositoryWatchAttemptError> {
         let projected = self
@@ -2098,6 +2101,13 @@ impl PollCache {
             .checked_add(wire_bytes)
             .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
         if projected > MAX_POLL_WIRE_BYTES {
+            tracing::warn!(
+                resource_kind,
+                accepted_poll_wire_bytes = self.poll_wire_bytes,
+                next_chunk_bytes = wire_bytes,
+                projected_poll_wire_bytes = projected,
+                "repository-watch poll wire budget exceeded"
+            );
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
         self.poll_wire_bytes = projected;
@@ -5727,11 +5737,11 @@ mod tests {
         let mut cache = PollCache::default();
         cache.begin_poll();
         cache
-            .record_poll_wire_bytes(MAX_POLL_WIRE_BYTES)
+            .record_poll_wire_bytes(CACHE_KEY_KIND, MAX_POLL_WIRE_BYTES)
             .expect("exact aggregate wire bound is accepted");
 
         assert_eq!(
-            cache.record_poll_wire_bytes(1),
+            cache.record_poll_wire_bytes(CACHE_KEY_KIND, 1),
             Err(RepositoryWatchAttemptError::ResourceLimit)
         );
     }
