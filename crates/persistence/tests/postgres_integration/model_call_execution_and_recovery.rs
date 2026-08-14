@@ -73,6 +73,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         panic!("the model-call fixture turn must activate");
     };
     assert_eq!(activated.turn(), turn);
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe1));
     let resolved_target = ResolvedProviderTarget::naming(provider_identity);
@@ -480,6 +481,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         activation.execute(session).await?,
         StartEligibleTurnOutcome::Activated(_)
     ));
+    record_empty_instruction_manifest(&pool, session).await?;
     let steering_inputs = [
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e2)),
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e3)),
@@ -1472,6 +1474,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
         activated_interrupt.turn(),
         TurnId::from_uuid(Uuid::from_u128(0x6203))
     );
+    record_empty_instruction_manifest(&restarted_pool, stopped.session).await?;
     let empty_targets =
         ModelTargetCatalog::try_from_definitions([]).expect("an empty target catalog is valid");
     let target_miss = PostgresModelCallRepository::new(
@@ -1668,6 +1671,7 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
         source_activation.execute(session).await?,
         StartEligibleTurnOutcome::Activated(_)
     ));
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe4));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -2193,6 +2197,7 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
         panic!("the target-miss fixture turn must activate");
     };
     assert_eq!(activated.turn(), turn);
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let pending_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9f2));
     let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(0xaf2));

@@ -3267,6 +3267,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
         panic!("the unchanged counted activation must commit");
     };
     assert_eq!(activated.turn(), turn);
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let steering = input_with_delivery(
         0xcd0d,
