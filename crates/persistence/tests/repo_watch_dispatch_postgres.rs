@@ -7,10 +7,11 @@
 use std::{error::Error, time::Duration};
 
 use signalbox_application::{
-    RepoWatchDispatchService, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchRuleEvaluationOutcome,
-    RepoWatchTemplateResolver, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
+    UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
@@ -18,10 +19,11 @@ use signalbox_domain::{
     GoalStatement, GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionRequest,
     PullRequestBody, PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber,
     PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
-    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, TurnId, UserContent,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1,
+    RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
+    RepoWatchSingletonScope, RepositorySlug, SessionConfigurationDefaults, SessionId,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
@@ -32,6 +34,7 @@ use signalbox_persistence::{
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
+    repo_watch_dispatch_obligation::RepoWatchDispatchObligation,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -49,6 +52,7 @@ const BASE_BRANCH: &str = "main";
 const HEAD_BRANCH: &str = "feature/repo-watch";
 const FIRST_HEAD: &str = "1111111111111111111111111111111111111111";
 const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
+const THIRD_HEAD: &str = "3333333333333333333333333333333333333333";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
 const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
@@ -202,6 +206,30 @@ impl RepoWatchTemplateResolver for TemplateResolver {
     }
 }
 
+struct ObligationTransaction {
+    store: PostgresRepoWatchDispatchStore,
+    obligation: Option<RepoWatchDispatchObligation>,
+}
+
+impl RepoWatchDispatchTransaction for ObligationTransaction {
+    type Error = RepoWatchDispatchRepositoryError;
+
+    async fn handle_repo_watch_evaluation(
+        &mut self,
+        evaluation: RepoWatchRuleEvaluation,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
+        let obligation =
+            self.obligation
+                .take()
+                .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+                    "test obligation transaction was reused",
+                ))?;
+        self.store
+            .handle_repo_watch_obligation_with_alias_resolver(obligation, evaluation, |_| None)
+            .await
+    }
+}
+
 fn credential_pin() -> SessionCredentialPin {
     SessionCredentialPin::try_new(vec![SessionModelCredential::new(
         "fixture-family",
@@ -231,6 +259,33 @@ fn dispatched(
         } => (dispatch_id, sessions),
         _ => panic!("fixture rule evaluation must dispatch"),
     }
+}
+
+fn replayed(
+    outcome: RepoWatchRuleEvaluationOutcome,
+) -> (signalbox_domain::RepoWatchDispatchId, Box<[SessionId]>) {
+    match outcome {
+        RepoWatchRuleEvaluationOutcome::Replayed {
+            dispatch_id,
+            sessions,
+        } => (dispatch_id, sessions),
+        _ => panic!("fixture obligation must replay its dispatch"),
+    }
+}
+
+fn pull_request_number(event: &RepoWatchEvent) -> PullRequestNumber {
+    let RepoWatchEventTarget::PullRequest(context) = event.target() else {
+        panic!("fixture event must target a pull request");
+    };
+    context.number()
+}
+
+fn session_uuids(fixture: &DispatchFixture) -> Vec<Uuid> {
+    fixture
+        .sessions
+        .iter()
+        .map(|session| *session.as_uuid())
+        .collect()
 }
 
 fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
@@ -487,7 +542,15 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
 async fn evaluate_second_conflict(
     fixture: &DispatchFixture,
 ) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
-    let (loaded, observation) = load_second_conflict(fixture).await?;
+    evaluate_conflict(fixture, 102, SECOND_HEAD).await
+}
+
+async fn evaluate_conflict(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let (loaded, observation) = load_conflict(fixture, event_id, head).await?;
     Ok(
         RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
             .evaluate(
@@ -504,13 +567,21 @@ async fn evaluate_second_conflict(
 async fn load_second_conflict(
     fixture: &DispatchFixture,
 ) -> Result<(RepoWatchEvent, RepoWatchObservation), Box<dyn Error>> {
+    load_conflict(fixture, 102, SECOND_HEAD).await
+}
+
+async fn load_conflict(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+) -> Result<(RepoWatchEvent, RepoWatchObservation), Box<dyn Error>> {
     let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
     let cursor = event_store
         .load_cursor(&fixture.repository)
         .await?
         .expect("fixture cursor exists");
-    let event = conflict_event(102, SECOND_HEAD)?;
-    let observation = observation(context(SECOND_HEAD)?)?;
+    let event = conflict_event(event_id, head)?;
+    let observation = observation(context(head)?)?;
     event_store
         .commit(
             &fixture.repository,
@@ -531,6 +602,29 @@ async fn load_second_conflict(
         .await?
         .expect("second conflict remains unevaluated");
     Ok((loaded, observation))
+}
+
+async fn evaluate_obligation(
+    fixture: &DispatchFixture,
+    obligation: RepoWatchDispatchObligation,
+    observation: &RepoWatchObservation,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let event = obligation.latest_event().clone();
+    Ok(RepoWatchDispatchService::new(
+        UuidV7RepoWatchDispatchIdGenerator,
+        ObligationTransaction {
+            store: fixture.store.clone(),
+            obligation: Some(obligation),
+        },
+    )
+    .evaluate(
+        event,
+        &fixture.rule,
+        observation,
+        &TemplateResolver,
+        dispatch_context(),
+    )
+    .await?)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1002,5 +1096,157 @@ async fn occupied_pull_request_singleton_suppresses_a_later_match() -> Result<()
     let outcome = evaluate_second_conflict(&fixture).await?;
 
     assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn occupied_matches_collapse_into_one_visible_dispatch_obligation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let second = evaluate_second_conflict(&fixture).await?;
+    let third = evaluate_conflict(&fixture, 103, THIRD_HEAD).await?;
+    let visible: (i64, Uuid, String, Uuid, Vec<Uuid>, bool) = sqlx::query_as(
+        "SELECT matched_event_count, latest_event_id,
+                singleton_pull_request_number::text, occupying_dispatch_id,
+                occupying_session_ids, ready
+           FROM repo_watch_outstanding_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(second, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(third, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(visible.0, 2);
+    assert_eq!(visible.1, *conflict_event(103, THIRD_HEAD)?.id().as_uuid());
+    assert_eq!(
+        visible.2,
+        pull_request_number(&fixture.event).get().to_string()
+    );
+    assert_eq!(visible.3, *fixture.dispatch_id.as_uuid());
+    assert_eq!(visible.4, session_uuids(&fixture));
+    assert!(!visible.5);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn released_obligation_dispatches_latest_state_once_and_replays_that_delivery()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let _second = evaluate_second_conflict(&fixture).await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_release (dispatch_id)
+         VALUES ($1)",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let third = evaluate_conflict(&fixture, 103, THIRD_HEAD).await?;
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("released obligation is ready");
+    let replay_candidate = obligation.clone();
+
+    assert_eq!(third, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(obligation.matched_event_count(), 2);
+    assert_eq!(
+        obligation.latest_event().id(),
+        conflict_event(103, THIRD_HEAD)?.id()
+    );
+    let (dispatch_id, sessions) = dispatched(
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
+    );
+    let outstanding: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_outstanding_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let batch_count: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+        .fetch_one(&fixture.pool)
+        .await?;
+    let (replayed_dispatch, replayed_sessions) = replayed(
+        evaluate_obligation(&fixture, replay_candidate, cursor.candidate().observation()).await?,
+    );
+    let replayed_batch_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert_eq!(outstanding, 0);
+    assert_eq!(batch_count, 2);
+    assert_eq!(replayed_dispatch, dispatch_id);
+    assert_eq!(replayed_sessions, sessions);
+    assert_eq!(replayed_batch_count, batch_count);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn dispatch_obligation_waits_visibly_through_configured_cooldown()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(cooldown_rule()?).await?;
+    let _outcome = evaluate_second_conflict(&fixture).await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_release (dispatch_id)
+         VALUES ($1)",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?;
+    let visible: (i64, bool, bool) = sqlx::query_as(
+        "SELECT matched_event_count, eligible_at > clock_timestamp(), ready
+           FROM repo_watch_outstanding_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(obligation.is_none());
+    assert_eq!(visible.0, 1);
+    assert!(visible.1);
+    assert!(!visible.2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let _outcome = evaluate_second_conflict(&fixture).await?;
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, &[])
+        .await?;
+    let outstanding: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_outstanding_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let settlement: String = sqlx::query_scalar(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(outstanding, 0);
+    assert_eq!(settlement, "deactivated");
     Ok(())
 }
