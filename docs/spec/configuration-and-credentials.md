@@ -38,6 +38,10 @@ The blob catalog and input-modality grammar below are the foundation proposal
 from PR #553 (`agent/blob-storage-foundation`) and become verified with its
 implementing child stack.
 
+The configured workspace-instruction root grammar below is the foundation
+proposal from PR #796 (`agent/agent-docs-skills-spec`) and becomes verified with
+its first implementing child, PR #798 (`agent/agent-docs-skills-foundation`).
+
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
 
@@ -551,6 +555,48 @@ selected adapter cannot enforce also fails startup, including a global
 combination masked by the selected profile. The precedence and durable
 provenance of these layers are owned by
 [Model and session settings](model-session-settings.md).
+
+### Workspace-instruction roots
+
+The optional `[workspace_instructions]` table owns the explicitly registered
+daemon directories used by
+[workspace-instruction discovery](workspace-instructions.md#discovery). Its
+exact version-one grammar is:
+
+```toml
+[workspace_instructions]
+version = 1
+registered_roots = ["/absolute/canonical/path"]
+```
+
+An absent table means no configured roots. When present, `version` and
+`registered_roots` are required and no other field is admitted. The array has at
+most 64 distinct strings. Each string must be a nonempty, absolute, lexically
+canonical UTF-8 path of at most 4,096 bytes with no NUL: it begins with `/`,
+followed by one or more nonempty components separated by single `/` characters,
+and no component is `.` or `..`. Thus the filesystem root itself and a trailing
+separator are not admitted. Equal canonical strings are duplicates and fail
+startup. A wrong version, wrong type, relative or noncanonical path, duplicate,
+excess entry, and unknown field are typed configuration failures.
+
+Configuration validation does not require a registered root to exist or be
+readable. Discovery reports a typed root-unavailable finding instead, so an
+operator can provision the path after validating the static file without an
+unavailable directory masquerading as an empty successful scan. The catalog is
+read once at daemon startup; changing it requires a restart and never rewrites
+an earlier discovery snapshot.
+
+**Committed unimplemented functionality — configured-root selector identity.**
+Template eligibility will give every configured root a stable
+`ConfiguredInstructionRootId`. Its value is SHA-256 over literal UTF-8
+`signalbox-configured-instruction-root-v1`, followed by the canonical path as an
+unsigned 64-bit big-endian byte length and that many exact UTF-8 bytes. It is
+displayed as 64 lowercase hexadecimal characters. The identifier lets a template
+distinguish two configured roots with the same root-relative bundle path without
+placing an absolute daemon path in the template selector. No present
+configuration, template, or runtime surface materializes this identifier; the
+eligibility slice that adds selectors must derive it from the validated path by
+this algorithm.
 
 Each `[[models]]` record declares its capability surface with
 `reasoning_levels`, `fast_mode`, `service_tiers`, and `input_modalities`.

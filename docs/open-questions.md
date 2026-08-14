@@ -77,8 +77,10 @@ per-turn provenance. The following extensions remain undecided:
   eligible metadata, path-triggered admission, and any template-eager tier need
   exact recorded trigger and budget contracts. The baseline remains deliberate
   identity-addressed admission.
-- **Skill resources and archive export.** Addressing and hashing files below a
-  skill bundle, plus export policy for retained rendered plaintext, remain open.
+- **Skill resources and rendered-byte externalization.** Addressing and hashing
+  files below a skill bundle, export policy for retained rendered plaintext, and
+  whether a later migration moves version-one admission-row wrapper bytes to
+  content-addressed blob storage remain open.
 - **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
   but unload authority, tombstone rendering, admitted-set history, and the
   model-facing operation remain foundation work. See the owning
