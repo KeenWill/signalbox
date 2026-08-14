@@ -311,8 +311,23 @@ async fn lock_sequence(
     let row = sqlx::query(PROGRAM_JOURNAL_SEQUENCE)
         .bind(run.into_uuid())
         .fetch_optional(&mut **transaction)
-        .await?
-        .ok_or(ProgramJournalCorruption::MissingSequenceState)?;
+        .await?;
+    let Some(row) = row else {
+        let stream_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM program_run_journal_stream WHERE run_id = $1
+             )",
+        )
+        .bind(run.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?;
+        let corruption = if stream_exists {
+            ProgramJournalCorruption::MissingSequenceState
+        } else {
+            ProgramJournalCorruption::MissingStream
+        };
+        return Err(corruption.into());
+    };
     Ok(SequenceState {
         last_position: nonnegative_u64(row.try_get("last_position")?, "sequence last position")?,
         last_request: nonnegative_u64(

@@ -177,6 +177,17 @@ CREATE TABLE program_run_journal_entry (
                     'contract_retired', 'journal_bound', 'payload_too_large'
                 )
             )
+        ),
+    CONSTRAINT program_run_journal_entry_payload_shape
+        CHECK (
+            octet_length(payload_inline) = 0
+            OR (
+                frame_kind NOT IN ('scope', 'reject')
+                AND NOT (
+                    frame_kind = 'fault'
+                    AND fault_cause = 'nondeterminism'
+                )
+            )
         )
 );
 
@@ -236,6 +247,7 @@ CREATE TABLE program_run_journal_nondeterminism (
         CHECK (
             (
                 expected_kind = 'scope'
+                AND expected_scope_operation IS NOT NULL
                 AND expected_scope_operation IN ('open', 'close')
                 AND expected_declared_scope_ordinal IS NOT NULL
             )
@@ -251,6 +263,7 @@ CREATE TABLE program_run_journal_nondeterminism (
         CHECK (
             (
                 observed_kind = 'scope'
+                AND observed_scope_operation IS NOT NULL
                 AND observed_scope_operation IN ('open', 'close')
                 AND observed_declared_scope_ordinal IS NOT NULL
             )
@@ -266,6 +279,7 @@ CREATE TABLE program_run_journal_nondeterminism (
         CHECK (
             (
                 expected_kind = 'effect'
+                AND expected_effect_capability IS NOT NULL
                 AND expected_effect_capability IN (
                     'time', 'random', 'sleep', 'subscribe', 'session', 'judge',
                     'exec-stage', 'corpus', 'eval-record', 'blob', 'register'
@@ -283,6 +297,7 @@ CREATE TABLE program_run_journal_nondeterminism (
         CHECK (
             (
                 observed_kind = 'effect'
+                AND observed_effect_capability IS NOT NULL
                 AND observed_effect_capability IN (
                     'time', 'random', 'sleep', 'subscribe', 'session', 'judge',
                     'exec-stage', 'corpus', 'eval-record', 'blob', 'register'
@@ -294,6 +309,17 @@ CREATE TABLE program_run_journal_nondeterminism (
                 observed_kind <> 'effect'
                 AND observed_effect_capability IS NULL
                 AND observed_effect_method IS NULL
+            )
+        ),
+    CONSTRAINT program_run_journal_nondeterminism_payload_shape
+        CHECK (
+            (
+                expected_kind <> 'scope'
+                OR octet_length(expected_payload_inline) = 0
+            )
+            AND (
+                observed_kind <> 'scope'
+                OR octet_length(observed_payload_inline) = 0
             )
         )
 );
@@ -476,6 +502,11 @@ EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TRIGGER program_run_journal_sequence_state_cannot_be_deleted
 BEFORE DELETE ON program_run_journal_sequence_state
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER program_run_journal_sequence_state_identity_is_immutable
+BEFORE UPDATE OF run_id ON program_run_journal_sequence_state
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 

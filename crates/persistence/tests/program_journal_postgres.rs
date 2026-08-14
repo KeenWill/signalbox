@@ -14,7 +14,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
-    program_journal::ProgramJournalRepository,
+    program_journal::{ProgramJournalCorruption, ProgramJournalRepository},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -223,6 +223,123 @@ async fn sequence_state_row_cannot_be_deleted() -> Result<(), Box<dyn Error>> {
     .await;
 
     assert!(delete.is_err());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn sequence_state_run_identity_cannot_change() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    let other_run = ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID + 1));
+    repository.create_stream(run).await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO program_run_journal_stream (run_id, frame_contract_version)
+         VALUES ($1, 1)",
+    )
+    .bind(other_run.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+
+    let update = sqlx::query(
+        "UPDATE program_run_journal_sequence_state
+            SET run_id = $2
+          WHERE run_id = $1",
+    )
+    .bind(run.into_uuid())
+    .bind(other_run.into_uuid())
+    .execute(&mut *transaction)
+    .await;
+
+    assert!(update.is_err());
+    transaction.rollback().await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn payloadless_scope_request_rejects_inline_bytes() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+
+    let insert = sqlx::query(
+        "INSERT INTO program_run_journal_entry (
+             run_id, journal_position, frame_direction, frame_kind,
+             request_ordinal, scope_operation, declared_scope_ordinal, payload_inline
+         ) VALUES ($1, 1, 'request', 'scope', 1, 'open', 1, 'unexpected')",
+    )
+    .bind(run.into_uuid())
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn nondeterminism_scope_evidence_requires_nonnull_operation() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let request = repository
+        .append_request(run, None, RequestKind::Now(payload(b"ordinary-request")))
+        .await?;
+
+    let insert = sqlx::query(
+        "INSERT INTO program_run_journal_nondeterminism (
+             run_id, journal_position,
+             expected_request_ordinal, expected_kind,
+             expected_declared_scope_ordinal, expected_payload_inline,
+             observed_request_ordinal, observed_kind, observed_payload_inline
+         )
+         SELECT run_id, journal_position,
+                request_ordinal, 'scope', 1, '',
+                request_ordinal, frame_kind, payload_inline
+           FROM program_run_journal_entry
+          WHERE run_id = $1 AND request_ordinal = $2",
+    )
+    .bind(run.into_uuid())
+    .bind(rust_decimal::Decimal::from(request.ordinal().as_u64()))
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn append_to_missing_stream_reports_missing_stream() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+
+    let error = repository
+        .append_request(run_id(), None, RequestKind::Now(payload(b"missing")))
+        .await
+        .expect_err("an append requires a created stream");
+
+    assert_eq!(
+        error.corruption(),
+        Some(&ProgramJournalCorruption::MissingStream)
+    );
 
     pool.close().await;
     drop(container);
