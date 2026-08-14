@@ -14826,7 +14826,7 @@ mod tests {
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
+        ImportedSpeaker, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
         RejectionDetail, ReviewFindingInput, ReviewSeverity,
         RunnerPlacementRevision as WireRunnerPlacementRevision,
         RunnerSandboxProfile as WireRunnerSandboxProfile,
