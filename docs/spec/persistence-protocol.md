@@ -224,8 +224,10 @@ Implemented table families (across the forward-only migrations):
   `registered_instruction_bundle`; and `turn_instruction_manifest`, whose
   append-only discovery, registration, and exact turn-start provenance are owned
   by [workspace-instructions](workspace-instructions.md) (INV-061). Migration
-  `202608140001` backfills the empty manifest for existing turns and makes every
-  `model_call` name the manifest for its own session and turn. Its synthetic
+  `202608140001` backfills the empty manifest for each existing turn that
+  already has a model call and makes every `model_call` name the manifest for
+  its own session and turn. Queued turns and callless active turns remain
+  unbound for ordinary discovery before their first call. The synthetic
   discovery has no roots, candidates, or findings and is complete evidence for
   the empty instruction projection those historical calls used;
 - `model_call` (execution state owned by
@@ -777,16 +779,17 @@ Locks per transaction, in acquisition order:
 - **Empty turn-instruction manifest recording**: the `session_scheduler` row
   `FOR UPDATE` is the only explicit lock. An ordinary activation records after
   activation and before model work, rechecking the exact active `turn_lifecycle`
-  row under that lock. A counted activation records after the fitting exact
-  count and before its activation commit, rechecking the exact queued row; the
-  later atomic activation-and-first-call transaction takes the same scheduler
-  lock and authenticates that manifest. In either path, discovery,
-  registrations, and the empty manifest commit atomically for a complete scan.
-  An incomplete discovery may commit as diagnostic evidence but binds no
-  manifest, leaving the turn eligible for a new scan on retry. These temporary
-  boundaries are sound only while eligibility is the one immutable empty value.
-  The committed nonempty eligibility surface moves the manifest into activation
-  under this same scheduler lock, as
+  row under that lock. A counted activation retains its complete scan in memory
+  after the fitting exact count. Its activation-and-first-call transaction then
+  takes the scheduler lock, revalidates the exact queued row, activates it,
+  records discovery, registrations, and the manifest, and checkpoints the exact
+  Prepared call atomically; a stale preview commits none of them. In either
+  path, discovery, registrations, and the empty manifest commit atomically for a
+  complete scan. An incomplete discovery may commit as diagnostic evidence but
+  binds no manifest, leaving the turn eligible for a new scan on retry. These
+  temporary boundaries are sound only while eligibility is the one immutable
+  empty value. The committed nonempty eligibility surface moves every manifest
+  into activation under this same scheduler lock, as
   [the activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
   requires.
 
