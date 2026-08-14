@@ -469,6 +469,17 @@ execution and continuation. For each next approved request:
    moves lifecycle to `awaiting_tool_recovery` correlated with that exact
    attempt.
 
+**Committed unimplemented functionality — instruction admission effect.** For a
+successful fresh `instructions.read`, the commit-result transaction also locks
+the session's admitted-set head and atomically appends the
+`InstructionAdmission` specified by
+[workspace instructions](workspace-instructions.md#durable-admission-transition)
+with the receipt-only completed result. A stale head, failed read, or failed
+admission validation rolls back both effects. Replay of an already committed
+request returns the recorded receipt and admission link without appending either
+again; a conflicting receipt or link is corruption. No present tool supplies
+this effect until an implementing child advances the owning workspace contract.
+
 The runner durably spools a terminal evidence envelope until `result_recorded`.
 A process exit, timeout, supervisor loss, or channel loss after claim is not a
 known tool failure; it enters the effect-class loss and ambiguity law. A tool
