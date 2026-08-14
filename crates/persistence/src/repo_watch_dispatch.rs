@@ -12,9 +12,10 @@ use signalbox_application::{
     RepoWatchSingletonKey,
 };
 use signalbox_domain::{
-    FrozenAliasDefinition, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug,
-    SessionId,
+    DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
+    GoalUserCommand, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepositorySlug, SessionId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
 
@@ -37,6 +38,7 @@ pub enum RepoWatchDispatchRepositoryError {
     SessionCreation(crate::create_session::CreateSessionRepositoryError),
     InitialInput(crate::submit_input::SubmitInputRepositoryError),
     GoalCommission(crate::goal::GoalRepositoryError),
+    GoalCutoff(crate::goal::GoalRepositoryError),
     ReusedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
@@ -62,6 +64,7 @@ impl fmt::Display for RepoWatchDispatchRepositoryError {
             Self::SessionCreation(error) => error.fmt(formatter),
             Self::InitialInput(error) => error.fmt(formatter),
             Self::GoalCommission(error) => error.fmt(formatter),
+            Self::GoalCutoff(error) => error.fmt(formatter),
             Self::EventStore(error) => error.fmt(formatter),
             Self::ReusedRuleIdentity {
                 rule_id,
@@ -99,6 +102,7 @@ impl Error for RepoWatchDispatchRepositoryError {
             Self::SessionCreation(error) => Some(error),
             Self::InitialInput(error) => Some(error),
             Self::GoalCommission(error) => Some(error),
+            Self::GoalCutoff(error) => Some(error),
             Self::ReusedRuleIdentity { .. }
             | Self::ChangedRuleIdentity { .. }
             | Self::Corruption(_) => None,
@@ -129,6 +133,111 @@ impl PostgresRepoWatchDispatchStore {
 
     pub(crate) const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Processes the oldest unhandled pull-request closure and withdraws every
+    /// still-active generation-one goal commissioned for that pull request.
+    pub async fn process_next_lifecycle_cutoff<NextCommandId>(
+        &self,
+        repository: &RepositorySlug,
+        mut next_command_id: NextCommandId,
+    ) -> Result<bool, RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, repository.as_str()).await?;
+        let candidate = sqlx::query(
+            "SELECT event.event_id, event.pull_request_number
+               FROM repo_watch_event AS event
+              WHERE event.repository = $1
+                AND event.event_kind IN ('pull_request_closed', 'pull_request_merged')
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_lifecycle_cutoff AS cutoff
+                     WHERE cutoff.event_id = event.event_id
+                )
+              ORDER BY event.cursor_generation, event.event_ordinal
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(candidate) = candidate else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let event_id: Uuid = candidate.try_get("event_id")?;
+        let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
+        let latest_lifecycle: String = sqlx::query_scalar(
+            "SELECT event_kind
+               FROM repo_watch_event
+              WHERE repository = $1
+                AND pull_request_number = $2
+                AND event_kind IN (
+                    'pull_request_opened', 'pull_request_closed', 'pull_request_merged'
+                )
+              ORDER BY cursor_generation DESC, event_ordinal DESC
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .bind(pull_request_number)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let disposition = if latest_lifecycle == "pull_request_opened" {
+            "reopened"
+        } else {
+            "terminal"
+        };
+        sqlx::query(
+            "INSERT INTO repo_watch_lifecycle_cutoff (event_id, disposition_kind)
+             VALUES ($1, $2)",
+        )
+        .bind(event_id)
+        .bind(disposition)
+        .execute(&mut *transaction)
+        .await?;
+        if disposition == "terminal" {
+            let sessions = sqlx::query_scalar::<_, Uuid>(
+                "SELECT DISTINCT action.session_id
+                   FROM repo_watch_dispatch_action AS action
+                   JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
+                  WHERE origin.repository = $1
+                    AND origin.pull_request_number = $2
+                  ORDER BY action.session_id",
+            )
+            .bind(repository.as_str())
+            .bind(pull_request_number)
+            .fetch_all(&mut *transaction)
+            .await?;
+            for session_id in sessions {
+                let session = SessionId::from_uuid(session_id);
+                let command = GoalUserCommand::new(
+                    next_command_id(),
+                    session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                );
+                if crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+                    .await
+                    .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?
+                {
+                    sqlx::query(
+                        "INSERT INTO repo_watch_lifecycle_cutoff_goal
+                            (event_id, session_id, goal_command_id)
+                         VALUES ($1, $2, $3)",
+                    )
+                    .bind(event_id)
+                    .bind(session_id)
+                    .bind(command.command_id().as_uuid())
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+            }
+        }
+        commit(transaction).await?;
+        Ok(true)
     }
 
     /// Deactivates rules belonging to repositories absent from configuration.
@@ -476,6 +585,31 @@ impl PostgresRepoWatchDispatchStore {
                 if !rule_is_active(&mut transaction, &event, &rule_id, rule_version).await? {
                     transaction.rollback().await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
+                }
+                if !event_target_is_open(&mut transaction, &event).await? {
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                "target_closed",
+                                None,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::settle_target_closed_obligation(
+                                &mut transaction,
+                                obligation_id,
+                                event.id(),
+                            )
+                            .await?;
+                        }
+                    }
+                    commit(transaction).await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::TargetClosed);
                 }
                 if matched_admission == MatchedAdmission::Fresh
                     && crate::repo_watch_dispatch_obligation::active_obligation_exists(
@@ -978,6 +1112,7 @@ async fn load_recorded_evaluation(
     let outcome: String = first.try_get("outcome_kind")?;
     match outcome.as_str() {
         "not_matched" => Ok(Some(RepoWatchRuleEvaluationOutcome::NotMatched)),
+        "target_closed" => Ok(Some(RepoWatchRuleEvaluationOutcome::TargetClosed)),
         "occupied" | "coalesced" => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
         "cooldown" => Ok(Some(RepoWatchRuleEvaluationOutcome::Cooldown)),
         "dispatched" => {
@@ -1035,6 +1170,34 @@ async fn occupying_dispatch(
     .fetch_optional(&mut **transaction)
     .await?
     .map(RepoWatchDispatchId::from_uuid))
+}
+
+async fn event_target_is_open(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    let RepoWatchEventTarget::PullRequest(context) = event.target() else {
+        return Ok(true);
+    };
+    let lifecycle = sqlx::query_scalar::<_, String>(
+        "SELECT event_kind
+           FROM repo_watch_event
+          WHERE repository = $1
+            AND pull_request_number = $2
+            AND event_kind IN (
+                'pull_request_opened', 'pull_request_closed', 'pull_request_merged'
+            )
+          ORDER BY cursor_generation DESC, event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(event.repository().as_str())
+    .bind(Decimal::from(context.number().get()))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+        "pull-request event has no durable lifecycle",
+    ))?;
+    Ok(lifecycle == "pull_request_opened")
 }
 
 async fn singleton_is_cooling_down(

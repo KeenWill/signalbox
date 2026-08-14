@@ -25,7 +25,9 @@ commissions with its session, and the binding of the dispatched work turn to
 that goal's generation, are verified against this PR
 (`agent/commission-binding`). The occupied-refusal obligation and collapsed
 current-state delivery below are verified against this PR
-(`agent/repo-watch-dispatch-loop`).
+(`agent/repo-watch-dispatch-loop`). Runtime-relevance release, held-slot
+diagnostics, and terminal-target cutoff are verified against this PR
+(`agent/dispatch-autonomy`).
 
 ## Configuration and credential boundary
 
@@ -496,17 +498,33 @@ obligation for that singleton. Further matching facts join its latest-event
 projection and increment its count, including a match racing with release, so
 one singleton has at most one outstanding obligation. Their individual terminal
 evaluations remain append-only audit facts. The batch releases the singleton at
-the terminal transition that makes every dispatched session in that batch
-terminal. The obligation becomes eligible only after that release and the same
-cooldown that would suppress a fresh successor; cooldown suppression without an
-existing obligation does not create one. Eligibility settles the obligation and
-creates its one current-state batch atomically. Equal recovery cannot create a
-second session for the same admitted action or obligation. A session whose
-current goal is pursuing remains nonterminal for singleton ownership across the
-gap between a completed goal turn and its durably queued continuation. Goal
-blocking, achievement, or user stop rechecks release after pursuit ends. The
-append-only dispatch records identify the sessions responsible for the PR; no
-mutable assignment flag replaces them.
+the transition that makes every dispatched turn terminal or runtime-irrelevant,
+leaves no live runtime-relevant turn for its session, and leaves no pursuing
+goal. A goal-ending recheck is deferred to its transaction boundary so an active
+turn's stop cascade is visible. The obligation becomes eligible only after that
+release and the same cooldown that would suppress a fresh successor; cooldown
+suppression without an existing obligation does not create one. Eligibility
+settles the obligation and creates its one current-state batch atomically. Equal
+recovery cannot create a second session for the same admitted action or
+obligation. A session whose current goal is pursuing remains nonterminal for
+singleton ownership across the gap between a completed goal turn and its durably
+queued continuation. Goal blocking, achievement, or user stop rechecks release
+after pursuit ends. The append-only dispatch records identify the sessions
+responsible for the PR; no mutable assignment flag replaces them.
+
+**Implemented behavior.** A pull-request close or merge durably records one
+lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
+the ordinary parent-only stop to each generation-one goal it commissioned for
+the pull request; it cannot stop descendants, a later user-authored generation,
+or an unrelated session. A later open event makes an earlier unprocessed cutoff
+a recorded reopen instead. Dispatch admission rechecks the latest durable
+lifecycle under the repository lock: a stale match or obligation for a terminal
+target settles as `target_closed` without creating a session.
+
+**Implemented behavior.** Held singleton batches are directly observable in the
+`repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
+pull request, rule, singleton key, sessions, and held-since time; states each
+release clause independently; and names every failing clause in `blockers`.
 
 **Implemented behavior.** Outstanding obligations are directly observable in the
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
@@ -514,7 +532,8 @@ repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
 sessions, cooldown eligibility, and present readiness. Rule deactivation settles
 an obligation without dispatch rather than leaving permanently owed work for
-semantics that are no longer configured.
+semantics that are no longer configured; terminal-target settlement likewise
+records why the obligation no longer remains owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes

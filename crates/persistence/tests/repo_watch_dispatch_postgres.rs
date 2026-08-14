@@ -16,13 +16,13 @@ use signalbox_application::{
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, GoalCommandResult, GoalNeed, GoalSchedulerProvenance,
-    GoalStatement, GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionRequest,
-    PullRequestBody, PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber,
-    PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1,
-    RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
-    RepoWatchSingletonScope, RepositorySlug, SessionConfigurationDefaults, SessionId,
-    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, MergeableState,
+    ModelSelectionRequest, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug, SessionConfigurationDefaults,
+    SessionId, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
     SessionTemplateProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
@@ -50,6 +50,7 @@ const REPOSITORY: &str = "signalbox/repository";
 const HEAD_REPOSITORY: &str = "contributor/repository";
 const BASE_BRANCH: &str = "main";
 const HEAD_BRANCH: &str = "feature/repo-watch";
+const INITIAL_HEAD: &str = "0000000000000000000000000000000000000000";
 const FIRST_HEAD: &str = "1111111111111111111111111111111111111111";
 const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const THIRD_HEAD: &str = "3333333333333333333333333333333333333333";
@@ -100,13 +101,20 @@ fn context(head: &str) -> Result<PullRequestEventContext, Box<dyn Error>> {
 }
 
 fn observation(context: PullRequestEventContext) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    lifecycle_observation(context, RepoWatchPullRequestLifecycle::Open)
+}
+
+fn lifecycle_observation(
+    context: PullRequestEventContext,
+    lifecycle: RepoWatchPullRequestLifecycle,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
     Ok(RepoWatchObservation::new(
         Vec::new(),
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
             pull_requests: vec![RepoWatchPullRequestState::try_new(
                 RepoWatchPullRequestStateInput {
                     context,
-                    lifecycle: RepoWatchPullRequestLifecycle::Open,
+                    lifecycle,
                     mergeable_state: MergeableState::Conflicting,
                     completed_check_suites: Vec::new(),
                     completed_check_runs: Vec::new(),
@@ -119,6 +127,24 @@ fn observation(context: PullRequestEventContext) -> Result<RepoWatchObservation,
             branch_heads: Vec::new(),
         })?,
     ))
+}
+
+fn opened_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::try_pull_request(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(value)),
+        repository()?,
+        context(head)?,
+        RepoWatchEventKindV1::PullRequestOpened,
+    )?)
+}
+
+fn merged_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::try_pull_request(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(value)),
+        repository()?,
+        context(head)?,
+        RepoWatchEventKindV1::PullRequestMerged,
+    )?)
 }
 
 fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error>> {
@@ -221,6 +247,15 @@ struct OutstandingCooldownVisibility {
     matched_event_count: i64,
     eligible_at_is_future: bool,
     ready: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct HeldSlotVisibility {
+    every_action_delivered: bool,
+    every_delivery_turn_releasable: bool,
+    no_live_runtime_turn: bool,
+    every_goal_nonpursuing: bool,
+    blockers: Vec<String>,
 }
 
 impl RepoWatchDispatchTransaction for ObligationTransaction {
@@ -338,13 +373,8 @@ fn assert_applied_goal_command(outcome: GoalCommandHandlingOutcome) {
 /// so a test whose subject is the release mechanism has to end that pursuit
 /// before the turn it is exercising can release anything.
 ///
-/// This stops the goal rather than failing its turn, and the difference is the
-/// point: the dispatched work turn is that goal's own turn, so failing it and
-/// then blocking would leave every delivery turn terminal and the goal
-/// non-pursuing at once, and the terminal-goal trigger would insert the release
-/// here instead of at the moment the caller is measuring. A user stop ends
-/// pursuit while the work turn is still queued, which is what makes that
-/// trigger's release check decline.
+/// This stops the goal rather than failing its turn. A stopped queued or active
+/// turn is runtime-irrelevant and therefore no longer owns the singleton.
 async fn withdraw_dispatched_goal(
     pool: &PgPool,
     session: SessionId,
@@ -496,15 +526,13 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
     let repository = repository()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
     let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
-    let initial = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::default(),
-    ));
+    let initial_observation = observation(context(INITIAL_HEAD)?)?;
+    let initial = RepoWatchCursorCandidate::new(initial_observation);
     let first_generation = generation(
         event_store
             .commit(
                 &repository,
-                RepoWatchCommitRequest::new(None, initial, Vec::new()),
+                RepoWatchCommitRequest::new(None, initial, vec![opened_event(100, INITIAL_HEAD)?]),
             )
             .await?,
     );
@@ -617,6 +645,27 @@ async fn load_conflict(
     Ok((loaded, observation))
 }
 
+async fn commit_merge(fixture: &DispatchFixture, event_id: u128) -> Result<(), Box<dyn Error>> {
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let merged =
+        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?;
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(merged),
+                vec![merged_event(event_id, SECOND_HEAD)?],
+            ),
+        )
+        .await?;
+    Ok(())
+}
+
 async fn evaluate_obligation(
     fixture: &DispatchFixture,
     obligation: RepoWatchDispatchObligation,
@@ -638,6 +687,163 @@ async fn evaluate_obligation(
         dispatch_context(),
     )
     .await?)
+}
+
+/// A user stop retires a queued dispatch turn without changing its physical
+/// lifecycle state, so release follows runtime relevance rather than waiting
+/// for a terminal state transition that will never happen.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stopped_runtime_irrelevant_turn_releases_its_singleton() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+
+    withdraw_dispatched_goal(&fixture.pool, fixture.session(0), 0x50_100).await?;
+
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn held_slot_projection_names_each_failed_release_clause() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+
+    let held: HeldSlotVisibility = sqlx::query_as(
+        "SELECT every_action_delivered, every_delivery_turn_releasable,
+                no_live_runtime_turn, every_goal_nonpursuing, blockers
+           FROM repo_watch_held_dispatch_slot
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(held.every_action_delivered);
+    assert!(!held.every_delivery_turn_releasable);
+    assert!(!held.no_live_runtime_turn);
+    assert!(!held.every_goal_nonpursuing);
+    assert_eq!(
+        held.blockers,
+        vec![
+            String::from("delivery_turn_runtime_relevant"),
+            String::from("live_runtime_turn"),
+            String::from("pursuing_goal"),
+        ]
+    );
+    Ok(())
+}
+
+/// A terminal pull-request lifecycle withdraws only the generation-one goals
+/// repository watch commissioned for that pull request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn merged_pull_request_ends_the_commissioned_goal() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    commit_merge(&fixture, 0x51_000).await?;
+
+    let processed = fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x51_100))
+        })
+        .await?;
+    let replayed = fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x51_100))
+        })
+        .await?;
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the dispatched goal remains readable");
+    let cutoff_goal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_lifecycle_cutoff_goal
+          WHERE session_id = $1",
+    )
+    .bind(session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(processed);
+    assert!(!replayed);
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(cutoff_goal_count, 1);
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// Dispatch admission rechecks durable lifecycle after an event was loaded, so
+/// a merge committed in between prevents the stale match from firing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn matching_event_loaded_before_merge_records_target_closed() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let (loaded, stale_open_observation) = load_second_conflict(&fixture).await?;
+    let batches_before: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+        .fetch_one(&fixture.pool)
+        .await?;
+    commit_merge(&fixture, 0x52_000).await?;
+
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &stale_open_observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::TargetClosed);
+    let batches_after: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+        .fetch_one(&fixture.pool)
+        .await?;
+    assert_eq!(batches_after, batches_before);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let _occupied = evaluate_second_conflict(&fixture).await?;
+    commit_merge(&fixture, 0x53_000).await?;
+    fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x53_100))
+        })
+        .await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("released terminal-target obligation becomes eligible for settlement");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+
+    let outcome =
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?;
+    let settlement: String = sqlx::query_scalar(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::TargetClosed);
+    assert_eq!(settlement, "target_closed");
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -967,7 +1173,19 @@ async fn release_timestamp_is_sampled_after_dispatch_lock_wait() -> Result<(), B
     .bind(fixture.dispatch_id.as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         DISABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
     withdraw_dispatched_goal(&fixture.pool, fixture.sessions[0], 0x20_000).await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         ENABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
     let mut dispatch_lock = fixture.pool.begin().await?;
     sqlx::query("SELECT 1 FROM repo_watch_dispatch_batch WHERE dispatch_id = $1 FOR UPDATE")
         .bind(fixture.dispatch_id.as_uuid())
@@ -1019,8 +1237,20 @@ async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<
     .bind(fixture.dispatch_id.as_uuid())
     .fetch_all(&fixture.pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         DISABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
     withdraw_dispatched_goal(&fixture.pool, fixture.sessions[0], 0x30_000).await?;
     withdraw_dispatched_goal(&fixture.pool, fixture.sessions[1], 0x40_000).await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         ENABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
     mark_queued_turn_failed(
         &fixture.pool,
         fixture.sessions[0],
