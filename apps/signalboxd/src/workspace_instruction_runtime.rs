@@ -11,8 +11,8 @@ use signalbox_domain::{
     SessionId, TurnId, TurnInstructionManifest, TurnInstructionManifestId,
 };
 use signalbox_persistence::workspace_instructions::{
-    RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepository,
-    WorkspaceInstructionRepositoryError,
+    RecordTurnInstructionSnapshotOutcome, TurnInstructionManifestPreflight,
+    WorkspaceInstructionRepository, WorkspaceInstructionRepositoryError,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -122,6 +122,19 @@ impl WorkspaceInstructionRuntime {
         session: SessionId,
         turn: TurnId,
     ) -> Result<bool, WorkspaceInstructionRuntimeError> {
+        match self
+            .repository
+            .preflight_turn_start(session, turn)
+            .await
+            .map_err(WorkspaceInstructionRuntimeError::Persistence)?
+        {
+            TurnInstructionManifestPreflight::Available(_) => return Ok(true),
+            TurnInstructionManifestPreflight::DiscoveryIncomplete(_) => {
+                return Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete);
+            }
+            TurnInstructionManifestPreflight::TurnUnavailable => return Ok(false),
+            TurnInstructionManifestPreflight::Absent => {}
+        }
         let snapshot = self.discover(session).await?;
         let discovery = InstructionDiscoveryId::from_uuid(Uuid::now_v7());
         let manifest = TurnInstructionManifest::empty_turn_start(
@@ -146,6 +159,19 @@ impl WorkspaceInstructionRuntime {
         session: SessionId,
         turn: TurnId,
     ) -> Result<bool, WorkspaceInstructionRuntimeError> {
+        match self
+            .repository
+            .preflight_counted_activation(session, turn)
+            .await
+            .map_err(WorkspaceInstructionRuntimeError::Persistence)?
+        {
+            TurnInstructionManifestPreflight::Available(_) => return Ok(true),
+            TurnInstructionManifestPreflight::DiscoveryIncomplete(_) => {
+                return Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete);
+            }
+            TurnInstructionManifestPreflight::TurnUnavailable => return Ok(false),
+            TurnInstructionManifestPreflight::Absent => {}
+        }
         let snapshot = self.discover(session).await?;
         let discovery = InstructionDiscoveryId::from_uuid(Uuid::now_v7());
         let manifest = TurnInstructionManifest::empty_turn_start(
@@ -198,7 +224,7 @@ fn outcome_is_available(
     match outcome {
         RecordTurnInstructionSnapshotOutcome::Recorded(_)
         | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => Ok(true),
-        RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(_) => {
+        RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
             Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
         }
         RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(false),
@@ -220,7 +246,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn misprovisioned_daemon_workspace_fails_before_persistence() {
+    async fn misprovisioned_daemon_workspace_fails_discovery_before_scan() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
         let configured = temporary.path().join("workspace");
         std::fs::create_dir(&configured).expect("configured workspace exists");
@@ -236,9 +262,9 @@ mod tests {
         let runtime = WorkspaceInstructionRuntime::new(pool, Some(roots), Vec::new());
 
         let error = runtime
-            .prepare(session, TurnId::from_uuid(Uuid::from_u128(2)))
+            .discover(session)
             .await
-            .expect_err("misprovisioning fails before persistence");
+            .expect_err("misprovisioning fails before scanning");
 
         assert_eq!(
             error.operator_failure_cause_code(),

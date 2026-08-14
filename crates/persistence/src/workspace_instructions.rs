@@ -19,7 +19,20 @@ use sqlx::{PgPool, Row, types::Uuid};
 pub enum RecordTurnInstructionSnapshotOutcome {
     Recorded(TurnInstructionManifestId),
     AlreadyRecorded(TurnInstructionManifestId),
+    DiscoveryIncomplete,
+    TurnUnavailable,
+}
+
+/// Result of authenticating durable turn-start evidence before discovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnInstructionManifestPreflight {
+    /// No manifest is yet bound to this available turn.
+    Absent,
+    /// One complete canonical manifest is already bound to this turn.
+    Available(TurnInstructionManifestId),
+    /// A pre-alpha migration manifest names an incomplete discovery.
     DiscoveryIncomplete(TurnInstructionManifestId),
+    /// The turn is absent or no longer in the required lifecycle state.
     TurnUnavailable,
 }
 
@@ -82,6 +95,24 @@ impl WorkspaceInstructionRepository {
         Self { pool }
     }
 
+    /// Authenticates existing evidence for one active turn before discovery.
+    pub async fn preflight_turn_start(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<TurnInstructionManifestPreflight, WorkspaceInstructionRepositoryError> {
+        self.preflight_for_state(session, turn, "active").await
+    }
+
+    /// Authenticates existing evidence for one queued counted activation.
+    pub async fn preflight_counted_activation(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<TurnInstructionManifestPreflight, WorkspaceInstructionRepositoryError> {
+        self.preflight_for_state(session, turn, "queued").await
+    }
+
     /// Records one complete scan and empty turn-start manifest atomically.
     pub async fn record_turn_start<NextBundleId>(
         &self,
@@ -125,25 +156,14 @@ impl WorkspaceInstructionRepository {
         NextBundleId: FnMut() -> InstructionBundleId,
     {
         let mut transaction = self.pool.begin().await?;
-        let scheduler =
-            sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
-                .bind(manifest.session().into_uuid())
-                .fetch_optional(&mut *transaction)
-                .await?;
-        if scheduler.is_none() {
-            transaction.rollback().await?;
-            return Ok(RecordTurnInstructionSnapshotOutcome::TurnUnavailable);
-        }
-        let state = sqlx::query_scalar::<_, String>(
-            "SELECT state_kind
-               FROM turn_lifecycle
-              WHERE session_id = $1 AND turn_id = $2",
+        if !turn_is_available(
+            &mut transaction,
+            manifest.session(),
+            manifest.turn(),
+            required_state,
         )
-        .bind(manifest.session().into_uuid())
-        .bind(manifest.turn().into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if state.as_deref() != Some(required_state) {
+        .await?
+        {
             transaction.rollback().await?;
             return Ok(RecordTurnInstructionSnapshotOutcome::TurnUnavailable);
         }
@@ -154,7 +174,7 @@ impl WorkspaceInstructionRepository {
             return Ok(if complete {
                 RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(existing.id())
             } else {
-                RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(existing.id())
+                RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete
             });
         }
         let classified_entries = i64::try_from(snapshot.classified_entries())
@@ -264,6 +284,10 @@ impl WorkspaceInstructionRepository {
             .execute(&mut *transaction)
             .await?;
         }
+        if !snapshot.is_complete() {
+            transaction.commit().await?;
+            return Ok(RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete);
+        }
         sqlx::query(
             "INSERT INTO turn_instruction_manifest
                 (turn_instruction_manifest_id, session_id, turn_id,
@@ -281,12 +305,57 @@ impl WorkspaceInstructionRepository {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(if snapshot.is_complete() {
-            RecordTurnInstructionSnapshotOutcome::Recorded(manifest.id())
-        } else {
-            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete(manifest.id())
+        Ok(RecordTurnInstructionSnapshotOutcome::Recorded(
+            manifest.id(),
+        ))
+    }
+
+    async fn preflight_for_state(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        required_state: &'static str,
+    ) -> Result<TurnInstructionManifestPreflight, WorkspaceInstructionRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        if !turn_is_available(&mut transaction, session, turn, required_state).await? {
+            transaction.rollback().await?;
+            return Ok(TurnInstructionManifestPreflight::TurnUnavailable);
+        }
+        let existing = load_manifest(&mut transaction, session, turn).await?;
+        transaction.rollback().await?;
+        Ok(match existing {
+            Some((manifest, true)) => TurnInstructionManifestPreflight::Available(manifest.id()),
+            Some((manifest, false)) => {
+                TurnInstructionManifestPreflight::DiscoveryIncomplete(manifest.id())
+            }
+            None => TurnInstructionManifestPreflight::Absent,
         })
     }
+}
+
+async fn turn_is_available(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+    turn: TurnId,
+    required_state: &'static str,
+) -> Result<bool, sqlx::Error> {
+    let scheduler = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
+        .bind(session.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if scheduler.is_none() {
+        return Ok(false);
+    }
+    let state = sqlx::query_scalar::<_, String>(
+        "SELECT state_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(state.as_deref() == Some(required_state))
 }
 
 async fn load_manifest(
@@ -300,6 +369,8 @@ async fn load_manifest(
            FROM turn_instruction_manifest AS m
            JOIN instruction_discovery AS d
              ON d.instruction_discovery_id = m.instruction_discovery_id
+            AND d.session_id = m.session_id
+            AND d.turn_id = m.turn_id
           WHERE m.session_id = $1 AND m.turn_id = $2 AND m.boundary_kind = 'turn_start'",
     )
     .bind(session.into_uuid())

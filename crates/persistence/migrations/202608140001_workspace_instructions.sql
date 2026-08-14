@@ -22,6 +22,8 @@ CREATE TABLE instruction_discovery (
         CHECK (candidate_source_byte_count BETWEEN 0 AND 67108864),
     CONSTRAINT instruction_discovery_elapsed_nonnegative
         CHECK (elapsed_millis >= 0),
+    CONSTRAINT instruction_discovery_correlation_key
+        UNIQUE (instruction_discovery_id, session_id, turn_id),
 
     CONSTRAINT instruction_discovery_turn_fk
         FOREIGN KEY (turn_id, session_id)
@@ -201,8 +203,8 @@ CREATE TABLE turn_instruction_manifest (
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
     CONSTRAINT turn_instruction_manifest_discovery_fk
-        FOREIGN KEY (instruction_discovery_id)
-        REFERENCES instruction_discovery (instruction_discovery_id)
+        FOREIGN KEY (instruction_discovery_id, session_id, turn_id)
+        REFERENCES instruction_discovery (instruction_discovery_id, session_id, turn_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
 );
