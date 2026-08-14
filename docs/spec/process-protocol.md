@@ -1019,8 +1019,12 @@ request, or blob-upload transport request — `create_session`,
   `{ "kind": "applied", "terminal_state": "cancelled", "result": null }`;
   `{ "kind": "not_found" }`; or
   `{ "kind": "already_terminal", "terminal_state": <standing terminal state>, "result": <standing terminal result> }`;
-  equal `command_id` replay returns the originally stored receipt even if the
-  run's standing state later changes;
+  under the command-identity claim protocol in
+  [identity and commands](identity-and-commands.md), an identical
+  `cancel_program_run` request bearing the same `command_id` is a replay and
+  returns the originally stored receipt even if the run's standing state later
+  changes; reuse of that `command_id` with a different `run_id` or other payload
+  is conflicting reuse and is rejected as such;
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`;
 - `conversation_import_begun` with the admitted `declared_size_bytes`;
