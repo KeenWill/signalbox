@@ -110,7 +110,9 @@ CREATE TABLE registered_instruction_bundle (
         ),
     CONSTRAINT registered_instruction_bundle_source_path_bounded
         CHECK (
-            octet_length(source_path) BETWEEN 2 AND 4096
+            octet_length(source_path) BETWEEN 2 AND 8193
+            AND octet_length(source_path) - octet_length(root_path) - 1
+                BETWEEN 1 AND 4096
             AND source_path LIKE '/%'
             AND source_path !~ '(^|/)(\.|\.\.)($|/)'
             AND source_path !~ '//'
