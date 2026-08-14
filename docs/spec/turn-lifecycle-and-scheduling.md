@@ -362,6 +362,18 @@ The committed turn-start entries, snapshot, start, active slot, and attempt are
 one transaction: no durable state exists in which a start references a missing
 or partial snapshot (INV-040).
 
+**Committed unimplemented functionality — instruction eligibility freeze.** When
+session instruction eligibility is implemented, step 4 also copies the session's
+exact ordered eligible-bundle identities under the same `session_scheduler` lock
+and inserts the turn-start instruction manifest carrying their canonical hash in
+this transaction. The replacement command takes that same lock, so a replacement
+either precedes activation and enters the snapshot or follows activation and
+affects only a later turn. No present replacement or nonempty eligibility
+surface exists; the first workspace-instruction slice may record the one
+canonical empty manifest after activation and before model work because no
+concurrent command can change that value. A later slice may not keep that
+post-activation boundary once eligibility can vary.
+
 Both authoritative repositories — activation and startup recovery — classify
 commit failures (`commit_failure_is_ambiguous`, tested in each): SQLSTATE
 08007/40003 or any non-database error during the commit await surfaces

@@ -179,17 +179,27 @@ values: a root reference, root-relative source path, bundle kind, and expected
 source hash. The root reference is exactly `workspace`, or `configured` plus the
 configured root's stable `ConfiguredInstructionRootId` defined by the
 [configuration contract](configuration-and-credentials.md#workspace-instruction-roots).
-The checked session-creation operation scans and registers its daemon-local
-workspace, resolves each selector to exactly one identity, and then copies those
-identities. A missing, stale, or ambiguous selector grants nothing and is
-recorded as a typed resolution finding; it never degrades to a path glob or
-newest-content match. Runner-workspace selectors remain unresolved until the
-runner discovery protocol exists.
+Session creation copies the selectors as unresolved eligibility input; it does
+not scan an unbound workspace or invent bundle identities.
 
-The effective eligibility snapshot is immutable for one turn. A turn records a
-versioned SHA-256 hash of the canonical ordered bundle-identity list effective
-at start. Replacement affects only later turns. A registered bundle absent from
-that snapshot cannot be enumerated, previewed, or admitted.
+Before a session carrying selectors can activate its first turn, the daemon
+resolves its configured-root selectors and, when a workspace selector is
+present, establishes the session's workspace binding through the owning
+[pre-activation binding contract](configuration-and-credentials.md#derived-session-workspace-roots).
+It scans and registers only after that binding is fixed, then resolves every
+selector to exactly one identity and installs the initial session allow-list. A
+missing, stale, or ambiguous selector grants nothing and is recorded as a typed
+resolution finding; it never degrades to a path glob or newest-content match.
+The initial resolution and allow-list installation complete before activation
+may acquire the eligibility snapshot. Runner-workspace selectors remain
+unresolved until the runner discovery protocol exists.
+
+The effective eligibility snapshot is immutable for one turn. The owning
+[activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+copies the exact ordered bundle-identity list effective under its session lock
+and records its versioned SHA-256 hash. Replacement serializes on the same lock
+and affects only later activations. A registered bundle absent from that
+snapshot cannot be enumerated, previewed, or admitted.
 
 Until whole-bundle unload is implemented, a replacement command rejects removal
 of any currently admitted identity. This makes replacement neither an implicit
@@ -382,12 +392,15 @@ uniquely decodable. The empty turn-start vector ends immediately after literal
 
 ## Budgets and rendered content
 
-Every admission has an explicit per-bundle source-byte budget. Rendering
+Version one fixes every admission's per-bundle source-byte budget at 32,768
+bytes. `instructions.read` has no caller-supplied budget field. Rendering
 preserves UTF-8 and emits the complete source or truncates at a character
-boundary no later than the budget before applying the required content escaping
-and wrapper. It never borrows a shared pool whose earlier entries can starve
-later ones. Rendered byte length, source truncation boundary, and retained exact
-wrapper bytes are evidence.
+boundary no later than that fixed budget before applying the required content
+escaping and wrapper. It never borrows a shared pool whose earlier entries can
+starve later ones. Why fixed and per source: identical registered evidence must
+render identically on replay, and one large ancestor document must not consume
+the budget of a more specific bundle. Rendered byte length, source truncation
+boundary, and retained exact wrapper bytes are evidence.
 
 Version one has a fixed 65,536-byte aggregate workspace-instruction-region
 budget, including every wrapper. A provider model with a smaller instruction
