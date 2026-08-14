@@ -42,6 +42,7 @@ const HELP: &str =
     "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
 
 Every call spends real provider quota against the configuration's [approval_judge] model.
+One run is limited to 1000 total paid calls after filter and limit selection.
 
 Usage:
   approval-judge-eval --config <daemon-config.toml> --cases <cases.jsonl> [options]
@@ -53,6 +54,10 @@ Options:
   --filter <text>   Keep only cases whose name or category contains <text>. Default: all cases.
   --limit <n>       Stop after selecting n cases, n >= 1. Default: no bound.
   --help            Print this reference and exit without spending quota.";
+
+/// Hard per-invocation ceiling on provider traffic from the Cartesian product
+/// of selected cases and repeats.
+const MAX_PAID_CALLS: usize = 1_000;
 
 /// Bumped whenever the majority, tie, or stability algorithms change, so
 /// before/after scorecards with identical replay metadata still declare
@@ -201,6 +206,20 @@ fn recommendation_label(recommendation: DelegateApprovalRecommendation) -> &'sta
         DelegateApprovalRecommendation::Deny => "deny",
         DelegateApprovalRecommendation::EscalateToHuman => "escalate_to_human",
     }
+}
+
+fn paid_call_count(selected_cases: usize, repeats: usize) -> Result<usize, String> {
+    let paid_calls = selected_cases.checked_mul(repeats).ok_or_else(|| {
+        format!(
+            "selected case count multiplied by --repeats exceeds the {MAX_PAID_CALLS}-call safety ceiling"
+        )
+    })?;
+    if paid_calls > MAX_PAID_CALLS {
+        return Err(format!(
+            "selected {selected_cases} cases x{repeats} repeats requests {paid_calls} paid calls; maximum is {MAX_PAID_CALLS}"
+        ));
+    }
+    Ok(paid_calls)
 }
 
 #[derive(Default)]
@@ -479,6 +498,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
     if cases.is_empty() {
         return Err(String::from("no corpus cases selected"));
     }
+    paid_call_count(cases.len(), options.repeats)?;
     // Every selected case must render before the first paid call, so an
     // inadmissible line late in the corpus cannot masquerade as a provider
     // failure after quota is already spent.
@@ -719,4 +739,24 @@ async fn run(options: RunOptions) -> Result<(), String> {
     )?;
     println!("{rendered}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_PAID_CALLS, paid_call_count};
+
+    #[test]
+    fn paid_call_count_accepts_the_safety_ceiling() {
+        assert_eq!(paid_call_count(MAX_PAID_CALLS, 1), Ok(MAX_PAID_CALLS));
+    }
+
+    #[test]
+    fn paid_call_count_rejects_one_call_above_the_safety_ceiling() {
+        assert!(paid_call_count(MAX_PAID_CALLS + 1, 1).is_err());
+    }
+
+    #[test]
+    fn paid_call_count_rejects_arithmetic_overflow() {
+        assert!(paid_call_count(usize::MAX, 2).is_err());
+    }
 }
