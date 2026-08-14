@@ -19,6 +19,14 @@ The configuration catalog, route validation, filesystem namespace admission, and
 startup store registry are verified against this implementing change
 (`agent/blob-storage-registry`).
 
+The disk-backed upload lifecycle, routed-store-only live deduplication,
+publication-before-registration ordering, process-protocol messages, and shared
+bulk-ingest resource bounds are verified against this implementing change
+(`agent/blob-storage-upload`).
+
+The terminal upload command and PostgreSQL/socket lifecycle proofs are verified
+against this implementing change (`agent/blob-storage-upload-terminal`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire
@@ -206,6 +214,16 @@ type or filename is inexpressible. Why: class is a classification Signalbox
 itself made, while media type and filename are caller-supplied strings, and a
 caller-supplied string must not select which infrastructure gains authority over
 bytes.
+
+**Committed unimplemented functionality.** No present surface stores program
+frame payloads. The closed routing-class vocabulary gains one `program_journal`
+class for over-threshold journal payloads written by the
+[program substrate](program-substrate.md)'s host: derived by the daemon from the
+writing surface exactly as every class is, never operation-selected, and added
+to the routes table's required set when the substrate lands. This constrains
+present change: the class vocabulary and route-validation surface must stay
+extensible to that addition without loosening the closed-set rejection of
+unknown classes.
 
 Blobs are large: the substrate supports multi-gigabyte objects, so every daemon
 path — ingest, verification, replica copy, read — streams and none materializes

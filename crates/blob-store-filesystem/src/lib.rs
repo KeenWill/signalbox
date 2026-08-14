@@ -8,7 +8,10 @@ use std::{
     fs,
     io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[cfg(target_os = "linux")]
@@ -36,7 +39,7 @@ use signalbox_blob_store::{
     BlobVerificationFailure, ExpectedBlob, MAX_BLOB_RANGE_BYTES, OpenedBlob,
 };
 use signalbox_domain::BlobDigest;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
@@ -168,6 +171,14 @@ impl OpenedFilesystemBlobRoot {
         Self::open_with_locality_policy(root, true)
     }
 
+    /// Opens a fixture root without host-locality classification.
+    #[cfg(feature = "test-support")]
+    pub fn open_without_locality_check_for_test(
+        root: PathBuf,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::open_with_locality_policy(root, false)
+    }
+
     fn open_with_locality_policy(
         root: PathBuf,
         require_local_backing: bool,
@@ -188,9 +199,9 @@ impl OpenedFilesystemBlobRoot {
 
 /// Private crash-recovered staging namespace for connection-local uploads.
 pub struct FilesystemBlobStaging {
-    uploads_directory: fs::File,
+    uploads_directory: Arc<fs::File>,
     identity: FilesystemNamespaceIdentity,
-    sweep_on_drop: bool,
+    sweep_on_drop: AtomicBool,
 }
 
 impl std::fmt::Debug for FilesystemBlobStaging {
@@ -203,6 +214,14 @@ impl FilesystemBlobStaging {
     /// Opens the configured staging root and removes proven crash leftovers.
     pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
         Self::try_new_with_locality_policy(root, true)
+    }
+
+    /// Opens a fixture staging namespace without host-locality classification.
+    #[cfg(feature = "test-support")]
+    pub fn try_new_without_locality_check_for_test(
+        root: PathBuf,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::try_new_with_locality_policy(root, false)
     }
 
     fn try_new_with_locality_policy(
@@ -226,9 +245,9 @@ impl FilesystemBlobStaging {
                 }
             })?;
         Ok(Self {
-            uploads_directory,
+            uploads_directory: Arc::new(uploads_directory),
             identity: opened.identity,
-            sweep_on_drop: true,
+            sweep_on_drop: AtomicBool::new(true),
         })
     }
 
@@ -243,19 +262,59 @@ impl FilesystemBlobStaging {
         self.uploads_directory.sync_all()
     }
 
+    /// Creates one private connection-local upload spool.
+    pub async fn create_upload(&self) -> io::Result<FilesystemBlobUpload> {
+        let directory = self.uploads_directory.clone();
+        let (temporary, file) =
+            tokio::task::spawn_blocking(move || create_temporary_blob_file(directory))
+                .await
+                .map_err(io::Error::other)??;
+        Ok(FilesystemBlobUpload {
+            temporary,
+            file: tokio::fs::File::from_std(file),
+        })
+    }
+
     /// Prevents cleanup after the daemon has lost its exclusive staging guard.
-    pub const fn disarm_sweep_on_drop(&mut self) {
-        self.sweep_on_drop = false;
+    pub fn disarm_sweep_on_drop(&self) {
+        self.sweep_on_drop.store(false, Ordering::Release);
     }
 }
 
 impl Drop for FilesystemBlobStaging {
     fn drop(&mut self) {
-        if !self.sweep_on_drop {
+        if !self.sweep_on_drop.load(Ordering::Acquire) {
             return;
         }
         let _ = sweep_private_temporary_directory(&self.uploads_directory);
         let _ = self.uploads_directory.sync_all();
+    }
+}
+
+/// One create-new private upload spool, removed when its connection state drops.
+pub struct FilesystemBlobUpload {
+    temporary: TemporaryBlobFile,
+    file: tokio::fs::File,
+}
+
+impl std::fmt::Debug for FilesystemBlobUpload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FilesystemBlobUpload { path: <redacted> }")
+    }
+}
+
+impl FilesystemBlobUpload {
+    /// Appends one already-bounded chunk in exact physical order.
+    pub async fn append(&mut self, chunk: &[u8]) -> io::Result<()> {
+        self.file.write_all(chunk).await
+    }
+
+    /// Flushes the spool and returns its descriptor at offset zero as a stream.
+    pub async fn into_reader(mut self) -> io::Result<BlobReader> {
+        self.file.flush().await?;
+        self.file.seek(std::io::SeekFrom::Start(0)).await?;
+        self.temporary.remove()?;
+        Ok(Box::new(self.file))
     }
 }
 
@@ -309,6 +368,21 @@ impl FilesystemBlobStore {
         binding_state: NamespaceBindingState,
     ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
         Self::from_opened_bound_inner(opened, namespace_id, binding_state)
+    }
+
+    /// Opens a conformance namespace while retaining every check except host
+    /// backing-device locality, which shared CI cannot establish.
+    #[cfg(feature = "test-support")]
+    pub fn try_new_bound_for_conformance(
+        root: PathBuf,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        Self::from_opened_bound(
+            OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)?,
+            namespace_id,
+            binding_state,
+        )
     }
 
     /// Constructs a conformance fixture while retaining every check except
@@ -1907,12 +1981,85 @@ mod tests {
         assert!(!spool.exists());
     }
 
+    /// INV-060: an active upload retains only one private linked spool, then
+    /// hands its descriptor to publication after unlinking the staging name.
+    #[tokio::test]
+    async fn inv060_upload_spool_streams_exact_bytes_after_unlink() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let mut upload = staging
+            .create_upload()
+            .await
+            .expect("one private upload spool is created");
+        upload
+            .append(b"first")
+            .await
+            .expect("the first bounded chunk appends");
+        upload
+            .append(b"-second")
+            .await
+            .expect("the second bounded chunk appends");
+        let linked_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory is readable")
+            .count();
+        let mut reader = upload
+            .into_reader()
+            .await
+            .expect("the unlinked descriptor becomes a reader");
+        let unlinked_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory remains readable")
+            .count();
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .await
+            .expect("the unlinked descriptor remains readable");
+
+        assert_eq!(linked_count, 1);
+        assert_eq!(unlinked_count, 0);
+        assert_eq!(bytes, b"first-second");
+    }
+
+    /// INV-060: abandoning one connection-local upload removes its linked
+    /// private spool without needing a daemon-wide sweep.
+    #[tokio::test]
+    async fn inv060_dropped_upload_spool_is_removed() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let mut upload = staging
+            .create_upload()
+            .await
+            .expect("one private upload spool is created");
+        upload
+            .append(b"partial")
+            .await
+            .expect("one bounded chunk appends");
+        let linked_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory is readable")
+            .count();
+        drop(upload);
+        let dropped_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory remains readable")
+            .count();
+
+        assert_eq!(linked_count, 1);
+        assert_eq!(dropped_count, 0);
+    }
+
     #[test]
     fn disarmed_staging_drop_leaves_spools_for_the_guard_holder() {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
-        let mut staging =
+        let staging =
             FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
                 .expect("the staging namespace opens");
         let spool = root

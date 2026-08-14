@@ -2,10 +2,11 @@
 
 use std::{
     any::Any,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
     num::NonZeroU64,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -40,13 +41,18 @@ use signalbox_domain::{
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
-    RepoWatchCursorCandidate,
+    RepoWatchCursorCandidate, RepoWatchCursorGeneration,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
 use sqlx::PgPool;
-use tokio::{select, sync::watch, task::JoinSet, time::sleep};
+use tokio::{
+    select,
+    sync::watch,
+    task::JoinSet,
+    time::{Instant, sleep},
+};
 
 use crate::SessionTemplateConfiguration;
 use crate::configuration::{
@@ -65,6 +71,8 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
+const MAX_CONCURRENT_PULL_REQUEST_FETCHES: usize = 8;
+const MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS: usize = 4;
 // One polling attempt may transfer this many response bytes. The dogfooded
 // repository exceeds 64 MiB in a single attempt, and the bound fails the
 // attempt rather than shedding, so it has to clear real event volume.
@@ -163,55 +171,68 @@ impl RepositoryWatchRuntime {
             return Ok(());
         }
         let mut tasks = JoinSet::new();
+        let mut pollers = Vec::with_capacity(self.tasks.len());
         for task in self.tasks {
+            pollers.push(Arc::clone(&task.poller));
             tasks.spawn(task.run(shutdown.clone()));
         }
-        supervise_repository_tasks(tasks, shutdown).await
+        supervise_repository_tasks(tasks, pollers, shutdown).await
     }
 }
 
 async fn supervise_repository_tasks(
     mut tasks: JoinSet<()>,
+    pollers: Vec<Arc<GitHubRepositoryPoller>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RepositoryWatchRuntimeError> {
-    if *shutdown.borrow() {
-        while let Some(result) = tasks.join_next().await {
-            result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
-        }
-        return Ok(());
-    }
-    loop {
-        select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    while let Some(result) = tasks.join_next().await {
-                        result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
-                    }
-                    return Ok(());
-                }
+    let result = async {
+        if *shutdown.borrow() {
+            while let Some(result) = tasks.join_next().await {
+                result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
             }
-            completed = tasks.join_next() => {
-                return match completed {
-                    Some(Ok(())) if *shutdown.borrow() => {
+            return Ok(());
+        }
+        loop {
+            select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
                         while let Some(result) = tasks.join_next().await {
                             result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
                         }
-                        Ok(())
+                        return Ok(());
                     }
-                    Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
-                    Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
-                    None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
-                };
+                }
+                completed = tasks.join_next() => {
+                    return match completed {
+                        Some(Ok(())) if *shutdown.borrow() => {
+                            while let Some(result) = tasks.join_next().await {
+                                result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
+                            }
+                            Ok(())
+                        }
+                        Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
+                        Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
+                        None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
+                    };
+                }
             }
         }
     }
+    .await;
+
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    for poller in &pollers {
+        poller.drain_fetches().await;
+    }
+    result
 }
 
 struct RepositoryWatchTask {
     repository: RepositorySlug,
     interval: Duration,
-    poller: GitHubRepositoryPoller,
+    poller: Arc<GitHubRepositoryPoller>,
     store: PostgresRepoWatchStore,
     dispatch_store: PostgresRepoWatchDispatchStore,
     rules: Vec<RepoWatchRule>,
@@ -255,12 +276,12 @@ impl RepositoryWatchTask {
         Ok(Self {
             repository: configuration.repository().clone(),
             interval: configuration.poll_interval(),
-            poller: GitHubRepositoryPoller::try_new(
+            poller: Arc::new(GitHubRepositoryPoller::try_new(
                 configuration.repository().clone(),
                 signal_reviewers,
                 credentials,
                 credential_reference,
-            )?,
+            )?),
             store,
             dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
             rules,
@@ -276,6 +297,8 @@ impl RepositoryWatchTask {
             if *shutdown.borrow() {
                 return;
             }
+            let cycle_started = Instant::now();
+            let mut attempt_cancelled = false;
             select! {
                 result = self.run_attempt() => {
                     match result {
@@ -295,12 +318,23 @@ impl RepositoryWatchTask {
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        return;
+                        attempt_cancelled = true;
                     }
                 }
             }
+            if attempt_cancelled {
+                // Winning this race dropped the attempt future, which aborts
+                // its spawned pull-request fetches without joining them. Join
+                // them before returning, so the supervisor's clean stop means
+                // every child has actually finished.
+                self.poller.drain_fetches().await;
+                return;
+            }
             select! {
-                () = sleep(self.interval) => {}
+                () = sleep(remaining_interval(PollCycleTiming {
+                    interval: self.interval,
+                    elapsed: cycle_started.elapsed(),
+                })) => {}
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         return;
@@ -311,13 +345,22 @@ impl RepositoryWatchTask {
     }
 
     async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
-        if !self.rules_activated {
-            self.activate_rules().await?;
-            self.rules_activated = true;
+        let result = async {
+            if !self.rules_activated {
+                self.activate_rules().await?;
+                self.rules_activated = true;
+            }
+            self.process_dispatches().await?;
+            self.poll_and_commit().await?;
+            self.process_dispatches().await
         }
-        self.process_dispatches().await?;
-        self.poll_and_commit().await?;
-        self.process_dispatches().await
+        .await;
+        if result.is_err() {
+            // Any failed attempt may leave published entries tied to an older
+            // durable cursor, regardless of which step failed.
+            self.poller.invalidate_freshness();
+        }
+        result
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -390,7 +433,11 @@ impl RepositoryWatchTask {
         let previous = cursor
             .as_ref()
             .map(|cursor| cursor.candidate().observation());
-        let observation = self.poller.poll(previous).await?;
+        let cursor_generation = cursor.as_ref().map(|cursor| cursor.generation());
+        let observation = self
+            .poller
+            .poll_against_cursor(previous, cursor_generation)
+            .await?;
         let events = derive_repo_watch_events(
             &self.repository,
             previous,
@@ -403,7 +450,7 @@ impl RepositoryWatchTask {
             .commit(
                 &self.repository,
                 RepoWatchCommitRequest::new(
-                    cursor.as_ref().map(|cursor| cursor.generation()),
+                    cursor_generation,
                     RepoWatchCursorCandidate::new(observation),
                     events,
                 ),
@@ -411,9 +458,12 @@ impl RepositoryWatchTask {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         match outcome {
-            RepoWatchCommitOutcome::Committed(_)
-            | RepoWatchCommitOutcome::Replayed(_)
-            | RepoWatchCommitOutcome::Unchanged(_) => Ok(()),
+            RepoWatchCommitOutcome::Committed(cursor)
+            | RepoWatchCommitOutcome::Replayed(cursor)
+            | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                self.poller.publish_freshness(cursor.generation());
+                Ok(())
+            }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
                 Err(RepositoryWatchAttemptError::Persistence)
             }
@@ -646,6 +696,7 @@ enum RepositoryWatchAttemptError {
     MissingCachedResource,
     ResourceLimit,
     Normalization,
+    PullRequestFetchAbandoned,
     Differ,
     Dispatch,
     Persistence,
@@ -665,6 +716,7 @@ impl RepositoryWatchAttemptError {
             Self::MissingCachedResource => "github_not_modified_without_accepted_state",
             Self::ResourceLimit => "repository_resource_limit_exceeded",
             Self::Normalization => "repository_state_invalid",
+            Self::PullRequestFetchAbandoned => "repository_pull_request_fetch_abandoned",
             Self::Differ => "repository_differ_failed",
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
@@ -698,7 +750,44 @@ struct GitHubRepositoryPoller {
     client: Client,
     rest_base: Url,
     graphql_url: Url,
-    cache: PollCache,
+    cache: Mutex<PollCache>,
+    freshness: Mutex<HashMap<u64, PullRequestFreshness>>,
+    // The child fetches one attempt spawns. Owned here rather than by the
+    // attempt future so that cancelling an attempt cannot orphan its children:
+    // dropping the future aborts them and releases the lock, but they stay
+    // joinable, and whoever runs next — the following attempt, or the
+    // repository task on its way out — joins them before proceeding.
+    fetches:
+        tokio::sync::Mutex<JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>>,
+}
+
+struct PullRequestFreshness {
+    updated_at: String,
+    settlement: PullRequestSettlement,
+    skipped_polls: usize,
+    // A fetch that never reached the durable cursor must not authorize reuse:
+    // the next attempt would compare this updated_at against a stale committed
+    // observation and skip the very changes that failed to commit. Reuse
+    // therefore consults published entries only, so a forgotten publication
+    // costs the optimization rather than an observation.
+    published_generation: Option<RepoWatchCursorGeneration>,
+}
+
+#[derive(Clone)]
+struct ListedPullRequest {
+    updated_at: String,
+    head_sha: CommitSha,
+}
+
+struct FetchedPullRequest {
+    state: RepoWatchPullRequestState,
+    settlement: PullRequestSettlement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PullRequestSettlement {
+    Settled,
+    Unsettled,
 }
 
 impl GitHubRepositoryPoller {
@@ -749,27 +838,45 @@ impl GitHubRepositoryPoller {
             client,
             rest_base,
             graphql_url,
-            cache: PollCache::default(),
+            cache: Mutex::new(PollCache::default()),
+            freshness: Mutex::new(HashMap::new()),
+            fetches: tokio::sync::Mutex::new(JoinSet::new()),
         })
     }
 
+    fn cache(&self) -> MutexGuard<'_, PollCache> {
+        self.cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
     async fn poll(
-        &mut self,
+        self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
-        self.cache.begin_poll();
-        let result = self.poll_complete(previous).await;
+        self.poll_against_cursor(previous, Some(RepoWatchCursorGeneration::INITIAL))
+            .await
+    }
+
+    async fn poll_against_cursor(
+        self: &Arc<Self>,
+        previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+        self.cache().begin_poll();
+        let result = self.poll_complete(previous, cursor_generation).await;
         if result.is_ok() {
-            self.cache.complete_poll();
+            self.cache().complete_poll();
         }
         result
     }
 
     async fn poll_complete(
-        &mut self,
+        self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
-        let mut pull_numbers = self.fetch_open_pull_numbers().await?;
+        let listed = self.fetch_open_pull_numbers().await?;
+        let mut pull_numbers: BTreeSet<u64> = listed.keys().copied().collect();
         if let Some(previous) = previous {
             for pull_request in previous.state().pull_requests() {
                 if pull_request.lifecycle() == RepoWatchPullRequestLifecycle::Open {
@@ -777,20 +884,9 @@ impl GitHubRepositoryPoller {
                 }
             }
         }
-        let mut pull_requests = Vec::with_capacity(pull_numbers.len());
-        for number in pull_numbers {
-            let previous_pull_request = previous.and_then(|observation| {
-                observation
-                    .state()
-                    .pull_requests()
-                    .iter()
-                    .find(|pull_request| pull_request.context().number().get() == number)
-            });
-            pull_requests.push(
-                self.fetch_pull_request(number, previous_pull_request)
-                    .await?,
-            );
-        }
+        let pull_requests = self
+            .fetch_pull_requests(pull_numbers, &listed, previous, cursor_generation)
+            .await?;
         let branch_heads = self.fetch_branch_heads().await?;
         let workflows = self.fetch_workflows().await?;
         let mut workflow_runs = Vec::new();
@@ -815,10 +911,93 @@ impl GitHubRepositoryPoller {
         ))
     }
 
+    async fn fetch_pull_requests(
+        self: &Arc<Self>,
+        pull_numbers: BTreeSet<u64>,
+        listed: &BTreeMap<u64, ListedPullRequest>,
+        previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+    ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
+        self.forget_unlisted_freshness(&pull_numbers);
+        let mut fetches = self.fetches.lock().await;
+        // A cancelled attempt drops this future mid-collection, which aborts
+        // the children without joining them; they stay behind in the shared
+        // set. Join any such survivor before spawning, so no child of an
+        // earlier attempt can interleave with this one.
+        fetches.shutdown().await;
+        let collected = self
+            .collect_pull_request_fetches(
+                pull_numbers,
+                listed,
+                previous,
+                cursor_generation,
+                &mut fetches,
+            )
+            .await;
+        // Dropping the set aborts the siblings but does not wait for them.
+        // An aborted task only stops at its next await, so it can still charge
+        // wire bytes, touch cache entries, or record freshness after this
+        // attempt returns, landing that state in the next attempt. Wait for
+        // every task to finish before the caller can begin another poll.
+        fetches.shutdown().await;
+        let mut pull_requests = collected?;
+        pull_requests.sort_by_key(|pull_request| pull_request.context().number().get());
+        Ok(pull_requests)
+    }
+
+    /// Joins every child fetch a cancelled attempt left behind. The repository
+    /// task calls this after cancelling an in-flight attempt, so a reported
+    /// stop means no child is still resolving credentials, holding a
+    /// connection, or touching shared state.
+    async fn drain_fetches(&self) {
+        self.fetches.lock().await.shutdown().await;
+    }
+
+    async fn collect_pull_request_fetches(
+        self: &Arc<Self>,
+        pull_numbers: BTreeSet<u64>,
+        listed: &BTreeMap<u64, ListedPullRequest>,
+        previous: Option<&RepoWatchObservation>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+        fetches: &mut JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>,
+    ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
+        let mut pull_requests = Vec::with_capacity(pull_numbers.len());
+        let mut pending = pull_numbers.into_iter();
+        loop {
+            while fetches.len() < MAX_CONCURRENT_PULL_REQUEST_FETCHES {
+                let Some(number) = pending.next() else {
+                    break;
+                };
+                let poller = Arc::clone(self);
+                let listed_pull_request = listed.get(&number).cloned();
+                let previous_pull_request = previous
+                    .and_then(|observation| previous_pull_request(observation, number))
+                    .cloned();
+                fetches.spawn(async move {
+                    poller
+                        .fetch_or_reuse_pull_request(
+                            number,
+                            listed_pull_request.as_ref(),
+                            previous_pull_request.as_ref(),
+                            cursor_generation,
+                        )
+                        .await
+                });
+            }
+            let Some(fetched) = fetches.join_next().await else {
+                break;
+            };
+            pull_requests.push(
+                fetched.map_err(|_| RepositoryWatchAttemptError::PullRequestFetchAbandoned)??,
+            );
+        }
+        Ok(pull_requests)
+    }
+
     async fn fetch_open_pull_numbers(
-        &mut self,
-    ) -> Result<BTreeSet<u64>, RepositoryWatchAttemptError> {
-        let mut numbers = BTreeSet::new();
+        &self,
+    ) -> Result<BTreeMap<u64, ListedPullRequest>, RepositoryWatchAttemptError> {
+        let mut numbers = BTreeMap::new();
         let mut page = 1_u16;
         loop {
             let url = self.repository_url(
@@ -835,7 +1014,15 @@ impl GitHubRepositoryPoller {
             let has_next = response.has_next_page;
             for value in response.value {
                 positive(value.number)?;
-                numbers.insert(value.number);
+                let head_sha = CommitSha::try_new(value.head.sha)
+                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                numbers.insert(
+                    value.number,
+                    ListedPullRequest {
+                        updated_at: value.updated_at,
+                        head_sha,
+                    },
+                );
             }
             if !has_next {
                 return Ok(numbers);
@@ -844,11 +1031,108 @@ impl GitHubRepositoryPoller {
         }
     }
 
+    async fn fetch_or_reuse_pull_request(
+        &self,
+        number: u64,
+        listed_pull_request: Option<&ListedPullRequest>,
+        previous_pull_request: Option<&RepoWatchPullRequestState>,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+    ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
+        if let (Some(listed), Some(previous)) = (listed_pull_request, previous_pull_request)
+            && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
+        {
+            let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
+            let threads = self.fetch_threads(number).await?;
+            let reactions = self
+                .fetch_reactions(number, Some(previous.reactions()))
+                .await?;
+            self.record_skipped_poll(number);
+            return reuse_pull_request(previous, reviews, threads, reactions);
+        }
+        let fetched = self
+            .fetch_pull_request(number, previous_pull_request)
+            .await?;
+        match listed_pull_request {
+            Some(listed) => {
+                self.record_fetched_pull_request(number, listed, fetched.settlement);
+            }
+            None => self.forget_pull_request(number),
+        }
+        Ok(fetched.state)
+    }
+
+    fn pull_request_detail_is_reusable(
+        &self,
+        number: u64,
+        listed: &ListedPullRequest,
+        previous: &RepoWatchPullRequestState,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+    ) -> bool {
+        self.freshness().get(&number).is_some_and(|freshness| {
+            freshness.published_generation == cursor_generation
+                && cursor_generation.is_some()
+                && freshness.updated_at == listed.updated_at
+                && previous.context().head_sha() == &listed.head_sha
+                && freshness.settlement == PullRequestSettlement::Settled
+                && freshness.skipped_polls < MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS
+        })
+    }
+
+    fn record_skipped_poll(&self, number: u64) {
+        if let Some(freshness) = self.freshness().get_mut(&number) {
+            freshness.skipped_polls = freshness.skipped_polls.saturating_add(1);
+        }
+    }
+
+    fn record_fetched_pull_request(
+        &self,
+        number: u64,
+        listed: &ListedPullRequest,
+        settlement: PullRequestSettlement,
+    ) {
+        self.freshness().insert(
+            number,
+            PullRequestFreshness {
+                updated_at: listed.updated_at.clone(),
+                settlement,
+                skipped_polls: 0,
+                published_generation: None,
+            },
+        );
+    }
+
+    fn publish_freshness(&self, generation: RepoWatchCursorGeneration) {
+        for freshness in self.freshness().values_mut() {
+            freshness.published_generation = Some(generation);
+        }
+    }
+
+    /// Drops every freshness entry, published or not. After a failed attempt,
+    /// a competing watcher may advance the durable cursor, so entries recorded
+    /// against this process's prior baseline must authorize no further reuse.
+    fn invalidate_freshness(&self) {
+        self.freshness().clear();
+    }
+
+    fn forget_pull_request(&self, number: u64) {
+        self.freshness().remove(&number);
+    }
+
+    fn forget_unlisted_freshness(&self, polled: &BTreeSet<u64>) {
+        self.freshness().retain(|number, _| polled.contains(number));
+    }
+
+    fn freshness(&self) -> MutexGuard<'_, HashMap<u64, PullRequestFreshness>> {
+        self.freshness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     async fn fetch_pull_request(
-        &mut self,
+        &self,
         number: u64,
         previous_pull_request: Option<&RepoWatchPullRequestState>,
-    ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
+    ) -> Result<FetchedPullRequest, RepositoryWatchAttemptError> {
         let number_text = number.to_string();
         let detail: PullResponse = self
             .conditional_json(
@@ -869,7 +1153,24 @@ impl GitHubRepositoryPoller {
             previous_pull_request.map(RepoWatchPullRequestState::context),
         )?;
         let (completed_check_suites, check_suite_ids) = self.fetch_check_suites(&head_sha).await?;
-        let completed_check_runs = self.fetch_check_runs(&check_suite_ids).await?;
+        let (completed_check_runs, every_run_completed) =
+            self.fetch_check_runs(&check_suite_ids).await?;
+        let mergeable_state = match detail.mergeable {
+            Some(true) => MergeableState::Mergeable,
+            Some(false) => MergeableState::Conflicting,
+            None => MergeableState::Unknown,
+        };
+        // Neither a check completion nor GitHub finishing its background
+        // mergeability calculation moves the listing's updated_at, so a pull
+        // request is only reusable when both have already come to rest.
+        let settlement = if every_run_completed
+            && completed_check_suites.len() == check_suite_ids.len()
+            && mergeable_state != MergeableState::Unknown
+        {
+            PullRequestSettlement::Settled
+        } else {
+            PullRequestSettlement::Unsettled
+        };
         let reviews = self
             .fetch_reviews(
                 number,
@@ -883,25 +1184,22 @@ impl GitHubRepositoryPoller {
                 previous_pull_request.map(RepoWatchPullRequestState::reactions),
             )
             .await?;
-        RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        let state = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
             context,
             lifecycle: normalize_lifecycle(&detail)?,
-            mergeable_state: match detail.mergeable {
-                Some(true) => MergeableState::Mergeable,
-                Some(false) => MergeableState::Conflicting,
-                None => MergeableState::Unknown,
-            },
+            mergeable_state,
             completed_check_suites,
             completed_check_runs,
             reviews,
             threads,
             reactions,
         })
-        .map_err(|_| RepositoryWatchAttemptError::Normalization)
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        Ok(FetchedPullRequest { state, settlement })
     }
 
     async fn fetch_check_suites(
-        &mut self,
+        &self,
         head: &CommitSha,
     ) -> Result<
         (Vec<RepoWatchCheckSuiteObservation>, Vec<GitHubObjectId>),
@@ -947,10 +1245,11 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_check_runs(
-        &mut self,
+        &self,
         suite_ids: &[GitHubObjectId],
-    ) -> Result<Vec<RepoWatchCheckRunObservation>, RepositoryWatchAttemptError> {
+    ) -> Result<(Vec<RepoWatchCheckRunObservation>, bool), RepositoryWatchAttemptError> {
         let mut observations = Vec::new();
+        let mut every_run_completed = true;
         for suite_id in suite_ids {
             let suite_id = suite_id.get().to_string();
             let mut page = 1_u16;
@@ -984,6 +1283,8 @@ impl GitHubRepositoryPoller {
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
                         ));
+                    } else {
+                        every_run_completed = false;
                     }
                 }
                 if !has_next {
@@ -992,11 +1293,11 @@ impl GitHubRepositoryPoller {
                 page = next_page(page)?;
             }
         }
-        Ok(observations)
+        Ok((observations, every_run_completed))
     }
 
     async fn fetch_reviews(
-        &mut self,
+        &self,
         number: u64,
         previous: Option<&[RepoWatchReviewObservation]>,
     ) -> Result<Vec<RepoWatchReviewObservation>, RepositoryWatchAttemptError> {
@@ -1054,7 +1355,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_threads(
-        &mut self,
+        &self,
         number: u64,
     ) -> Result<Vec<RepoWatchThreadObservation>, RepositoryWatchAttemptError> {
         let (namespace, name) = self
@@ -1120,7 +1421,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_reactions(
-        &mut self,
+        &self,
         number: u64,
         previous: Option<&[RepoWatchReactionObservation]>,
     ) -> Result<Vec<RepoWatchReactionObservation>, RepositoryWatchAttemptError> {
@@ -1167,7 +1468,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_comment_ids(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         suffix: &[&str],
     ) -> Result<Vec<GitHubObjectId>, RepositoryWatchAttemptError> {
@@ -1200,7 +1501,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_reaction_pages(
-        &mut self,
+        &self,
         suffix: &[&str],
         subject: ReactionSubject,
         previous: Option<&[RepoWatchReactionObservation]>,
@@ -1267,7 +1568,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_branch_heads(
-        &mut self,
+        &self,
     ) -> Result<Vec<RepoWatchBranchHead>, RepositoryWatchAttemptError> {
         let mut heads = Vec::new();
         let mut page = 1_u16;
@@ -1302,9 +1603,7 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    async fn fetch_workflows(
-        &mut self,
-    ) -> Result<Vec<WorkflowResponse>, RepositoryWatchAttemptError> {
+    async fn fetch_workflows(&self) -> Result<Vec<WorkflowResponse>, RepositoryWatchAttemptError> {
         let mut workflows = Vec::new();
         let mut page = 1_u16;
         loop {
@@ -1337,7 +1636,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn fetch_workflow_runs(
-        &mut self,
+        &self,
         branches: &[RepoWatchBranchHead],
         workflow: &WorkflowResponse,
         previous: &[RepoWatchWorkflowRunObservation],
@@ -1468,8 +1767,36 @@ impl GitHubRepositoryPoller {
         Ok(url)
     }
 
+    // Each chunk is charged against the shared per-attempt budget as it
+    // arrives, so concurrent reads account for exactly what they consumed. A
+    // reservation of each read's upper bound would instead understate the
+    // remaining budget by whatever the other in-flight reads never used, and
+    // fail an attempt whose true total fits.
+    async fn read_bounded(
+        &self,
+        mut response: Response,
+    ) -> Result<Vec<u8>, RepositoryWatchAttemptError> {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Request)?
+        {
+            let next = body
+                .len()
+                .checked_add(chunk.len())
+                .ok_or(RepositoryWatchAttemptError::ResponseTooLarge)?;
+            if next > MAX_RESPONSE_BYTES {
+                return Err(RepositoryWatchAttemptError::ResponseTooLarge);
+            }
+            self.cache().record_poll_wire_bytes(chunk.len())?;
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
     async fn conditional_json<T>(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         method: Method,
         url: Url,
@@ -1485,7 +1812,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn conditional_json_page<T>(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         method: Method,
         url: Url,
@@ -1499,7 +1826,7 @@ impl GitHubRepositoryPoller {
     }
 
     async fn conditional_json_response<T>(
-        &mut self,
+        &self,
         resource_kind: &'static str,
         method: Method,
         url: Url,
@@ -1511,7 +1838,7 @@ impl GitHubRepositoryPoller {
     {
         let key = ResourceKey::new(resource_kind, &method, &url, body.as_deref());
         let page_is_at_cap = page_item_count.is_some() && result_page(&url) == MAX_RESULT_PAGES;
-        self.cache.touch(key.clone())?;
+        self.cache().touch(key.clone())?;
         let credential = self
             .credentials
             .resolve(&self.credential_reference)
@@ -1535,7 +1862,8 @@ impl GitHubRepositoryPoller {
             .header(ACCEPT, "application/vnd.github+json")
             .header("X-GitHub-Api-Version", API_VERSION)
             .header(USER_AGENT, USER_AGENT_VALUE);
-        if let Some(entity_tag) = self.cache.entity_tag(&key) {
+        let cached_entity_tag = self.cache().entity_tag(&key).cloned();
+        if let Some(entity_tag) = &cached_entity_tag {
             request = request.header(IF_NONE_MATCH, entity_tag.as_str());
         }
         if let Some(body) = body {
@@ -1546,10 +1874,14 @@ impl GitHubRepositoryPoller {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Request)?;
         if response.status() == StatusCode::NOT_MODIFIED {
-            let mut accepted = self.cache.accepted::<ConditionalJsonResponse<T>>(&key)?;
-            if let Some(entity_tag) = response.headers().get(ETAG).map(entity_tag).transpose()? {
-                self.cache.replace_entity_tag(&key, entity_tag)?;
-            }
+            let refreshed_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
+            let mut accepted = self
+                .cache()
+                .accepted_for_validator::<ConditionalJsonResponse<T>>(
+                    &key,
+                    cached_entity_tag.as_ref(),
+                    refreshed_entity_tag,
+                )?;
             if page_item_count.is_some() && accepted.page_is_full && !accepted.has_next_page {
                 accepted.has_next_page = true;
             }
@@ -1558,13 +1890,20 @@ impl GitHubRepositoryPoller {
         if response.status() != StatusCode::OK {
             return Err(RepositoryWatchAttemptError::Rejected);
         }
-        self.cache.remove(&key);
+        // The cached pair stays in place while this body is read and parsed.
+        // Two open pull requests sharing a head SHA fetch the same check-suite
+        // and check-run keys concurrently, so dropping the pair before the
+        // await would let a concurrent `304` resolve its accepted state against
+        // a hole and fail an otherwise valid attempt. A changed response
+        // replaces the pair atomically below, and only an unparseable one
+        // invalidates it.
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
         let has_next_page = has_next_link(&response)?;
-        let bytes = read_bounded(response, self.cache.remaining_poll_wire_bytes()?).await?;
-        self.cache.record_poll_wire_bytes(bytes.len())?;
-        let value = serde_json::from_slice::<T>(&bytes)
-            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+        let bytes = self.read_bounded(response).await?;
+        let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
+            self.cache().remove(&key);
+            return Err(RepositoryWatchAttemptError::InvalidResponse);
+        };
         let accepted = ConditionalJsonResponse {
             page_is_full: page_item_count.is_some_and(|item_count| item_count(&value) == PAGE_SIZE),
             value,
@@ -1572,10 +1911,17 @@ impl GitHubRepositoryPoller {
         };
         match response_entity_tag {
             Some(entity_tag) if !page_is_at_cap => {
-                self.cache
+                self.cache()
                     .insert(key, entity_tag, bytes.len(), accepted.clone());
             }
-            Some(_) | None => self.cache.remove(&key),
+            // A response that is deliberately not cached leaves any prior pair
+            // in place. Removing it would reopen the same window as removing
+            // before the read: a concurrent request for this key that already
+            // took a 304 may still be about to resolve its accepted state. The
+            // prior pair stays correct on its own terms, since a later
+            // validator match means the provider still considers that body
+            // current.
+            Some(_) | None => {}
         }
         Ok(accepted)
     }
@@ -1672,6 +2018,7 @@ struct CachedResource {
     entity_tag: EntityTag,
     wire_bytes: usize,
     accepted: Box<dyn Any + Send + Sync>,
+    idle_polls: usize,
 }
 
 #[derive(Default)]
@@ -1703,18 +2050,20 @@ impl PollCache {
     }
 
     fn complete_poll(&mut self) {
-        self.resources.retain(|key, _| self.touched.contains(key));
+        let touched = &self.touched;
+        self.resources.retain(|key, resource| {
+            if touched.contains(key) {
+                resource.idle_polls = 0;
+                return true;
+            }
+            resource.idle_polls = resource.idle_polls.saturating_add(1);
+            resource.idle_polls <= MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS
+        });
         self.cached_wire_bytes = self
             .resources
             .values()
             .map(|resource| resource.wire_bytes)
             .sum();
-    }
-
-    fn remaining_poll_wire_bytes(&self) -> Result<usize, RepositoryWatchAttemptError> {
-        MAX_POLL_WIRE_BYTES
-            .checked_sub(self.poll_wire_bytes)
-            .ok_or(RepositoryWatchAttemptError::ResourceLimit)
     }
 
     fn record_poll_wire_bytes(
@@ -1736,15 +2085,34 @@ impl PollCache {
         self.resources.get(key).map(|resource| &resource.entity_tag)
     }
 
-    fn accepted<T: Any + Clone>(
-        &self,
+    // Reading the accepted body and rebinding the entity tag happen under one
+    // lock, and the rebind only lands when the pair is still the one this
+    // request validated. Two open pull requests sharing a head SHA issue
+    // identical conditional requests, so a concurrent 200 can install a
+    // different pair in between; binding this request's validator onto that
+    // pair would leave a tag describing a body it never validated, and a later
+    // 304 against that tag would then reuse the wrong body.
+    fn accepted_for_validator<T: Any + Clone>(
+        &mut self,
         key: &ResourceKey,
+        validated: Option<&EntityTag>,
+        refreshed: Option<EntityTag>,
     ) -> Result<T, RepositoryWatchAttemptError> {
-        self.resources
-            .get(key)
-            .and_then(|resource| resource.accepted.downcast_ref::<T>())
+        let resource = self
+            .resources
+            .get_mut(key)
+            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)?;
+        let accepted = resource
+            .accepted
+            .downcast_ref::<T>()
             .cloned()
-            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)
+            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)?;
+        if let (Some(refreshed), Some(validated)) = (refreshed, validated)
+            && &resource.entity_tag == validated
+        {
+            resource.entity_tag = refreshed;
+        }
+        Ok(accepted)
     }
 
     // Admission is an accelerator, never a precondition for an observation: a
@@ -1805,6 +2173,7 @@ impl PollCache {
                 entity_tag,
                 wire_bytes,
                 accepted: Box::new(accepted),
+                idle_polls: 0,
             },
         );
         self.cached_wire_bytes = projected_bytes;
@@ -1839,19 +2208,6 @@ impl PollCache {
         }
     }
 
-    fn replace_entity_tag(
-        &mut self,
-        key: &ResourceKey,
-        entity_tag: EntityTag,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        let resource = self
-            .resources
-            .get_mut(key)
-            .ok_or(RepositoryWatchAttemptError::MissingCachedResource)?;
-        resource.entity_tag = entity_tag;
-        Ok(())
-    }
-
     fn remove(&mut self, key: &ResourceKey) {
         if let Some(resource) = self.resources.remove(key) {
             self.cached_wire_bytes = self.cached_wire_bytes.saturating_sub(resource.wire_bytes);
@@ -1859,26 +2215,43 @@ impl PollCache {
     }
 }
 
-async fn read_bounded(
-    mut response: Response,
-    remaining_poll_bytes: usize,
-) -> Result<Vec<u8>, RepositoryWatchAttemptError> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| RepositoryWatchAttemptError::Request)?
-    {
-        let next = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or(RepositoryWatchAttemptError::ResponseTooLarge)?;
-        if next > MAX_RESPONSE_BYTES || next > remaining_poll_bytes {
-            return Err(RepositoryWatchAttemptError::ResponseTooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+struct PollCycleTiming {
+    interval: Duration,
+    elapsed: Duration,
+}
+
+const fn remaining_interval(timing: PollCycleTiming) -> Duration {
+    timing.interval.saturating_sub(timing.elapsed)
+}
+
+fn reuse_pull_request(
+    previous: &RepoWatchPullRequestState,
+    reviews: Vec<RepoWatchReviewObservation>,
+    threads: Vec<RepoWatchThreadObservation>,
+    reactions: Vec<RepoWatchReactionObservation>,
+) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
+    RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: previous.context().clone(),
+        lifecycle: previous.lifecycle(),
+        mergeable_state: previous.mergeable_state(),
+        completed_check_suites: previous.completed_check_suites().to_vec(),
+        completed_check_runs: previous.completed_check_runs().to_vec(),
+        reviews,
+        threads,
+        reactions,
+    })
+    .map_err(|_| RepositoryWatchAttemptError::Normalization)
+}
+
+fn previous_pull_request(
+    previous: &RepoWatchObservation,
+    number: u64,
+) -> Option<&RepoWatchPullRequestState> {
+    previous
+        .state()
+        .pull_requests()
+        .iter()
+        .find(|pull_request| pull_request.context().number().get() == number)
 }
 
 fn next_page(page: u16) -> Result<u16, RepositoryWatchAttemptError> {
@@ -2012,6 +2385,13 @@ fn normalize_review_state(state: &str) -> Result<ProviderReviewState, Repository
 #[derive(Clone, Deserialize)]
 struct PullNumberResponse {
     number: u64,
+    updated_at: String,
+    head: ListedPullHeadResponse,
+}
+
+#[derive(Clone, Deserialize)]
+struct ListedPullHeadResponse {
+    sha: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2229,27 +2609,40 @@ struct PageInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, num::NonZeroU64, path::PathBuf, sync::Arc, time::Duration};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        num::NonZeroU64,
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
         sync::{Notify, watch},
         task::{JoinHandle, JoinSet},
+        time::sleep,
     };
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_CACHED_WIRE_BYTES, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache,
-        PullResponse, ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead,
-        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchReactionObservation,
-        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
-        RepositoryWatchRuntimeConstructionError, ResourceKey, ReviewState, Url, WorkflowName,
-        WorkflowResponse, dispatch_context_json, normalize_checks_outcome,
-        normalize_pull_request_context, object_id, rule_activation_error,
-        supervise_repository_tasks,
+        ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
+        MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
+        PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
+        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
+        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
+        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
+        dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
+        remaining_interval, rule_activation_error, supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -2294,6 +2687,21 @@ mod tests {
     const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str =
         "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=2";
     const EMPTY_LIST: &str = "[]";
+    const EMPTY_CHECK_SUITE_LIST: &str = "{\"check_suites\":[]}";
+    const CONCURRENT_FETCH_PULL_NUMBERS: std::ops::RangeInclusive<u64> = 1..=9;
+    const CONCURRENT_FETCH_DELAY: Duration = Duration::from_millis(20);
+    // Longer than any await this module's tests perform, so a child parked in
+    // a response carrying it can only stop by being aborted and joined.
+    const CANCELLED_FETCH_DELAY: Duration = Duration::from_secs(60);
+    // Arbitrary: any open pull request exercises cancellation. The constant
+    // keeps the scripted response target, the generated detail, the listing,
+    // and the fetch set on the same pull request.
+    const CANCELLED_FETCH_PULL_NUMBER: u64 = 7;
+    const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
+    const POLL_INTERVAL: Duration = Duration::from_secs(300);
+    const SHORT_CYCLE: Duration = Duration::from_secs(75);
+    const SHORT_CYCLE_REMAINDER: Duration = Duration::from_secs(225);
+    const OVERRUNNING_CYCLE: Duration = Duration::from_secs(900);
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
     const CACHE_RESOURCE_KEY: &str = "fixture/resource";
@@ -2302,6 +2710,8 @@ mod tests {
     const CACHE_REPLACEMENT_KEY: &str = "fixture/replacement";
     const TEST_CACHE_RESOURCE_LIMIT: usize = 2;
     const CACHE_WIRE_BYTES: usize = 1;
+    const CONCURRENTLY_REPLACED_ENTITY_TAG: &str = "\"fixture-etag-replaced\"";
+    const REFRESHED_ENTITY_TAG: &str = "\"fixture-etag-refreshed\"";
     const CACHE_KEY_KIND: &str = "fixture-page";
     const CACHE_KEY_QUERY_VALUE: &str = "provider-controlled-branch";
     const CACHE_KEY_URL: &str =
@@ -2318,6 +2728,7 @@ mod tests {
     const EXPECTED_MAIN_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Success;
     const PULL_NUMBER: u64 = 7;
     const HEAD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CHANGED_LISTED_HEAD_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
     const BASE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HEAD_REPOSITORY: &str = "fork/repository";
     const HEAD_BRANCH: &str = "feature/watch";
@@ -2347,6 +2758,12 @@ mod tests {
     const IN_PROGRESS_CHECK_RUN_NAME: &str = "lint";
     const RETAINED_REVIEW_IDS: [u64; 2] = [31, 32];
     const PENDING_REVIEW_ID: u64 = 33;
+    // Public provider identities from the deferred-refresh reproduction. The
+    // surrounding actors and content stay synthetic test data.
+    const DEFERRED_REVIEW_IDS: [u64; 3] = [4_922_903_072, 4_922_910_037, 4_922_938_791];
+    const DEFERRED_USER_REVIEWER: &str = "watch-user";
+    const DEFERRED_APPROVING_REVIEWER: &str = "review-agent-one[bot]";
+    const DEFERRED_COMMENTING_REVIEWER: &str = "review-agent-two[bot]";
     const REVIEW_THREADS: [&str; 2] = [REVIEW_THREAD, RESOLVED_REVIEW_THREAD];
     const SIGNAL_REACTION_CONTENTS: [&str; 3] = ["+1", "rocket", "eyes"];
     const AMBIENT_REACTOR: &str = "ambient-user";
@@ -2365,7 +2782,20 @@ mod tests {
     const SCRIPTED_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn pulls_with_one() -> String {
-        serde_json::json!([{ "number": PULL_NUMBERS[0] }]).to_string()
+        serde_json::json!([{
+            "number": PULL_NUMBERS[0],
+            "updated_at": PULL_UPDATED_AT,
+            "head": { "sha": HEAD_SHA }
+        }])
+        .to_string()
+    }
+
+    fn listed_pull_request(head_sha: &str) -> ListedPullRequest {
+        ListedPullRequest {
+            updated_at: PULL_UPDATED_AT.to_owned(),
+            head_sha: CommitSha::try_new(head_sha.to_owned())
+                .expect("fixture listed head is valid"),
+        }
     }
 
     fn pull_detail() -> String {
@@ -2391,6 +2821,13 @@ mod tests {
             "user": { "login": PROVIDER_PULL_AUTHOR }
         })
         .to_string()
+    }
+
+    fn pull_detail_with_pending_mergeability() -> String {
+        let mut detail = serde_json::from_str::<serde_json::Value>(&pull_detail())
+            .expect("fixture pull detail is JSON");
+        detail["mergeable"] = serde_json::Value::Null;
+        detail.to_string()
     }
 
     fn pull_detail_without_head_repository() -> String {
@@ -2498,6 +2935,42 @@ mod tests {
         page.to_string()
     }
 
+    /// The check-suites page once every suite has settled: the completed suite
+    /// from [`check_suites`] alone, stated directly so the settled payload is
+    /// inspectable rather than recalculated by the completion filter the
+    /// poller itself applies.
+    fn settled_check_suites() -> String {
+        serde_json::json!({
+            "check_suites": [
+                {
+                    "id": COMPLETED_CHECK_SUITE_IDS[0],
+                    "status": "completed",
+                    "conclusion": "success",
+                    "updated_at": CHECK_SUITE_COMPLETION_GENERATION
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    /// The check-runs page once every run has settled: the completed run from
+    /// [`check_runs`] alone, stated directly for the same reason as
+    /// [`settled_check_suites`].
+    fn settled_check_runs() -> String {
+        serde_json::json!({
+            "check_runs": [
+                {
+                    "id": COMPLETED_CHECK_RUN_IDS[0],
+                    "status": "completed",
+                    "name": CHECK_RUN_NAME,
+                    "conclusion": "failure",
+                    "completed_at": CHECK_RUN_COMPLETION_GENERATION
+                }
+            ]
+        })
+        .to_string()
+    }
+
     fn empty_check_runs() -> &'static str {
         "{\"check_runs\":[]}"
     }
@@ -2520,6 +2993,48 @@ mod tests {
                 "id": PENDING_REVIEW_ID,
                 "user": { "login": PROVIDER_REVIEWER },
                 "state": "PENDING",
+                "commit_id": HEAD_SHA
+            }
+        ])
+        .to_string()
+    }
+
+    fn reviews_with_deferred_wave() -> String {
+        serde_json::json!([
+            {
+                "id": RETAINED_REVIEW_IDS[0],
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "APPROVED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": RETAINED_REVIEW_IDS[1],
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "DISMISSED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": PENDING_REVIEW_ID,
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "PENDING",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[0],
+                "user": { "login": DEFERRED_USER_REVIEWER },
+                "state": "COMMENTED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[1],
+                "user": { "login": DEFERRED_APPROVING_REVIEWER },
+                "state": "APPROVED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[2],
+                "user": { "login": DEFERRED_COMMENTING_REVIEWER },
+                "state": "COMMENTED",
                 "commit_id": HEAD_SHA
             }
         ])
@@ -2792,76 +3307,209 @@ mod tests {
         }
     }
 
+    /// The request line a scripted response answers. Distinct from
+    /// [`ResponseBody`] because the two travel through the same constructors:
+    /// with both as plain strings, a transposed pair still compiles and is
+    /// caught only by the server rejecting the request.
+    struct RequestTarget(String);
+
+    /// The payload a scripted response returns. See [`RequestTarget`].
+    struct ResponseBody(String);
+
     struct ScriptedResponse {
         method: &'static str,
-        target: &'static str,
+        target: String,
         validator: Option<&'static str>,
         status: &'static str,
         entity_tag: Option<&'static str>,
         link: Option<&'static str>,
         body: String,
+        delay: Duration,
     }
 
     impl ScriptedResponse {
-        fn ok(target: &'static str, body: impl Into<String>) -> Self {
+        fn ok(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.0,
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
-                body: body.into(),
+                body: body.0,
+                delay: Duration::ZERO,
             }
         }
 
-        fn ok_with_next(target: &'static str, body: impl Into<String>) -> Self {
+        fn ok_with_next(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.0,
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: Some(NEXT_PAGE_LINK),
-                body: body.into(),
+                body: body.0,
+                delay: Duration::ZERO,
             }
         }
 
-        fn conditional_ok(target: &'static str, body: impl Into<String>) -> Self {
+        fn conditional_ok(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.0,
                 validator: Some(ENTITY_TAG),
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
-                body: body.into(),
+                body: body.0,
+                delay: Duration::ZERO,
             }
         }
 
-        fn not_modified(target: &'static str) -> Self {
+        fn not_modified(target: RequestTarget) -> Self {
             Self {
                 method: "GET",
-                target,
+                target: target.0,
                 validator: Some(ENTITY_TAG),
                 status: "304 Not Modified",
                 entity_tag: None,
                 link: None,
                 body: String::new(),
+                delay: Duration::ZERO,
             }
         }
 
-        fn post(target: &'static str, body: impl Into<String>) -> Self {
+        fn delayed(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
+        }
+
+        fn post(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "POST",
-                target,
+                target: target.0,
                 validator: None,
                 status: "200 OK",
                 entity_tag: None,
                 link: None,
-                body: body.into(),
+                body: body.0,
+                delay: Duration::ZERO,
             }
         }
+    }
+
+    struct ConcurrentScriptedState {
+        responses: Mutex<Vec<ScriptedResponse>>,
+        in_flight: AtomicUsize,
+        peak_in_flight: AtomicUsize,
+        unmatched: AtomicUsize,
+    }
+
+    struct ConcurrentScriptedServer {
+        base_url: Url,
+        state: Arc<ConcurrentScriptedState>,
+        task: JoinHandle<()>,
+    }
+
+    impl ConcurrentScriptedServer {
+        async fn start(responses: Vec<ScriptedResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback listener binds");
+            let address = listener.local_addr().expect("listener has an address");
+            let base_url =
+                Url::parse(&format!("http://{address}/")).expect("loopback address forms a URL");
+            let state = Arc::new(ConcurrentScriptedState {
+                responses: Mutex::new(responses),
+                in_flight: AtomicUsize::new(0),
+                peak_in_flight: AtomicUsize::new(0),
+                unmatched: AtomicUsize::new(0),
+            });
+            let task = tokio::spawn({
+                let state = Arc::clone(&state);
+                async move {
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move { serve_matched_response(stream, &state).await });
+                    }
+                }
+            });
+            Self {
+                base_url,
+                state,
+                task,
+            }
+        }
+
+        /// Waits until the server holds a request in flight, so a caller can
+        /// cancel a fetch that is demonstrably mid-request. Bounded, so a
+        /// regression that keeps the fetch from ever reaching the listener
+        /// fails the test locally instead of hanging it until the job times
+        /// out.
+        async fn request_in_flight(&self) {
+            let arrival = async {
+                while self.state.in_flight.load(Ordering::SeqCst) == 0 {
+                    sleep(Duration::from_millis(1)).await;
+                }
+            };
+            tokio::time::timeout(SCRIPTED_SERVER_TIMEOUT, arrival)
+                .await
+                .expect("a scripted request goes in flight before the deadline");
+        }
+
+        async fn finish(self) -> usize {
+            self.task.abort();
+            let remaining = self
+                .state
+                .responses
+                .lock()
+                .expect("scripted responses are readable")
+                .len();
+            assert_eq!(remaining, 0, "every scripted response is consumed");
+            assert_eq!(
+                self.state.unmatched.load(Ordering::SeqCst),
+                0,
+                "every request matches a scripted response"
+            );
+            self.state.peak_in_flight.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn serve_matched_response(mut stream: TcpStream, state: &ConcurrentScriptedState) {
+        let in_flight = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        state.peak_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        let request = read_request(&mut stream).await;
+        let start_line = request
+            .lines()
+            .next()
+            .expect("request has a start line")
+            .to_owned();
+        let matched = {
+            let mut responses = state
+                .responses
+                .lock()
+                .expect("scripted responses are readable");
+            responses
+                .iter()
+                .position(|response| {
+                    start_line == format!("{} {} HTTP/1.1", response.method, response.target)
+                })
+                .map(|position| responses.remove(position))
+        };
+        match matched {
+            Some(response) => write_response(&mut stream, &response).await,
+            None => {
+                state.unmatched.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("unmatched refusal can be written");
+            }
+        }
+        state.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 
     struct ScriptedServer {
@@ -2893,8 +3541,7 @@ mod tests {
         }
     }
 
-    async fn serve_response(listener: &TcpListener, response: ScriptedResponse) {
-        let (mut stream, _) = listener.accept().await.expect("scripted request arrives");
+    async fn read_request(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         loop {
             let mut chunk = [0_u8; 1_024];
@@ -2908,22 +3555,11 @@ mod tests {
             }
             assert_ne!(read, 0, "request headers must be complete");
         }
-        let request = String::from_utf8(request).expect("request headers are UTF-8");
-        let start_line = request.lines().next().expect("request has a start line");
-        assert_eq!(
-            start_line,
-            format!("{} {} HTTP/1.1", response.method, response.target)
-        );
-        let lowercase_request = request.to_ascii_lowercase();
-        assert!(lowercase_request.contains(&format!("authorization: bearer {}", CREDENTIAL_VALUE)));
-        match response.validator {
-            Some(validator) => assert!(
-                request
-                    .lines()
-                    .any(|line| line.eq_ignore_ascii_case(&format!("if-none-match: {validator}")))
-            ),
-            None => assert!(!lowercase_request.contains("if-none-match:")),
-        }
+        String::from_utf8(request).expect("request headers are UTF-8")
+    }
+
+    async fn write_response(stream: &mut TcpStream, response: &ScriptedResponse) {
+        sleep(response.delay).await;
         let entity_tag = response
             .entity_tag
             .map(|value| format!("ETag: {value}\r\n"))
@@ -2946,8 +3582,29 @@ mod tests {
             .expect("scripted response can be written");
     }
 
+    async fn serve_response(listener: &TcpListener, response: ScriptedResponse) {
+        let (mut stream, _) = listener.accept().await.expect("scripted request arrives");
+        let request = read_request(&mut stream).await;
+        let start_line = request.lines().next().expect("request has a start line");
+        assert_eq!(
+            start_line,
+            format!("{} {} HTTP/1.1", response.method, response.target)
+        );
+        let lowercase_request = request.to_ascii_lowercase();
+        assert!(lowercase_request.contains(&format!("authorization: bearer {}", CREDENTIAL_VALUE)));
+        match response.validator {
+            Some(validator) => assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case(&format!("if-none-match: {validator}")))
+            ),
+            None => assert!(!lowercase_request.contains("if-none-match:")),
+        }
+        write_response(&mut stream, &response).await;
+    }
+
     struct PollerFixture {
-        poller: GitHubRepositoryPoller,
+        poller: Arc<GitHubRepositoryPoller>,
         _credential_directory: TempDir,
     }
 
@@ -2983,50 +3640,466 @@ mod tests {
             rest_base,
         )?;
         Ok(PollerFixture {
-            poller,
+            poller: Arc::new(poller),
             _credential_directory: credential_directory,
         })
     }
 
     fn complete_poll_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, EMPTY_WORKFLOW_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(EMPTY_WORKFLOW_LIST.to_owned()),
+            ),
         ]
     }
 
     fn conditional_poll_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::not_modified(PULLS_TARGET),
-            ScriptedResponse::not_modified(BRANCHES_TARGET),
-            ScriptedResponse::not_modified(WORKFLOWS_TARGET),
+            ScriptedResponse::not_modified(RequestTarget(PULLS_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(BRANCHES_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(WORKFLOWS_TARGET.to_owned())),
         ]
     }
 
     fn complete_typed_observation_responses() -> Vec<ScriptedResponse> {
         vec![
-            ScriptedResponse::ok(PULLS_TARGET, pulls_with_one()),
-            ScriptedResponse::ok(PULL_DETAIL_TARGET, pull_detail()),
-            ScriptedResponse::ok(CHECK_SUITES_TARGET, check_suites()),
-            ScriptedResponse::ok(COMPLETED_SUITE_CHECK_RUNS_TARGET, check_runs()),
-            ScriptedResponse::ok(QUEUED_SUITE_CHECK_RUNS_TARGET, empty_check_runs()),
-            ScriptedResponse::ok(REVIEWS_TARGET, reviews()),
-            ScriptedResponse::post(THREADS_TARGET, threads()),
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, pull_reactions()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, issue_comments()),
-            ScriptedResponse::ok(ISSUE_COMMENT_REACTIONS_TARGET, issue_comment_reactions()),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, review_comments()),
-            ScriptedResponse::ok(REVIEW_COMMENT_REACTIONS_TARGET, review_comment_reactions()),
-            ScriptedResponse::ok(BRANCHES_TARGET, branches()),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, workflows()),
-            ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, main_workflow_run()),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                ResponseBody(pull_detail()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(CHECK_SUITES_TARGET.to_owned()),
+                ResponseBody(check_suites()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(check_runs()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(QUEUED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(empty_check_runs().to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(threads()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(pull_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(issue_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(issue_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(review_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(review_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(workflows()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
         ]
+    }
+
+    /// Descends as the pull number ascends, so an implementation that
+    /// accidentally orders fetched pull requests by head identity or head
+    /// branch reverses the expected number order instead of matching it.
+    fn minimal_pull_head_seed(number: u64) -> u64 {
+        u64::MAX - number
+    }
+
+    fn minimal_pull_head_sha(number: u64) -> String {
+        format!("{:040x}", minimal_pull_head_seed(number))
+    }
+
+    fn minimal_pull_detail(number: u64) -> String {
+        serde_json::json!({
+            "number": number,
+            "state": "open",
+            "merged_at": null,
+            "mergeable": true,
+            "head": {
+                "sha": minimal_pull_head_sha(number),
+                "ref": format!("{HEAD_BRANCH}-{}", minimal_pull_head_seed(number)),
+                "repo": { "full_name": PROVIDER_HEAD_REPOSITORY }
+            },
+            "base": {
+                "sha": BASE_SHA,
+                "ref": BASE_BRANCH,
+                "repo": { "full_name": PROVIDER_BASE_REPOSITORY }
+            },
+            "title": PULL_TITLE,
+            "body": PULL_BODY,
+            "labels": [],
+            "draft": false,
+            "user": { "login": PROVIDER_PULL_AUTHOR }
+        })
+        .to_string()
+    }
+
+    fn empty_threads() -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": { "hasNextPage": false, "endCursor": null }
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn minimal_pull_responses(number: u64) -> Vec<ScriptedResponse> {
+        let head_sha = minimal_pull_head_sha(number);
+        vec![
+            ScriptedResponse::ok(
+                RequestTarget(format!("/repos/{WATCHED_REPOSITORY}/pulls/{number}")),
+                ResponseBody(minimal_pull_detail(number)),
+            )
+            .delayed(CONCURRENT_FETCH_DELAY),
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/commits/{head_sha}/check-suites?filter=all&per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_CHECK_SUITE_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{number}/reviews?per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(empty_threads()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/issues/{number}/reactions?per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/issues/{number}/comments?per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{number}/comments?per_page=100&page=1"
+                )),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+        ]
+    }
+
+    fn settled_typed_observation_responses() -> Vec<ScriptedResponse> {
+        vec![
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                ResponseBody(pull_detail()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(CHECK_SUITES_TARGET.to_owned()),
+                ResponseBody(settled_check_suites()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(settled_check_runs()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(threads()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(pull_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(issue_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(issue_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(review_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(review_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(workflows()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
+        ]
+    }
+
+    fn skipped_pull_request_responses() -> Vec<ScriptedResponse> {
+        skipped_pull_request_responses_with_reviews(reviews())
+    }
+
+    fn skipped_pull_request_responses_with_deferred_reviews() -> Vec<ScriptedResponse> {
+        skipped_pull_request_responses_with_reviews(reviews_with_deferred_wave())
+    }
+
+    fn skipped_pull_request_responses_with_reviews(reviews: String) -> Vec<ScriptedResponse> {
+        vec![
+            ScriptedResponse::conditional_ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(threads()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(pull_reactions()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(issue_comments()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(issue_comment_reactions()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(review_comments()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(review_comment_reactions()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(workflows()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
+        ]
+    }
+
+    fn settled_responses_with_pending_mergeability() -> Vec<ScriptedResponse> {
+        with_pending_mergeability(settled_typed_observation_responses())
+    }
+
+    fn responses_with_only_an_unsettled_check_suite() -> Vec<ScriptedResponse> {
+        complete_typed_observation_responses()
+            .into_iter()
+            .map(|response| {
+                if response.target == COMPLETED_SUITE_CHECK_RUNS_TARGET {
+                    ScriptedResponse::ok(
+                        RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                        ResponseBody(settled_check_runs()),
+                    )
+                } else {
+                    response
+                }
+            })
+            .collect()
+    }
+
+    fn responses_with_only_an_unsettled_check_run() -> Vec<ScriptedResponse> {
+        complete_typed_observation_responses()
+            .into_iter()
+            .filter_map(|response| {
+                if response.target == CHECK_SUITES_TARGET {
+                    Some(ScriptedResponse::ok(
+                        RequestTarget(CHECK_SUITES_TARGET.to_owned()),
+                        ResponseBody(settled_check_suites()),
+                    ))
+                } else if response.target == QUEUED_SUITE_CHECK_RUNS_TARGET {
+                    None
+                } else {
+                    Some(response)
+                }
+            })
+            .collect()
+    }
+
+    fn with_pending_mergeability(responses: Vec<ScriptedResponse>) -> Vec<ScriptedResponse> {
+        responses
+            .into_iter()
+            .map(|response| {
+                if response.target == PULL_DETAIL_TARGET {
+                    ScriptedResponse::ok(
+                        RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                        ResponseBody(pull_detail_with_pending_mergeability()),
+                    )
+                } else {
+                    response
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn with_pending_mergeability_rewrites_the_pull_detail_response() {
+        let responses = with_pending_mergeability(vec![ScriptedResponse::conditional_ok(
+            RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+            ResponseBody(pull_detail()),
+        )]);
+
+        let [response] = responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "GET");
+        assert_eq!(response.target, PULL_DETAIL_TARGET);
+        assert_eq!(response.validator, None);
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, Some(ENTITY_TAG));
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, pull_detail_with_pending_mergeability());
+        assert_eq!(response.delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn with_pending_mergeability_leaves_another_target_unchanged() {
+        let responses = with_pending_mergeability(vec![ScriptedResponse::conditional_ok(
+            RequestTarget(REVIEWS_TARGET.to_owned()),
+            ResponseBody(reviews()),
+        )]);
+
+        let [response] = responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "GET");
+        assert_eq!(response.target, REVIEWS_TARGET);
+        assert_eq!(response.validator, Some(ENTITY_TAG));
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, Some(ENTITY_TAG));
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, reviews());
+        assert_eq!(response.delay, Duration::ZERO);
+    }
+
+    fn revalidated(responses: Vec<ScriptedResponse>) -> Vec<ScriptedResponse> {
+        responses
+            .into_iter()
+            .map(|response| match response.entity_tag {
+                Some(_) => ScriptedResponse::conditional_ok(
+                    RequestTarget(response.target),
+                    ResponseBody(response.body),
+                ),
+                None => response,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn revalidated_rewrites_a_tagged_response_into_a_conditional_expectation() {
+        let revalidated_responses = revalidated(vec![ScriptedResponse::ok(
+            RequestTarget(PULLS_TARGET.to_owned()),
+            ResponseBody(EMPTY_LIST.to_owned()),
+        )]);
+
+        let [response] = revalidated_responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "GET");
+        assert_eq!(response.target, PULLS_TARGET);
+        assert_eq!(response.validator, Some(ENTITY_TAG));
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, Some(ENTITY_TAG));
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, EMPTY_LIST);
+        assert_eq!(response.delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn revalidated_leaves_an_untagged_response_unchanged() {
+        let revalidated_responses = revalidated(vec![ScriptedResponse::post(
+            RequestTarget(THREADS_TARGET.to_owned()),
+            ResponseBody(empty_threads()),
+        )]);
+
+        let [response] = revalidated_responses.as_slice() else {
+            panic!("one scripted response stays one response");
+        };
+        assert_eq!(response.method, "POST");
+        assert_eq!(response.target, THREADS_TARGET);
+        assert_eq!(response.validator, None);
+        assert_eq!(response.status, "200 OK");
+        assert_eq!(response.entity_tag, None);
+        assert_eq!(response.link, None);
+        assert_eq!(response.body, empty_threads());
+        assert_eq!(response.delay, Duration::ZERO);
     }
 
     async fn complete_typed_observation() -> RepoWatchObservation {
         let server = ScriptedServer::start(complete_typed_observation_responses()).await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
         observation
@@ -3049,10 +4122,108 @@ mod tests {
             exit.notify_one();
         });
 
-        let result = supervise_repository_tasks(tasks, receiver).await;
+        let result = supervise_repository_tasks(tasks, Vec::new(), receiver).await;
         trigger.await.expect("fixture race trigger completes");
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn supervisor_failure_drains_sibling_fetches() {
+        let server = ConcurrentScriptedServer::start(vec![
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{CANCELLED_FETCH_PULL_NUMBER}"
+                )),
+                ResponseBody(minimal_pull_detail(CANCELLED_FETCH_PULL_NUMBER)),
+            )
+            .delayed(CANCELLED_FETCH_DELAY),
+        ])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
+        let mut tasks = JoinSet::new();
+        tasks.spawn({
+            let poller = Arc::clone(&fixture.poller);
+            async move {
+                let _ = poller
+                    .fetch_pull_requests(
+                        BTreeSet::from([CANCELLED_FETCH_PULL_NUMBER]),
+                        &listed,
+                        None,
+                        Some(RepoWatchCursorGeneration::INITIAL),
+                    )
+                    .await;
+            }
+        });
+        server.request_in_flight().await;
+        tasks.spawn(async { panic!("fixture repository task panics") });
+        let (_sender, receiver) = watch::channel(false);
+
+        let result =
+            supervise_repository_tasks(tasks, vec![Arc::clone(&fixture.poller)], receiver).await;
+
+        assert_eq!(
+            result,
+            Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked)
+        );
+        assert_eq!(
+            Arc::strong_count(&fixture.poller),
+            1,
+            "a failed supervisor leaves no child fetch holding the sibling poller"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_task_panic_during_shutdown_drain_drains_sibling_fetches() {
+        let server = ConcurrentScriptedServer::start(vec![
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{CANCELLED_FETCH_PULL_NUMBER}"
+                )),
+                ResponseBody(minimal_pull_detail(CANCELLED_FETCH_PULL_NUMBER)),
+            )
+            .delayed(CANCELLED_FETCH_DELAY),
+        ])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
+        let mut tasks = JoinSet::new();
+        tasks.spawn({
+            let poller = Arc::clone(&fixture.poller);
+            async move {
+                let _ = poller
+                    .fetch_pull_requests(
+                        BTreeSet::from([CANCELLED_FETCH_PULL_NUMBER]),
+                        &listed,
+                        None,
+                        Some(RepoWatchCursorGeneration::INITIAL),
+                    )
+                    .await;
+            }
+        });
+        server.request_in_flight().await;
+        tasks.spawn(async { panic!("fixture repository task panics during shutdown") });
+        let (_sender, receiver) = watch::channel(true);
+
+        let result =
+            supervise_repository_tasks(tasks, vec![Arc::clone(&fixture.poller)], receiver).await;
+
+        assert_eq!(
+            result,
+            Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked)
+        );
+        assert_eq!(
+            Arc::strong_count(&fixture.poller),
+            1,
+            "a shutdown-drain panic leaves no child fetch holding the sibling poller"
+        );
     }
 
     #[test]
@@ -3090,7 +4261,7 @@ mod tests {
                 .collect(),
         )
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let first = fixture
             .poller
             .poll(None)
@@ -3115,14 +4286,14 @@ mod tests {
                 .collect(),
         )
         .await;
-        let mut first_poller =
+        let first_poller =
             poller_fixture(server.base_url.clone()).expect("first poller is constructed");
         let first = first_poller
             .poller
             .poll(None)
             .await
             .expect("first poll succeeds");
-        let mut restarted = poller_fixture(server.base_url.clone()).expect("poller restarts");
+        let restarted = poller_fixture(server.base_url.clone()).expect("poller restarts");
         let after_restart = restarted
             .poller
             .poll(Some(&first))
@@ -3136,13 +4307,25 @@ mod tests {
     #[tokio::test]
     async fn workflow_listing_follows_the_link_after_a_full_page() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok_with_next(WORKFLOWS_TARGET, full_workflow_page()),
-            ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok_with_next(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(full_workflow_page()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(SECOND_WORKFLOWS_PAGE_TARGET.to_owned()),
+                ResponseBody(EMPTY_WORKFLOW_LIST.to_owned()),
+            ),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
 
@@ -3152,12 +4335,21 @@ mod tests {
     #[tokio::test]
     async fn workflow_listing_accepts_a_full_terminal_page_without_a_link() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(full_workflow_page()),
+            ),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
@@ -3168,16 +4360,28 @@ mod tests {
     #[tokio::test]
     async fn cached_full_terminal_page_probes_one_bounded_successor() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
-            ScriptedResponse::not_modified(PULLS_TARGET),
-            ScriptedResponse::not_modified(BRANCHES_TARGET),
-            ScriptedResponse::not_modified(WORKFLOWS_TARGET),
-            ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(full_workflow_page()),
+            ),
+            ScriptedResponse::not_modified(RequestTarget(PULLS_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(BRANCHES_TARGET.to_owned())),
+            ScriptedResponse::not_modified(RequestTarget(WORKFLOWS_TARGET.to_owned())),
+            ScriptedResponse::ok(
+                RequestTarget(SECOND_WORKFLOWS_PAGE_TARGET.to_owned()),
+                ResponseBody(EMPTY_WORKFLOW_LIST.to_owned()),
+            ),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let first = fixture
             .poller
             .poll(None)
@@ -3197,11 +4401,11 @@ mod tests {
     #[tokio::test]
     async fn branch_projection_skips_a_fork_run_with_the_same_branch_name() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            MAIN_WORKFLOW_TARGET,
-            foreign_then_watched_workflow_runs(),
+            RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+            ResponseBody(foreign_then_watched_workflow_runs()),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
 
@@ -3221,11 +4425,11 @@ mod tests {
     #[tokio::test]
     async fn active_rerun_retains_the_previous_completed_workflow_baseline() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            MAIN_WORKFLOW_TARGET,
-            active_rerun_then_stale_workflow_run(),
+            RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+            ResponseBody(active_rerun_then_stale_workflow_run()),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
         let previous = previous_main_workflow_run();
@@ -3250,11 +4454,11 @@ mod tests {
     #[tokio::test]
     async fn active_run_does_not_hide_a_newer_completed_workflow_baseline() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            MAIN_WORKFLOW_TARGET,
-            active_rerun_then_stale_workflow_run(),
+            RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+            ResponseBody(active_rerun_then_stale_workflow_run()),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
         let previous = older_main_workflow_run();
@@ -3279,11 +4483,17 @@ mod tests {
     #[tokio::test]
     async fn branch_projection_follows_a_full_page_of_fork_runs() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok_with_next(MAIN_WORKFLOW_TARGET, full_foreign_workflow_run_page()),
-            ScriptedResponse::ok(SECOND_MAIN_WORKFLOW_PAGE_TARGET, main_workflow_run()),
+            ScriptedResponse::ok_with_next(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(full_foreign_workflow_run_page()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(SECOND_MAIN_WORKFLOW_PAGE_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
 
@@ -3305,17 +4515,20 @@ mod tests {
         let responses = complete_poll_responses()
             .into_iter()
             .chain([ScriptedResponse::conditional_ok(
-                PULLS_TARGET,
-                MALFORMED_JSON,
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(MALFORMED_JSON.to_owned()),
             )])
             .chain([
-                ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
-                ScriptedResponse::not_modified(BRANCHES_TARGET),
-                ScriptedResponse::not_modified(WORKFLOWS_TARGET),
+                ScriptedResponse::ok(
+                    RequestTarget(PULLS_TARGET.to_owned()),
+                    ResponseBody(EMPTY_LIST.to_owned()),
+                ),
+                ScriptedResponse::not_modified(RequestTarget(BRANCHES_TARGET.to_owned())),
+                ScriptedResponse::not_modified(RequestTarget(WORKFLOWS_TARGET.to_owned())),
             ])
             .collect();
         let server = ScriptedServer::start(responses).await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let first = fixture
             .poller
             .poll(None)
@@ -3472,21 +4685,543 @@ mod tests {
         );
     }
 
-    /// A required member the provider does not define fails every check-runs
-    /// page, and therefore every poll, closed. Decoding the provider's complete
-    /// member set is what proves the decoder asks only for members that arrive.
+    #[test]
+    fn a_cycle_shorter_than_the_interval_waits_out_the_remainder() {
+        assert_eq!(
+            remaining_interval(PollCycleTiming {
+                interval: POLL_INTERVAL,
+                elapsed: SHORT_CYCLE,
+            }),
+            SHORT_CYCLE_REMAINDER
+        );
+    }
+
+    #[test]
+    fn a_cycle_that_reaches_the_interval_starts_the_next_immediately() {
+        assert_eq!(
+            remaining_interval(PollCycleTiming {
+                interval: POLL_INTERVAL,
+                elapsed: POLL_INTERVAL,
+            }),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn a_cycle_that_overruns_the_interval_starts_the_next_immediately() {
+        assert_eq!(
+            remaining_interval(PollCycleTiming {
+                interval: POLL_INTERVAL,
+                elapsed: OVERRUNNING_CYCLE,
+            }),
+            Duration::ZERO
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_pull_request_refetches_dispatch_signals() {
+        let responses = settled_typed_observation_responses()
+            .into_iter()
+            .chain(skipped_pull_request_responses())
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn a_reused_pull_request_emits_every_deferred_review_once() {
+        let responses = settled_typed_observation_responses()
+            .into_iter()
+            .chain(skipped_pull_request_responses_with_deferred_reviews())
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let previous = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("the prior cursor observation is fetched");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let current = fixture
+            .poller
+            .poll(Some(&previous))
+            .await
+            .expect("the deferred remote state is fetched");
+        server.finish().await;
+        let events = derive_repo_watch_events(
+            &fixture.poller.repository,
+            Some(&previous),
+            &current,
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .expect("the deferred review wave forms events");
+
+        assert_eq!(events.len(), DEFERRED_REVIEW_IDS.len());
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_USER_REVIEWER))
+                    .expect("fixture reviewer is valid"),
+                state: ReviewState::Commented,
+                commit: CommitSha::try_new(String::from(HEAD_SHA))
+                    .expect("fixture review commit is valid"),
+            }
+        );
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_APPROVING_REVIEWER,))
+                    .expect("fixture reviewer is valid"),
+                state: ReviewState::Approved,
+                commit: CommitSha::try_new(String::from(HEAD_SHA))
+                    .expect("fixture review commit is valid"),
+            }
+        );
+        assert_eq!(
+            events[2].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(
+                    String::from(DEFERRED_COMMENTING_REVIEWER,)
+                )
+                .expect("fixture reviewer is valid"),
+                state: ReviewState::Commented,
+                commit: CommitSha::try_new(String::from(HEAD_SHA))
+                    .expect("fixture review commit is valid"),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_with_pending_mergeability_is_refetched() {
+        let responses = settled_responses_with_pending_mergeability()
+            .into_iter()
+            .chain(revalidated(settled_responses_with_pending_mergeability()))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_fetch_that_never_committed_is_refetched() {
+        let responses = settled_typed_observation_responses()
+            .into_iter()
+            .chain(revalidated(settled_typed_observation_responses()))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_pull_request_with_an_unsettled_check_suite_is_refetched() {
+        let responses = responses_with_only_an_unsettled_check_suite()
+            .into_iter()
+            .chain(revalidated(responses_with_only_an_unsettled_check_suite()))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_pull_request_with_an_unsettled_check_run_is_refetched() {
+        let responses = responses_with_only_an_unsettled_check_run()
+            .into_iter()
+            .chain(revalidated(responses_with_only_an_unsettled_check_run()))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("second poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
+    }
+
+    async fn concurrently_fetched_pull_requests() -> (Vec<u64>, usize) {
+        let numbers: BTreeSet<u64> = CONCURRENT_FETCH_PULL_NUMBERS.collect();
+        let responses = numbers
+            .iter()
+            .flat_map(|number| minimal_pull_responses(*number))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let listed: BTreeMap<u64, ListedPullRequest> = numbers
+            .iter()
+            .map(|number| {
+                (
+                    *number,
+                    ListedPullRequest {
+                        updated_at: PULL_UPDATED_AT.to_owned(),
+                        head_sha: CommitSha::try_new(minimal_pull_head_sha(*number))
+                            .expect("fixture listed head is valid"),
+                    },
+                )
+            })
+            .collect();
+
+        let pull_requests = fixture
+            .poller
+            .fetch_pull_requests(
+                numbers,
+                &listed,
+                None,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            )
+            .await
+            .expect("every open pull request is fetched");
+        let peak_in_flight = server.finish().await;
+
+        (
+            pull_requests
+                .iter()
+                .map(|pull_request| pull_request.context().number().get())
+                .collect(),
+            peak_in_flight,
+        )
+    }
+
+    #[tokio::test]
+    async fn concurrent_pull_request_fetches_stay_within_their_bound() {
+        let (_, peak_in_flight) = concurrently_fetched_pull_requests().await;
+
+        assert!(peak_in_flight > 1);
+        assert!(peak_in_flight <= MAX_CONCURRENT_PULL_REQUEST_FETCHES);
+    }
+
+    #[tokio::test]
+    async fn concurrently_fetched_pull_requests_keep_ascending_number_order() {
+        let (fetched, _) = concurrently_fetched_pull_requests().await;
+
+        assert_eq!(fetched, CONCURRENT_FETCH_PULL_NUMBERS.collect::<Vec<u64>>());
+    }
+
+    /// Cancelling an attempt drops the fetch future, which aborts the spawned
+    /// children without joining them. Whether a child is still running is read
+    /// from the poller's reference count: the child parked in the delayed
+    /// response owns a clone, so the count stays raised until a join actually
+    /// retires it.
+    #[tokio::test]
+    async fn draining_after_a_cancelled_fetch_joins_every_child() {
+        let server = ConcurrentScriptedServer::start(vec![
+            ScriptedResponse::ok(
+                RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/pulls/{CANCELLED_FETCH_PULL_NUMBER}"
+                )),
+                ResponseBody(minimal_pull_detail(CANCELLED_FETCH_PULL_NUMBER)),
+            )
+            .delayed(CANCELLED_FETCH_DELAY),
+        ])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let poller = Arc::clone(&fixture.poller);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            ListedPullRequest {
+                updated_at: PULL_UPDATED_AT.to_owned(),
+                head_sha: CommitSha::try_new(minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER))
+                    .expect("fixture listed head is valid"),
+            },
+        )]);
+        let fetch = tokio::spawn(async move {
+            poller
+                .fetch_pull_requests(
+                    BTreeSet::from([CANCELLED_FETCH_PULL_NUMBER]),
+                    &listed,
+                    None,
+                    Some(RepoWatchCursorGeneration::INITIAL),
+                )
+                .await
+        });
+        server.request_in_flight().await;
+
+        fetch.abort();
+        let cancelled = fetch.await;
+
+        assert!(
+            cancelled
+                .expect_err("the mid-request fetch must not have completed")
+                .is_cancelled()
+        );
+        assert_eq!(
+            Arc::strong_count(&fixture.poller),
+            2,
+            "the aborted attempt leaves its child running"
+        );
+        fixture.poller.drain_fetches().await;
+        assert_eq!(
+            Arc::strong_count(&fixture.poller),
+            1,
+            "a drained poller has no child still holding it"
+        );
+    }
+
+    /// After a commit conflict the durable baseline belongs to a competing
+    /// watcher, so entries recorded and published against the superseded
+    /// baseline must authorize no further reuse.
+    #[tokio::test]
+    async fn invalidated_freshness_authorizes_no_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        let number = 7_u64;
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        assert!(
+            fixture.poller.pull_request_detail_is_reusable(
+                number,
+                &listed,
+                previous,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            ),
+            "a published settled entry authorizes reuse against its cursor generation"
+        );
+        fixture.poller.invalidate_freshness();
+
+        assert!(
+            !fixture.poller.pull_request_detail_is_reusable(
+                number,
+                &listed,
+                previous,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            ),
+            "an invalidated record authorizes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn freshness_published_against_another_cursor_authorizes_no_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let number = 7_u64;
+        let published_generation = RepoWatchCursorGeneration::INITIAL;
+        let loaded_generation = published_generation
+            .next()
+            .expect("fixture cursor generation has a successor");
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.publish_freshness(published_generation);
+
+        assert!(
+            !fixture.poller.pull_request_detail_is_reusable(
+                number,
+                &listed,
+                previous,
+                Some(loaded_generation),
+            ),
+            "freshness published against another durable cursor must not authorize reuse"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_pull_request_timestamp_authorizes_no_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let number = 7_u64;
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
+            number,
+            &ListedPullRequest {
+                updated_at: "2026-08-03T12:30:01Z".to_owned(),
+                head_sha:
+                    CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture listed head is valid"),
+            },
+            previous,
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
+    }
+
+    #[tokio::test]
+    async fn pull_request_reuse_stops_at_the_skipped_poll_limit() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let number = 7_u64;
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        fixture
+            .poller
+            .freshness()
+            .get_mut(&number)
+            .expect("fixture freshness is recorded")
+            .skipped_polls = MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS - 1;
+
+        assert!(fixture.poller.pull_request_detail_is_reusable(
+            number,
+            &listed,
+            previous,
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
+        fixture.poller.record_skipped_poll(number);
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
+            number,
+            &listed,
+            previous,
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
+        fixture.poller.record_skipped_poll(number);
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
+            number,
+            &listed,
+            previous,
+            Some(RepoWatchCursorGeneration::INITIAL),
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_listed_head_change_forbids_pull_request_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let previously_listed = listed_pull_request(HEAD_SHA);
+        let changed_listing = listed_pull_request(CHANGED_LISTED_HEAD_SHA);
+        let number = previous.context().number().get();
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &previously_listed,
+            PullRequestSettlement::Settled,
+        );
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+
+        assert!(
+            !fixture.poller.pull_request_detail_is_reusable(
+                number,
+                &changed_listing,
+                previous,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            ),
+            "a head change is never hidden by unchanged listing metadata"
+        );
+    }
+
     #[tokio::test]
     async fn every_check_run_member_the_decoder_requires_exists_in_the_provider_payload() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            COMPLETED_SUITE_CHECK_RUNS_TARGET,
-            provider_defined_check_runs(),
+            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            ResponseBody(provider_defined_check_runs()),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let suite =
             object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
 
-        let runs = fixture
+        let (runs, _) = fixture
             .poller
             .fetch_check_runs(std::slice::from_ref(&suite))
             .await
@@ -3503,11 +5238,11 @@ mod tests {
     #[tokio::test]
     async fn a_completed_check_run_without_a_completion_time_is_an_invalid_response() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            COMPLETED_SUITE_CHECK_RUNS_TARGET,
-            completed_check_run_without_a_completion_time(),
+            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            ResponseBody(completed_check_run_without_a_completion_time()),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let suite =
             object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
 
@@ -3548,11 +5283,11 @@ mod tests {
     #[tokio::test]
     async fn a_deleted_review_author_reuses_the_prior_review_identity() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            REVIEWS_TARGET,
-            identity_less_review(RETAINED_REVIEW_IDS[0]),
+            RequestTarget(REVIEWS_TARGET.to_owned()),
+            ResponseBody(identity_less_review(RETAINED_REVIEW_IDS[0])),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let previous = submitted_review(RETAINED_REVIEW_IDS[0]);
 
         let reviews = fixture
@@ -3568,11 +5303,11 @@ mod tests {
     #[tokio::test]
     async fn a_new_review_without_an_author_identity_is_omitted() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            REVIEWS_TARGET,
-            identity_less_review(RETAINED_REVIEW_IDS[0]),
+            RequestTarget(REVIEWS_TARGET.to_owned()),
+            ResponseBody(identity_less_review(RETAINED_REVIEW_IDS[0])),
         )])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let reviews = fixture
             .poller
@@ -3608,7 +5343,7 @@ mod tests {
     #[tokio::test]
     async fn no_signal_reviewers_skip_every_reaction_request() {
         let server = ScriptedServer::start(Vec::new()).await;
-        let mut fixture = poller_fixture_with_signal_reviewers(server.base_url.clone(), Vec::new())
+        let fixture = poller_fixture_with_signal_reviewers(server.base_url.clone(), Vec::new())
             .expect("poller is constructed");
 
         let reactions = fixture
@@ -3624,12 +5359,21 @@ mod tests {
     #[tokio::test]
     async fn a_reaction_without_an_actor_identity_is_omitted() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(identity_less_reaction()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
         let reactions = fixture
             .poller
@@ -3644,12 +5388,21 @@ mod tests {
     #[tokio::test]
     async fn a_reaction_without_an_actor_identity_retains_prior_subject_reactions() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(identity_less_reaction()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
         ])
         .await;
-        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let previous = RepoWatchReactionObservation::new(
             ReactionSubject::PullRequestBody,
             RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
@@ -3671,14 +5424,23 @@ mod tests {
     #[tokio::test]
     async fn a_changed_signal_reviewer_filter_drops_identity_less_prior_reactions() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
-            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(identity_less_reaction()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(EMPTY_LIST.to_owned()),
+            ),
         ])
         .await;
         let current_reviewer = RepoWatchAuthorLogin::try_new(String::from(AMBIENT_REACTOR))
             .expect("current reviewer fixture is valid");
-        let mut fixture =
+        let fixture =
             poller_fixture_with_signal_reviewers(server.base_url.clone(), vec![current_reviewer])
                 .expect("poller is constructed");
         let previous = RepoWatchReactionObservation::new(
@@ -3771,6 +5533,48 @@ mod tests {
     }
 
     #[test]
+    fn process_local_cache_retains_an_entry_for_four_untouched_poll_completions() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+
+        assert_eq!(
+            cache.entity_tag(&key),
+            Some(&EntityTag(ENTITY_TAG.to_owned()))
+        );
+    }
+
+    #[test]
+    fn process_local_cache_evicts_an_entry_on_the_fifth_untouched_poll_completion() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+        cache.complete_poll();
+
+        assert_eq!(cache.entity_tag(&key), None);
+    }
+
+    #[test]
     fn process_local_cache_replaces_an_untouched_stale_entry_at_capacity() {
         let mut cache = PollCache::default();
         let retained = ResourceKey(CACHE_RETAINED_KEY.to_owned());
@@ -3810,6 +5614,56 @@ mod tests {
         assert!(cache.resources.contains_key(&retained));
         assert!(cache.resources.contains_key(&replacement));
         assert!(!cache.resources.contains_key(&stale));
+    }
+
+    #[test]
+    fn a_not_modified_response_refreshes_the_tag_it_validated() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache
+            .accepted_for_validator::<Vec<u8>>(
+                &key,
+                Some(&EntityTag(ENTITY_TAG.to_owned())),
+                Some(EntityTag(REFRESHED_ENTITY_TAG.to_owned())),
+            )
+            .expect("the validated pair is still cached");
+
+        assert_eq!(
+            cache.entity_tag(&key),
+            Some(&EntityTag(REFRESHED_ENTITY_TAG.to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_not_modified_response_leaves_a_concurrently_replaced_pair_alone() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(CONCURRENTLY_REPLACED_ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+
+        cache
+            .accepted_for_validator::<Vec<u8>>(
+                &key,
+                Some(&EntityTag(ENTITY_TAG.to_owned())),
+                Some(EntityTag(REFRESHED_ENTITY_TAG.to_owned())),
+            )
+            .expect("the replacement pair is cached");
+
+        assert_eq!(
+            cache.entity_tag(&key),
+            Some(&EntityTag(CONCURRENTLY_REPLACED_ENTITY_TAG.to_owned()))
+        );
     }
 
     #[test]
