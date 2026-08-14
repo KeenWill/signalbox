@@ -339,6 +339,16 @@ boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
 mid-call (INV-046).
 
+**Committed unimplemented functionality — instruction-aware replacement.** Once
+workspace-instruction admission exists, a replacement for a session with a
+nonempty admitted set rejects its proposed model selection unless every target
+the current configuration can select from that direct selection or alias has a
+typed system-instruction transport and capacity for the complete retained
+workspace-instruction region. The replacement checks this before committing the
+successor defaults epoch under the session lock. Rejection is typed and leaves
+the current defaults and admitted set unchanged. No present replacement path
+performs this check because no present surface admits a bundle.
+
 ### Session system prompt
 
 A present session system prompt (`SessionSystemPrompt`) is nonempty exact
