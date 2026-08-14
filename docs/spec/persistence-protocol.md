@@ -779,7 +779,9 @@ Locks per transaction, in acquisition order:
   count and before its activation commit, rechecking the exact queued row; the
   later atomic activation-and-first-call transaction takes the same scheduler
   lock and authenticates that manifest. In either path, discovery,
-  registrations, and the empty manifest commit atomically. These temporary
+  registrations, and the empty manifest commit atomically for a complete scan.
+  An incomplete discovery may commit as diagnostic evidence but binds no
+  manifest, leaving the turn eligible for a new scan on retry. These temporary
   boundaries are sound only while eligibility is the one immutable empty value.
   The committed nonempty eligibility surface moves the manifest into activation
   under this same scheduler lock, as

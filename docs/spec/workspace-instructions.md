@@ -102,9 +102,10 @@ limit-set version, every consumed count, and a typed `limit_reached` finding
 naming the first exhausted dimension; it then stops without presenting the
 partial inventory as complete. Registration may retain the candidates already
 found, but session creation or turn preparation that requires a complete scan
-fails closed. Product ignore rules and configurable depth policy remain
-deferred. The 4,096-finding bound reserves its final slot for this terminal
-limit finding.
+fails closed. An incomplete discovery may be retained as append-only diagnostic
+evidence, but no turn manifest names it; a later preparation retries with a new
+scan. Product ignore rules and configurable depth policy remain deferred. The
+4,096-finding bound reserves its final slot for this terminal limit finding.
 
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.
