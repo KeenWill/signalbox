@@ -166,11 +166,11 @@ async fn active_instruction_turn(
     Ok((session, turn))
 }
 
-/// INV-061: one active turn records its exact discovery candidates and an
-/// immutable empty turn-start instruction manifest before model execution.
+/// INV-061: one active turn records its exact discovery evidence and empty
+/// turn-start instruction manifest before model execution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(), Box<dyn Error>> {
+async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x6101));
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x6102));
@@ -347,6 +347,33 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
             .get(1)
             .expect("the discovery contains the skill"),
     );
+    let persisted_findings = sqlx::query_as::<_, PersistedDiscoveryFinding>(
+        "SELECT finding_ordinal, source_path, finding_kind
+           FROM instruction_discovery_finding
+          WHERE instruction_discovery_id = $1
+          ORDER BY finding_ordinal",
+    )
+    .bind(discovery.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let persisted_finding = persisted_findings
+        .first()
+        .expect("the invalid skill finding is persisted");
+    let expected_finding = snapshot
+        .findings()
+        .first()
+        .expect("the discovery carries the invalid skill finding");
+    assert_eq!(persisted_findings.len(), snapshot.findings().len());
+    assert_eq!(persisted_finding.finding_ordinal, 1);
+    assert_eq!(
+        persisted_finding.source_path,
+        expected_finding.path().as_str()
+    );
+    assert_eq!(
+        expected_finding.kind(),
+        signalbox_application::InstructionDiscoveryFindingKind::InvalidSkill
+    );
+    assert_eq!(persisted_finding.finding_kind, "invalid_skill");
     let persisted_hashes = sqlx::query_as::<_, PersistedManifestHashes>(
         "SELECT eligibility_hash, manifest_hash
            FROM turn_instruction_manifest
@@ -373,6 +400,68 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
             manifest_id,
         )
     );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: every persisted turn-instruction evidence table rejects mutation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = active_instruction_turn(&pool, 0x6700).await?;
+    let directory = tempfile::tempdir()?;
+    let root_path = directory.path().canonicalize()?;
+    std::fs::write(root_path.join("AGENTS.md"), "workspace rule\n")?;
+    std::fs::create_dir_all(root_path.join(".agents/skills/review"))?;
+    std::fs::write(
+        root_path.join(".agents/skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review one change\n---\nsteps\n",
+    )?;
+    std::fs::create_dir_all(root_path.join(".agents/skills/broken"))?;
+    std::fs::write(
+        root_path.join(".agents/skills/broken/SKILL.md"),
+        "missing frontmatter\n",
+    )?;
+    let root = signalbox_domain::InstructionPath::try_new(
+        root_path
+            .to_str()
+            .expect("temporary path is UTF-8")
+            .to_owned(),
+    )?;
+    let snapshot = signalbox_application::discover_workspace_instructions(vec![
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+            root,
+        ),
+    ]);
+    let discovery = signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6710));
+    let manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6711));
+    let manifest =
+        signalbox_domain::TurnInstructionManifest::empty_turn_start(manifest_id, session, turn);
+    let agent_document_id =
+        signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6712));
+    let agent_skill_id = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6713));
+    let mut bundle_ids = [agent_document_id, agent_skill_id].into_iter();
+    let outcome =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .record_turn_start(discovery, manifest, &snapshot, || {
+            bundle_ids
+                .next()
+                .expect("two discovered bundles need two identities")
+        })
+        .await?;
+    assert_eq!(
+        outcome,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
+            manifest_id,
+        )
+    );
+
     let discovery_update = sqlx::query(
         "UPDATE instruction_discovery SET elapsed_millis = elapsed_millis
           WHERE instruction_discovery_id = $1",
@@ -450,20 +539,21 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
     .execute(&pool)
     .await;
     assert_append_only_rejection(finding_delete);
-    let mutation = sqlx::query(
-        "UPDATE turn_instruction_manifest SET boundary_kind = 'turn_start' WHERE turn_instruction_manifest_id = $1",
+    let manifest_update = sqlx::query(
+        "UPDATE turn_instruction_manifest SET boundary_kind = 'turn_start'
+          WHERE turn_instruction_manifest_id = $1",
     )
     .bind(manifest_id.into_uuid())
     .execute(&pool)
     .await;
-    assert_append_only_rejection(mutation);
-    let deletion = sqlx::query(
+    assert_append_only_rejection(manifest_update);
+    let manifest_delete = sqlx::query(
         "DELETE FROM turn_instruction_manifest WHERE turn_instruction_manifest_id = $1",
     )
     .bind(manifest_id.into_uuid())
     .execute(&pool)
     .await;
-    assert_append_only_rejection(deletion);
+    assert_append_only_rejection(manifest_delete);
 
     pool.close().await;
     drop(container);
