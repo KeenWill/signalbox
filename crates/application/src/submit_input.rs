@@ -64,6 +64,7 @@ pub struct SubmitInputRequest {
 impl SubmitInputRequest {
     /// The provisional inclusive admission maximum: one mebibyte of UTF-8
     /// text.
+    // numeric-bound: ceiling - protects command memory and durable input storage
     pub const MAX_CONTENT_UTF8_BYTES: usize = 1_048_576;
 
     /// Validates admission policy before canonical command construction.

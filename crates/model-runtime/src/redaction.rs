@@ -12,6 +12,7 @@ use crate::{
     TerminalEvidence, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
 };
 
+// numeric-bound: tunable - controls retained provider diagnostic detail
 const MAX_NATIVE_MESSAGE_BYTES: usize = 2_048;
 const NATIVE_MESSAGE_TRUNCATION_SUFFIX: &str = " … [truncated]";
 

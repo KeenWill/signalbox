@@ -14,6 +14,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
+// numeric-bound: ceiling - protects against an unbounded paid provider loop
 const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
