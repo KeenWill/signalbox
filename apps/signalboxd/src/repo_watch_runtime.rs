@@ -1933,7 +1933,6 @@ impl GitHubRepositoryPoller {
                         &[
                             ("per_page", PAGE_SIZE.to_string()),
                             ("page", page.to_string()),
-                            ("exclude_pull_requests", "true".to_owned()),
                         ],
                     )?,
                     None,
@@ -2975,8 +2974,10 @@ mod tests {
         "/repos/namespace/project/pulls/7/comments?per_page=100&page=1";
     const REVIEW_COMMENT_REACTIONS_TARGET: &str =
         "/repos/namespace/project/pulls/comments/51/reactions?per_page=100&page=1";
-    const MAIN_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1&exclude_pull_requests=true";
-    const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=2&exclude_pull_requests=true";
+    const MAIN_WORKFLOW_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1";
+    const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=2";
     const EMPTY_LIST: &str = "[]";
     const EMPTY_CHECK_SUITE_LIST: &str = "{\"check_suites\":[]}";
     const CONCURRENT_FETCH_PULL_NUMBERS: std::ops::RangeInclusive<u64> = 1..=9;
