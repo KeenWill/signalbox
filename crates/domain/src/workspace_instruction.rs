@@ -82,10 +82,15 @@ impl InstructionPath {
 /// Why one durable instruction path was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstructionPathError {
+    /// The supplied path had no bytes.
     Empty,
+    /// The supplied path contained U+0000.
     ContainsNull,
+    /// The supplied path exceeded the durable byte bound.
     TooLong,
+    /// The supplied path was not absolute.
     NotAbsolute,
+    /// The supplied path contained an empty, dot, or dot-dot component.
     NotCanonical,
 }
 
@@ -106,15 +111,30 @@ impl Error for InstructionPathError {}
 /// Authority route through which one candidate was found.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InstructionDiscoveryRootKind {
+    /// The session's fixed daemon-local workspace root.
     Workspace,
+    /// One daemon root registered by configuration.
     Configured,
 }
 
 /// Closed version-one bundle kinds.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InstructionBundleKind {
+    /// One scoped `AGENTS.md` document.
     AgentDocument,
+    /// One portable Agent Skills directory represented by `SKILL.md`.
     AgentSkill,
+}
+
+/// Named portable fields whose roles must remain visible at call sites.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionSkillMetadataInput {
+    /// Portable skill name from frontmatter.
+    pub name: String,
+    /// Portable skill description from frontmatter.
+    pub description: String,
+    /// Candidate directory name that must equal the portable skill name.
+    pub parent_directory: String,
 }
 
 /// Validated portable Agent Skills display metadata.
@@ -127,10 +147,13 @@ pub struct InstructionSkillMetadata {
 impl InstructionSkillMetadata {
     /// Validates the required portable fields and parent-directory identity.
     pub fn try_new(
-        name: String,
-        description: String,
-        parent_directory: &str,
+        input: InstructionSkillMetadataInput,
     ) -> Result<Self, InstructionSkillMetadataError> {
+        let InstructionSkillMetadataInput {
+            name,
+            description,
+            parent_directory,
+        } = input;
         if !(1..=64).contains(&name.len())
             || name.starts_with('-')
             || name.ends_with('-')
@@ -150,10 +173,12 @@ impl InstructionSkillMetadata {
         Ok(Self { name, description })
     }
 
+    /// Borrows the validated portable name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Borrows the validated portable description.
     pub fn description(&self) -> &str {
         &self.description
     }
@@ -162,8 +187,11 @@ impl InstructionSkillMetadata {
 /// Why portable skill metadata was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstructionSkillMetadataError {
+    /// The name violated the portable grammar or byte bound.
     InvalidName,
+    /// The description violated the portable content bound.
     InvalidDescription,
+    /// The portable name did not equal the candidate directory name.
     ParentMismatch,
 }
 
@@ -179,6 +207,25 @@ impl fmt::Display for InstructionSkillMetadataError {
 
 impl Error for InstructionSkillMetadataError {}
 
+/// Named fields validated into one append-only bundle registration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionBundleRegistrationInput {
+    /// Closed kind of instruction source.
+    pub kind: InstructionBundleKind,
+    /// Authority route that yielded the candidate.
+    pub root_kind: InstructionDiscoveryRootKind,
+    /// Canonical absolute path of the authorizing root.
+    pub root_path: InstructionPath,
+    /// Canonical absolute path of the candidate source file.
+    pub source_path: InstructionPath,
+    /// Exact source byte length.
+    pub source_bytes: u64,
+    /// Digest of the exact source bytes.
+    pub source_hash: InstructionDigest,
+    /// Validated skill metadata, present exactly for skill bundles.
+    pub skill: Option<InstructionSkillMetadata>,
+}
+
 /// Validated content ready for append-only registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstructionBundleRegistration {
@@ -192,16 +239,17 @@ pub struct InstructionBundleRegistration {
 }
 
 impl InstructionBundleRegistration {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        kind: InstructionBundleKind,
-        root_kind: InstructionDiscoveryRootKind,
-        root_path: InstructionPath,
-        source_path: InstructionPath,
-        source_bytes: u64,
-        source_hash: InstructionDigest,
-        skill: Option<InstructionSkillMetadata>,
-    ) -> Option<Self> {
+    /// Validates path containment and bundle/metadata shape.
+    pub fn new(input: InstructionBundleRegistrationInput) -> Option<Self> {
+        let InstructionBundleRegistrationInput {
+            kind,
+            root_kind,
+            root_path,
+            source_path,
+            source_bytes,
+            source_hash,
+            skill,
+        } = input;
         let shape_matches = matches!(kind, InstructionBundleKind::AgentSkill) == skill.is_some();
         let below_root = source_path
             .as_str()
@@ -218,15 +266,19 @@ impl InstructionBundleRegistration {
         })
     }
 
+    /// Returns the closed bundle kind.
     pub const fn kind(&self) -> InstructionBundleKind {
         self.kind
     }
+    /// Returns the authority route that yielded the source.
     pub const fn root_kind(&self) -> InstructionDiscoveryRootKind {
         self.root_kind
     }
+    /// Borrows the canonical authorizing root path.
     pub const fn root_path(&self) -> &InstructionPath {
         &self.root_path
     }
+    /// Borrows the canonical source-file path.
     pub const fn source_path(&self) -> &InstructionPath {
         &self.source_path
     }
@@ -243,12 +295,15 @@ impl InstructionBundleRegistration {
                 .unwrap_or_default()
         })
     }
+    /// Returns the exact source byte length.
     pub const fn source_bytes(&self) -> u64 {
         self.source_bytes
     }
+    /// Returns the digest of the exact source bytes.
     pub const fn source_hash(&self) -> InstructionDigest {
         self.source_hash
     }
+    /// Borrows validated skill metadata when the bundle is a skill.
     pub const fn skill(&self) -> Option<&InstructionSkillMetadata> {
         self.skill.as_ref()
     }
@@ -262,6 +317,15 @@ pub struct TurnInstructionManifest {
     turn: TurnId,
     eligibility_hash: InstructionDigest,
     manifest_hash: InstructionDigest,
+}
+
+/// Stored digests revalidated as one canonical empty turn-start manifest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EmptyTurnInstructionManifestEvidence {
+    /// SHA-256 of the frozen empty eligibility identity sequence.
+    pub eligibility_hash: InstructionDigest,
+    /// SHA-256 of the complete canonical turn-start manifest representation.
+    pub manifest_hash: InstructionDigest,
 }
 
 impl TurnInstructionManifest {
@@ -293,26 +357,34 @@ impl TurnInstructionManifest {
         id: TurnInstructionManifestId,
         session: SessionId,
         turn: TurnId,
-        eligibility_hash: InstructionDigest,
-        manifest_hash: InstructionDigest,
+        evidence: EmptyTurnInstructionManifestEvidence,
     ) -> Option<Self> {
+        let EmptyTurnInstructionManifestEvidence {
+            eligibility_hash,
+            manifest_hash,
+        } = evidence;
         let expected = Self::empty_turn_start(id, session, turn);
         (expected.eligibility_hash == eligibility_hash && expected.manifest_hash == manifest_hash)
             .then_some(expected)
     }
 
+    /// Returns this manifest's durable identity.
     pub const fn id(&self) -> TurnInstructionManifestId {
         self.id
     }
+    /// Returns the session whose turn owns this manifest.
     pub const fn session(&self) -> SessionId {
         self.session
     }
+    /// Returns the turn whose start boundary this manifest authenticates.
     pub const fn turn(&self) -> TurnId {
         self.turn
     }
+    /// Returns the frozen empty eligibility hash.
     pub const fn eligibility_hash(&self) -> InstructionDigest {
         self.eligibility_hash
     }
+    /// Returns the canonical manifest hash.
     pub const fn manifest_hash(&self) -> InstructionDigest {
         self.manifest_hash
     }
@@ -345,11 +417,11 @@ mod tests {
 
     #[test]
     fn skill_metadata_requires_its_portable_parent_name() {
-        let error = InstructionSkillMetadata::try_new(
-            String::from("review-rust"),
-            String::from("Review Rust changes."),
-            "other",
-        );
+        let error = InstructionSkillMetadata::try_new(InstructionSkillMetadataInput {
+            name: String::from("review-rust"),
+            description: String::from("Review Rust changes."),
+            parent_directory: String::from("other"),
+        });
 
         assert_eq!(error, Err(InstructionSkillMetadataError::ParentMismatch));
     }

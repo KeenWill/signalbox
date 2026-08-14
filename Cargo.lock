@@ -3167,6 +3167,7 @@ name = "signalbox-application"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "rustix",
  "serde",
  "serde_yaml_ng",
  "signalbox-domain",

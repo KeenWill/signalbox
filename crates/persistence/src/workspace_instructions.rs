@@ -8,9 +8,9 @@ use signalbox_application::{
     InstructionDiscoverySnapshot, OperatorFailureClass,
 };
 use signalbox_domain::{
-    InstructionBundleId, InstructionBundleKind, InstructionDigest, InstructionDiscoveryId,
-    InstructionDiscoveryRootKind, SessionId, TurnId, TurnInstructionManifest,
-    TurnInstructionManifestId,
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
+    InstructionDigest, InstructionDiscoveryId, InstructionDiscoveryRootKind, SessionId, TurnId,
+    TurnInstructionManifest, TurnInstructionManifestId,
 };
 use sqlx::{PgPool, Row, types::Uuid};
 
@@ -316,8 +316,10 @@ async fn load_manifest(
         id,
         session,
         turn,
-        eligibility_hash,
-        manifest_hash,
+        EmptyTurnInstructionManifestEvidence {
+            eligibility_hash,
+            manifest_hash,
+        },
     )
     .ok_or(WorkspaceInstructionRepositoryError::Corruption(
         "manifest hash",

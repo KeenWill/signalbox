@@ -381,10 +381,11 @@ pub use user_content::{
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
 pub use workspace_instruction::{
-    InstructionBundleId, InstructionBundleKind, InstructionBundleRegistration, InstructionDigest,
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
+    InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
     InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
-    InstructionSkillMetadata, InstructionSkillMetadataError, TurnInstructionManifest,
-    TurnInstructionManifestId,
+    InstructionSkillMetadata, InstructionSkillMetadataError, InstructionSkillMetadataInput,
+    TurnInstructionManifest, TurnInstructionManifestId,
 };
 
 macro_rules! define_identity {

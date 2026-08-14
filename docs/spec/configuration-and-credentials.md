@@ -851,6 +851,26 @@ so it is kept apart from the descriptor-holding composition and is never
 evicted. A daemon restart clears it, after which a removed directory again reads
 as unprovisioned.
 
+**Committed unimplemented functionality — instruction-selector binding.** A
+session carrying a workspace instruction selector extends that process-lifetime
+record with durable pre-activation correlation. Its instruction-eligibility
+initialization records the selector-set hash, complete discovery identity,
+resolved workspace root path, and the exact worktree and `.git` filesystem
+identities captured above. After the scan, one session-scheduler transaction
+revalidates the live process binding against that evidence, installs the initial
+allow-list, copies it into the first turn's eligibility snapshot, and activates
+that turn. The transaction commits all three state changes or none, so no crash
+can leave installed identities awaiting an unrelated later activation.
+
+After restart, an already-active first turn may proceed only after the binding
+resolver reconstructs its process record by comparing the current path with the
+durable correlation. Missing or different filesystem identities fail closed;
+recovery neither rescans selectors nor substitutes newly registered bundle
+identities. Configured-root-only selectors carry no workspace correlation but
+use the same atomic install-and-activate transition. No present template field
+or activation path supplies this behavior; it is admitted only with the future
+eligibility-control child.
+
 A derived root is opened, layout-checked, and supervisor-bound the first time
 that session invokes a workspace-root-bound tool, not at startup, because no
 session exists at startup. Every family in one composition resolves the same
@@ -2497,6 +2517,37 @@ Each template table carries exactly:
 - exactly one of `system_prompt` or `system_prompt_file`; and
 - `dangerous_tool_auto_approval` — the required Boolean encoding of the complete
   `Disabled`/`ApproveAll` blanket.
+
+**Committed unimplemented functionality — template instruction selectors.** The
+eligibility-control child extends an ordinary template with one optional
+`instruction_selectors` array containing at most 256 inline tables. Each table
+has exactly `root`, `source_path`, `kind`, and `source_sha256`, plus
+`configured_root_id` exactly when `root = "configured"`. `root` is `"workspace"`
+or `"configured"`; the configured identity and source hash are 64 lowercase
+hexadecimal characters encoding 32 bytes; `kind` is `"agent_document"` or
+`"agent_skill"`; and `source_path` is 1 through 4,096 UTF-8 bytes of nonempty
+normal components separated by single `/` characters, with no leading or
+trailing slash or U+0000. The configured identity is the path-derived
+`ConfiguredInstructionRootId` above. An absent or empty array means no selector
+and therefore no eligible bundle.
+
+The loader rejects duplicate selectors and canonicalizes them by root
+(`workspace` first), configured-root digest bytes when present, raw UTF-8 source
+path bytes, kind (`agent_document` first), then source-hash bytes. The immutable
+resolved template bundle retains that ordered sequence, and session creation
+copies it unchanged as unresolved eligibility input.
+
+Selector-bearing bundles use content-digest version three. It retains the
+version-two frames below except that its first frame is
+`signalbox/session-template/content-digest/v3`; after the model-settings digest
+it writes the selector count as eight unsigned big-endian bytes, then each
+canonical selector record. A record frames the root spelling; for `configured`
+only, the 32 raw configured-root digest bytes; the exact source-path bytes; the
+kind spelling; and the 32 raw expected source-hash bytes. Thus templates that
+differ only in selectors have different provenance. Generated review templates
+carry the empty sequence. No present parser admits `instruction_selectors`, no
+resolved bundle retains it, and the implemented version-two digest and stable
+vector below remain unchanged until that child lands.
 
 An inline prompt is the exact TOML string value. A prompt-file reference is
 either a relative path resolved from the template document's parent directory,

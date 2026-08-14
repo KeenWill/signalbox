@@ -28,13 +28,14 @@ use signalbox_domain::{
     CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
     CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
     DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
-    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
-    InstructionDigest, ModelAlias, ModelCallDisposition, ModelCallExecution,
-    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
-    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
+    DelegationOutcomeReason, DirectModelSelection, DurableCommandId,
+    EmptyTurnInstructionManifestEvidence, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    FastMode, FrozenAliasDefinition, FrozenModelSelection, InstructionDigest, ModelAlias,
+    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
+    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
     PendingSteeringReclassificationIdentity, PinnedProviderTargetReconstitutionInput,
     PreparedDelegatedTurnActivation, PreparedModelCallRequest, PreparedToolResultProjection,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
@@ -4459,8 +4460,10 @@ fn authenticate_model_call_instruction_manifest(
         manifest_id,
         session,
         turn,
-        InstructionDigest::from_sha256(eligibility_hash),
-        InstructionDigest::from_sha256(manifest_hash),
+        EmptyTurnInstructionManifestEvidence {
+            eligibility_hash: InstructionDigest::from_sha256(eligibility_hash),
+            manifest_hash: InstructionDigest::from_sha256(manifest_hash),
+        },
     )
     .ok_or(ModelCallCorruption::Inconsistent(
         "turn instruction manifest authentication",
@@ -4648,8 +4651,10 @@ pub(crate) async fn insert_prepared_call(
         instruction_manifest_id,
         prepared.session(),
         prepared.turn(),
-        InstructionDigest::from_sha256(eligibility_hash),
-        InstructionDigest::from_sha256(manifest_hash),
+        EmptyTurnInstructionManifestEvidence {
+            eligibility_hash: InstructionDigest::from_sha256(eligibility_hash),
+            manifest_hash: InstructionDigest::from_sha256(manifest_hash),
+        },
     )
     .ok_or(ModelCallCorruption::Inconsistent(
         "turn instruction manifest authentication",

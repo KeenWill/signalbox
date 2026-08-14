@@ -145,15 +145,20 @@ Every registered bundle carries:
 - source byte length; and
 - a versioned SHA-256 source-content hash.
 
+Each discovery snapshot separately retains its ordered candidate link to the
+registered identity. A registration may therefore be observed by several scans
+without losing which session and root authorized each observation.
+
 For an agent document, source content is the file's exact bytes. For a skill,
 version-one source content is the exact `SKILL.md` bytes. Supporting resources
 are neither enumerated nor registered until a later contract defines their
 relative identities, traversal, ordering, and hashes. Registration rejects a
 non-UTF-8 source, invalid frontmatter, a skill name that differs from its parent
-directory, or a path escaping its root. A candidate whose canonical or
-root-relative source path is not UTF-8 produces a typed `non_utf8_source_path`
-discovery finding and never reaches registration. Rejection is a typed finding
-and creates no partial bundle.
+directory, a path escaping its root, or a root-relative source or scope path
+longer than 4,096 UTF-8 bytes. A candidate whose canonical or root-relative
+source path is not UTF-8 produces a typed `non_utf8_source_path` discovery
+finding and never reaches registration. Rejection is a typed finding and creates
+no partial bundle.
 
 SHA-256 is named in the representation rather than assumed. The MCP skill
 transfer proposal
@@ -176,25 +181,31 @@ without editing shared files. An absent allow-list means no bundle is eligible,
 never every discovered bundle.
 
 A session allow-list names registered bundle identities. A template predates the
-workspace registrations, so it instead names exact `TemplateInstructionSelector`
-values: a root reference, root-relative source path, bundle kind, and expected
-source hash. The root reference is exactly `workspace`, or `configured` plus the
-configured root's stable `ConfiguredInstructionRootId` defined by the
-[configuration contract](configuration-and-credentials.md#workspace-instruction-roots).
-Session creation copies the selectors as unresolved eligibility input; it does
+workspace registrations, so it instead names the exact selectors owned by the
+[static-template grammar](configuration-and-credentials.md#the-static-session-template-catalog).
+Session creation copies those selectors as unresolved eligibility input; it does
 not scan an unbound workspace or invent bundle identities.
+
+A session-specific allow-list replacement may name a configured-root bundle from
+any scan because its stable configured-root identity is the sharing authority.
+It may name a workspace-root bundle only when the target session has a complete
+discovery snapshot that used its fixed workspace binding as the workspace root
+and linked that exact registered identity as a candidate. A canonical-path match
+without that session-correlated discovery link is not authority. A mismatch is a
+typed rejection and exposes no source metadata to the target session.
 
 Before a session carrying selectors can activate its first turn, the daemon
 resolves its configured-root selectors and, when a workspace selector is
 present, establishes the session's workspace binding through the owning
 [pre-activation binding contract](configuration-and-credentials.md#derived-session-workspace-roots).
 It scans and registers only after that binding is fixed, then resolves every
-selector to exactly one identity and installs the initial session allow-list. A
-missing, stale, or ambiguous selector grants nothing and is recorded as a typed
-resolution finding; it never degrades to a path glob or newest-content match.
-The initial resolution and allow-list installation complete before activation
-may acquire the eligibility snapshot. Runner-workspace selectors remain
-unresolved until the runner discovery protocol exists.
+selector to exactly one identity. The owning binding contract persists the
+binding correlation and makes initial installation crash-atomic with first-turn
+activation; restart never reuses identities under an uncorrelated workspace or
+blindly rescans them. A missing, stale, or ambiguous selector grants nothing and
+is recorded as a typed resolution finding; it never degrades to a path glob or
+newest-content match. Runner-workspace selectors remain unresolved until the
+runner discovery protocol exists.
 
 The effective eligibility snapshot is immutable for one turn. The owning
 [activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
@@ -204,10 +215,14 @@ and affects only later activations. A registered bundle absent from that
 snapshot cannot be enumerated, previewed, or admitted.
 
 Until whole-bundle unload is implemented, a replacement command rejects removal
-of any currently admitted identity. This makes replacement neither an implicit
-unload nor an authority revocation that effective input ignores. Additions and
-removal of never-admitted identities can still take effect at the next turn
-boundary; the later unload transition owns removal from both sets.
+of any currently admitted identity or any identity in the frozen eligibility
+snapshot of the session's active turn. Replacement reads those sets while
+holding the same session-scheduler lock used by activation and admission, so an
+active turn cannot admit an identity whose authority was concurrently removed.
+This makes replacement neither an implicit unload nor an authority revocation
+that effective input ignores. Additions and removal of identities absent from
+both sets can still take effect at the next turn boundary; the later unload
+transition owns removal from both sets.
 
 **Committed unimplemented functionality — eligibility control.** The first
 implementation slice records the empty snapshot and exposes no replacement
@@ -219,19 +234,38 @@ and frozen turn snapshot.
 ## Enumeration, preview, and admission
 
 Eligible inventory is progressively disclosed. `instructions.list` returns a
-bounded cursor-paginated catalog with bundle identity, kind, display name,
-description when present, source byte length, source hash, authorizing root, and
-root-relative source and scope paths. For `AGENTS.md`, an empty scope means the
-root and a nested scope applies only to that directory and descendants. Catalog
-order is root, then increasing scope depth, then raw relative path. An ancestor
-document precedes a descendant document, so a deliberately admitted descendant
-is the later, more specific instruction; sibling scopes never apply to each
-other. `instructions.preview` returns bounded structure — headings for a
-document and validated metadata plus headings for a skill — with full source
-byte length and estimated model-token cost. Preview re-reads at most that one
-registered source under its authorizing root, revalidates the registered source
-hash, and returns typed stale-source evidence if the bytes changed or
-disappeared. It neither returns the full body nor admits content.
+cursor-paginated catalog with bundle identity, kind, display name, description
+when present, source byte length, source hash, provider-safe root reference, and
+root-relative source and scope paths. The root reference is the closed
+`workspace` kind or `configured` plus `ConfiguredInstructionRootId`; neither it
+nor any other result field contains a canonical absolute path. For `AGENTS.md`,
+an empty scope means the root and a nested scope applies only to that directory
+and descendants. Catalog order is root, then increasing scope depth, then raw
+relative path. An ancestor document precedes a descendant document, so a
+deliberately admitted descendant is the later, more specific instruction;
+sibling scopes never apply to each other.
+
+Version one returns at most 32 identities and 524,288 catalog-result bytes per
+page. Those bytes are compact UTF-8 JSON with object keys sorted by raw ASCII
+bytes, no insignificant whitespace, unsigned decimal integers without leading
+zeroes, and strings escaped by the canonical algorithm below. A description
+longer than 512 UTF-8 bytes is shortened at a character boundary and reports its
+full byte length plus truncation boundary. The cursor is the
+eligibility-snapshot hash plus the zero-based ordinal of the next item in
+canonical order. Each page reports the snapshot's total item count, the returned
+ordinal range, and remaining count. It first shortens descriptions and then ends
+the page before an item that would exceed the byte bound; the cursor continues
+at that unreturned item, so budgeting never drops an identity. The registration
+path bounds guarantee that one minimally encoded item fits. An absent next
+cursor proves enumeration is complete; a cursor for another snapshot is a typed
+stale-cursor failure.
+
+`instructions.preview` returns bounded structure — headings for a document and
+validated metadata plus headings for a skill — with full source byte length and
+estimated model-token cost. Preview re-reads at most that one registered source
+under its authorizing root, revalidates the registered source hash, and returns
+typed stale-source evidence if the bytes changed or disappeared. It neither
+returns the full body nor admits content.
 
 `instructions.read` names one eligible bundle and requests deliberate admission.
 The daemon re-reads and validates it under its registered root, compares the
@@ -252,10 +286,8 @@ receipt, so one manifest can never contain duplicate bundle identities.
 
 List reads only registration metadata; preview performs the single-source
 revalidated read above. Their bounds are independent of aggregate registered
-content. Catalog budgeting shortens descriptions before omitting identities, and
-every shortening or omission is explicit. This retains the Agent Skills
-progressive-disclosure economics without unrecorded selection or budget
-outcomes.
+content. This retains the Agent Skills progressive-disclosure economics without
+unrecorded selection or budget outcomes.
 
 Nothing is admitted merely because it is eligible, heuristically relevant, near
 a touched file, or present in a template. Version one admits only by the closed
@@ -269,14 +301,16 @@ first slice.
 
 ## Durable admission transition
 
-Each `instructions.read` request has a replay-stable tool-request identity. In
-the same transaction as its receipt-only tool result, a successful request
+Each `instructions.read` request has a replay-stable tool-request identity. The
+owning
+[tool result-commit transaction](tool-loop.md#serialized-staged-execution)
+atomically commits its receipt-only result and, for a successful fresh read,
 appends one `InstructionAdmission` naming the prior admitted-set hash, bundle,
 rendered evidence, exact rendered wrapper bytes, and request identity. The
 immutable admission row is the version-one plaintext authority for later
 projections even if the workspace source changes or disappears. Replaying that
-identity returns the same receipt; a conflicting replay is corruption. A failed
-request appends no admission and does not change the set.
+identity returns the same receipt and admission linkage; a conflicting replay is
+corruption. A failed request appends neither admission nor a changed set.
 
 After a tool batch, preparation folds successful admissions in durable request
 order and ignores idempotent repeats. The owning continuation transaction in
@@ -322,13 +356,18 @@ manifest provenance and never enter provider input.
 </signalbox_workspace_instruction>
 ```
 
-JSON string escaping follows RFC 8259, line endings shown above are LF, and
-there is no implicit leading or trailing byte. After source-budget truncation,
-content escaping replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;` in
-that order; repository bytes therefore cannot terminate or fabricate an
-envelope. The rendered-content hash covers this complete escaped wrapper. These
-labels distinguish untrusted repository text from daemon authority and make
-adapter output byte-stable without disclosing host filesystem layout.
+Wrapper metadata uses one canonical JSON-string escaping algorithm. Quotation
+mark becomes `\"`, reverse solidus becomes `\\`, and U+0008, U+0009, U+000A,
+U+000C, and U+000D become `\b`, `\t`, `\n`, `\f`, and `\r`. Every other scalar
+from U+0000 through U+001F becomes `\u00xx` with lowercase hexadecimal digits.
+Solidus is not escaped, and every other scalar, including non-ASCII, remains its
+literal UTF-8 encoding. Line endings shown above are LF, and there is no
+implicit leading or trailing byte. After source-budget truncation, content
+escaping replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;` in that
+order; repository bytes therefore cannot terminate or fabricate an envelope. The
+rendered-content hash covers this complete escaped wrapper. These labels
+distinguish untrusted repository text from daemon authority and make adapter
+output byte-stable without disclosing host filesystem layout.
 
 Two designs were considered:
 
@@ -406,12 +445,20 @@ boundary, and retained exact wrapper bytes are evidence.
 
 Version one has a fixed 65,536-byte aggregate workspace-instruction-region
 budget, including every wrapper. A provider model with a smaller instruction
-capacity is not eligible for this capability. A successful read serializes on
-the admitted-set head and preflights the current region plus its candidate
-against that aggregate budget before committing its receipt or admission.
+capacity or no typed system-instruction transport is not eligible for this
+capability. A successful read serializes on the admitted-set head and preflights
+the current region plus its candidate against that aggregate budget and the
+active turn's pinned model target before committing its receipt or admission.
 Concurrent and same-batch reads therefore observe one ordered predecessor and
 cannot commit a set whose instruction region alone is unrenderable. Aggregate
 exhaustion is a typed failed read and changes no durable admitted set.
+
+Later session-default replacement cannot strand existing admissions. The owning
+[session-default contract](sessions-and-transcript.md#session-defaults-and-replacement)
+rejects a model selection unless every configured target it may select supports
+the typed region and can carry the complete retained region. This check occurs
+before the successor defaults epoch commits; a rejection leaves both defaults
+and admissions unchanged.
 
 The durable rendered-content hash is SHA-256 over the exact bytes placed in
 prepared model input **after** wrappers, labels, and budget truncation. It is

@@ -5554,12 +5554,15 @@ pub enum InstructionPathError {
 pub enum InstructionDiscoveryRootKind { Workspace, Configured }
 pub enum InstructionBundleKind { AgentDocument, AgentSkill }
 
+pub struct InstructionSkillMetadataInput {
+    pub name: String,
+    pub description: String,
+    pub parent_directory: String,
+}
 pub struct InstructionSkillMetadata { /* private */ }
 impl InstructionSkillMetadata {
     pub fn try_new(
-        name: String,
-        description: String,
-        parent_directory: &str,
+        input: InstructionSkillMetadataInput,
     ) -> Result<Self, InstructionSkillMetadataError>;
     // accessors: name(), description()
 }
@@ -5569,21 +5572,26 @@ pub enum InstructionSkillMetadataError {
     ParentMismatch,
 }
 
+pub struct InstructionBundleRegistrationInput {
+    pub kind: InstructionBundleKind,
+    pub root_kind: InstructionDiscoveryRootKind,
+    pub root_path: InstructionPath,
+    pub source_path: InstructionPath,
+    pub source_bytes: u64,
+    pub source_hash: InstructionDigest,
+    pub skill: Option<InstructionSkillMetadata>,
+}
 pub struct InstructionBundleRegistration { /* private */ }
 impl InstructionBundleRegistration {
-    pub fn new(
-        kind: InstructionBundleKind,
-        root_kind: InstructionDiscoveryRootKind,
-        root_path: InstructionPath,
-        source_path: InstructionPath,
-        source_bytes: u64,
-        source_hash: InstructionDigest,
-        skill: Option<InstructionSkillMetadata>,
-    ) -> Option<Self>;
+    pub fn new(input: InstructionBundleRegistrationInput) -> Option<Self>;
     // accessors: kind(), root_kind(), root_path(), source_path(),
     // relative_source_path(), agent_document_scope(), source_bytes(), source_hash(), skill()
 }
 
+pub struct EmptyTurnInstructionManifestEvidence {
+    pub eligibility_hash: InstructionDigest,
+    pub manifest_hash: InstructionDigest,
+}
 pub struct TurnInstructionManifest { /* private */ }
 impl TurnInstructionManifest {
     pub fn empty_turn_start(
@@ -5595,8 +5603,7 @@ impl TurnInstructionManifest {
         id: TurnInstructionManifestId,
         session: SessionId,
         turn: TurnId,
-        eligibility_hash: InstructionDigest,
-        manifest_hash: InstructionDigest,
+        evidence: EmptyTurnInstructionManifestEvidence,
     ) -> Option<Self>;
     // accessors: id(), session(), turn(), eligibility_hash(), manifest_hash()
 }
@@ -10439,8 +10446,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| domain: workspace_instruction                      | 12                    |
-| **signalbox-domain total**                         | **786 (+12 free fn)** |
+| domain: workspace_instruction                      | 15                    |
+| **signalbox-domain total**                         | **789 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
