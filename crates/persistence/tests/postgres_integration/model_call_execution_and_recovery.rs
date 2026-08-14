@@ -112,6 +112,84 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     };
     assert_eq!(checkpointed_call, call);
 
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+         DISABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_instruction_manifest
+            SET manifest_hash = $1
+          WHERE session_id = $2
+            AND turn_id = $3",
+    )
+    .bind([0_u8; 32].as_slice())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+          ENABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted_manifest = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0xce3)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde9)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee9)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe9)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf9)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdfa)),
+                )
+            },
+        )
+        .await
+        .expect_err("reconstitution must authenticate the exact turn instruction manifest");
+    assert!(matches!(
+        corrupted_manifest,
+        ModelCallRepositoryError::Corruption(_)
+    ));
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+         DISABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_instruction_manifest
+            SET manifest_hash = $1
+          WHERE session_id = $2
+            AND turn_id = $3",
+    )
+    .bind(
+        signalbox_domain::TurnInstructionManifest::empty_turn_start(
+            signalbox_domain::TurnInstructionManifestId::from_uuid(turn.into_uuid()),
+            session,
+            turn,
+        )
+        .manifest_hash()
+        .as_bytes()
+        .as_slice(),
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+          ENABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
     let repository = PostgresModelCallRepository::new(
         pool.clone(),
         targets,

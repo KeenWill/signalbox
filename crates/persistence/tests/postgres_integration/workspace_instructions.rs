@@ -112,7 +112,7 @@ async fn inv061_turn_instruction_snapshot_is_exact_and_append_only() -> Result<(
         .bind(discovery.into_uuid())
         .fetch_one(&pool)
         .await?,
-        2
+        i64::try_from(snapshot.bundles().len()).expect("fixture bundle count fits PostgreSQL bigint")
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<u8>>(
