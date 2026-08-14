@@ -1215,7 +1215,10 @@ revalidate, under the runner lock order, that the supplied registration's
 enrollment remains active, its connection remains live, and its revision remains
 enrollment-owned current. Profile replacement remains a placement-local
 operation and revalidates the enrollment and current registration under lock.
-Every appended record advances the current-placement head in the same
+If a live lease predates one or more profile replacements, later loss preserves
+that lease's pinned event as its admission evidence and authenticates the loss
+revision through the uninterrupted profile-only successor chain. Every appended
+record advances the current-placement head in the same
 transaction. Reconstitution reads the current record with its exact validated
 registration and tool inventory. The loaded persistence wrapper retains that
 historical registration and its durable revision so a caller can reconcile

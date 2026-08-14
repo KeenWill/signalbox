@@ -1216,7 +1216,22 @@ impl RunnerProtocolStore {
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
         } else {
-            yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
+            let has_active_boundary: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM turn_lifecycle
+                      WHERE session_id = $1
+                        AND state_kind = 'active'
+                        AND active_phase_kind = 'running'
+                        AND active_tool_round_call_id IS NOT NULL
+                 )",
+            )
+            .bind(session.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if has_active_boundary {
+                yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
+            }
         }
         outbox::append(
             transaction.as_mut(),
@@ -6863,6 +6878,10 @@ async fn lock_runner_placement_loss_baseline(
     let Some(runner) = placement_loss_fence_runner(placement) else {
         return Ok(());
     };
+    sqlx::query("SELECT lock_runner_loss_identity($1)")
+        .bind(runner.into_uuid())
+        .execute(&mut **transaction)
+        .await?;
     let enrollment = sqlx::query_scalar::<_, Uuid>(RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER)
         .bind(runner.into_uuid())
         .fetch_optional(&mut **transaction)
