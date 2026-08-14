@@ -30,6 +30,12 @@ pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
   WHERE run_id = $1
   FOR UPDATE";
 
+pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
+    "SELECT latest_event_id, settled_kind, settled_dispatch_id
+       FROM repo_watch_dispatch_obligation
+      WHERE obligation_id = $1
+      FOR UPDATE";
+
 pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             EXISTS (
                 SELECT 1
