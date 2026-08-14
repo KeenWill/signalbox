@@ -18,11 +18,12 @@ four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
 (`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against this PR (`agent/repo-watch-poll-performance`). The provider members the
-poller adopts as check-suite and check-run completion generations are verified
-against PR #541 (`fix/check-run-updated-at`). The goal a dispatch commissions
-with its session, and the binding of the dispatched work turn to that goal's
-generation, are verified against this PR (`agent/commission-binding`).
+against this PR (`agent/repo-watch-poll-performance-2`). The provider members
+the poller adopts as check-suite and check-run completion generations are
+verified against PR #541 (`fix/check-run-updated-at`). The goal a dispatch
+commissions with its session, and the binding of the dispatched work turn to
+that goal's generation, are verified against this PR
+(`agent/commission-binding`).
 
 ## Configuration and credential boundary
 
@@ -101,9 +102,42 @@ the projection, while a next relation beyond that bound fails the poll. Because
 a `304` can omit changed pagination metadata, a cached full terminal page
 conservatively probes one bounded successor; the cap page is reread
 unconditionally so that probe never manufactures page 101. A failed, rejected,
-partial, or unparseable poll submits no persistence candidate. The next poll
-occurs after the per-repository interval; version one has no webhook fallback
-and no speculative second polling transport.
+partial, or unparseable poll submits no persistence candidate. The
+per-repository interval is measured start to start, so a cadence does not drift
+by the duration of its own attempt; attempts never overlap, and an attempt that
+reaches or exceeds the interval is followed immediately by the next. Version one
+has no webhook fallback and no speculative second polling transport.
+
+**Implemented behavior.** One attempt fetches up to eight open pull requests
+concurrently. The fetch sequence within a single pull request stays ordered, and
+the fetched pull requests are ordered by number before comparison, so
+concurrency cannot reorder a baseline. A single attempt may transfer up to 512
+MiB of response bytes; what one poller retains between attempts is bounded
+separately and lower, because retention is per watched repository and therefore
+multiplies by the configured repository count.
+
+**Implemented behavior.** An attempt reuses the committed baseline for an open
+pull request instead of re-fetching its detail, check suites, check runs,
+reviews, and threads, but only when every one of the following holds: the open
+pull request listing reports an `updated_at` identical to the one recorded when
+that baseline was fetched; the recorded fetch reached the durable cursor, so an
+attempt that failed before committing cannot authorize reuse of the stale
+baseline it never replaced; that fetch observed every check suite and check run
+in a terminal state and a known mergeable state, because neither a check
+completion nor the provider's background mergeability calculation moves
+`updated_at`; and the pull request has been reused fewer than four consecutive
+attempts, which bounds how long any other fact that never moves `updated_at` can
+go unobserved. Reactions are re-fetched on every attempt and are never reused,
+because a reaction does not move `updated_at` at all and a signal-reviewer
+reaction is a dispatch trigger; with no configured signal reviewer there is
+nothing a reaction can trigger, so the poller issues no reaction request at all.
+A pull request absent from the open listing is never reused. Reuse carries the
+prior baseline forward unchanged, so no event class becomes unobservable: a
+reused pull request's accumulated changes all appear in the comparison that
+follows its next fetch. Cached resources survive the same bounded number of
+untouched attempts, so reuse does not discard the validators that keep the
+following fetch conditional. The freshness record is process-local, like the
+conditional-request cache, so a restarted daemon re-fetches every pull request.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Check runs are enumerated through
@@ -469,6 +503,26 @@ permanent configuration failure. A deactivated rule identity and version cannot
 be configured again; either kind of replacement uses a new identity so no events
 can be evaluated under semantics different from the activation that admitted
 them.
+
+**Committed unimplemented functionality.** The structured-rule dispatch surface
+converges onto the program substrate by replacing each rule with a subscription
+whose action is a built-in dispatch program. This page owns that ingress
+cutover. Shadowing is validation only and never owns delivery. Cutover commits
+in one durable transaction at an event frontier after requiring a terminal
+evaluation outcome for every old-rule event through that frontier: it records
+deactivation of the old rule after the frontier, activation of the replacement
+subscription strictly after it, and the mapping from rule identity and version
+to the exact program registration. The same transaction transfers every occupied
+singleton batch, its responsible sessions, and any recorded cooldown boundary to
+substrate-owned dispatch state without recreating sessions or changing
+append-only audit identities. Events at or before the frontier remain owned only
+by rule evaluation; later events are owned only by subscription matching.
+Reconciliation, rule evaluation, event commit, and subscription matching
+serialize against this transaction, so a crash or concurrent poll may retry it
+but cannot omit or dispatch a boundary event twice or release an occupied
+singleton. After this transaction, the mapped rule is a subscription;
+subscription identity, delivery, continuation cursor inheritance, and
+cancellation follow the [program substrate](program-substrate.md).
 
 ## First live rule
 
