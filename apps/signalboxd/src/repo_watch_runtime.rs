@@ -46,6 +46,7 @@ use signalbox_persistence::repo_watch::{
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
+use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObligation;
 use sqlx::PgPool;
 use tokio::{
     select,
@@ -391,6 +392,45 @@ impl RepositoryWatchTask {
                     RepoWatchDispatchPersistence {
                         store: self.dispatch_store.clone(),
                         models: &self.models,
+                        obligation: None,
+                    },
+                );
+                let outcome = service
+                    .evaluate(
+                        event,
+                        rule,
+                        cursor.candidate().observation(),
+                        &self.templates,
+                        content,
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                self.nudge_dispatched_sessions(&outcome);
+            }
+            while let Some(obligation) = self
+                .dispatch_store
+                .load_next_dispatch_obligation(&self.repository, rule.id(), rule.version())
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            {
+                let cursor = self
+                    .store
+                    .load_cursor(&self.repository)
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                    .ok_or(RepositoryWatchAttemptError::Persistence)?;
+                let event = obligation.latest_event().clone();
+                let content = UserContent::try_text(owed_dispatch_context_json(
+                    &obligation,
+                    cursor.candidate().observation(),
+                ))
+                .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                let mut service = RepoWatchDispatchService::new(
+                    UuidV7RepoWatchDispatchIdGenerator,
+                    RepoWatchDispatchPersistence {
+                        store: self.dispatch_store.clone(),
+                        models: &self.models,
+                        obligation: Some(obligation),
                     },
                 );
                 let outcome = service
@@ -474,6 +514,7 @@ impl RepositoryWatchTask {
 struct RepoWatchDispatchPersistence<'configuration> {
     store: PostgresRepoWatchDispatchStore,
     models: &'configuration HubModelConfiguration,
+    obligation: Option<RepoWatchDispatchObligation>,
 }
 
 impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
@@ -483,15 +524,31 @@ impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
-        self.store
-            .handle_repo_watch_evaluation_with_alias_resolver(evaluation, |alias: ModelAlias| {
-                self.models.resolve_alias(alias)
-            })
-            .await
+        let select_definition = |alias: ModelAlias| self.models.resolve_alias(alias);
+        match self.obligation.take() {
+            Some(obligation) => {
+                self.store
+                    .handle_repo_watch_obligation_with_alias_resolver(
+                        obligation,
+                        evaluation,
+                        select_definition,
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .handle_repo_watch_evaluation_with_alias_resolver(evaluation, select_definition)
+                    .await
+            }
+        }
     }
 }
 
 fn dispatch_context_json(event: &RepoWatchEvent) -> String {
+    dispatch_context_value(event).to_string()
+}
+
+fn dispatch_context_value(event: &RepoWatchEvent) -> serde_json::Value {
     let event_value = serde_json::json!({
         "version": 1,
         "id": event.id().as_uuid().to_string(),
@@ -507,8 +564,7 @@ fn dispatch_context_json(event: &RepoWatchEvent) -> String {
             "number": context.number().get(),
             "head_sha": context.head_sha().as_str(),
             "event": event_value,
-        })
-        .to_string(),
+        }),
         RepoWatchEventTarget::Branch => {
             let RepoWatchEventKindV1::BranchWorkflowRunCompleted {
                 branch,
@@ -516,7 +572,7 @@ fn dispatch_context_json(event: &RepoWatchEvent) -> String {
                 conclusion,
             } = event.kind()
             else {
-                return event_value.to_string();
+                return event_value;
             };
             serde_json::json!({
                 "type": "branch",
@@ -526,9 +582,157 @@ fn dispatch_context_json(event: &RepoWatchEvent) -> String {
                 "conclusion": check_conclusion_name(*conclusion),
                 "event": event_value,
             })
-            .to_string()
         }
     }
+}
+
+fn owed_dispatch_context_json(
+    obligation: &RepoWatchDispatchObligation,
+    observation: &RepoWatchObservation,
+) -> String {
+    owed_dispatch_context_json_parts(
+        obligation.latest_event(),
+        obligation.id(),
+        obligation.first_event_id(),
+        obligation.matched_event_count(),
+        observation,
+    )
+}
+
+fn owed_dispatch_context_json_parts(
+    event: &RepoWatchEvent,
+    obligation_id: uuid::Uuid,
+    first_event_id: signalbox_domain::RepoWatchEventId,
+    matched_event_count: u64,
+    observation: &RepoWatchObservation,
+) -> String {
+    let mut context = dispatch_context_value(event);
+    if let Some(object) = context.as_object_mut() {
+        object.insert(
+            String::from("delivery"),
+            serde_json::json!({
+                "mode": "owed_current_state",
+                "obligation_id": obligation_id.to_string(),
+                "matched_event_count": matched_event_count,
+                "first_event_id": first_event_id.as_uuid().to_string(),
+                "latest_event_id": event.id().as_uuid().to_string(),
+                "current": current_dispatch_state_json(event, observation),
+            }),
+        );
+    }
+    context.to_string()
+}
+
+fn current_dispatch_state_json(
+    event: &RepoWatchEvent,
+    observation: &RepoWatchObservation,
+) -> serde_json::Value {
+    match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => observation
+            .state()
+            .pull_requests()
+            .iter()
+            .find(|pull_request| pull_request.context().number() == context.number())
+            .map(current_pull_request_json)
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "type": "pull_request",
+                    "number": context.number().get(),
+                    "present": false,
+                })
+            }),
+        RepoWatchEventTarget::Branch => current_branch_state_json(event, observation),
+    }
+}
+
+fn current_pull_request_json(pull_request: &RepoWatchPullRequestState) -> serde_json::Value {
+    serde_json::json!({
+        "type": "pull_request",
+        "present": true,
+        "target": pull_request_context_json(pull_request.context()),
+        "lifecycle": pull_request_lifecycle_name(pull_request.lifecycle()),
+        "mergeable_state": mergeable_state_name(pull_request.mergeable_state()),
+        "completed_check_suites": pull_request.completed_check_suites().iter().map(|suite| {
+            serde_json::json!({
+                "id": suite.id().get(),
+                "completion_generation": suite.completion_generation().as_str(),
+                "outcome": checks_outcome_name(suite.outcome()),
+            })
+        }).collect::<Vec<_>>(),
+        "completed_check_runs": pull_request.completed_check_runs().iter().map(|run| {
+            serde_json::json!({
+                "id": run.id().get(),
+                "completion_generation": run.completion_generation().as_str(),
+                "name": run.name().as_str(),
+                "conclusion": check_conclusion_name(run.conclusion()),
+            })
+        }).collect::<Vec<_>>(),
+        "reviews": pull_request.reviews().iter().map(|review| {
+            serde_json::json!({
+                "id": review.id().get(),
+                "reviewer": review.reviewer().as_str(),
+                "state": review.state().map(review_state_name),
+                "commit": review.commit().as_str(),
+            })
+        }).collect::<Vec<_>>(),
+        "threads": pull_request.threads().iter().map(|thread| {
+            serde_json::json!({
+                "thread": thread.thread().as_str(),
+                "state": review_thread_state_name(thread.state()),
+            })
+        }).collect::<Vec<_>>(),
+        "reactions": pull_request.reactions().iter().map(|reaction| {
+            serde_json::json!({
+                "subject": reaction_subject_json(reaction.subject()),
+                "reactor": reaction.reactor().as_str(),
+                "content": reaction.content().as_str(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn current_branch_state_json(
+    event: &RepoWatchEvent,
+    observation: &RepoWatchObservation,
+) -> serde_json::Value {
+    let RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+        branch, workflow, ..
+    } = event.kind()
+    else {
+        return serde_json::json!({ "type": "branch", "present": false });
+    };
+    serde_json::json!({
+        "type": "branch",
+        "branch": branch.as_str(),
+        "head_sha": observation.state().branch_heads().iter()
+            .find(|head| head.branch() == branch)
+            .map(|head| head.head().as_str()),
+        "workflow": workflow.as_str(),
+        "completed_runs": observation.state().workflow_runs().iter()
+            .filter(|run| run.branch() == branch && run.workflow() == workflow)
+            .map(|run| serde_json::json!({
+                "id": run.id().get(),
+                "workflow_id": run.workflow_id().get(),
+                "attempt": run.attempt().get(),
+                "conclusion": check_conclusion_name(run.conclusion()),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn pull_request_context_json(context: &PullRequestEventContext) -> serde_json::Value {
+    serde_json::json!({
+        "number": context.number().get(),
+        "head_sha": context.head_sha().as_str(),
+        "head_repo": context.head_repository().as_str(),
+        "base_branch": context.base_branch().as_str(),
+        "head_branch": context.head_branch().as_str(),
+        "title": context.title().as_str(),
+        "body": context.body().as_str(),
+        "labels": context.labels().iter().map(LabelName::as_str).collect::<Vec<_>>(),
+        "draft": context.draft(),
+        "author": context.author().map(RepoWatchAuthorLogin::as_str),
+    })
 }
 
 fn event_target_json(target: &RepoWatchEventTarget) -> serde_json::Value {
@@ -675,6 +879,21 @@ const fn review_state_name(value: ReviewState) -> &'static str {
         ReviewState::Approved => "approved",
         ReviewState::ChangesRequested => "changes_requested",
         ReviewState::Commented => "commented",
+    }
+}
+
+const fn pull_request_lifecycle_name(value: RepoWatchPullRequestLifecycle) -> &'static str {
+    match value {
+        RepoWatchPullRequestLifecycle::Open => "open",
+        RepoWatchPullRequestLifecycle::Closed => "closed",
+        RepoWatchPullRequestLifecycle::Merged => "merged",
+    }
+}
+
+const fn review_thread_state_name(value: RepoWatchThreadState) -> &'static str {
+    match value {
+        RepoWatchThreadState::Open => "open",
+        RepoWatchThreadState::Resolved => "resolved",
     }
 }
 
@@ -2642,7 +2861,8 @@ mod tests {
         RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
         UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
         dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
-        remaining_interval, rule_activation_error, supervise_repository_tasks,
+        owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
+        supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -2728,6 +2948,8 @@ mod tests {
     const EXPECTED_MAIN_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Success;
     const PULL_NUMBER: u64 = 7;
     const HEAD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OWED_EVENT_HEAD_SHA: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const OWED_MATCH_COUNT: u64 = 51;
     const CHANGED_LISTED_HEAD_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
     const BASE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HEAD_REPOSITORY: &str = "fork/repository";
@@ -5773,5 +5995,80 @@ mod tests {
         assert_eq!(encoded["event"]["target"]["head_branch"], HEAD_BRANCH);
         assert_eq!(encoded["event"]["kind"], "MergeableStateChanged");
         assert_eq!(encoded["event"]["payload"]["current"], "conflicting");
+    }
+
+    #[tokio::test]
+    async fn owed_dispatch_context_collapses_history_into_the_current_durable_state() {
+        let observation = complete_typed_observation().await;
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
+            .expect("fixture repository is valid");
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(
+                PULL_NUMBER
+                    .try_into()
+                    .expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(OWED_EVENT_HEAD_SHA.to_owned())
+                .expect("fixture old SHA is valid"),
+            head_repository: repository.clone(),
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())
+                .expect("fixture base branch is valid"),
+            head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())
+                .expect("fixture head branch is valid"),
+            title: PullRequestTitle::try_new("Earlier repository watch".to_owned())
+                .expect("fixture title is valid"),
+            body: PullRequestBody::try_new("Earlier review state.".to_owned())
+                .expect("fixture body is valid"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(81)),
+            repository,
+            context,
+            RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(PROVIDER_REVIEWER.to_owned())
+                    .expect("fixture reviewer is valid"),
+                state: ReviewState::Approved,
+                commit: CommitSha::try_new(OWED_EVENT_HEAD_SHA.to_owned())
+                    .expect("fixture review commit is valid"),
+            },
+        )
+        .expect("fixture event is coherent");
+        let encoded: serde_json::Value = serde_json::from_str(&owed_dispatch_context_json_parts(
+            &event,
+            uuid::Uuid::from_u128(82),
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(79)),
+            OWED_MATCH_COUNT,
+            &observation,
+        ))
+        .expect("owed dispatch context is JSON");
+
+        assert_eq!(encoded["event"]["target"]["head_sha"], OWED_EVENT_HEAD_SHA);
+        assert_eq!(encoded["delivery"]["mode"], "owed_current_state");
+        assert_eq!(encoded["delivery"]["matched_event_count"], OWED_MATCH_COUNT);
+        assert_eq!(
+            encoded["delivery"]["current"]["target"]["head_sha"],
+            HEAD_SHA
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["reviews"]
+                .as_array()
+                .map(Vec::len),
+            Some(RETAINED_REVIEW_IDS.len())
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["threads"][0]["thread"],
+            REVIEW_THREAD
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["threads"][0]["state"],
+            "open"
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["threads"][1]["thread"],
+            RESOLVED_REVIEW_THREAD
+        );
     }
 }
