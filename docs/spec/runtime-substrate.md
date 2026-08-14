@@ -14,24 +14,26 @@ credential delivery and authenticated live smoke are verified against this PR
 (`agent/claude-cli-credential-delivery`). The Codex CLI adapter stack comprises
 PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
-compatibility-smoke automation was verified through PR #333
-(`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
-probe, and pinned version were verified against the `0.146.0` executable through
-PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
-workflow-self-change trigger were verified through PR #471
-(`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt tool-authority
-preamble is verified against this PR (`agent/phantom-prohibition`). The
-`signalboxd` names this page states for the composition root, its telemetry, and
-the production `FileCredentialAccess` were verified through PR #258
-(`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
-catalogs are verified against this PR (`agent/credential-pools-parser`). The
-Anthropic adapter's server-side `fallback`-block recognition was verified
-through PR #280 (`agent/provider-identity-normalization`). The HTTP
-fallback-body redaction ordering was verified through PR #330
-(`agent/audit-verified-fixes`). The five persistence-repository families in the
-operator-failure inventory were verified through PR #288
-(`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
-text-delta projection were verified through PR #300
+typed rate-limit and overload evidence, provider-directed retry delay, and
+pre-stream non-acceptance proof are verified against this PR
+(`agent/multi-account-pools`). The Codex CLI compatibility-smoke automation was
+verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
+ambient-skill catalog probe, and pinned version were verified against the
+`0.146.0` executable through PR #321 (`renovate/openai-codex-0.x`). Its
+twice-daily schedule and workflow-self-change trigger were verified through PR
+#471 (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
+tool-authority preamble is verified against this PR
+(`agent/phantom-prohibition`). The `signalboxd` names this page states for the
+composition root, its telemetry, and the production `FileCredentialAccess` were
+verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
+adapter-scoped file catalogs are verified against this PR
+(`agent/credential-pools-parser`). The Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
+(`agent/provider-identity-normalization`). The HTTP fallback-body redaction
+ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
+persistence-repository families in the operator-failure inventory were verified
+through PR #288 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge
+and ephemeral text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316

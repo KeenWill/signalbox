@@ -56,9 +56,9 @@ automatic machinery. Session-delegation semantic rendering and its
 provider-neutral bridge were verified against this PR (`agent/delegation`). The
 runner-placement rendering and executable session-tool snapshot paragraphs are
 the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Availability successor calls are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with its child pull requests. Invariant tags cite
+verified only with those child pull requests. Availability successor calls and
+their durable provider-directed backoff are verified against this PR
+(`agent/multi-account-pools`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
