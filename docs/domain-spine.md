@@ -5544,6 +5544,11 @@ impl InstructionPath {
     pub fn try_new(value: String) -> Result<Self, InstructionPathError>;
     pub fn as_str(&self) -> &str;
 }
+pub struct InstructionSourcePath { /* private */ }
+impl InstructionSourcePath {
+    pub fn try_new(value: String) -> Result<Self, InstructionPathError>;
+    pub fn as_str(&self) -> &str;
+}
 pub enum InstructionPathError {
     Empty,
     ContainsNull,
@@ -5576,7 +5581,7 @@ pub struct InstructionBundleRegistrationInput {
     pub kind: InstructionBundleKind,
     pub root_kind: InstructionDiscoveryRootKind,
     pub root_path: InstructionPath,
-    pub source_path: InstructionPath,
+    pub source_path: InstructionSourcePath,
     pub source_bytes: u64,
     pub source_hash: InstructionDigest,
     pub skill: Option<InstructionSkillMetadata>,
@@ -10446,8 +10451,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| domain: workspace_instruction                      | 15                    |
-| **signalbox-domain total**                         | **789 (+12 free fn)** |
+| domain: workspace_instruction                      | 16                    |
+| **signalbox-domain total**                         | **790 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
