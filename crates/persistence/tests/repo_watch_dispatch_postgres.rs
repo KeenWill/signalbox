@@ -809,7 +809,7 @@ async fn matching_event_loaded_before_merge_records_target_closed() -> Result<()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<dyn Error>> {
-    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let fixture = dispatch_fixture_for(cooldown_rule()?).await?;
     let _occupied = evaluate_second_conflict(&fixture).await?;
     commit_merge(&fixture, 0x53_000).await?;
     fixture
@@ -818,22 +818,14 @@ async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<
             DurableCommandId::from_uuid(Uuid::from_u128(0x53_100))
         })
         .await?;
-    let obligation = fixture
+    let pending_obligation = fixture
         .store
         .load_next_dispatch_obligation(
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
         )
-        .await?
-        .expect("released terminal-target obligation becomes eligible for settlement");
-    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
-        .load_cursor(&fixture.repository)
-        .await?
-        .expect("fixture cursor exists");
-
-    let outcome =
-        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?;
+        .await?;
     let settlement: String = sqlx::query_scalar(
         "SELECT settled_kind
            FROM repo_watch_dispatch_obligation",
@@ -841,7 +833,7 @@ async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<
     .fetch_one(&fixture.pool)
     .await?;
 
-    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::TargetClosed);
+    assert!(pending_obligation.is_none());
     assert_eq!(settlement, "target_closed");
     Ok(())
 }

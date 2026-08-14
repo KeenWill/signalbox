@@ -198,6 +198,12 @@ impl PostgresRepoWatchDispatchStore {
         .execute(&mut *transaction)
         .await?;
         if disposition == "terminal" {
+            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
+                &mut transaction,
+                repository,
+                pull_request_number,
+            )
+            .await?;
             let sessions = sqlx::query_scalar::<_, Uuid>(
                 "SELECT DISTINCT action.session_id
                    FROM repo_watch_dispatch_action AS action

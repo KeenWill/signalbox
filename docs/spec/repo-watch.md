@@ -517,8 +517,10 @@ the ordinary parent-only stop to each generation-one goal it commissioned for
 the pull request; it cannot stop descendants, a later user-authored generation,
 or an unrelated session. A later open event makes an earlier unprocessed cutoff
 a recorded reopen instead. Dispatch admission rechecks the latest durable
-lifecycle under the repository lock: a stale match or obligation for a terminal
-target settles as `target_closed` without creating a session.
+lifecycle under the repository lock. A terminal cutoff settles every outstanding
+obligation for that pull request immediately, without waiting for singleton or
+cooldown readiness; the admission recheck is the race-closing backstop. Either
+path settles stale work as `target_closed` without creating a session.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
