@@ -373,15 +373,28 @@ impl RepositoryWatchTask {
     }
 
     async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
-        while self
-            .dispatch_store
-            .process_next_lifecycle_cutoff(&self.repository, || {
-                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
-            })
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
-        {}
-        Ok(())
+        loop {
+            match self
+                .dispatch_store
+                .process_next_lifecycle_cutoff(&self.repository, || {
+                    DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(error)) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_cutoff_corruption",
+                        error = %error,
+                        "repository-watch lifecycle cutoff is corrupt; dispatch processing continues"
+                    );
+                    return Ok(());
+                }
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
+        }
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
