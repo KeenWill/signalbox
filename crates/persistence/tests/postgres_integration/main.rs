@@ -24,7 +24,6 @@ mod session_creation_and_submit;
 mod session_plan;
 mod tool_round_lifecycle;
 mod turn_activation;
-mod workspace_instructions;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
