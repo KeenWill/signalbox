@@ -10,7 +10,11 @@
 //! `--help` for the option reference.
 
 use std::{
-    collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode,
+    collections::BTreeMap,
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 use serde::Deserialize;
@@ -24,8 +28,8 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use signalboxd::{
-    DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess, HubModelConfiguration,
-    ModelAdapter,
+    CredentialDelivery, DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess,
+    HubModelConfiguration, ModelAdapter,
     approval_judge_eval::{
         ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalVerdict, judge_eval_case,
         judge_system_prompt, render_eval_case,
@@ -228,6 +232,16 @@ fn stable_digest(bytes: &[u8]) -> String {
     format!("fnv1a128:{hash:032x}")
 }
 
+fn credential_delivery_identity(
+    delivery: &CredentialDelivery,
+) -> (&'static str, Option<&Path>, Option<&str>) {
+    (
+        delivery.key(),
+        delivery.path().map(PathBuf::as_path),
+        delivery.env_key(),
+    )
+}
+
 fn main() -> ExitCode {
     let options = match parse_arguments() {
         Ok(ParsedArguments::Run(options)) => options,
@@ -290,6 +304,11 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let route = configuration
         .resolve_direct_model(selection)
         .ok_or_else(|| String::from("approval_judge selection has no configured route"))?;
+    let credential_profile = configuration
+        .credential_profile(route.credential_profile())
+        .ok_or_else(|| String::from("resolved route has no configured credential profile"))?;
+    let (credential_delivery, credential_file, credential_env_key) =
+        credential_delivery_identity(credential_profile.delivery());
     // CLI-family adapters accept exactly the credential reference they were
     // constructed with, so the binding must carry the route's profile verbatim.
     let binding = ApprovalJudgeEvalBinding {
@@ -409,20 +428,23 @@ async fn run(options: RunOptions) -> Result<(), String> {
     // The contract digest covers everything the operation sends or enforces
     // beyond the payloads: the system prompt, the structured-output schema,
     // the resolved model's configured output and context bounds, and the
-    // credential profile name selected for the call. The profile is not a
-    // secret — `route.credential_profile()` names which configured
-    // credential the call uses, not its contents — but it does select which
-    // provider account or CLI credential `binding.credential_reference`
-    // carries into the actual call, so two configurations that differ only
-    // in that profile must not be presented as replay-compatible.
+    // credential profile and delivery selected for the call. These values are
+    // non-secret configuration references — profile name, delivery mode, file
+    // path, and environment key — but they determine how the provider account
+    // reaches the adapter, so changing any of them must change the fingerprint.
     let operation_contract = format!(
-        "{}\u{0}{}\u{0}adapter={:?}\u{0}max_output_tokens={}\u{0}context_window_tokens={}\u{0}credential_profile={}",
+        "{}\u{0}{}\u{0}adapter={:?}\u{0}max_output_tokens={}\u{0}context_window_tokens={}\u{0}credential_profile={}\u{0}credential_delivery={}\u{0}credential_file={}\u{0}credential_env_key={}",
         judge_system_prompt(),
         approval_judge_output_contract_text(),
         route.adapter(),
         definition_max_output_tokens,
         definition_context_window_tokens,
         route.credential_profile(),
+        credential_delivery,
+        credential_file
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        credential_env_key.unwrap_or_default(),
     );
     let operation_contract = match route.adapter() {
         ModelAdapter::ClaudeCli => {
