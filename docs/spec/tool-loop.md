@@ -622,10 +622,13 @@ so every multi-request batch counts once and inherited tool history from earlier
 turns does not count. After the thirty-second batch resolves, the ordinary
 continuation transaction still projects all results and creates its fresh
 `Prepared` call; model execution closes that checkpoint as `KnownFailed` before
-provider capability preparation or send. The normal known-failure boundary then
-fails the turn honestly. These durable-content bounds avoid wall-clock policy
-and ensure one model-controlled response or chain cannot retain the progressing
-slot indefinitely.
+provider capability preparation or send. At that enforcement site it emits a
+warning carrying the limit and observed round count, and the guarded pre-send
+closure carries `ToolRoundLimitReached`. The terminal event consequently uses
+`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-061).
+These durable-content bounds avoid wall-clock policy and ensure one
+model-controlled response or chain cannot retain the progressing slot
+indefinitely.
 
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
