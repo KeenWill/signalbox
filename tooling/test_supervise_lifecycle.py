@@ -14,12 +14,14 @@ from pathlib import Path
 SCRIPT = Path(__file__).with_name("supervise-lifecycle.sh")
 PROCESS_NAME = "fixture-daemon"
 POLL_SECONDS = "1"
+MANAGED_UID = "4242"
 
 
 @dataclass(frozen=True)
 class WatchdogRun:
     result: subprocess.CompletedProcess[str]
     lifecycle_calls: str
+    pgrep_arguments: str
 
 
 def write_executable(path: Path, content: str) -> None:
@@ -31,12 +33,21 @@ def run_watchdog(*, pgrep_status: int, sleep_status: int) -> WatchdogRun:
     with tempfile.TemporaryDirectory() as raw_directory:
         directory = Path(raw_directory)
         calls = directory / "lifecycle-calls"
+        pgrep_arguments = directory / "pgrep-arguments"
         lifecycle = directory / "lifecycle"
         write_executable(
             lifecycle,
             f"#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{calls}'\n",
         )
-        write_executable(directory / "pgrep", f"#!/bin/sh\nexit {pgrep_status}\n")
+        write_executable(
+            directory / "id",
+            f"#!/bin/sh\nprintf '%s\\n' '{MANAGED_UID}'\n",
+        )
+        write_executable(
+            directory / "pgrep",
+            f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{pgrep_arguments}'\n"
+            f"exit {pgrep_status}\n",
+        )
         write_executable(directory / "sleep", f"#!/bin/sh\nexit {sleep_status}\n")
         environment = os.environ.copy()
         environment["PATH"] = str(directory)
@@ -48,7 +59,11 @@ def run_watchdog(*, pgrep_status: int, sleep_status: int) -> WatchdogRun:
             env=environment,
         )
         lifecycle_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
-        return WatchdogRun(result=result, lifecycle_calls=lifecycle_calls)
+        return WatchdogRun(
+            result=result,
+            lifecycle_calls=lifecycle_calls,
+            pgrep_arguments=pgrep_arguments.read_text(encoding="utf-8"),
+        )
 
 
 class SuperviseLifecycleTests(unittest.TestCase):
@@ -65,6 +80,10 @@ class SuperviseLifecycleTests(unittest.TestCase):
         self.assertEqual(run.result.returncode, 7)
         self.assertEqual(run.lifecycle_calls, "")
         self.assertEqual(run.result.stderr, "")
+        self.assertEqual(
+            run.pgrep_arguments.splitlines(),
+            ["-u", MANAGED_UID, "-x", "--", PROCESS_NAME],
+        )
 
     def test_process_lookup_error_does_not_boot(self) -> None:
         run = run_watchdog(pgrep_status=2, sleep_status=0)

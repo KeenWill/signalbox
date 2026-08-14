@@ -12,6 +12,7 @@ fi
 lifecycle_program=$1
 process_name=$2
 poll_seconds=${3:-5}
+managed_uid=$(id -u)
 
 if [ ! -x "$lifecycle_program" ]; then
 	echo "supervise-lifecycle: lifecycle program is not executable: $lifecycle_program" >&2
@@ -30,8 +31,15 @@ if [ "$poll_seconds" -eq 0 ]; then
 	exit 2
 fi
 
+case "$managed_uid" in
+	'' | *[!0-9]*)
+		echo "supervise-lifecycle: effective user ID must be numeric" >&2
+		exit 2
+		;;
+esac
+
 while :; do
-	if pgrep -x -- "$process_name" >/dev/null; then
+	if pgrep -u "$managed_uid" -x -- "$process_name" >/dev/null; then
 		sleep "$poll_seconds"
 		continue
 	else
