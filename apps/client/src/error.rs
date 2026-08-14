@@ -8,7 +8,7 @@ use std::{
 use signalbox_process_protocol::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
     ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
-    OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
+    MAX_BLOB_READ_BYTES, OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
 };
 
 #[derive(Debug)]
@@ -54,6 +54,7 @@ pub(crate) enum ClientError {
     },
     AmbiguousMutation,
     Input(&'static str),
+    BlobReadLengthOutOfRange,
     TurnRecoveryRequired,
     RunnerRecoveryRequired,
     TurnFailed(Option<FailedModelCallCause>),
@@ -152,6 +153,7 @@ impl ClientError {
             | Self::Protocol(_)
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::BlobReadLengthOutOfRange
             | Self::TurnRecoveryRequired
             | Self::RunnerRecoveryRequired
             | Self::TurnFailed(_)
@@ -242,6 +244,10 @@ impl fmt::Display for ClientError {
                  arguments and exact input, using any printed recovery values",
             ),
             Self::Input(message) => formatter.write_str(message),
+            Self::BlobReadLengthOutOfRange => write!(
+                formatter,
+                "blob read length must be between 1 and {MAX_BLOB_READ_BYTES} bytes"
+            ),
             Self::TurnRecoveryRequired => formatter.write_str(
                 "the submitted turn requires model-call recovery that the terminal cannot perform",
             ),
@@ -284,6 +290,7 @@ impl Error for ClientError {
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::BlobReadLengthOutOfRange
             | Self::ReviewInputExceedsFrame
             | Self::SourceExceedsFrame
             | Self::ScanIncomplete { .. }

@@ -1448,9 +1448,7 @@ async fn read_blob_chunk(
     length_bytes: CanonicalU64,
 ) -> Result<Vec<u8>, ClientError> {
     if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
-        return Err(ClientError::Input(
-            "blob read length must be between 1 and 4194304 bytes",
-        ));
+        return Err(ClientError::BlobReadLengthOutOfRange);
     }
     let mut connection = client
         .setup_request(ClientRequest::ReadBlobChunk {
@@ -1482,31 +1480,31 @@ async fn read_blob_chunk(
 }
 
 async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
-    let descriptor = openat(
-        CWD,
-        path,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
-    )
-    .map_err(std::io::Error::from)
-    .map_err(|source| ClientError::blob_output_file(path, source))?;
-    let result = async {
-        fchmod(&descriptor, Mode::RUSR | Mode::WUSR)
-            .map_err(std::io::Error::from)
-            .map_err(|source| ClientError::blob_output_file(path, source))?;
-        let mut file = tokio::fs::File::from_std(File::from(descriptor));
-        file.write_all(bytes)
-            .await
-            .map_err(|source| ClientError::blob_output_file(path, source))?;
-        file.sync_all()
-            .await
-            .map_err(|source| ClientError::blob_output_file(path, source))
-    }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(path).await;
-    }
-    result
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    fchmod(temporary.as_file(), Mode::RUSR | Mode::WUSR)
+        .map_err(std::io::Error::from)
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    let mut file = tokio::fs::File::from_std(
+        temporary
+            .reopen()
+            .map_err(|source| ClientError::blob_output_file(path, source))?,
+    );
+    file.write_all(bytes)
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    file.sync_all()
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    drop(file);
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| ClientError::blob_output_file(path, error.error))?;
+    Ok(())
 }
 
 async fn hash_blob_source(
