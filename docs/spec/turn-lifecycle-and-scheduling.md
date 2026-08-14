@@ -10,7 +10,9 @@ resumption of that transition were verified against this PR
 same runner-recovery turn boundary and is verified against this PR
 (`agent/runner-registration-reconciliation`). Queued activation across the
 latest runner-placement frontier is verified against this PR
-(`agent/runner-placement-semantic-persistence`).
+(`agent/runner-placement-semantic-persistence`). Model-observation ordering for
+a staged exact-directory pinned replacement is verified against this PR
+(`agent/runner-pinned-replacement-observation-finalizer`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
