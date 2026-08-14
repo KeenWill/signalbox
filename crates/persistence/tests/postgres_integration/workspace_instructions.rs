@@ -51,16 +51,16 @@ fn assert_persisted_candidate(
     persisted: &PersistedCandidate,
     ordinal: i64,
     identity: signalbox_domain::InstructionBundleId,
-    root_kind: &str,
-    bundle_kind: &str,
+    root_kind: signalbox_domain::InstructionDiscoveryRootKind,
+    bundle_kind: signalbox_domain::InstructionBundleKind,
     expected: &signalbox_domain::InstructionBundleRegistration,
 ) {
     assert_eq!(persisted.candidate_ordinal, ordinal);
     assert_eq!(persisted.instruction_bundle_id, identity.into_uuid());
-    assert_eq!(persisted.root_kind, root_kind);
+    assert_eq!(persisted.root_kind, persisted_root_kind(root_kind));
     assert_eq!(persisted.root_path, expected.root_path().as_str());
     assert_eq!(persisted.source_path, expected.source_path().as_str());
-    assert_eq!(persisted.bundle_kind, bundle_kind);
+    assert_eq!(persisted.bundle_kind, persisted_bundle_kind(bundle_kind));
     assert_eq!(
         persisted.skill_name.as_deref(),
         expected
@@ -81,6 +81,20 @@ fn assert_persisted_candidate(
         persisted.source_hash,
         expected.source_hash().as_bytes().as_slice()
     );
+}
+
+fn persisted_root_kind(kind: signalbox_domain::InstructionDiscoveryRootKind) -> &'static str {
+    match kind {
+        signalbox_domain::InstructionDiscoveryRootKind::Workspace => "workspace",
+        signalbox_domain::InstructionDiscoveryRootKind::Configured => "configured",
+    }
+}
+
+fn persisted_bundle_kind(kind: signalbox_domain::InstructionBundleKind) -> &'static str {
+    match kind {
+        signalbox_domain::InstructionBundleKind::AgentDocument => "agent_document",
+        signalbox_domain::InstructionBundleKind::AgentSkill => "agent_skill",
+    }
 }
 
 #[track_caller]
@@ -241,13 +255,26 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
         root.join(".agents/skills/broken/SKILL.md"),
         "missing frontmatter\n",
     )?;
+    let configured_directory = tempfile::tempdir()?;
+    let configured_root_path = configured_directory.path().canonicalize()?;
+    std::fs::write(configured_root_path.join("AGENTS.md"), "configured rule\n")?;
     let root = signalbox_domain::InstructionPath::try_new(
         root.to_str().expect("temporary path is UTF-8").to_owned(),
+    )?;
+    let configured_root = signalbox_domain::InstructionPath::try_new(
+        configured_root_path
+            .to_str()
+            .expect("configured temporary path is UTF-8")
+            .to_owned(),
     )?;
     let snapshot = signalbox_application::discover_workspace_instructions(vec![
         signalbox_application::InstructionDiscoveryRoot::new(
             signalbox_domain::InstructionDiscoveryRootKind::Workspace,
             root,
+        ),
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Configured,
+            configured_root,
         ),
     ]);
     let discovery = signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6110));
@@ -258,7 +285,9 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
     let agent_document_id =
         signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6112));
     let agent_skill_id = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6113));
-    let mut bundle_ids = [agent_document_id, agent_skill_id].into_iter();
+    let configured_document_id =
+        signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6114));
+    let mut bundle_ids = [agent_document_id, agent_skill_id, configured_document_id].into_iter();
     let outcome =
         signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
             pool.clone(),
@@ -266,7 +295,7 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
         .record_turn_start(discovery, manifest.clone(), &snapshot, || {
             bundle_ids
                 .next()
-                .expect("two discovered bundles need two identities")
+                .expect("three discovered bundles need three identities")
         })
         .await?;
     assert_eq!(
@@ -306,6 +335,32 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
         i64::try_from(snapshot.elapsed_millis()).expect("fixture elapsed time fits bigint")
     );
     assert_eq!(persisted_usage.scan_complete, snapshot.is_complete());
+    let persisted_roots = sqlx::query_as::<_, PersistedDiscoveryRoot>(
+        "SELECT root_ordinal, root_kind, root_path
+           FROM instruction_discovery_root
+          WHERE instruction_discovery_id = $1
+          ORDER BY root_ordinal",
+    )
+    .bind(discovery.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    let persisted_configured_root = persisted_roots
+        .get(1)
+        .expect("the configured discovery root is persisted");
+    let expected_configured_root = snapshot
+        .roots()
+        .get(1)
+        .expect("the discovery contains the configured root");
+    assert_eq!(persisted_roots.len(), snapshot.roots().len());
+    assert_eq!(persisted_configured_root.root_ordinal, 2);
+    assert_eq!(
+        persisted_configured_root.root_kind,
+        persisted_root_kind(expected_configured_root.kind())
+    );
+    assert_eq!(
+        persisted_configured_root.root_path,
+        expected_configured_root.path().as_str()
+    );
     let persisted_candidates = sqlx::query_as::<_, PersistedCandidate>(
         "SELECT candidate.candidate_ordinal, bundle.instruction_bundle_id,
                 bundle.root_kind, bundle.root_path, bundle.source_path,
@@ -327,8 +382,8 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
             .expect("the agent document candidate is persisted"),
         1,
         agent_document_id,
-        "workspace",
-        "agent_document",
+        signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+        signalbox_domain::InstructionBundleKind::AgentDocument,
         snapshot
             .bundles()
             .first()
@@ -340,12 +395,25 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
             .expect("the skill candidate is persisted"),
         2,
         agent_skill_id,
-        "workspace",
-        "agent_skill",
+        signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+        signalbox_domain::InstructionBundleKind::AgentSkill,
         snapshot
             .bundles()
             .get(1)
             .expect("the discovery contains the skill"),
+    );
+    assert_persisted_candidate(
+        persisted_candidates
+            .get(2)
+            .expect("the configured agent document candidate is persisted"),
+        3,
+        configured_document_id,
+        signalbox_domain::InstructionDiscoveryRootKind::Configured,
+        signalbox_domain::InstructionBundleKind::AgentDocument,
+        snapshot
+            .bundles()
+            .get(2)
+            .expect("the discovery contains the configured agent document"),
     );
     let persisted_findings = sqlx::query_as::<_, PersistedDiscoveryFinding>(
         "SELECT finding_ordinal, source_path, finding_kind
@@ -400,6 +468,105 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
             manifest_id,
         )
     );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: a complete recorder that loses scheduler serialization observes
+/// the winning manifest and retains none of its fresh evidence identities.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_losing_complete_record_observes_the_winning_manifest() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = active_instruction_turn(&pool, 0x6900).await?;
+    let directory = tempfile::tempdir()?;
+    let root_path = directory.path().canonicalize()?;
+    std::fs::write(root_path.join("AGENTS.md"), "winning rule\n")?;
+    let root = signalbox_domain::InstructionPath::try_new(
+        root_path
+            .to_str()
+            .expect("temporary path is UTF-8")
+            .to_owned(),
+    )?;
+    let snapshot = signalbox_application::discover_workspace_instructions(vec![
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+            root,
+        ),
+    ]);
+    let repository =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        );
+    let winning_discovery =
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6910));
+    let winning_manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6911));
+    let winning_bundle = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6912));
+    let winning = repository
+        .record_turn_start(
+            winning_discovery,
+            signalbox_domain::TurnInstructionManifest::empty_turn_start(
+                winning_manifest_id,
+                session,
+                turn,
+            ),
+            &snapshot,
+            || winning_bundle,
+        )
+        .await?;
+    let losing_discovery =
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6920));
+    let losing_manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6921));
+    let losing_bundle = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6922));
+    let losing = repository
+        .record_turn_start(
+            losing_discovery,
+            signalbox_domain::TurnInstructionManifest::empty_turn_start(
+                losing_manifest_id,
+                session,
+                turn,
+            ),
+            &snapshot,
+            || losing_bundle,
+        )
+        .await?;
+    let evidence_counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        "SELECT
+            (SELECT count(*) FROM instruction_discovery
+              WHERE session_id = $1 AND turn_id = $2),
+            (SELECT count(*) FROM turn_instruction_manifest
+              WHERE session_id = $1 AND turn_id = $2),
+            (SELECT count(*) FROM instruction_discovery_candidate AS candidate
+              JOIN instruction_discovery AS discovery
+                ON discovery.instruction_discovery_id = candidate.instruction_discovery_id
+             WHERE discovery.session_id = $1 AND discovery.turn_id = $2),
+            (SELECT count(*) FROM registered_instruction_bundle
+              WHERE root_path = $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(snapshot.roots()[0].path().as_str())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        winning,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
+            winning_manifest_id,
+        )
+    );
+    assert_eq!(
+        losing,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(
+            winning_manifest_id,
+        )
+    );
+    assert_eq!(evidence_counts, (1, 1, 1, 1));
+
     pool.close().await;
     drop(container);
     Ok(())
