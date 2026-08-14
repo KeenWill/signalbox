@@ -44,6 +44,10 @@ use signalbox_model_runtime_codex_cli::{
 };
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
+    model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeExhaustion,
+        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
+    },
     process_read::ProcessModelCallInputTokenSemantics,
 };
 use signalbox_process_protocol::{
@@ -59,9 +63,28 @@ use uuid::Uuid;
 
 use crate::blob_storage_configuration::BlobStorageConfiguration;
 use crate::credential_pools::{
-    CredentialDelivery, CredentialPool, CredentialProfile, parse_credential_pools,
-    parse_credential_profiles,
+    CredentialDelivery, CredentialPool, CredentialPoolAction, CredentialPoolExhaustion,
+    CredentialPoolTrigger, CredentialProfile, parse_credential_pools, parse_credential_profiles,
 };
+
+const fn runtime_pool_action(action: CredentialPoolAction) -> CredentialPoolRuntimeAction {
+    match action {
+        CredentialPoolAction::Stay => CredentialPoolRuntimeAction::Stay,
+        CredentialPoolAction::SwitchNextTurn => CredentialPoolRuntimeAction::SwitchNextTurn,
+        CredentialPoolAction::SwitchNow => CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolAction::AvoidNewSessions => CredentialPoolRuntimeAction::AvoidNewSessions,
+        CredentialPoolAction::Quarantine => CredentialPoolRuntimeAction::Quarantine,
+    }
+}
+
+const fn runtime_pool_exhaustion(
+    exhaustion: CredentialPoolExhaustion,
+) -> CredentialPoolRuntimeExhaustion {
+    match exhaustion {
+        CredentialPoolExhaustion::Park => CredentialPoolRuntimeExhaustion::Park,
+        CredentialPoolExhaustion::Fail => CredentialPoolRuntimeExhaustion::Fail,
+    }
+}
 
 /// Non-secret reference the process binds its Anthropic key file to when no
 /// configured route names that adapter, so a deployment serving Codex alone
@@ -173,10 +196,11 @@ impl ModelAdapter {
     /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
     /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
     /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
-    /// `insufficient_quota` but reaches overload only by status. Both CLI
-    /// adapters classify from rendered failure prose, which the same contract
-    /// refuses as a derivation, so neither admits any cause until its CLI
-    /// exposes a stable machine-readable discriminator. Listing every pair
+    /// `insufficient_quota` but reaches overload only by status. Codex
+    /// classifies the narrower cause from rendered failure prose only after its
+    /// machine-readable JSONL lifecycle closes the request as `turn.failed`;
+    /// that envelope proves non-acceptance. Claude Code exposes no equivalent
+    /// proof. Listing every pair
     /// rather than matching on a group makes a later adapter state its own
     /// answer.
     pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
@@ -189,7 +213,8 @@ impl ModelAdapter {
                 true
             }
             (Self::OpenAi, AvailabilityCause::Overloaded) => false,
-            (Self::ClaudeCli | Self::CodexCli, _) => false,
+            (Self::CodexCli, _) => true,
+            (Self::ClaudeCli, _) => false,
         }
     }
 
@@ -1324,6 +1349,35 @@ impl HubModelConfiguration {
     /// Maps each exact target to the family key stored in session snapshots.
     pub fn credential_family_catalog(&self) -> ModelCredentialFamilyCatalog {
         self.credential_families.clone()
+    }
+
+    /// Projects admitted pool policy into the persistence-owned runtime form.
+    pub fn credential_pool_runtime_catalog(&self) -> CredentialPoolRuntimeCatalog {
+        self.routes
+            .values()
+            .filter_map(|route| {
+                let pool = self.credential_pools.get(route.credential_pool())?;
+                let mut members = pool.members().to_vec();
+                members.sort_by_key(|member| member.priority());
+                let members = members
+                    .into_iter()
+                    .map(|member| {
+                        CredentialPoolRuntimeMember::new(member.profile(), member.priority().get())
+                    })
+                    .collect::<Vec<_>>();
+                Some((
+                    route.target(),
+                    CredentialPoolRuntimePolicy::new(
+                        pool.name(),
+                        members,
+                        runtime_pool_exhaustion(pool.on_pool_exhausted()),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::QuotaExhausted)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::RateLimited)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::Overloaded)),
+                    ),
+                ))
+            })
+            .collect()
     }
 
     /// Derives a labeled USD figure from exactly the token axes present.
@@ -5261,7 +5315,7 @@ members = [
         let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
-tie_break = "round_robin"
+tie_break = "first_listed"
 on_pool_exhausted = "fail"
 members = [{ profile = "anthropic-primary", priority = 1 }]
 on_quota_exhausted = "switch_next_turn"
@@ -5275,7 +5329,7 @@ on_credential_rejected = "quarantine""#,
             .credential_pool("anthropic-main")
             .expect("the fixture declares the pool");
 
-        assert_eq!(pool.tie_break(), CredentialPoolTieBreak::RoundRobin);
+        assert_eq!(pool.tie_break(), CredentialPoolTieBreak::FirstListed);
         assert_eq!(pool.on_pool_exhausted(), CredentialPoolExhaustion::Fail);
         // Anthropic's mapping has no quota token, so only rate limiting can
         // carry the proof `switch_now` requires.
@@ -5538,6 +5592,22 @@ members = [{ profile = "anthropic-primary", priority = 1 }]"#,
     }
 
     #[test]
+    fn configuration_rejects_round_robin_until_its_durable_cursor_exists() {
+        let round_robin = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "round_robin"
+on_pool_exhausted = "fail"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&round_robin).err(),
+            Some(HubModelConfigurationError::InvalidCredentialPoolPolicy)
+        );
+    }
+
+    #[test]
     fn configuration_rejects_an_unknown_exhaustion_behavior() {
         let unknown_exhaustion = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
@@ -5669,18 +5739,14 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
     }
 
     #[test]
-    fn configuration_rejects_switch_now_no_cli_adapter_can_prove() {
+    fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
         let substituting = CONFIGURATION.replace(
             CODEX_POOL,
             &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
         );
 
-        assert_eq!(
-            HubModelConfiguration::parse(&substituting).err(),
-            Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-                credential_pool: Arc::from("codex-main"),
-            })
-        );
+        HubModelConfiguration::parse(&substituting)
+            .expect("Codex turn.failed proves that a successor cannot duplicate acceptance");
     }
 
     #[test]

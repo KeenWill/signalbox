@@ -125,8 +125,9 @@ pub use model_call::{
 };
 pub use model_execution::{
     AmbiguousModelCallTurn, AmbiguousModelCallTurnIdentities, AuthorizedModelCall,
-    CancelledModelCallTurn, CancelledModelCallTurnIdentities, CancelledToolRoundModelCallTurn,
-    CompletedModelCallIdentities, CompletedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn, CancelledModelCallTurnIdentities,
+    CancelledToolRoundModelCallTurn, CompletedModelCallIdentities, CompletedModelCallTurn,
+    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
     FailedModelCallTurn, FailedModelCallTurnIdentities, IssuedModelCallCorrelation,
     ModelCallAuthorizationError, ModelCallAuthorizationFailure, ModelCallClosureError,
     ModelCallExecution, ModelCallExecutionReconstitutionError,

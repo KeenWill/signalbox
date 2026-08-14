@@ -49,7 +49,7 @@ use signalbox_model_runtime::{
     redact_text, trailing_credential_context, validate_provider_json_nesting,
 };
 
-use crate::status::classify_error;
+use crate::status::{classify_error, retry_after};
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
     EnvelopeOutcome, ItemDetails, ItemEvent, ItemIdentity, ItemLifecycleEvent, ModelEnvelope,
@@ -992,11 +992,17 @@ fn optional_usage(value: Option<i64>, name: &str) -> Result<Option<u64>, DecodeF
         .transpose()
 }
 
-fn provider_error(exchange: ExchangeFacts, usage: TokenUsage, message: &str) -> TerminalEvidence {
+fn provider_error(
+    mut exchange: ExchangeFacts,
+    usage: TokenUsage,
+    message: &str,
+) -> TerminalEvidence {
+    exchange.retry_after = retry_after(message);
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
         kind: classify_error(message),
+        non_acceptance_proven: true,
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
             error_code: None,
@@ -1024,16 +1030,18 @@ fn provider_failure<C: Clone>(
 /// provider-controlled material before the emitted native message receives
 /// the stateful redaction of `message`.
 fn provider_failure_classified<C: Clone>(
-    exchange: ExchangeFacts,
+    mut exchange: ExchangeFacts,
     usage: TokenUsage,
     message: &str,
     kind: ProviderErrorKind,
     sink: &RedactingSink<'_, C>,
 ) -> TerminalEvidence {
+    exchange.retry_after = retry_after(message);
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
         kind,
+        non_acceptance_proven: true,
         native: NativeErrorFacts {
             error_token: Some("codex_cli_error".to_string()),
             error_code: None,

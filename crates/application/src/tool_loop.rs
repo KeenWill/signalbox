@@ -717,6 +717,8 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationCheckpointed(ModelCallId),
     /// Continuation target resolution closed the turn atomically.
     ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
+    /// Continuation credential-pool exhaustion closed the turn atomically.
+    ContinuationPoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
 }
 
 /// Failure annotated with the exact tool orchestration stage.
@@ -1735,6 +1737,11 @@ where
                     report_tool_turn_terminalization(&failed);
                     return Ok(ToolExecutionServiceOutcome::ContinuationTargetUnavailable(
                         failed,
+                    ));
+                }
+                Ok(PrepareToolContinuationOutcome::PoolExhausted(exhausted)) => {
+                    return Ok(ToolExecutionServiceOutcome::ContinuationPoolExhausted(
+                        exhausted,
                     ));
                 }
                 Err(error) => return Err(ToolExecutionServiceError::Continuation(error)),

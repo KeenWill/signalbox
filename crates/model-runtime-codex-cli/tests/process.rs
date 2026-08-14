@@ -3728,6 +3728,7 @@ async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {
     .await;
 
     assert_eq!(provider_error(&result.evidence).kind, expected);
+    assert!(provider_error(&result.evidence).non_acceptance_proven);
     assert_eq!(result.spawns, 1);
 }
 

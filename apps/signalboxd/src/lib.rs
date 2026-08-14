@@ -936,8 +936,13 @@ where
                     Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
                 };
                 match outcome {
-                    ModelCallExecutionOutcome::Checkpointed(_) => continue,
+                    ModelCallExecutionOutcome::RetryBackoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
@@ -1514,7 +1519,8 @@ where
                         }
                         ToolExecutionServiceOutcome::ChildWaitParked(_)
                         | ToolExecutionServiceOutcome::AwaitingRecovery(_)
-                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
+                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_)
+                        | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_) => {
                             return Ok(());
                         }
                     }
@@ -1536,8 +1542,13 @@ where
                     }
                 };
                 match model_outcome {
-                    ModelCallExecutionOutcome::Checkpointed(_) => {}
+                    ModelCallExecutionOutcome::RetryBackoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
+                    | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
                         return Ok(());
@@ -1685,8 +1696,13 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
                 };
                 match outcome {
-                    ModelCallExecutionOutcome::Checkpointed(_) => continue,
+                    ModelCallExecutionOutcome::RetryBackoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)

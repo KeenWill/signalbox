@@ -727,34 +727,21 @@ provider cause, because no provider request was issued for it to have observed.
 A parked turn carries no terminal evidence at all: it has not terminalized, and
 is not one of this page's terminal outcomes.
 
-**Committed unimplemented functionality — pre-call pool-exhaustion failure.** No
-present domain transition, repository shape, or process event can produce this
-failure. Its implementing child must add the sealed
-`CredentialPoolExhaustedFailure` value carrying the immutable pool-policy
-identity and a complete nonempty evidence list in policy-member order. Each
-member item carries the profile reference, the one closed exclusion kind
-(`profile_quarantine`, `membership_exclusion`, `session_displacement`, or
-`chain_exclusion`), its durable record generation or predecessor-observation
-correlation, and its optional reset. A member covered by several at once selects
-one kind by the widest-scope-first precedence, and reports a reset only when
-every exclusion then active for it is of a kind that *expires* at the reset it
-reports — and then the latest of them — exactly as
+**Implemented behavior — typed pool exhaustion.** A sealed
+`CredentialPoolExhaustedModelCallTurn` carries the pool identity separately from
+the ordinary failed-turn projection. The guarded transition requires an active
+turn whose current attempt has no model call, ends that attempt `KnownFailure`,
+terminalizes the turn `Failed`, and appends the ordinary `TurnFailed { turn }`
+marker. Post-failure exhaustion instead preserves the last member's terminal
+provider evidence while returning a distinct pool-exhausted application outcome.
+Both forms are durable and cannot be reconstructed as a single account failure.
+
+**Committed unimplemented functionality — process-level exclusion evidence.**
+The richer process event at
 [process protocol](process-protocol.md#credential-pool-preparation-failure)
-requires. Reporting a reset is not sufficient, because a displacement or a
-quarantine can carry one while clearing only by another preparation or an
-operator command. It carries no provider prose or credential value. The guarded
-transition requires an active turn whose current attempt has no model call, ends
-that attempt `KnownFailure`, terminalizes the turn `Failed`, appends the
-ordinary `TurnFailed { turn }` marker to that attempt's source frontier, and
-atomically emits the typed preparation-failure event owned by
-[process protocol](process-protocol.md#credential-pool-preparation-failure).
-Partial evidence, a member outside the frozen policy, duplicate or reordered
-members, or a correlation that did not supply active exclusion evidence in the
-atomic failure commit fails closed. A later authorized clear leaves that
-historical correlation valid: reconstitution validates the retained generation
-or predecessor observation and its active-at-failure fact, not its current
-active state. Persistence owns the corresponding all-or-nothing representation
-below.
+remains absent. Its implementing child adds the complete nonempty evidence list
+in policy-member order, including exclusion generation or predecessor
+correlation and optional reset, without changing the typed domain cause above.
 
 The same child adds the selecting immutable pool-policy identity to every
 pool-selected `Prepared` call as an insert-only authorization fact beside its

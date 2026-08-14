@@ -1,5 +1,7 @@
 //! The adapter runtime: one operation, at most one HTTP interaction.
 
+use std::time::{Duration, SystemTime};
+
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::redirect::Policy;
@@ -14,7 +16,7 @@ use signalbox_model_runtime::{
     PreparationDefect, PreparationFailure, PreparationOutcome, ProviderErrorEvidence,
     ProviderErrorKind, ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming,
     StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
-    boundary_loss_evidence as exchange_loss, emit_provider_observation as emit,
+    boundary_loss_evidence as exchange_loss, emit_provider_observation as emit, parse_retry_after,
     pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
     provider_response_prefix_len as streamed_response_prefix_len,
@@ -417,6 +419,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         let exchange = ExchangeFacts {
             provider_request_id: request_id_from(response.headers()),
             http_status: Some(status.as_u16()),
+            retry_after: retry_after_from(response.headers()),
         };
         emit(
             correlation,
@@ -770,6 +773,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 exchange: refusal.exchange,
                 reported_model: refusal.reported_model,
                 kind: ProviderErrorKind::Unrecognized,
+                non_acceptance_proven: false,
                 native: NativeErrorFacts {
                     error_token: Some("refusal".to_string()),
                     error_code: None,
@@ -806,6 +810,10 @@ async fn finish_error(
             // The Messages error envelope reports no model identity.
             reported_model: None,
             kind,
+            non_acceptance_proven: matches!(
+                kind,
+                ProviderErrorKind::RateLimited | ProviderErrorKind::Overloaded
+            ),
             native: error.into_native_facts(),
             usage: TokenUsage::unreported(),
         });
@@ -817,6 +825,7 @@ async fn finish_error(
         exchange,
         reported_model: None,
         kind: classify_error_status(status),
+        non_acceptance_proven: false,
         native: NativeErrorFacts {
             error_token: None,
             error_code: None,
@@ -894,6 +903,13 @@ fn request_id_from(headers: &HeaderMap) -> Option<ProviderRequestId> {
         .or_else(|| headers.get("x-request-id"))
         .and_then(|value| value.to_str().ok())
         .map(ProviderRequestId::new)
+}
+
+fn retry_after_from(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, SystemTime::now()))
 }
 
 /// The credential as a sensitivity-marked header value, or `None` when its

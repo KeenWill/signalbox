@@ -234,7 +234,11 @@ strings appear only as retained detail inside already-classified variants:
   representation from format-aware redaction; audit evidence must be bounded and
   secret-free before it leaves the adapter. Quota exhaustion is distinct from
   rate limiting. Why: a billing condition must never be treated as retry-later
-  backoff.
+  backoff. HTTP adapters decode both `Retry-After` delay-seconds and HTTP-date
+  forms; Codex decodes its bounded seconds/minutes retry phrase. The resulting
+  duration is typed exchange evidence, never retained prose. Rate-limit and
+  overload successors use it as a minimum beneath a five-minute cap; quota
+  successors remain immediate.
 - `CancellationConfirmed`: a definitive provider cancellation response. No
   in-repository adapter constructs one; the variant keeps the vocabulary total
   so observing one never forces a misclassification.
@@ -283,20 +287,18 @@ states the negative, while the same rejection with blocks still behind it
 withholds. A tool call an earlier record already established outranks the
 withholding in every adapter.
 
-**Committed unimplemented functionality — provider non-acceptance evidence.** No
-present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
-a provider rejected a request before accepting it, and no current adapter can
-authorize an availability successor. This proof is what separates the
+**Implemented behavior — provider non-acceptance evidence.**
+`ProviderErrorEvidence::non_acceptance_proven` is an adapter-owned typed fact,
+never inferred from `ProviderErrorKind` or provider prose. This proof separates the
 `successor` and `terminal` endings of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine);
-this page owns the evidence algebra that carries it. The implementing child must
-add a sealed typed proof alongside `ProviderError` for the exact
+this page owns the evidence algebra that carries it. Adapters set the proof
+alongside `ProviderError` for the exact
 quota-exhausted, rate-limited, and overloaded provider responses whose protocol
 semantics establish non-acceptance. Each adapter owns its exhaustive native
 mapping; the provider bridge preserves the proof without deriving it from
 `ProviderErrorKind`, status retryability, or native prose. Classification alone
 remains insufficient, and absence of the proof keeps the known failure terminal.
-This constraint adds no proof to the implemented evidence vocabulary above.
 
 The admitting condition is fixed here rather than left to that child, because
 the two readings differ in whether another provider call happens. A proof is
@@ -304,6 +306,8 @@ admitted only when the adapter decoded its own documented error envelope and the
 decoded native token names one of the three causes in that adapter's exhaustive
 mapping — `rate_limit_error` or `overloaded_error` for Anthropic, and
 `rate_limit_exceeded`, `rate_limit_error`, or `insufficient_quota` for OpenAI.
+Codex additionally admits a classified availability cause only when its JSONL
+lifecycle reaches the exact, noncontradictory `turn.failed` closure.
 Every status-derived fallback carries no proof: a response whose body is absent,
 undecodable, or names a token the mapping does not cover keeps its
 status-classified kind and stays an ordinary terminal known failure. A native

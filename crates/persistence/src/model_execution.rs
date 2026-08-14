@@ -6,31 +6,35 @@
 //! method holds a database transaction across provider work.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
     num::NonZeroU64,
+    sync::Arc,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
-    CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
-    ModelCallAuthorizationReread, ModelCallCredentialReference,
-    ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus,
+    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
+    ClassifyOperatorFailure, CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
+    FailPreparedModelCallTransaction, ModelCallAuthorizationReread, ModelCallCredentialReference,
+    ModelCallObservationCommitOutcome, ModelCallTerminalIdentityCandidates, OperatorFailureClass,
+    PrepareModelCallOutcome, PrepareModelCallTransaction, PrepareToolContinuationOutcome,
+    ResolvedToolConversationEntry, RetainedCapabilityFailureStatus,
+    RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
-    AssistantText, AuthorizedModelCall, CancelledModelCallTurn, CancelledToolRoundModelCallTurn,
-    CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
-    CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
-    DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
-    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
+    CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
+    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
+    DelegatedTurnActivationInput, DelegatedWakeTurnActivationInput, DelegationContent,
+    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurn, FailedModelCallTurnIdentities, FastMode,
+    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
+    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -45,7 +49,7 @@ use signalbox_domain::{
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
     ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
-    ToolRoundModelCallTurn, TurnId, UserContent,
+    ToolRoundModelCallTurn, TurnAttemptId, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -276,6 +280,175 @@ impl ModelCallRepositoryError {
 /// Compatibility spelling for the application-owned prepare result.
 pub use signalbox_application::PrepareModelCallOutcome as PrepareInitialModelCallOutcome;
 
+/// Runtime action frozen for one classified availability trigger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialPoolRuntimeAction {
+    /// Leave selection unchanged and terminalize normally.
+    Stay,
+    /// Exclude the member from the session's next distinct turn.
+    SwitchNextTurn,
+    /// Continue this turn on the next admitted member.
+    SwitchNow,
+    /// Exclude the membership for sessions without prior success.
+    AvoidNewSessions,
+    /// Exclude the profile across every pool until cleared.
+    Quarantine,
+}
+
+/// Frozen exhaustion policy for one selected credential pool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialPoolRuntimeExhaustion {
+    /// Wait only when durable exclusion evidence carries a wake condition.
+    Park,
+    /// Terminalize immediately with the typed pool-wide cause.
+    Fail,
+}
+
+impl CredentialPoolRuntimeExhaustion {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Park => "park",
+            Self::Fail => "fail",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, ModelCallRepositoryError> {
+        match value {
+            "park" => Ok(Self::Park),
+            "fail" => Ok(Self::Fail),
+            _ => Err(ModelCallCorruption::Unsupported {
+                field: "model_call_credential_pool_policy on_pool_exhausted",
+                value: value.to_owned(),
+            }
+            .into()),
+        }
+    }
+}
+
+impl CredentialPoolRuntimeAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stay => "stay",
+            Self::SwitchNextTurn => "switch_next_turn",
+            Self::SwitchNow => "switch_now",
+            Self::AvoidNewSessions => "avoid_new_sessions",
+            Self::Quarantine => "quarantine",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, ModelCallRepositoryError> {
+        match value {
+            "stay" => Ok(Self::Stay),
+            "switch_next_turn" => Ok(Self::SwitchNextTurn),
+            "switch_now" => Ok(Self::SwitchNow),
+            "avoid_new_sessions" => Ok(Self::AvoidNewSessions),
+            "quarantine" => Ok(Self::Quarantine),
+            _ => Err(ModelCallCorruption::Unsupported {
+                field: "model_call_credential_pool_policy action",
+                value: value.to_owned(),
+            }
+            .into()),
+        }
+    }
+}
+
+/// Runtime pool member in immutable policy order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialPoolRuntimeMember {
+    credential_reference: Arc<str>,
+    priority: u32,
+}
+
+impl CredentialPoolRuntimeMember {
+    /// Binds one non-secret profile reference to its membership priority.
+    pub fn new(credential_reference: impl Into<Arc<str>>, priority: u32) -> Self {
+        Self {
+            credential_reference: credential_reference.into(),
+            priority,
+        }
+    }
+
+    /// Borrows the deployment-owned profile reference.
+    pub fn credential_reference(&self) -> &str {
+        &self.credential_reference
+    }
+
+    /// Returns the membership priority.
+    pub const fn priority(&self) -> u32 {
+        self.priority
+    }
+}
+
+/// Immutable credential-pool policy supplied by admitted daemon configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialPoolRuntimePolicy {
+    name: Arc<str>,
+    members: Arc<[CredentialPoolRuntimeMember]>,
+    on_pool_exhausted: CredentialPoolRuntimeExhaustion,
+    quota_exhausted: CredentialPoolRuntimeAction,
+    rate_limited: CredentialPoolRuntimeAction,
+    overloaded: CredentialPoolRuntimeAction,
+}
+
+impl CredentialPoolRuntimePolicy {
+    /// Creates one policy in its already-resolved traversal order.
+    pub fn new(
+        name: impl Into<Arc<str>>,
+        members: impl Into<Arc<[CredentialPoolRuntimeMember]>>,
+        on_pool_exhausted: CredentialPoolRuntimeExhaustion,
+        quota_exhausted: CredentialPoolRuntimeAction,
+        rate_limited: CredentialPoolRuntimeAction,
+        overloaded: CredentialPoolRuntimeAction,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            members: members.into(),
+            on_pool_exhausted,
+            quota_exhausted,
+            rate_limited,
+            overloaded,
+        }
+    }
+
+    /// Borrows the exact pool name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Borrows members in deterministic selection order.
+    pub fn members(&self) -> &[CredentialPoolRuntimeMember] {
+        &self.members
+    }
+
+    const fn action(&self, cause: ProviderModelCallFailureCause) -> CredentialPoolRuntimeAction {
+        match cause {
+            ProviderModelCallFailureCause::QuotaExhausted => {
+                let _configured_action = self.quota_exhausted;
+                CredentialPoolRuntimeAction::Stay
+            }
+            ProviderModelCallFailureCause::RateLimited => {
+                let _configured_action = self.rate_limited;
+                CredentialPoolRuntimeAction::Stay
+            }
+            ProviderModelCallFailureCause::Overloaded => {
+                let _configured_action = self.overloaded;
+                CredentialPoolRuntimeAction::Stay
+            }
+            ProviderModelCallFailureCause::CredentialRejected
+            | ProviderModelCallFailureCause::PermissionDenied
+            | ProviderModelCallFailureCause::InvalidRequest
+            | ProviderModelCallFailureCause::TargetNotFound
+            | ProviderModelCallFailureCause::RequestTooLarge
+            | ProviderModelCallFailureCause::ProviderInternal
+            | ProviderModelCallFailureCause::Unrecognized => CredentialPoolRuntimeAction::Stay,
+        }
+    }
+}
+
+/// Pool policies indexed by exact resolved target.
+pub type CredentialPoolRuntimeCatalog =
+    HashMap<ResolvedProviderTarget, CredentialPoolRuntimePolicy>;
+
 /// PostgreSQL adapter for the initial model-call execution transactions.
 #[derive(Clone, Debug)]
 pub struct PostgresModelCallRepository {
@@ -283,6 +456,7 @@ pub struct PostgresModelCallRepository {
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    credential_pools: CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
 }
 
@@ -299,6 +473,7 @@ impl PostgresModelCallRepository {
             targets,
             credential_reference,
             credential_families: None,
+            credential_pools: HashMap::new(),
             cache_inclusive_input_targets: HashSet::new(),
         }
     }
@@ -309,6 +484,12 @@ impl PostgresModelCallRepository {
         credential_families: crate::ModelCredentialFamilyCatalog,
     ) -> Self {
         self.credential_families = Some(credential_families);
+        self
+    }
+
+    /// Enables per-call credential-pool selection and trigger observation.
+    pub fn with_credential_pools(mut self, credential_pools: CredentialPoolRuntimeCatalog) -> Self {
+        self.credential_pools = credential_pools;
         self
     }
 
@@ -355,6 +536,7 @@ impl PostgresModelCallRepository {
         )
         .with_cache_inclusive_input_targets(self.cache_inclusive_input_targets.clone())
         .with_session_credentials(self.credential_families.clone())
+        .with_credential_pools(self.credential_pools.clone())
     }
 
     /// Derives approval-judge storage from this repository's exact database
@@ -504,10 +686,26 @@ impl PostgresModelCallRepository {
             self.credential_families.as_ref(),
         )
         .await?;
+        let selected = select_runtime_pool_credential(
+            connection,
+            prepared.session(),
+            prepared.turn(),
+            prepared.attempt(),
+            prepared.call().target(),
+            credential_reference,
+            &self.credential_pools,
+        )
+        .await?;
+        let Some(credential_reference) = selected.reference.as_ref() else {
+            // The activated turn remains call-free; the ordinary preparation
+            // pass owns the typed pool-exhaustion closure and its identities.
+            return Ok(());
+        };
         insert_prepared_call(
             connection,
             &prepared,
-            &credential_reference,
+            credential_reference,
+            selected.policy.as_ref(),
             self.cache_inclusive_input_targets
                 .contains(&prepared.call().target()),
         )
@@ -533,6 +731,15 @@ impl PostgresModelCallRepository {
             lock_session(&mut transaction, session).await?;
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
+            if execution.current_call().is_none()
+                && let Some(delay) = load_availability_successor_backoff(
+                    &mut transaction,
+                    execution.current_attempt().id(),
+                )
+                .await?
+            {
+                return Ok((false, PrepareInitialModelCallOutcome::RetryBackoff(delay)));
+            }
             if let Some(current_call) = execution.current_call() {
                 return match current_call.state() {
                     signalbox_domain::CurrentModelCallState::Prepared => {
@@ -619,6 +826,71 @@ impl PostgresModelCallRepository {
                 .model_settings()
                 .effective()
                 .fast_mode();
+            let selected = if let Ok(resolved) = self
+                .targets
+                .resolve(*execution.configuration().effective().model())
+            {
+                let credential_reference = resolve_session_credential(
+                    &mut transaction,
+                    session,
+                    resolved.target(),
+                    fast_mode,
+                    &self.credential_reference,
+                    self.credential_families.as_ref(),
+                )
+                .await?;
+                Some(
+                    select_runtime_pool_credential(
+                        &mut transaction,
+                        session,
+                        execution.turn(),
+                        execution.current_attempt().id(),
+                        resolved.target(),
+                        credential_reference,
+                        &self.credential_pools,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            if let Some(SelectedRuntimePoolCredential {
+                reference: None,
+                policy: Some(policy),
+            }) = selected.as_ref()
+            {
+                let source_turn = execution.turn();
+                let reclassifications = steering_identities
+                    .iter()
+                    .map(|(_, reclassification)| reclassification.clone())
+                    .collect::<Vec<_>>();
+                let mut proposed_turns = BTreeSet::new();
+                for reclassification in &reclassifications {
+                    record_reclassified_turn_candidate(
+                        source_turn,
+                        reclassification.turn(),
+                        &mut proposed_turns,
+                    )?;
+                }
+                let exhausted = execution
+                    .fail_credential_pool_exhausted(
+                        policy.name().to_owned(),
+                        failure_identities
+                            .clone()
+                            .with_pending_steering_reclassifications(reclassifications),
+                    )
+                    .map_err(|_| {
+                        ModelCallRepositoryError::InvalidTransition(
+                            "credential-pool exhaustion could not close fresh execution state",
+                        )
+                    })?;
+                persist_credential_pool_exhaustion(&mut transaction, &exhausted, None, None)
+                    .await?;
+                return Ok((
+                    true,
+                    PrepareInitialModelCallOutcome::PoolExhausted(Box::new(exhausted)),
+                ));
+            }
             let prepared = match execution.prepare_initial_call_consuming_steering(
                 call,
                 steering_entries,
@@ -675,19 +947,21 @@ impl PostgresModelCallRepository {
                     ));
                 }
             };
-            let credential_reference = resolve_session_credential(
-                &mut transaction,
-                session,
-                prepared.call().target(),
-                fast_mode,
-                &self.credential_reference,
-                self.credential_families.as_ref(),
-            )
-            .await?;
+            let selected = selected.ok_or(ModelCallRepositoryError::InvalidTransition(
+                "resolved initial call omitted credential selection",
+            ))?;
+            let credential_reference =
+                selected
+                    .reference
+                    .as_ref()
+                    .ok_or(ModelCallRepositoryError::InvalidTransition(
+                        "admitted credential pool omitted its selected member",
+                    ))?;
             insert_prepared_call(
                 &mut transaction,
                 &prepared,
-                &credential_reference,
+                credential_reference,
+                selected.policy.as_ref(),
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
             )
@@ -763,16 +1037,30 @@ impl PostgresModelCallRepository {
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
-        self.apply_terminal_observation_candidates(
-            session,
-            observation,
-            ModelCallTerminalIdentityCandidates::Exact(identities),
-            next_reclassified_turn,
-        )
-        .await?
-        .ok_or(ModelCallRepositoryError::InvalidTransition(
-            "provider observation was discarded by logical delegation terminalization",
-        ))
+        let outcome = self
+            .apply_terminal_observation_candidates(
+                session,
+                observation,
+                ModelCallTerminalIdentityCandidates::Exact(identities),
+                next_reclassified_turn,
+            )
+            .await?
+            .ok_or(ModelCallRepositoryError::InvalidTransition(
+                "provider observation was discarded by logical delegation terminalization",
+            ))?;
+        match outcome {
+            ModelCallObservationCommitOutcome::Terminal(outcome) => Ok(outcome),
+            ModelCallObservationCommitOutcome::AvailabilitySuccessor(_) => {
+                Err(ModelCallRepositoryError::InvalidTransition(
+                    "exact terminal candidates produced an availability successor",
+                ))
+            }
+            ModelCallObservationCommitOutcome::PoolExhausted(_) => {
+                Err(ModelCallRepositoryError::InvalidTransition(
+                    "exact terminal candidates produced pool exhaustion",
+                ))
+            }
+        }
     }
 
     async fn apply_terminal_observation_candidates<NextTurn>(
@@ -781,7 +1069,7 @@ impl PostgresModelCallRepository {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         mut next_reclassified_turn: NextTurn,
-    ) -> Result<Option<ModelCallTerminalOutcome>, ModelCallRepositoryError>
+    ) -> Result<Option<ModelCallObservationCommitOutcome>, ModelCallRepositoryError>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
@@ -804,6 +1092,154 @@ impl PostgresModelCallRepository {
             )?;
             let usage = observation.usage();
             let provider_failure_cause = observation.provider_failure_cause();
+            let retry_after = observation.retry_after();
+            if let ModelCallTerminalIdentityCandidates::Availability {
+                failed,
+                successor_attempt,
+            } = identities
+            {
+                let cause =
+                    provider_failure_cause.ok_or(ModelCallRepositoryError::InvalidTransition(
+                        "availability candidates require a classified provider failure",
+                    ))?;
+                let policy =
+                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?;
+                let action = policy.action(cause);
+                let mut pool_exhausted_name = None;
+                let current_reference = if action == CredentialPoolRuntimeAction::Stay {
+                    None
+                } else {
+                    Some(
+                        sqlx::query_scalar::<_, String>(
+                            "SELECT credential_reference
+                           FROM model_call
+                          WHERE model_call_id = $1",
+                        )
+                        .bind(observation.call().into_uuid())
+                        .fetch_one(&mut *transaction)
+                        .await?,
+                    )
+                };
+                if action == CredentialPoolRuntimeAction::SwitchNow {
+                    let current_reference = current_reference.as_deref().ok_or(
+                        ModelCallRepositoryError::InvalidTransition(
+                            "switch_now omitted the current credential reference",
+                        ),
+                    )?;
+                    sqlx::query(
+                        "INSERT INTO credential_pool_chain_exclusion
+                            (session_id, turn_id, credential_reference,
+                             predecessor_model_call_id, cause_kind)
+                         VALUES ($1, $2, $3, $4, $5)
+                         ON CONFLICT (session_id, turn_id, credential_reference) DO NOTHING",
+                    )
+                    .bind(session_id_to_uuid(session))
+                    .bind(turn_id_to_uuid(observation.correlation().turn()))
+                    .bind(current_reference)
+                    .bind(observation.call().into_uuid())
+                    .bind(encode_provider_failure_cause(cause))
+                    .execute(&mut *transaction)
+                    .await?;
+                    pool_exhausted_name = Some(Arc::<str>::from(policy.name()));
+                    let excluded = sqlx::query_scalar::<_, String>(
+                        "SELECT credential_reference
+                           FROM credential_pool_chain_exclusion
+                          WHERE session_id = $1
+                            AND turn_id = $2",
+                    )
+                    .bind(session_id_to_uuid(session))
+                    .bind(turn_id_to_uuid(observation.correlation().turn()))
+                    .fetch_all(&mut *transaction)
+                    .await?
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                    if policy
+                        .members()
+                        .iter()
+                        .any(|member| !excluded.contains(member.credential_reference()))
+                    {
+                        let backoff = availability_retry_backoff(
+                            cause,
+                            retry_after,
+                            excluded.len(),
+                            observation.call(),
+                        );
+                        let successor = execution
+                            .apply_availability_successor(observation, successor_attempt)
+                            .map_err(|_| {
+                                ModelCallRepositoryError::InvalidTransition(
+                                    "availability successor does not match fresh issued state",
+                                )
+                            })?;
+                        persist_availability_successor(
+                            &mut transaction,
+                            &successor,
+                            usage,
+                            cause,
+                            backoff,
+                        )
+                        .await?;
+                        return Ok(Some(
+                            ModelCallObservationCommitOutcome::AvailabilitySuccessor(
+                                AvailabilitySuccessorOutcome::new(successor, backoff),
+                            ),
+                        ));
+                    }
+                    sqlx::query(
+                        "INSERT INTO credential_pool_terminal_exhaustion
+                            (terminal_attempt_id, terminal_model_call_id,
+                             session_id, turn_id, pool_name, cause_kind)
+                         VALUES ($1, $2, $3, $4, $5, $6)",
+                    )
+                    .bind(observation.correlation().attempt().into_uuid())
+                    .bind(observation.call().into_uuid())
+                    .bind(session_id_to_uuid(session))
+                    .bind(turn_id_to_uuid(observation.correlation().turn()))
+                    .bind(policy.name())
+                    .bind(encode_provider_failure_cause(cause))
+                    .execute(&mut *transaction)
+                    .await?;
+                } else if let Some(current_reference) = current_reference {
+                    persist_credential_pool_member_action(
+                        &mut transaction,
+                        &policy,
+                        action,
+                        current_reference,
+                        &observation,
+                        cause,
+                    )
+                    .await?;
+                }
+                let outcome = execution
+                    .apply_terminal_observation(
+                        observation,
+                        ModelCallTerminalIdentities::Failed(failed),
+                    )
+                    .map_err(|_| {
+                        ModelCallRepositoryError::InvalidTransition(
+                            "terminal observation does not match fresh issued state",
+                        )
+                    })?;
+                persist_terminal_outcome_with_usage(
+                    &mut transaction,
+                    &outcome,
+                    usage,
+                    provider_failure_cause,
+                )
+                .await?;
+                if let Some(pool_name) = pool_exhausted_name {
+                    return Ok(Some(ModelCallObservationCommitOutcome::PoolExhausted(
+                        CredentialPoolExhaustedOutcome::AfterCall {
+                            pool_name,
+                            terminal: Box::new(outcome),
+                        },
+                    )));
+                }
+                return Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome)));
+            }
+            let ModelCallTerminalIdentityCandidates::Exact(identities) = identities else {
+                unreachable!("terminal candidate selection removes tool alternatives")
+            };
             let outcome = execution
                 .apply_terminal_observation(observation, identities)
                 .map_err(|_| {
@@ -818,7 +1254,7 @@ impl PostgresModelCallRepository {
                 provider_failure_cause,
             )
             .await?;
-            Ok(Some(outcome))
+            Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome)))
         }
         .await;
         finish_commit(transaction, result).await
@@ -1629,6 +2065,7 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     targets: &ModelTargetCatalog,
     credential_reference: &ModelCallCredentialReference,
     credential_families: Option<&crate::ModelCredentialFamilyCatalog>,
+    credential_pools: &CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: &HashSet<ResolvedProviderTarget>,
     projection: &PreparedToolResultProjection,
     call: ModelCallId,
@@ -1694,6 +2131,58 @@ where
         .model_settings()
         .effective()
         .fast_mode();
+    let selected =
+        if let Ok(resolved) = targets.resolve(*execution.configuration().effective().model()) {
+            let default_reference = resolve_session_credential(
+                connection,
+                session,
+                resolved.target(),
+                fast_mode,
+                credential_reference,
+                credential_families,
+            )
+            .await?;
+            Some(
+                select_runtime_pool_credential(
+                    connection,
+                    session,
+                    turn,
+                    execution.current_attempt().id(),
+                    resolved.target(),
+                    default_reference,
+                    credential_pools,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+    if let Some(SelectedRuntimePoolCredential {
+        reference: None,
+        policy: Some(policy),
+    }) = selected.as_ref()
+    {
+        let reclassifications = steering_identities
+            .iter()
+            .map(|(_, reclassification)| reclassification.clone())
+            .collect::<Vec<_>>();
+        let exhausted = execution
+            .fail_credential_pool_exhausted(
+                policy.name().to_owned(),
+                failure_identities
+                    .clone()
+                    .with_pending_steering_reclassifications(reclassifications),
+            )
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "credential-pool exhaustion could not close tool continuation",
+                )
+            })?;
+        persist_credential_pool_exhaustion(connection, &exhausted, None, None).await?;
+        return Ok(PrepareToolContinuationOutcome::PoolExhausted(Box::new(
+            exhausted,
+        )));
+    }
     let prepared = match execution.prepare_initial_call_consuming_steering(
         call,
         steering_entries,
@@ -1748,19 +2237,20 @@ where
             ));
         }
     };
-    let credential_reference = resolve_session_credential(
-        connection,
-        session,
-        prepared.call().target(),
-        fast_mode,
-        credential_reference,
-        credential_families,
-    )
-    .await?;
+    let selected = selected.ok_or(ModelCallRepositoryError::InvalidTransition(
+        "resolved continuation omitted credential selection",
+    ))?;
+    let credential_reference =
+        selected
+            .reference
+            .ok_or(ModelCallRepositoryError::InvalidTransition(
+                "available continuation selection omitted a credential reference",
+            ))?;
     insert_prepared_call(
         connection,
         &prepared,
         &credential_reference,
+        selected.policy.as_ref(),
         cache_inclusive_input_targets.contains(&prepared.call().target()),
     )
     .await?;
@@ -2180,7 +2670,7 @@ impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
+    ) -> Result<Option<ModelCallObservationCommitOutcome>, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
@@ -3195,9 +3685,11 @@ fn record_reclassified_turn_candidate(
 fn select_terminal_identity_candidates(
     identities: ModelCallTerminalIdentityCandidates,
     execution: &ModelCallExecution,
-) -> ModelCallTerminalIdentities {
+) -> ModelCallTerminalIdentityCandidates {
     match identities {
-        ModelCallTerminalIdentityCandidates::Exact(identities) => identities,
+        ModelCallTerminalIdentityCandidates::Exact(identities) => {
+            ModelCallTerminalIdentityCandidates::Exact(identities)
+        }
         ModelCallTerminalIdentityCandidates::ToolRound {
             continuing,
             stopped,
@@ -3206,49 +3698,91 @@ fn select_terminal_identity_candidates(
                 execution.current_attempt().state(),
                 signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
             ) {
-                ModelCallTerminalIdentities::StoppedToolRound(stopped)
+                ModelCallTerminalIdentityCandidates::Exact(
+                    ModelCallTerminalIdentities::StoppedToolRound(stopped),
+                )
             } else {
-                ModelCallTerminalIdentities::ToolRound(continuing)
+                ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::ToolRound(
+                    continuing,
+                ))
+            }
+        }
+        ModelCallTerminalIdentityCandidates::Availability {
+            failed,
+            successor_attempt,
+        } => {
+            if matches!(
+                execution.current_attempt().state(),
+                signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
+            ) {
+                ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Failed(
+                    failed,
+                ))
+            } else {
+                ModelCallTerminalIdentityCandidates::Availability {
+                    failed,
+                    successor_attempt,
+                }
             }
         }
     }
 }
 
 fn attach_pending_reclassification_candidates(
-    identities: ModelCallTerminalIdentities,
+    identities: ModelCallTerminalIdentityCandidates,
     execution: &ModelCallExecution,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
-) -> Result<ModelCallTerminalIdentities, ModelCallRepositoryError> {
+) -> Result<ModelCallTerminalIdentityCandidates, ModelCallRepositoryError> {
     let reclassifications = pending_reclassification_candidates(execution, next_turn)?;
     Ok(match identities {
-        ModelCallTerminalIdentities::Completed(identities) => {
-            ModelCallTerminalIdentities::Completed(
-                identities.with_pending_steering_reclassifications(reclassifications),
-            )
-        }
-        ModelCallTerminalIdentities::ToolRound(identities) => {
-            ModelCallTerminalIdentities::ToolRound(identities)
-        }
-        ModelCallTerminalIdentities::StoppedToolRound(identities) => {
+        ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Completed(
+            identities,
+        )) => ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Completed(
+            identities.with_pending_steering_reclassifications(reclassifications),
+        )),
+        ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::ToolRound(
+            identities,
+        )) => ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::ToolRound(
+            identities,
+        )),
+        ModelCallTerminalIdentityCandidates::Exact(
+            ModelCallTerminalIdentities::StoppedToolRound(identities),
+        ) => ModelCallTerminalIdentityCandidates::Exact(
             ModelCallTerminalIdentities::StoppedToolRound(
                 identities.with_pending_steering_reclassifications(reclassifications),
-            )
-        }
-        ModelCallTerminalIdentities::Failed(identities) => ModelCallTerminalIdentities::Failed(
-            identities.with_pending_steering_reclassifications(reclassifications),
+            ),
         ),
-        ModelCallTerminalIdentities::PhysicalCancellation(identities) => {
+        ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Failed(
+            identities,
+        )) => ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Failed(
+            identities.with_pending_steering_reclassifications(reclassifications),
+        )),
+        ModelCallTerminalIdentityCandidates::Exact(
+            ModelCallTerminalIdentities::PhysicalCancellation(identities),
+        ) => ModelCallTerminalIdentityCandidates::Exact(
             ModelCallTerminalIdentities::PhysicalCancellation(
                 identities.with_pending_steering_reclassifications(reclassifications),
-            )
-        }
-        ModelCallTerminalIdentities::Refused(identities) => ModelCallTerminalIdentities::Refused(
-            identities.with_pending_steering_reclassifications(reclassifications),
+            ),
         ),
-        ModelCallTerminalIdentities::Ambiguous(identities) => {
-            ModelCallTerminalIdentities::Ambiguous(
-                identities.with_pending_steering_reclassifications(reclassifications),
-            )
+        ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Refused(
+            identities,
+        )) => ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Refused(
+            identities.with_pending_steering_reclassifications(reclassifications),
+        )),
+        ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Ambiguous(
+            identities,
+        )) => ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Ambiguous(
+            identities.with_pending_steering_reclassifications(reclassifications),
+        )),
+        ModelCallTerminalIdentityCandidates::Availability {
+            failed,
+            successor_attempt,
+        } => ModelCallTerminalIdentityCandidates::Availability {
+            failed: failed.with_pending_steering_reclassifications(reclassifications),
+            successor_attempt,
+        },
+        ModelCallTerminalIdentityCandidates::ToolRound { .. } => {
+            unreachable!("tool candidates were selected above")
         }
     })
 }
@@ -3433,6 +3967,19 @@ async fn require_live_execution_with_targets(
     }
     let (pinned_target, calls) =
         load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
+    let signalbox_domain::ActiveTurnPhase::Running { current_attempt } = active_turn.phase() else {
+        return Err(ModelCallRepositoryError::NoLiveExecution);
+    };
+    let availability_successor: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM credential_pool_availability_successor
+              WHERE successor_turn_attempt_id = $1
+         )",
+    )
+    .bind(current_attempt.id().into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
     let call_snapshot = match calls
         .first()
         .filter(|call| call.frontier() != starting_snapshot.frontier().snapshot())
@@ -3506,6 +4053,9 @@ async fn require_live_execution_with_targets(
     )
     .with_tool_result_correlations(tool_result_correlations)
     .with_tool_denial_correlations(tool_denial_correlations);
+    if availability_successor {
+        input = input.with_availability_successor();
+    }
     if let Some(projection) = uncommitted_tool_result_projection {
         input = input.with_uncommitted_tool_result_projection(projection);
     }
@@ -4462,10 +5012,288 @@ fn require_exact_call(
     }
 }
 
+struct SelectedRuntimePoolCredential {
+    reference: Option<ModelCallCredentialReference>,
+    policy: Option<CredentialPoolRuntimePolicy>,
+}
+
+async fn load_availability_successor_backoff(
+    connection: &mut PgConnection,
+    attempt: TurnAttemptId,
+) -> Result<Option<Duration>, ModelCallRepositoryError> {
+    let remaining: Option<i64> = sqlx::query_scalar(
+        "SELECT GREATEST(
+                    0,
+                    CEIL(EXTRACT(EPOCH FROM (retry_not_before - clock_timestamp())) * 1000)
+                )::bigint
+           FROM credential_pool_availability_successor
+          WHERE successor_turn_attempt_id = $1
+            AND retry_not_before > clock_timestamp()",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    remaining
+        .map(|milliseconds| {
+            u64::try_from(milliseconds)
+                .map(Duration::from_millis)
+                .map_err(|_| {
+                    ModelCallCorruption::Inconsistent("availability successor backoff").into()
+                })
+        })
+        .transpose()
+}
+
+async fn select_runtime_pool_credential(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    attempt: TurnAttemptId,
+    target: ResolvedProviderTarget,
+    default_reference: ModelCallCredentialReference,
+    policies: &CredentialPoolRuntimeCatalog,
+) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
+    let predecessor: Option<Uuid> = sqlx::query_scalar(
+        "SELECT predecessor_model_call_id
+           FROM credential_pool_availability_successor
+          WHERE successor_turn_attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let (policy, predecessor_reference) = match predecessor {
+        Some(predecessor) => {
+            let policy = load_call_pool_policy(connection, predecessor).await?;
+            let reference: String = sqlx::query_scalar(
+                "SELECT credential_reference
+                   FROM model_call
+                  WHERE model_call_id = $1",
+            )
+            .bind(predecessor)
+            .fetch_one(&mut *connection)
+            .await?;
+            (Some(policy), Some(reference))
+        }
+        None => (policies.get(&target).cloned(), None),
+    };
+    let Some(policy) = policy else {
+        return Ok(SelectedRuntimePoolCredential {
+            reference: Some(default_reference),
+            policy: None,
+        });
+    };
+    let mut excluded = sqlx::query_scalar::<_, String>(
+        "SELECT credential_reference
+           FROM credential_pool_chain_exclusion
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let completed_references = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT call.credential_reference
+           FROM model_call AS call
+           JOIN model_call_credential_pool_policy AS call_policy
+             ON call_policy.model_call_id = call.model_call_id
+          WHERE call.session_id = $1
+            AND call_policy.pool_name = $2
+            AND call.state_kind = 'terminal'
+            AND call.terminal_disposition_kind = 'completed'",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(policy.name())
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
+        "SELECT action_id, credential_reference, action_kind,
+                observed_session_id, observed_turn_id
+           FROM credential_pool_member_action
+          WHERE consumed_turn_id IS NULL
+            AND (pool_name = $1 OR action_kind = 'quarantine')",
+    )
+    .bind(policy.name())
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut next_turn_actions = Vec::new();
+    for (action_id, reference, action_kind, observed_session, observed_turn) in actions {
+        let applies = match action_kind.as_str() {
+            "quarantine" => true,
+            "avoid_new_sessions" => !completed_references.contains(&reference),
+            "switch_next_turn" => {
+                observed_session == session_id_to_uuid(session)
+                    && observed_turn != turn_id_to_uuid(turn)
+            }
+            _ => {
+                return Err(ModelCallCorruption::Unsupported {
+                    field: "credential_pool_member_action action_kind",
+                    value: action_kind,
+                }
+                .into());
+            }
+        };
+        if applies {
+            excluded.insert(reference);
+        }
+        if action_kind == "switch_next_turn" && applies {
+            next_turn_actions.push(action_id);
+        }
+    }
+    let start = predecessor_reference
+        .as_deref()
+        .and_then(|reference| {
+            policy
+                .members()
+                .iter()
+                .position(|member| member.credential_reference() == reference)
+        })
+        .map_or(0, |position| position.saturating_add(1));
+    let selected = policy
+        .members()
+        .iter()
+        .skip(start)
+        .chain(policy.members().iter().take(start))
+        .find(|member| !excluded.contains(member.credential_reference()))
+        .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
+    if selected.is_some() && !next_turn_actions.is_empty() {
+        sqlx::query(
+            "UPDATE credential_pool_member_action
+                SET consumed_turn_id = $1
+              WHERE action_id = ANY($2)
+                AND consumed_turn_id IS NULL",
+        )
+        .bind(turn_id_to_uuid(turn))
+        .bind(&next_turn_actions)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(SelectedRuntimePoolCredential {
+        reference: selected,
+        policy: Some(policy),
+    })
+}
+
+async fn persist_call_pool_policy(
+    connection: &mut PgConnection,
+    call: ModelCallId,
+    policy: &CredentialPoolRuntimePolicy,
+) -> Result<(), ModelCallRepositoryError> {
+    sqlx::query(
+        "INSERT INTO model_call_credential_pool_policy
+            (model_call_id, pool_name, on_pool_exhausted,
+             on_quota_exhausted, on_rate_limited, on_overloaded)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(call.into_uuid())
+    .bind(policy.name())
+    .bind(policy.on_pool_exhausted.as_str())
+    .bind(policy.quota_exhausted.as_str())
+    .bind(policy.rate_limited.as_str())
+    .bind(policy.overloaded.as_str())
+    .execute(&mut *connection)
+    .await?;
+    for (ordinal, member) in policy.members().iter().enumerate() {
+        let ordinal = i32::try_from(ordinal).map_err(|_| {
+            ModelCallRepositoryError::InvalidTransition("credential pool ordinal overflow")
+        })?;
+        sqlx::query(
+            "INSERT INTO model_call_credential_pool_member
+                (model_call_id, member_ordinal, credential_reference, priority)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(call.into_uuid())
+        .bind(ordinal)
+        .bind(member.credential_reference())
+        .bind(i64::from(member.priority()))
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn persist_credential_pool_member_action(
+    connection: &mut PgConnection,
+    policy: &CredentialPoolRuntimePolicy,
+    action: CredentialPoolRuntimeAction,
+    credential_reference: String,
+    observation: &CorrelatedModelCallTerminalObservation,
+    cause: ProviderModelCallFailureCause,
+) -> Result<(), ModelCallRepositoryError> {
+    if action == CredentialPoolRuntimeAction::Stay
+        || action == CredentialPoolRuntimeAction::SwitchNow
+    {
+        return Err(ModelCallRepositoryError::InvalidTransition(
+            "non-durable pool action reached durable action persistence",
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO credential_pool_member_action
+            (pool_name, credential_reference, action_kind,
+             observed_session_id, observed_turn_id,
+             observation_model_call_id, cause_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(policy.name())
+    .bind(credential_reference)
+    .bind(action.as_str())
+    .bind(session_id_to_uuid(observation.correlation().session()))
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .bind(observation.call().into_uuid())
+    .bind(encode_provider_failure_cause(cause))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+async fn load_call_pool_policy(
+    connection: &mut PgConnection,
+    call: Uuid,
+) -> Result<CredentialPoolRuntimePolicy, ModelCallRepositoryError> {
+    let row = sqlx::query(
+        "SELECT pool_name, on_pool_exhausted,
+                on_quota_exhausted, on_rate_limited, on_overloaded
+           FROM model_call_credential_pool_policy
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .fetch_one(&mut *connection)
+    .await?;
+    let members = sqlx::query_as::<_, (String, i64)>(
+        "SELECT credential_reference, priority
+           FROM model_call_credential_pool_member
+          WHERE model_call_id = $1
+          ORDER BY member_ordinal",
+    )
+    .bind(call)
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .map(|(reference, priority)| {
+        let priority = u32::try_from(priority)
+            .map_err(|_| ModelCallCorruption::Inconsistent("credential pool member priority"))?;
+        Ok(CredentialPoolRuntimeMember::new(reference, priority))
+    })
+    .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
+    Ok(CredentialPoolRuntimePolicy::new(
+        row.try_get::<String, _>("pool_name")?,
+        Arc::<[CredentialPoolRuntimeMember]>::from(members),
+        CredentialPoolRuntimeExhaustion::parse(row.try_get("on_pool_exhausted")?)?,
+        CredentialPoolRuntimeAction::parse(row.try_get("on_quota_exhausted")?)?,
+        CredentialPoolRuntimeAction::parse(row.try_get("on_rate_limited")?)?,
+        CredentialPoolRuntimeAction::parse(row.try_get("on_overloaded")?)?,
+    ))
+}
+
 pub(crate) async fn insert_prepared_call(
     connection: &mut PgConnection,
     prepared: &signalbox_domain::PreparedInitialModelCall,
     credential_reference: &ModelCallCredentialReference,
+    credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
@@ -4576,6 +5404,9 @@ pub(crate) async fn insert_prepared_call(
     .bind(input_includes_cache_tokens)
     .execute(&mut *connection)
     .await?;
+    if let Some(policy) = credential_pool_policy {
+        persist_call_pool_policy(connection, call.id(), policy).await?;
+    }
     outbox::append(
         connection,
         OutboxEvent::ModelCallTransition {
@@ -5586,6 +6417,144 @@ async fn persist_tool_round(
     )
     .await?;
     append_terminal_call_event(connection, round.session(), round.turn(), round.call()).await
+}
+
+async fn persist_availability_successor(
+    connection: &mut PgConnection,
+    successor: &AvailabilitySuccessorModelCallTurn,
+    usage: ProviderReportedTokenUsage,
+    cause: ProviderModelCallFailureCause,
+    backoff: Duration,
+) -> Result<(), ModelCallRepositoryError> {
+    persist_ended_call_with_provider_failure_cause(
+        connection,
+        successor.session(),
+        successor.turn(),
+        successor.predecessor_call(),
+        usage,
+        Some(cause),
+    )
+    .await?;
+    persist_ended_attempt(
+        connection,
+        successor.session(),
+        successor.turn(),
+        successor.predecessor_attempt(),
+    )
+    .await?;
+    if successor.successor_attempt().state() != &signalbox_domain::CurrentTurnAttemptState::Prepared
+    {
+        return Err(
+            ModelCallCorruption::Inconsistent("availability successor attempt state").into(),
+        );
+    }
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id,
+             continued_from_attempt_id, state_kind)
+         VALUES ($1, $2, $3, $4, 'prepared')",
+    )
+    .bind(successor.successor_attempt().id().into_uuid())
+    .bind(turn_id_to_uuid(successor.turn()))
+    .bind(session_id_to_uuid(successor.session()))
+    .bind(successor.predecessor_attempt().id().into_uuid())
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO credential_pool_availability_successor
+            (predecessor_model_call_id, successor_turn_attempt_id, cause_kind,
+             retry_backoff_milliseconds, retry_not_before)
+         VALUES ($1, $2, $3, $4,
+                 transaction_timestamp() + ($4 * interval '1 millisecond'))",
+    )
+    .bind(successor.predecessor_call().id().into_uuid())
+    .bind(successor.successor_attempt().id().into_uuid())
+    .bind(encode_provider_failure_cause(cause))
+    .bind(i64::try_from(backoff.as_millis()).map_err(|_| {
+        ModelCallRepositoryError::InvalidTransition("availability backoff overflow")
+    })?)
+    .execute(&mut *connection)
+    .await?;
+    let rows = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET current_attempt_id = $1
+          WHERE turn_id = $2
+            AND session_id = $3
+            AND state_kind = 'active'
+            AND active_phase_kind = 'running'
+            AND current_attempt_id = $4",
+    )
+    .bind(successor.successor_attempt().id().into_uuid())
+    .bind(turn_id_to_uuid(successor.turn()))
+    .bind(session_id_to_uuid(successor.session()))
+    .bind(successor.predecessor_attempt().id().into_uuid())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(rows, "availability successor attempt")?;
+    append_terminal_call_event(
+        connection,
+        successor.session(),
+        successor.turn(),
+        successor.predecessor_call(),
+    )
+    .await
+}
+
+async fn persist_credential_pool_exhaustion(
+    connection: &mut PgConnection,
+    exhausted: &CredentialPoolExhaustedModelCallTurn,
+    last_call: Option<ModelCallId>,
+    last_cause: Option<ProviderModelCallFailureCause>,
+) -> Result<(), ModelCallRepositoryError> {
+    persist_failed_with_delegated_child_result(
+        connection,
+        exhausted.failed(),
+        ProviderReportedTokenUsage::unreported(),
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO credential_pool_terminal_exhaustion
+            (terminal_attempt_id, terminal_model_call_id,
+             session_id, turn_id, pool_name, cause_kind)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(exhausted.failed().attempt().id().into_uuid())
+    .bind(last_call.map(ModelCallId::into_uuid))
+    .bind(session_id_to_uuid(exhausted.failed().session()))
+    .bind(turn_id_to_uuid(exhausted.failed().turn()))
+    .bind(exhausted.pool_name())
+    .bind(last_cause.map(encode_provider_failure_cause))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+const MAX_AVAILABILITY_BACKOFF: Duration = Duration::from_secs(300);
+const MAX_EXPONENTIAL_BACKOFF: Duration = Duration::from_secs(60);
+
+fn availability_retry_backoff(
+    cause: ProviderModelCallFailureCause,
+    retry_after: Option<Duration>,
+    failed_members: usize,
+    call: ModelCallId,
+) -> Duration {
+    if !matches!(
+        cause,
+        ProviderModelCallFailureCause::RateLimited | ProviderModelCallFailureCause::Overloaded
+    ) {
+        return Duration::ZERO;
+    }
+    let exponent = u32::try_from(failed_members.saturating_sub(1).min(6)).unwrap_or(6);
+    let ceiling = Duration::from_secs(1_u64 << exponent).min(MAX_EXPONENTIAL_BACKOFF);
+    let sample = u64::try_from(call.as_uuid().as_u128() & 1023).unwrap_or(0);
+    let ceiling_millis = u64::try_from(ceiling.as_millis()).unwrap_or(u64::MAX);
+    let jittered_millis = ceiling_millis * (512 + sample) / 1024;
+    let jittered = Duration::from_millis(jittered_millis);
+    jittered
+        .max(retry_after.unwrap_or(Duration::ZERO))
+        .min(MAX_AVAILABILITY_BACKOFF)
 }
 
 async fn persist_cancelled_tool_round(
@@ -6987,21 +7956,63 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io};
+    use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io, time::Duration};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::{AssistantText, TurnId};
+    use signalbox_domain::{AssistantText, ModelCallId, ProviderModelCallFailureCause, TurnId};
     use sqlx::{
         error::{DatabaseError, ErrorKind},
         types::Uuid,
     };
 
     use super::{
-        ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-        StoredTerminalFrontierMember, cancellation_poll_interval, commit_failure_is_ambiguous,
+        MAX_AVAILABILITY_BACKOFF, ModelCallCorruption, ModelCallIdentityCollision,
+        ModelCallRepositoryError, StoredTerminalFrontierMember, availability_retry_backoff,
+        cancellation_poll_interval, commit_failure_is_ambiguous,
         completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
         failed_terminal_frontier_matches, record_reclassified_turn_candidate,
     };
+
+    #[test]
+    fn rate_limit_backoff_is_jittered_inside_the_exponential_window() {
+        let delay = availability_retry_backoff(
+            ProviderModelCallFailureCause::RateLimited,
+            None,
+            3,
+            ModelCallId::from_uuid(Uuid::from_u128(17)),
+        );
+        assert!(delay >= Duration::from_secs(2));
+        assert!(delay <= Duration::from_secs(4));
+    }
+
+    #[test]
+    fn provider_retry_after_is_a_minimum_until_the_cap() {
+        let delay = availability_retry_backoff(
+            ProviderModelCallFailureCause::Overloaded,
+            Some(Duration::from_secs(47)),
+            1,
+            ModelCallId::from_uuid(Uuid::from_u128(18)),
+        );
+        assert_eq!(delay, Duration::from_secs(47));
+    }
+
+    #[test]
+    fn provider_retry_after_is_capped_and_quota_rotation_is_immediate() {
+        let capped = availability_retry_backoff(
+            ProviderModelCallFailureCause::RateLimited,
+            Some(Duration::from_secs(600)),
+            1,
+            ModelCallId::from_uuid(Uuid::from_u128(19)),
+        );
+        assert_eq!(capped, MAX_AVAILABILITY_BACKOFF);
+        let quota = availability_retry_backoff(
+            ProviderModelCallFailureCause::QuotaExhausted,
+            Some(Duration::from_secs(15)),
+            1,
+            ModelCallId::from_uuid(Uuid::from_u128(20)),
+        );
+        assert_eq!(quota, Duration::ZERO);
+    }
 
     #[test]
     fn delegated_terminal_relation_decode_failure_is_corruption() {

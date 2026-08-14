@@ -3,6 +3,8 @@
 //! Concrete HTTP and TLS construction remain provider-owned; provider-neutral
 //! boundary policy is supplied by `signalbox-model-runtime`.
 
+use std::time::{Duration, SystemTime};
+
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::redirect::Policy;
@@ -16,7 +18,7 @@ use signalbox_model_runtime::{
     PreparationFailure, PreparationOutcome, ProviderErrorEvidence, ProviderErrorKind,
     ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming, StreamInterruption,
     TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
-    boundary_loss_evidence as exchange_loss, emit_provider_observation as emit,
+    boundary_loss_evidence as exchange_loss, emit_provider_observation as emit, parse_retry_after,
     pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
     provider_response_prefix_len as streamed_response_prefix_len,
@@ -396,6 +398,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         let exchange = ExchangeFacts {
             provider_request_id: request_id_from(response.headers()),
             http_status: Some(status.as_u16()),
+            retry_after: retry_after_from(response.headers()),
         };
         emit(
             correlation,
@@ -669,6 +672,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 exchange: refusal.exchange,
                 reported_model: refusal.reported_model,
                 kind: ProviderErrorKind::Unrecognized,
+                non_acceptance_proven: false,
                 native: NativeErrorFacts {
                     // Refusal came from `finish_reason` or `message.refusal`,
                     // not from a native error-envelope token.
@@ -704,6 +708,10 @@ async fn finish_error(
             // The Chat Completions error envelope reports no model identity.
             reported_model: None,
             kind,
+            non_acceptance_proven: matches!(
+                kind,
+                ProviderErrorKind::RateLimited | ProviderErrorKind::QuotaExhausted
+            ),
             native: error.into_native_facts(),
             usage: TokenUsage::unreported(),
         });
@@ -720,6 +728,7 @@ fn fallback_provider_error(exchange: ExchangeFacts, status: u16, body: &[u8]) ->
         exchange,
         reported_model: None,
         kind: classify_error(status, None),
+        non_acceptance_proven: false,
         native: NativeErrorFacts {
             error_token: None,
             error_code: None,
@@ -789,6 +798,13 @@ fn request_id_from(headers: &HeaderMap) -> Option<ProviderRequestId> {
         .or_else(|| headers.get("request-id"))
         .and_then(|value| value.to_str().ok())
         .map(ProviderRequestId::new)
+}
+
+fn retry_after_from(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after(value, SystemTime::now()))
 }
 
 /// The credential as a sensitivity-marked bearer header value, or `None`
