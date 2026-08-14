@@ -1902,15 +1902,20 @@ where
         &mut self,
         session: SessionId,
     ) -> Result<PathBuf, SessionWorkspaceFailure> {
-        let _executors = self.resolve(session).await?;
-        let state = self.state.lock().await;
-        match state.bindings.get(&session) {
+        let executors = self.resolve(session).await?;
+        let path = match self.state.lock().await.bindings.get(&session) {
             Some(RecordedSessionBinding::ConfiguredRoot) => Ok(self.roots.configured().to_owned()),
             Some(RecordedSessionBinding::DerivedRoot { .. }) => {
                 Ok(self.roots.derived_path(session))
             }
             None => Err(SessionWorkspaceFailure::UnresolvableRoot),
+        }?;
+        let standing = ComposedWorkspaceIdentity::capture(&path)
+            .map_err(|_| SessionWorkspaceFailure::ReplacedRootIdentity)?;
+        if standing != executors.workspace_identity {
+            return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
         }
+        Ok(path)
     }
 
     async fn resolve(
@@ -8092,6 +8097,32 @@ finally:
 
         assert_eq!(initially_bound, derived);
         assert_eq!(after_removal, Err(WorkspaceInstructionRootResolutionError));
+    }
+
+    /// Instruction discovery revalidates the pathname against the pinned tool
+    /// composition, so a replacement configured directory cannot be scanned
+    /// while tools continue to use the displaced directory descriptors.
+    #[tokio::test]
+    async fn instruction_discovery_refuses_a_replaced_configured_binding() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let displaced = parent.path().join("displaced-workspace");
+        let first = session(FIRST_SESSION_IDENTITY);
+        let resolver = offline_workspace_instruction_root_resolver(&configured);
+        let initially_bound = resolver
+            .resolve(first)
+            .await
+            .expect("the configured root binds");
+        fs::rename(&configured, &displaced).expect("the bound root is displaced");
+        fs::create_dir(&configured).expect("a replacement directory takes its pathname");
+
+        let after_replacement = resolver.resolve(first).await;
+
+        assert_eq!(initially_bound, configured);
+        assert_eq!(
+            after_replacement,
+            Err(WorkspaceInstructionRootResolutionError)
+        );
     }
 
     /// One composition serves two concurrent sessions from two roots: each

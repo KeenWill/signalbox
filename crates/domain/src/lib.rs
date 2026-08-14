@@ -385,7 +385,7 @@ pub use workspace_instruction::{
     InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
     InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
     InstructionSkillMetadata, InstructionSkillMetadataError, InstructionSkillMetadataInput,
-    TurnInstructionManifest, TurnInstructionManifestId,
+    InstructionSourcePath, TurnInstructionManifest, TurnInstructionManifestId,
 };
 
 macro_rules! define_identity {

@@ -11,8 +11,9 @@ use signalbox_domain::{
     SessionId, TurnId, TurnInstructionManifest, TurnInstructionManifestId,
 };
 use signalbox_persistence::workspace_instructions::{
-    RecordTurnInstructionSnapshotOutcome, TurnInstructionManifestPreflight,
-    WorkspaceInstructionRepository, WorkspaceInstructionRepositoryError,
+    CountedActivationInstructionEvidence, RecordTurnInstructionSnapshotOutcome,
+    TurnInstructionManifestPreflight, WorkspaceInstructionRepository,
+    WorkspaceInstructionRepositoryError,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -99,6 +100,27 @@ pub struct WorkspaceInstructionRuntime {
     configured_roots: Box<[InstructionPath]>,
 }
 
+/// Complete filesystem evidence retained only until a counted activation
+/// transaction either commits it or rejects the stale preview.
+#[derive(Debug)]
+pub(crate) struct PreparedCountedActivationInstructions {
+    discovery: InstructionDiscoveryId,
+    manifest: TurnInstructionManifest,
+    snapshot: signalbox_application::InstructionDiscoverySnapshot,
+    bundle_ids: Box<[InstructionBundleId]>,
+}
+
+impl PreparedCountedActivationInstructions {
+    pub(crate) fn evidence(&self) -> CountedActivationInstructionEvidence<'_> {
+        CountedActivationInstructionEvidence::new(
+            self.discovery,
+            &self.manifest,
+            &self.snapshot,
+            &self.bundle_ids,
+        )
+    }
+}
+
 impl WorkspaceInstructionRuntime {
     /// Supplies persistence, session workspace derivation, and explicit roots.
     pub fn new(
@@ -149,21 +171,31 @@ impl WorkspaceInstructionRuntime {
         outcome_is_available(outcome)
     }
 
-    /// Records the canonical empty manifest before a counted activation whose
-    /// first model call must commit in the activation transaction.
-    pub async fn prepare_counted_activation(
+    /// Prepares complete evidence for the counted activation transaction.
+    ///
+    /// An incomplete scan remains durable diagnostic evidence without binding
+    /// a manifest. Complete evidence is returned without persistence so a
+    /// stale preview cannot leave an authoritative snapshot behind.
+    pub(crate) async fn prepare_counted_activation(
         &self,
         session: SessionId,
         turn: TurnId,
-    ) -> Result<bool, WorkspaceInstructionRuntimeError> {
+    ) -> Result<Option<PreparedCountedActivationInstructions>, WorkspaceInstructionRuntimeError>
+    {
         match self
             .repository
             .preflight_counted_activation(session, turn)
             .await
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?
         {
-            TurnInstructionManifestPreflight::Available(_) => return Ok(true),
-            TurnInstructionManifestPreflight::TurnUnavailable => return Ok(false),
+            TurnInstructionManifestPreflight::Available(_) => {
+                return Err(WorkspaceInstructionRuntimeError::Persistence(
+                    WorkspaceInstructionRepositoryError::Corruption(
+                        "queued counted activation manifest preexisted",
+                    ),
+                ));
+            }
+            TurnInstructionManifestPreflight::TurnUnavailable => return Ok(None),
             TurnInstructionManifestPreflight::Absent => {}
         }
         let snapshot = self.discover(session).await?;
@@ -173,14 +205,41 @@ impl WorkspaceInstructionRuntime {
             session,
             turn,
         );
-        let outcome = self
-            .repository
-            .record_counted_activation(discovery, manifest, &snapshot, || {
-                InstructionBundleId::from_uuid(Uuid::now_v7())
-            })
-            .await
-            .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
-        outcome_is_available(outcome)
+        if !snapshot.is_complete() {
+            let outcome = self
+                .repository
+                .record_counted_activation(discovery, manifest, &snapshot, || {
+                    InstructionBundleId::from_uuid(Uuid::now_v7())
+                })
+                .await
+                .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
+            return match outcome {
+                RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
+                    Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete)
+                }
+                RecordTurnInstructionSnapshotOutcome::TurnUnavailable => Ok(None),
+                RecordTurnInstructionSnapshotOutcome::Recorded(_)
+                | RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_) => {
+                    Err(WorkspaceInstructionRuntimeError::Persistence(
+                        WorkspaceInstructionRepositoryError::Corruption(
+                            "incomplete counted activation bound a manifest",
+                        ),
+                    ))
+                }
+            };
+        }
+        let bundle_ids = snapshot
+            .bundles()
+            .iter()
+            .map(|_| InstructionBundleId::from_uuid(Uuid::now_v7()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(Some(PreparedCountedActivationInstructions {
+            discovery,
+            manifest,
+            snapshot,
+            bundle_ids,
+        }))
     }
 
     async fn discover(
@@ -188,8 +247,15 @@ impl WorkspaceInstructionRuntime {
         session: SessionId,
     ) -> Result<signalbox_application::InstructionDiscoverySnapshot, WorkspaceInstructionRuntimeError>
     {
-        let mut roots = Vec::with_capacity(self.configured_roots.len() + 1);
-        if let Some(workspace_root) = &self.workspace_root {
+        let runner_placed = self
+            .repository
+            .session_has_runner_placement(session)
+            .await
+            .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
+        let mut roots =
+            Vec::with_capacity(self.configured_roots.len() + usize::from(!runner_placed));
+        let workspace_binding = if !runner_placed && let Some(workspace_root) = &self.workspace_root
+        {
             let path = workspace_root
                 .resolve(session)
                 .await
@@ -198,13 +264,25 @@ impl WorkspaceInstructionRuntime {
                 InstructionDiscoveryRootKind::Workspace,
                 instruction_path(&path)?,
             ));
-        }
+            Some((workspace_root.clone(), path))
+        } else {
+            None
+        };
         roots.extend(self.configured_roots.iter().cloned().map(|path| {
             InstructionDiscoveryRoot::new(InstructionDiscoveryRootKind::Configured, path)
         }));
         let snapshot = tokio::task::spawn_blocking(move || discover_workspace_instructions(roots))
             .await
             .map_err(WorkspaceInstructionRuntimeError::DiscoveryTask)?;
+        if let Some((workspace_root, expected_path)) = workspace_binding {
+            let revalidated_path = workspace_root
+                .resolve(session)
+                .await
+                .map_err(|_| WorkspaceInstructionRuntimeError::UnresolvableWorkspace)?;
+            if revalidated_path != expected_path {
+                return Err(WorkspaceInstructionRuntimeError::UnresolvableWorkspace);
+            }
+        }
         Ok(snapshot)
     }
 }

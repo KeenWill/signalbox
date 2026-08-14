@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -18,7 +19,7 @@ use serde::Deserialize;
 use signalbox_domain::{
     InstructionBundleKind, InstructionBundleRegistration, InstructionBundleRegistrationInput,
     InstructionDigest, InstructionDiscoveryRootKind, InstructionPath, InstructionSkillMetadata,
-    InstructionSkillMetadataInput,
+    InstructionSkillMetadataInput, InstructionSourcePath,
 };
 
 /// One explicit authority root to scan.
@@ -168,7 +169,7 @@ struct DiscoveryState {
     started: Instant,
     classified_entries: u64,
     candidate_source_bytes: u64,
-    seen_sources: BTreeSet<InstructionPath>,
+    seen_sources: BTreeSet<InstructionSourcePath>,
     complete: bool,
 }
 
@@ -176,6 +177,12 @@ struct DiscoveryState {
 struct ClassifiedDirectoryEntry {
     name: OsString,
     file_type: rustix::fs::FileType,
+}
+
+#[cfg(unix)]
+struct PendingDirectory {
+    parent: Rc<PathBuf>,
+    name: Option<OsString>,
 }
 
 #[cfg(unix)]
@@ -241,8 +248,11 @@ fn walk_root(
     state: &mut DiscoveryState,
 ) -> bool {
     let root_path = PathBuf::from(root.path().as_str());
-    let root_descriptor = match open_directory_no_follow(&root_path) {
-        Ok(descriptor) => descriptor,
+    let root_descriptor = match open_directory_no_follow(&root_path, || {
+        check_elapsed(root.path(), findings, state)
+    }) {
+        Ok(Some(descriptor)) => descriptor,
+        Ok(None) => return false,
         Err(_) => {
             return push_finding(
                 root.path().clone(),
@@ -252,14 +262,26 @@ fn walk_root(
             );
         }
     };
-    let mut pending = vec![(PathBuf::new(), root_path, true)];
-    while let Some((relative_directory, directory, is_root)) = pending.pop() {
+    let mut pending = vec![PendingDirectory {
+        parent: Rc::new(PathBuf::new()),
+        name: None,
+    }];
+    while let Some(pending_directory) = pending.pop() {
+        let is_root = pending_directory.name.is_none();
+        let relative_directory = Rc::new(match pending_directory.name {
+            Some(name) => pending_directory.parent.join(name),
+            None => PathBuf::new(),
+        });
+        let directory = root_path.join(relative_directory.as_path());
         if !check_elapsed(root.path(), findings, state) {
             return false;
         }
         let directory_descriptor =
-            match open_directory_beneath(&root_descriptor, &relative_directory) {
-                Ok(descriptor) => descriptor,
+            match open_directory_beneath(&root_descriptor, &relative_directory, || {
+                check_elapsed(root.path(), findings, state)
+            }) {
+                Ok(Some(descriptor)) => descriptor,
+                Ok(None) => return false,
                 Err(_) => {
                     let kind = if is_root {
                         InstructionDiscoveryFindingKind::RootUnavailable
@@ -348,12 +370,10 @@ fn walk_root(
                 return false;
             }
             if classified_entry.file_type == rustix::fs::FileType::Directory {
-                let child_path = directory.join(&classified_entry.name);
-                pending.push((
-                    relative_directory.join(&classified_entry.name),
-                    child_path,
-                    false,
-                ));
+                pending.push(PendingDirectory {
+                    parent: Rc::clone(&relative_directory),
+                    name: Some(classified_entry.name),
+                });
             }
         }
     }
@@ -458,7 +478,7 @@ fn register_file(
     let source = location.directory.join(location.source_name);
     let source_path = match source
         .to_str()
-        .and_then(|value| InstructionPath::try_new(value.to_owned()).ok())
+        .and_then(|value| InstructionSourcePath::try_new(value.to_owned()).ok())
     {
         Some(path) => path,
         None => {
@@ -481,8 +501,9 @@ fn register_file(
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => text,
         Err(_) => {
-            return push_finding(
-                source_path,
+            return push_path_finding(
+                &source,
+                root.path(),
                 InstructionDiscoveryFindingKind::NonUtf8Source,
                 findings,
                 state,
@@ -493,8 +514,9 @@ fn register_file(
         Some(parent) => match parse_skill(text, parent) {
             Some(skill) => Some(skill),
             None => {
-                return push_finding(
-                    source_path,
+                return push_path_finding(
+                    &source,
+                    root.path(),
                     InstructionDiscoveryFindingKind::InvalidSkill,
                     findings,
                     state,
@@ -512,8 +534,9 @@ fn register_file(
         source_hash: InstructionDigest::sha256(&bytes),
         skill,
     }) else {
-        return push_finding(
-            source_path,
+        return push_path_finding(
+            &source,
+            root.path(),
             InstructionDiscoveryFindingKind::InvalidSkill,
             findings,
             state,
@@ -544,10 +567,71 @@ fn read_candidate(
                 ));
             }
         };
-    read_candidate_from(file, source, fallback, findings, state)
+    read_candidate_before_deadline(file, source, fallback, findings, state)
 }
 
 #[cfg(unix)]
+fn read_candidate_before_deadline(
+    source_file: impl Read + Send + 'static,
+    source: &std::path::Path,
+    fallback: &InstructionPath,
+    findings: &mut Vec<InstructionDiscoveryFinding>,
+    state: &mut DiscoveryState,
+) -> Result<Vec<u8>, bool> {
+    let remaining_bytes = state
+        .limits
+        .candidate_source_bytes
+        .saturating_sub(state.candidate_source_bytes);
+    let remaining_time = state.limits.elapsed.saturating_sub(state.started.elapsed());
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = match std::thread::Builder::new()
+        .name(String::from("signalbox-instruction-read"))
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = source_file
+                .take(remaining_bytes.saturating_add(1))
+                .read_to_end(&mut bytes);
+            let _sent = sender.send((bytes, result));
+        }) {
+        Ok(reader) => reader,
+        Err(_) => {
+            return Err(push_path_finding(
+                source,
+                fallback,
+                InstructionDiscoveryFindingKind::EntryUnreadable,
+                findings,
+                state,
+            ));
+        }
+    };
+    drop(reader);
+    match receiver.recv_timeout(remaining_time) {
+        Ok((bytes, result)) => finish_candidate_read(
+            bytes,
+            result,
+            source,
+            fallback,
+            findings,
+            state,
+            remaining_bytes,
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(reach_limit(
+            path_for_finding(source, fallback),
+            InstructionDiscoveryLimitKind::ElapsedTime,
+            findings,
+            state,
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(push_path_finding(
+            source,
+            fallback,
+            InstructionDiscoveryFindingKind::EntryUnreadable,
+            findings,
+            state,
+        )),
+    }
+}
+
+#[cfg(all(unix, test))]
 fn read_candidate_from(
     source_file: impl Read,
     source: &std::path::Path,
@@ -555,15 +639,36 @@ fn read_candidate_from(
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
 ) -> Result<Vec<u8>, bool> {
-    let remaining = state
+    let remaining_bytes = state
         .limits
         .candidate_source_bytes
         .saturating_sub(state.candidate_source_bytes);
     let mut bytes = Vec::new();
     let read_result = source_file
-        .take(remaining.saturating_add(1))
+        .take(remaining_bytes.saturating_add(1))
         .read_to_end(&mut bytes);
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > remaining {
+    finish_candidate_read(
+        bytes,
+        read_result,
+        source,
+        fallback,
+        findings,
+        state,
+        remaining_bytes,
+    )
+}
+
+#[cfg(unix)]
+fn finish_candidate_read(
+    bytes: Vec<u8>,
+    read_result: io::Result<usize>,
+    source: &std::path::Path,
+    fallback: &InstructionPath,
+    findings: &mut Vec<InstructionDiscoveryFinding>,
+    state: &mut DiscoveryState,
+    remaining_bytes: u64,
+) -> Result<Vec<u8>, bool> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > remaining_bytes {
         state.candidate_source_bytes = state.limits.candidate_source_bytes;
         reach_limit(
             path_for_finding(source, fallback),
@@ -573,7 +678,7 @@ fn read_candidate_from(
         );
         return Err(false);
     }
-    state.candidate_source_bytes += u64::try_from(bytes.len()).unwrap_or(remaining);
+    state.candidate_source_bytes += u64::try_from(bytes.len()).unwrap_or(remaining_bytes);
     if read_result.is_err() {
         return Err(push_path_finding(
             source,
@@ -590,7 +695,10 @@ fn read_candidate_from(
 }
 
 #[cfg(unix)]
-fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
+fn open_directory_no_follow(
+    source: &std::path::Path,
+    mut continue_opening: impl FnMut() -> bool,
+) -> io::Result<Option<OwnedFd>> {
     use rustix::fs::{CWD, Mode, OFlags, openat};
 
     let mut descriptor = openat(
@@ -600,6 +708,9 @@ fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
         Mode::empty(),
     )?;
     for component in source.components() {
+        if !continue_opening() {
+            return Ok(None);
+        }
         match component {
             std::path::Component::RootDir => {}
             std::path::Component::Normal(name) => {
@@ -608,19 +719,32 @@ fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
             _ => return Err(io::Error::other("instruction root is not canonical")),
         }
     }
-    Ok(descriptor)
+    if !continue_opening() {
+        return Ok(None);
+    }
+    Ok(Some(descriptor))
 }
 
 #[cfg(unix)]
-fn open_directory_beneath(root: &OwnedFd, relative: &std::path::Path) -> io::Result<OwnedFd> {
+fn open_directory_beneath(
+    root: &OwnedFd,
+    relative: &std::path::Path,
+    mut continue_opening: impl FnMut() -> bool,
+) -> io::Result<Option<OwnedFd>> {
     let mut descriptor = rustix::io::dup(root)?;
     for component in relative.components() {
+        if !continue_opening() {
+            return Ok(None);
+        }
         let std::path::Component::Normal(name) = component else {
             return Err(io::Error::other("instruction path is not relative"));
         };
         descriptor = open_directory_at_no_follow(&descriptor, name)?;
     }
-    Ok(descriptor)
+    if !continue_opening() {
+        return Ok(None);
+    }
+    Ok(Some(descriptor))
 }
 
 #[cfg(unix)]
@@ -803,8 +927,12 @@ impl<T> OptionalFrontmatterField<T> {
 }
 
 fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
-    let body = text.strip_prefix("---\n")?;
-    let boundary = body.find("\n---\n")?;
+    let (body, closing) = if let Some(body) = text.strip_prefix("---\n") {
+        (body, "\n---\n")
+    } else {
+        (text.strip_prefix("---\r\n")?, "\r\n---\r\n")
+    };
+    let boundary = body.find(closing)?;
     let parsed: PortableSkillFrontmatter = serde_yaml_ng::from_str(&body[..boundary]).ok()?;
     if parsed
         .compatibility
@@ -1036,6 +1164,51 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn candidate_read_stops_at_the_elapsed_deadline() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, writer) = UnixStream::pair().expect("fixture stream pair opens");
+        let source = PathBuf::from("/workspace/AGENTS.md");
+        let fallback = InstructionPath::try_new(String::from("/workspace"))
+            .expect("fixture fallback is valid");
+        let mut findings = Vec::new();
+        let mut state = test_state(test_limits(4, 4, 64, Duration::from_millis(5)));
+
+        let result =
+            read_candidate_before_deadline(reader, &source, &fallback, &mut findings, &mut state);
+
+        assert!(result.is_err());
+        assert!(!state.complete);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].kind(),
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::ElapsedTime
+            )
+        );
+        drop(writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_siblings_share_their_parent_path() {
+        let parent = Rc::new(PathBuf::from("nested/parent"));
+        let left = PendingDirectory {
+            parent: Rc::clone(&parent),
+            name: Some(OsString::from("left")),
+        };
+        let right = PendingDirectory {
+            parent: Rc::clone(&parent),
+            name: Some(OsString::from("right")),
+        };
+
+        assert!(Rc::ptr_eq(&left.parent, &right.parent));
+        assert_eq!(left.name.as_deref(), Some(OsStr::new("left")));
+        assert_eq!(right.name.as_deref(), Some(OsStr::new("right")));
+    }
+
     #[test]
     fn elapsed_limit_stops_before_candidate_inspection() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
@@ -1087,7 +1260,9 @@ mod tests {
         fs::write(&outside, "outside instructions").expect("outside source exists");
         symlink(&outside, &candidate).expect("candidate link exists");
         let root = workspace_root(&temporary);
-        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
         let mut findings = Vec::new();
         let mut state = test_state(test_limits(4, 4, 64, Duration::from_secs(1)));
 
@@ -1116,7 +1291,9 @@ mod tests {
     fn candidate_descriptor_is_nonblocking_before_type_validation() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
         fs::write(temporary.path().join("AGENTS.md"), "instructions").expect("candidate exists");
-        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
 
         let candidate = open_candidate_at_no_follow(&descriptor, OsStr::new("AGENTS.md"))
             .expect("regular candidate opens");
@@ -1134,7 +1311,9 @@ mod tests {
         let outside = tempfile::tempdir().expect("outside root exists");
         let child = temporary.path().join("child");
         symlink(outside.path(), &child).expect("child link exists");
-        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
 
         let result = open_directory_at_no_follow(&descriptor, OsStr::new("child"));
 
@@ -1186,6 +1365,36 @@ mod tests {
         assert!(parse_skill(compatibility, "review-rust").is_none());
         assert!(parse_skill(metadata, "review-rust").is_none());
         assert!(parse_skill(allowed_tools, "review-rust").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_reopen_stops_when_the_deadline_expires() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        fs::create_dir_all(temporary.path().join("first/second"))
+            .expect("nested fixture directories exist");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
+        let mut checks = [true, false].into_iter();
+
+        let reopened =
+            open_directory_beneath(&descriptor, PathBuf::from("first/second").as_path(), || {
+                checks.next().unwrap_or(false)
+            })
+            .expect("the deadline stop is not an I/O failure");
+
+        assert!(reopened.is_none());
+    }
+
+    #[test]
+    fn crlf_portable_skill_frontmatter_is_accepted() {
+        let source = "---\r\nname: review-rust\r\ndescription: Review Rust.\r\n---\r\n# Review\r\n";
+
+        let skill = parse_skill(source, "review-rust").expect("CRLF frontmatter is portable");
+
+        assert_eq!(skill.name(), "review-rust");
+        assert_eq!(skill.description(), "Review Rust.");
     }
 
     fn workspace_root(temporary: &tempfile::TempDir) -> InstructionDiscoveryRoot {

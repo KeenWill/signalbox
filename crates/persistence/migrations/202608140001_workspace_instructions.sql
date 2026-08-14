@@ -238,9 +238,11 @@ CREATE TRIGGER turn_instruction_manifest_is_append_only
 BEFORE UPDATE OR DELETE ON turn_instruction_manifest
 FOR EACH ROW EXECUTE FUNCTION reject_instruction_evidence_change();
 
--- Existing pre-alpha turns ran with no instruction projection. Their synthetic
--- discoveries therefore have no roots, candidates, or findings and are
--- complete evidence for the empty manifest each historical model call used.
+-- Existing pre-alpha model calls ran with no instruction projection. Their
+-- synthetic discoveries therefore have no roots, candidates, or findings and
+-- are complete evidence for the empty manifest each already-prepared call
+-- used. Queued turns and active turns without a call remain unbound so their
+-- first call performs ordinary discovery after this migration.
 INSERT INTO instruction_discovery (
     instruction_discovery_id,
     session_id,
@@ -253,7 +255,13 @@ INSERT INTO instruction_discovery (
     scan_complete
 )
 SELECT turn_id, session_id, turn_id, 1, 0, 0, 0, 0, true
-  FROM turn_lifecycle;
+  FROM turn_lifecycle AS lifecycle
+ WHERE EXISTS (
+           SELECT 1
+             FROM model_call AS call
+            WHERE call.session_id = lifecycle.session_id
+              AND call.turn_id = lifecycle.turn_id
+       );
 
 INSERT INTO turn_instruction_manifest (
     turn_instruction_manifest_id,
@@ -282,7 +290,13 @@ SELECT
         || sha256(convert_to('signalbox-instruction-eligibility-v1', 'UTF8'))
         || convert_to('turn_start', 'UTF8')
     )
-  FROM turn_lifecycle;
+  FROM turn_lifecycle AS lifecycle
+ WHERE EXISTS (
+           SELECT 1
+             FROM model_call AS call
+            WHERE call.session_id = lifecycle.session_id
+              AND call.turn_id = lifecycle.turn_id
+       );
 
 ALTER TABLE model_call
     ADD COLUMN turn_instruction_manifest_id uuid;
