@@ -145,8 +145,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-five files, `202607180001` through
-`202608110015` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — seventy-six files, `202607180001` through
+`202608140002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -196,6 +196,13 @@ log.
 
 Implemented table families (across the forward-only migrations):
 
+- `program_run_journal_stream`, its mutable per-run sequence allocator,
+  append-only `program_run_journal_entry` frames, and the typed
+  `program_run_journal_nondeterminism` evidence record. The allocator serializes
+  each run's global, request, and delivery orders; deferred checks require its
+  committed counters to equal the journal maxima. The adapter's composable
+  delivery append begins and commits no transaction, so a transactional effect
+  records its consequence and answer through one caller-owned commit;
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `replace_session_metadata_command`,
