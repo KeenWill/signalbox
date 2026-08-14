@@ -5626,6 +5626,15 @@ async fn handle_read_blob_metadata<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    if services.blob_store_registry.is_none() {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    }
     let repository = BlobCatalogRepository::new(services.pool.clone());
     let outcome = tokio::time::timeout(
         BLOB_READ_TIMEOUT,
@@ -5669,6 +5678,15 @@ async fn handle_read_blob_chunk<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let Some(registry) = services.blob_store_registry.as_deref() else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    };
     if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
         return write_error(
             writer,
@@ -5682,6 +5700,45 @@ where
         )
         .await;
     }
+    let Some(length) = NonZeroU64::new(length_bytes.value()) else {
+        return Err(ProcessConnectionError::EncodeInvariant);
+    };
+    let repository = BlobCatalogRepository::new(services.pool.clone());
+    let metadata = tokio::time::timeout(
+        BLOB_READ_TIMEOUT,
+        read_blob_metadata(&repository, digest.into_digest()),
+    )
+    .await
+    .unwrap_or(Err(BlobReadError::Unavailable));
+    let metadata = match metadata {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return write_blob_read_error(
+                writer,
+                version,
+                request_id,
+                Some((offset_bytes, length_bytes)),
+                error,
+            )
+            .await;
+        }
+    };
+    if offset_bytes
+        .value()
+        .checked_add(length.get())
+        .is_none_or(|end| end > metadata.byte_length)
+    {
+        return write_blob_read_error(
+            writer,
+            version,
+            request_id,
+            Some((offset_bytes, length_bytes)),
+            BlobReadError::RangeOutOfBounds {
+                blob_length: metadata.byte_length,
+            },
+        )
+        .await;
+    }
     let Some(permit) = try_acquire_blob_read_permit(Arc::clone(&services.blob_read_budget)) else {
         return write_error(
             writer,
@@ -5691,14 +5748,10 @@ where
         )
         .await;
     };
-    let Some(length) = NonZeroU64::new(length_bytes.value()) else {
-        return Err(ProcessConnectionError::EncodeInvariant);
-    };
-    let repository = BlobCatalogRepository::new(services.pool.clone());
     let traversal = tokio::time::timeout(
         BLOB_READ_TIMEOUT,
         read_blob_chunk(
-            services.blob_store_registry.as_deref(),
+            registry,
             &repository,
             digest.into_digest(),
             offset_bytes.value(),
