@@ -129,9 +129,6 @@ impl WorkspaceInstructionRuntime {
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?
         {
             TurnInstructionManifestPreflight::Available(_) => return Ok(true),
-            TurnInstructionManifestPreflight::DiscoveryIncomplete(_) => {
-                return Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete);
-            }
             TurnInstructionManifestPreflight::TurnUnavailable => return Ok(false),
             TurnInstructionManifestPreflight::Absent => {}
         }
@@ -166,9 +163,6 @@ impl WorkspaceInstructionRuntime {
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?
         {
             TurnInstructionManifestPreflight::Available(_) => return Ok(true),
-            TurnInstructionManifestPreflight::DiscoveryIncomplete(_) => {
-                return Err(WorkspaceInstructionRuntimeError::DiscoveryIncomplete);
-            }
             TurnInstructionManifestPreflight::TurnUnavailable => return Ok(false),
             TurnInstructionManifestPreflight::Absent => {}
         }
