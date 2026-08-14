@@ -79,12 +79,6 @@ later placement-revision-correlated protocol that returns bytes and findings
 from the pinned runner workspace. It may not be emulated by asking a
 model-runtime adapter to load ambient files.
 
-Explicit roots use the optional version-one `[workspace_instructions]` table and
-its required `registered_roots` array of unique canonical absolute UTF-8 paths.
-Omitting the table is an empty array. Missing or unreadable registered roots are
-scan findings rather than startup failures, so their absence is durable evidence
-for each affected turn.
-
 The walk considers every nested directory and yields an agent-document candidate
 for each `AGENTS.md` regular file. In the workspace it yields an agent-skill
 candidate for each directory immediately below an `.agents/skills` directory
