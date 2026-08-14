@@ -28,10 +28,10 @@ use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Directive, DirectiveAction,
     Enroll, Enrolled, Frame, FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase,
     LeaseClaim, LeaseCorrelation, LeasePhaseKind, MAX_FRAME_BYTES, Message, PositiveU64,
-    ReconnectDirectives, ReconnectInventory, Recovery as WireWorkspaceRecovery, Registered,
-    Rejected, RejectionCode, ReplacementPending, ResultFrame, Resume, Resumed, SandboxProfile,
-    Shutdown, ShutdownReason, WorkspaceFailureCorrelation, WorkspaceReady, WorkspaceRecorded,
-    advertisement_digest, decode_line, encode_line,
+    ProvisionPhase, ReconnectDirectives, ReconnectInventory, Recovery as WireWorkspaceRecovery,
+    Registered, Rejected, RejectionCode, ReplacementPending, ResultFrame, Resume, Resumed,
+    SandboxProfile, Shutdown, ShutdownReason, WorkspaceFailureCorrelation, WorkspaceOperation,
+    WorkspaceReady, WorkspaceRecorded, advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -691,6 +691,23 @@ impl PostgresRunnerRegistrationService {
                     (action == DirectiveAction::Await).then_some(claimed),
                 )
             }
+            ResumeOperation::ReadyWorkspace(workspace_correlation) => {
+                let action = ready_workspace_resume_action(
+                    &workspace_correlation,
+                    request.runner_id,
+                    request.prior_registration_revision,
+                );
+                (
+                    ready_workspace_directives(&request.inventory, action).map_err(|code| {
+                        RunnerRegistrationFailure::new(
+                            RunnerInboundFrameKind::Resume,
+                            correlation.clone(),
+                            code,
+                        )
+                    })?,
+                    None,
+                )
+            }
             ResumeOperation::Empty => (ReconnectDirectives::default(), None),
         };
         let previous_registration_revision = match self
@@ -1041,6 +1058,7 @@ enum ResumeOperation {
     Empty,
     ClaimedLease(LeaseCorrelation),
     RetainedResult(ResultFrame),
+    ReadyWorkspace(signalbox_runner_wire::ProvisionCorrelation),
 }
 
 fn classify_resume_inventory(
@@ -1049,10 +1067,27 @@ fn classify_resume_inventory(
     if inventory == &ReconnectInventory::default() {
         return Ok(ResumeOperation::Empty);
     }
-    if inventory.workspace_operation.is_some()
-        || inventory.operation_failure.is_some()
-        || inventory.leak_page.is_some()
-    {
+    if let Some(operation) = inventory.workspace_operation.as_ref() {
+        if inventory.lease.is_some()
+            || inventory.result.is_some()
+            || inventory.operation_failure.is_some()
+            || inventory.leak_page.is_some()
+        {
+            return Err(RejectionCode::CorrelationMismatch);
+        }
+        return match operation {
+            WorkspaceOperation::Provision {
+                correlation,
+                phase: ProvisionPhase::ReadyUnrecorded,
+            } => Ok(ResumeOperation::ReadyWorkspace(correlation.clone())),
+            WorkspaceOperation::Provision {
+                phase: ProvisionPhase::Provisioning,
+                ..
+            }
+            | WorkspaceOperation::Release { .. } => Err(RejectionCode::Unavailable),
+        };
+    }
+    if inventory.operation_failure.is_some() || inventory.leak_page.is_some() {
         return Err(RejectionCode::Unavailable);
     }
     let Some(lease) = inventory.lease.as_ref() else {
@@ -1119,6 +1154,45 @@ fn retained_result_directives(
         .validate_against(inventory)
         .map_err(|_| RejectionCode::CorrelationMismatch)?;
     Ok(directives)
+}
+
+fn ready_workspace_directives(
+    inventory: &ReconnectInventory,
+    action: DirectiveAction,
+) -> Result<ReconnectDirectives, RejectionCode> {
+    let Some(WorkspaceOperation::Provision { correlation, .. }) =
+        inventory.workspace_operation.as_ref()
+    else {
+        return Err(RejectionCode::CorrelationMismatch);
+    };
+    let directives = ReconnectDirectives {
+        workspace_operation: Some(Directive {
+            correlation: signalbox_runner_wire::OperationCorrelation::Provision(
+                correlation.clone(),
+            ),
+            action,
+        }),
+        ..ReconnectDirectives::default()
+    };
+    directives
+        .validate_against(inventory)
+        .map_err(|_| RejectionCode::CorrelationMismatch)?;
+    Ok(directives)
+}
+
+fn ready_workspace_resume_action(
+    correlation: &signalbox_runner_wire::ProvisionCorrelation,
+    authenticated_runner: CanonicalUuid,
+    prior_registration_revision: PositiveU64,
+) -> DirectiveAction {
+    if correlation.runner_id == authenticated_runner
+        && correlation.registration_revision == prior_registration_revision
+        && correlation.repository.is_some()
+    {
+        DirectiveAction::Resend
+    } else {
+        DirectiveAction::FailStale
+    }
 }
 
 impl RunnerLeaseOperationService for RunnerProtocolStore {
@@ -3458,6 +3532,98 @@ mod tests {
             .expect_err("terminal evidence requires its execution-possible lease phase");
 
         assert_eq!(rejected, RejectionCode::CorrelationMismatch);
+    }
+
+    #[test]
+    fn s32_inv012_ready_workspace_resume_requests_exact_resend() {
+        let correlation = repository_workspace_provision_correlation();
+        let inventory = ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Provision {
+                correlation: correlation.clone(),
+                phase: ProvisionPhase::ReadyUnrecorded,
+            }),
+            ..ReconnectInventory::default()
+        };
+
+        let operation = classify_resume_inventory(&inventory)
+            .expect("one ready-unrecorded workspace is recoverable");
+        let directives = ready_workspace_directives(&inventory, DirectiveAction::Resend)
+            .expect("the exact ready inventory accepts a resend directive");
+
+        assert_eq!(
+            operation,
+            ResumeOperation::ReadyWorkspace(correlation.clone())
+        );
+        assert_eq!(directives.validate_against(&inventory), Ok(()));
+        assert_eq!(
+            directives.workspace_operation,
+            Some(Directive {
+                correlation: signalbox_runner_wire::OperationCorrelation::Provision(correlation),
+                action: DirectiveAction::Resend,
+            })
+        );
+    }
+
+    #[test]
+    fn s32_provisioning_resume_remains_unavailable_without_ready_evidence() {
+        let inventory = ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Provision {
+                correlation: repository_workspace_provision_correlation(),
+                phase: ProvisionPhase::Provisioning,
+            }),
+            ..ReconnectInventory::default()
+        };
+
+        let rejected = classify_resume_inventory(&inventory)
+            .expect_err("an in-progress clone has no resumable ready payload");
+
+        assert_eq!(rejected, RejectionCode::Unavailable);
+    }
+
+    #[test]
+    fn s32_ready_workspace_resume_rejects_a_second_inventory_slot() {
+        let inventory = ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Provision {
+                correlation: repository_workspace_provision_correlation(),
+                phase: ProvisionPhase::ReadyUnrecorded,
+            }),
+            lease: Some(signalbox_runner_wire::LeasePhase {
+                correlation: canonical_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            }),
+            ..ReconnectInventory::default()
+        };
+
+        let rejected = classify_resume_inventory(&inventory)
+            .expect_err("workspace recovery remains serial with lease recovery");
+
+        assert_eq!(rejected, RejectionCode::CorrelationMismatch);
+    }
+
+    #[test]
+    fn s32_ready_workspace_resume_resends_for_the_authenticated_runner_revision() {
+        let correlation = repository_workspace_provision_correlation();
+
+        let action = ready_workspace_resume_action(
+            &correlation,
+            correlation.runner_id,
+            correlation.registration_revision,
+        );
+
+        assert_eq!(action, DirectiveAction::Resend);
+    }
+
+    #[test]
+    fn s32_ready_workspace_resume_fails_a_foreign_runner_correlation() {
+        let correlation = repository_workspace_provision_correlation();
+
+        let action = ready_workspace_resume_action(
+            &correlation,
+            identity(ARBITRARY_PROVISION_RUNNER_ID_SEED + 1),
+            correlation.registration_revision,
+        );
+
+        assert_eq!(action, DirectiveAction::FailStale);
     }
 
     #[test]
