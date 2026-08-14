@@ -350,6 +350,7 @@ impl RepositoryWatchTask {
     }
 
     async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        self.poller.begin_attempt();
         let result = async {
             if !self.rules_activated {
                 self.activate_rules().await?;
@@ -861,6 +862,10 @@ impl GitHubRepositoryPoller {
             cached_resources: cache.resources.len(),
             cached_wire_bytes: cache.cached_wire_bytes,
         }
+    }
+
+    fn begin_attempt(&self) {
+        self.cache().begin_attempt();
     }
 
     #[cfg(test)]
@@ -2057,10 +2062,14 @@ struct PollAttemptMetrics {
 }
 
 impl PollCache {
-    fn begin_poll(&mut self) {
-        self.touched.clear();
+    fn begin_attempt(&mut self) {
         self.requests = 0;
         self.poll_wire_bytes = 0;
+    }
+
+    fn begin_poll(&mut self) {
+        self.touched.clear();
+        self.begin_attempt();
     }
 
     fn touch(&mut self, key: ResourceKey) -> Result<(), RepositoryWatchAttemptError> {
@@ -5729,6 +5738,33 @@ mod tests {
         assert_eq!(cache.entity_tag(&admitted), None);
         assert!(cache.resources.contains_key(&first));
         assert!(cache.resources.contains_key(&second));
+    }
+
+    #[test]
+    fn a_new_attempt_clears_prior_poll_metrics_without_discarding_the_cache() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        cache.insert(
+            key.clone(),
+            EntityTag(ENTITY_TAG.to_owned()),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+        cache.begin_poll();
+        cache.touch(key.clone()).expect("cached fixture is touched");
+        cache
+            .record_poll_wire_bytes(CACHE_KEY_KIND, CACHE_WIRE_BYTES)
+            .expect("fixture wire bytes are admitted");
+
+        cache.begin_attempt();
+
+        assert_eq!(cache.requests, 0);
+        assert_eq!(cache.poll_wire_bytes, 0);
+        assert_eq!(cache.cached_wire_bytes, CACHE_WIRE_BYTES);
+        assert_eq!(
+            cache.entity_tag(&key),
+            Some(&EntityTag(ENTITY_TAG.to_owned()))
+        );
     }
 
     #[test]
