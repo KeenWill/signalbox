@@ -4024,6 +4024,12 @@ fn reconstitute_inner(
         &ordinary_roots,
         &queued_turns,
     );
+    let execution_position_by_turn = total_order
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(position, turn)| (turn, position))
+        .collect::<BTreeMap<_, _>>();
     let mut delegated_turns = BTreeMap::new();
     for fact in input.delegated_turns.iter().copied() {
         let turn = fact.turn();
@@ -6779,6 +6785,7 @@ fn reconstitute_inner(
         &records_by_turn,
         &accepted_input_turns,
         &preceding_non_accepted_terminal_turns,
+        &execution_position_by_turn,
     )?;
 
     if let Some(call) = active_compaction_call
@@ -6856,6 +6863,7 @@ fn reconstitute_active_acceptance_tail(
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
     accepted_input_turns: &BTreeMap<AcceptedInputId, TurnId>,
     preceding_non_accepted_terminals: &BTreeSet<TurnId>,
+    execution_position_by_turn: &BTreeMap<TurnId, usize>,
 ) -> Result<Option<SessionAcceptanceTail>, AcceptedInputSchedulingReconstitutionFailure> {
     let (active, candidate) = match (active, candidate) {
         (None, None) => return Ok(None),
@@ -7037,8 +7045,9 @@ fn reconstitute_active_acceptance_tail(
                             DeliveryRequest::NextSafePoint {
                                 expected_active_turn,
                             } if records_by_turn.get(&expected_active_turn).is_some_and(|record| {
-                                record.order.acceptance_position()
-                                    < active_record.order.acceptance_position()
+                                execution_position_by_turn.get(&expected_active_turn)
+                                    .zip(execution_position_by_turn.get(&active))
+                                    .is_some_and(|(source, active)| source < active)
                                     && !matches!(
                                         record.state,
                                         AcceptedInputTurnSchedulingRecordState::Queued
@@ -12800,6 +12809,8 @@ mod tests {
             (predecessor.accepted_input(), predecessor.turn()),
             (active.accepted_input(), active.turn()),
         ]);
+        let execution_position_by_turn =
+            BTreeMap::from([(predecessor.turn(), 0), (active.turn(), 1)]);
         let tail_input = SessionAcceptanceTailReconstitutionInput::new(
             session.id(),
             active.accepted_input(),
@@ -12849,6 +12860,7 @@ mod tests {
             &records,
             &accepted_input_turns,
             &BTreeSet::new(),
+            &execution_position_by_turn,
         )
         .expect("the terminal predecessor's consumed steering remains valid history")
         .expect("an active turn retains its complete acceptance tail");
@@ -12861,6 +12873,51 @@ mod tests {
             active_consumed.accepted_input()
         );
         assert_eq!(consumed[0].source_turn(), active.turn());
+    }
+
+    /// S03 / INV-016: later-accepted interrupt work executes before the
+    /// ordinary origin it displaced, so steering consumed by that interrupt
+    /// remains historical rather than becoming active execution input.
+    #[test]
+    fn s03_inv016_active_tail_uses_execution_order_for_consumed_steering() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let active = accepted_origin(2);
+        let interrupt_successor = accepted_origin(3);
+        let interrupt_consumed = accepted_origin(4);
+        let mut input = active_input_after_historical_interrupt(
+            &session,
+            predecessor,
+            active,
+            interrupt_successor,
+        );
+        let tail = input
+            .active_acceptance_tail
+            .as_mut()
+            .expect("the historical-interrupt helper supplies an active tail");
+        tail.observed_last_position = interrupt_consumed.position();
+        tail.entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    interrupt_consumed.accepted_input(),
+                    AcceptedInputDisposition::ConsumedAsSteering {
+                        call: model_call_id(76),
+                    },
+                ),
+                interrupt_consumed.position(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: interrupt_successor.turn(),
+                },
+            ));
+        let execution = input
+            .reconstitute()
+            .expect("execution order admits the displaced turn's complete tail")
+            .active_turn_execution()
+            .expect("the fixture retains one active turn");
+
+        assert!(execution.pending_steering().is_empty());
+        assert!(execution.consumed_steering().is_empty());
     }
 
     /// S03 / S09 / INV-009 / INV-016: a scheduler-gap start remains
