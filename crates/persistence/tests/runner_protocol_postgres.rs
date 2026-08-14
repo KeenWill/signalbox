@@ -23421,6 +23421,99 @@ async fn s32_inv012_inv044_workspace_free_pinned_replacement_stage_round_trips()
     Ok(())
 }
 
+/// S32 / INV-012 / INV-044: registration-triggered loss permits the exact
+/// re-enrolled runner to complete a workspace-free replacement while retaining
+/// the same physical directory.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv012_inv044_workspace_free_same_runner_reenrollment_completes()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (mut store, enrollment, pinned_registration, pin) =
+        stored_exact_directory_pin_fixture(&pool).await?;
+    store
+        .register(&enrollment, narrowed_advertisement())
+        .await?;
+    append_runner_registration_loss_projection(&store, &pinned_registration, &pin).await?;
+    let recovered_registration = store.register(&enrollment, advertisement()).await?;
+    let session = pin.placement.session();
+    let runner = enrollment.runner();
+    let successor_revision =
+        RunnerGeneration::try_from_u64(2).expect("the same-runner successor revision is positive");
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(SAME_RUNNER_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::SameRunnerReenrollment(runner),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let applied = store.complete(command, identities).await?;
+    let replay = store.complete(command, identities).await?;
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the same-runner successor placement reads back");
+    let expected = PinnedRunnerReplacementOutcome::Recorded(
+        PinnedRunnerReplacementResult::Applied(ReplacedPinnedRunner::new(
+            session,
+            runner,
+            runner,
+            successor_revision,
+            exact_runner_directory(),
+            RunnerSandboxProfile::WorkspaceRestricted,
+        )),
+    );
+
+    assert_eq!(applied, expected);
+    assert_eq!(replay, expected);
+    assert_eq!(loaded.placement().revision(), successor_revision);
+    assert_eq!(loaded.registration(), Some(&recovered_registration));
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a connection-loss label cannot authorize the explicit
+/// same-runner workspace-free recovery target.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_free_connection_loss_rejects_same_runner_reenrollment()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (mut store, enrollment, _, pin) = stored_exact_directory_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(SAME_RUNNER_REPLACEMENT_COMMAND)),
+        session,
+        RunnerGeneration::one(),
+        RunnerReplacementTarget::SameRunnerReenrollment(enrollment.runner()),
+    );
+    let rejected = store
+        .complete(
+            command,
+            PinnedRunnerReplacementIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+                ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+            ),
+        )
+        .await?;
+
+    assert_eq!(
+        rejected,
+        PinnedRunnerReplacementOutcome::Recorded(PinnedRunnerReplacementResult::Rejected(
+            RunnerReplacementProvisioningRejection::ReplacementSameRunner {
+                session,
+                runner: enrollment.runner(),
+            }
+        ))
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// S32 / INV-012 / INV-032 / INV-044: an idle frontier-root session consumes
 /// its exact workspace-free stage by atomically installing the successor,
 /// relocation boundary, root frontier, outbox event, and durable receipt.
