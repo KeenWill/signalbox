@@ -6784,6 +6784,7 @@ fn reconstitute_inner(
         input.active_acceptance_tail.as_ref(),
         &records_by_turn,
         &accepted_input_turns,
+        &consumed_inputs,
         &preceding_non_accepted_terminal_turns,
         &execution_position_by_turn,
     )?;
@@ -6862,6 +6863,7 @@ fn reconstitute_active_acceptance_tail(
     candidate: Option<&SessionAcceptanceTailReconstitutionInput>,
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
     accepted_input_turns: &BTreeMap<AcceptedInputId, TurnId>,
+    consumed_inputs: &BTreeSet<AcceptedInputId>,
     preceding_non_accepted_terminals: &BTreeSet<TurnId>,
     execution_position_by_turn: &BTreeMap<TurnId, usize>,
 ) -> Result<Option<SessionAcceptanceTail>, AcceptedInputSchedulingReconstitutionFailure> {
@@ -7056,7 +7058,8 @@ fn reconstitute_active_acceptance_tail(
                             }) || preceding_non_accepted_terminals
                                 .contains(&expected_active_turn)
                         );
-                        !pending_steering_seen
+                        consumed_inputs.contains(&accepted_input)
+                            && !pending_steering_seen
                             && !accepted_input_turns.contains_key(&accepted_input)
                             && !origin_by_position.contains_key(&entry.position)
                             && matches!(
@@ -12859,6 +12862,10 @@ mod tests {
             Some(&tail_input),
             &records,
             &accepted_input_turns,
+            &BTreeSet::from([
+                predecessor_consumed.accepted_input(),
+                active_consumed.accepted_input(),
+            ]),
             &BTreeSet::new(),
             &execution_position_by_turn,
         )
@@ -12879,7 +12886,7 @@ mod tests {
     /// ordinary origin it displaced, so steering consumed by that interrupt
     /// remains historical rather than becoming active execution input.
     #[test]
-    fn s03_inv016_active_tail_uses_execution_order_for_consumed_steering() {
+    fn s03_inv016_active_tail_rejects_unproven_historical_consumed_steering() {
         let session = current_session();
         let predecessor = accepted_origin(1);
         let active = accepted_origin(2);
@@ -12910,14 +12917,14 @@ mod tests {
                     expected_active_turn: interrupt_successor.turn(),
                 },
             ));
-        let execution = input
-            .reconstitute()
-            .expect("execution order admits the displaced turn's complete tail")
-            .active_turn_execution()
-            .expect("the fixture retains one active turn");
+        let failure = assert_input_rejects_unchanged(input);
 
-        assert!(execution.pending_steering().is_empty());
-        assert!(execution.consumed_steering().is_empty());
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: interrupt_consumed.accepted_input(),
+            }
+        );
     }
 
     /// S03 / S09 / INV-009 / INV-016: a scheduler-gap start remains
