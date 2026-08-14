@@ -2370,44 +2370,8 @@ impl AcceptedInputSchedulingProjection {
     pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn> {
         let active = self.active_turn()?;
         let tail = self.active_acceptance_tail.as_ref()?;
-        let pending_steering = tail
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.accepted_input.disposition(),
-                    AcceptedInputDisposition::PendingSteering { .. }
-                )
-            })
-            .map(|entry| PendingSteeringInput {
-                accepted_input: entry.accepted_input.clone(),
-                acceptance_position: entry.position,
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let consumed_steering = tail
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let AcceptedInputDisposition::ConsumedAsSteering { .. } =
-                    entry.accepted_input.disposition()
-                else {
-                    return None;
-                };
-                let DeliveryRequest::NextSafePoint {
-                    expected_active_turn,
-                } = entry.delivery
-                else {
-                    return None;
-                };
-                Some(ConsumedSteeringInput {
-                    accepted_input: entry.accepted_input.clone(),
-                    acceptance_position: entry.position,
-                    source_turn: expected_active_turn,
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        let (pending_steering, consumed_steering) =
+            active_execution_steering_inputs(active.turn, tail);
         active.active_turn_execution_with_pending(pending_steering, consumed_steering)
     }
 
@@ -2625,6 +2589,51 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<PreparedAcceptedInputTurnFailure, AcceptedInputTurnFailureError> {
         prepare_active_turn_lost_failure(self, identities)
     }
+}
+
+fn active_execution_steering_inputs(
+    active_turn: TurnId,
+    tail: &SessionAcceptanceTail,
+) -> (Box<[PendingSteeringInput]>, Box<[ConsumedSteeringInput]>) {
+    let pending = tail
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.accepted_input.disposition(),
+                AcceptedInputDisposition::PendingSteering { .. }
+            )
+        })
+        .map(|entry| PendingSteeringInput {
+            accepted_input: entry.accepted_input.clone(),
+            acceptance_position: entry.position,
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let consumed = tail
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let AcceptedInputDisposition::ConsumedAsSteering { .. } =
+                entry.accepted_input.disposition()
+            else {
+                return None;
+            };
+            let DeliveryRequest::NextSafePoint {
+                expected_active_turn,
+            } = entry.delivery
+            else {
+                return None;
+            };
+            (expected_active_turn == active_turn).then(|| ConsumedSteeringInput {
+                accepted_input: entry.accepted_input.clone(),
+                acceptance_position: entry.position,
+                source_turn: expected_active_turn,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    (pending, consumed)
 }
 
 /// Fresh identities supplied for one eligibility-time activation candidate.
@@ -7023,6 +7032,21 @@ fn reconstitute_active_acceptance_tail(
                             )
                     }
                     AcceptedInputDisposition::ConsumedAsSteering { .. } => {
+                        let source_precedes_active = matches!(
+                            entry.delivery,
+                            DeliveryRequest::NextSafePoint {
+                                expected_active_turn,
+                            } if records_by_turn.get(&expected_active_turn).is_some_and(|record| {
+                                record.order.acceptance_position()
+                                    < active_record.order.acceptance_position()
+                                    && !matches!(
+                                        record.state,
+                                        AcceptedInputTurnSchedulingRecordState::Queued
+                                            | AcceptedInputTurnSchedulingRecordState::Active { .. }
+                                    )
+                            }) || preceding_non_accepted_terminals
+                                .contains(&expected_active_turn)
+                        );
                         !pending_steering_seen
                             && !accepted_input_turns.contains_key(&accepted_input)
                             && !origin_by_position.contains_key(&entry.position)
@@ -7030,7 +7054,7 @@ fn reconstitute_active_acceptance_tail(
                                 entry.delivery,
                                 DeliveryRequest::NextSafePoint {
                                     expected_active_turn,
-                                } if expected_active_turn == active
+                                } if expected_active_turn == active || source_precedes_active
                             )
                     }
                 }
@@ -12734,6 +12758,109 @@ mod tests {
                 failure: format!("{cross_wired:?}"),
             },
         ]));
+    }
+
+    /// S03 / INV-016: a newly active queued origin retains later acceptance
+    /// positions already consumed by its terminal predecessor, while only its
+    /// own consumed steering reaches the active execution aggregate.
+    #[test]
+    fn s03_inv016_active_tail_retains_predecessor_consumed_steering() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let active = accepted_origin(2);
+        let predecessor_consumed = accepted_origin(3);
+        let active_consumed = accepted_origin(4);
+        let predecessor_record = predecessor.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: frontier(70).id(),
+                terminal_execution: None,
+                terminal_frontier: frontier(71).id(),
+            },
+        );
+        let active_record = active.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::Active {
+                starting_lineage: AcceptedInputStartingLineage::After {
+                    immediate_predecessor: predecessor.turn(),
+                },
+                starting_frontier: frontier(72).id(),
+                phase: ActiveTurnSchedulingReconstitutionInput::prepared(
+                    active.turn(),
+                    turn_attempt_id(73),
+                ),
+            },
+        );
+        let records = BTreeMap::from([
+            (predecessor.turn(), &predecessor_record),
+            (active.turn(), &active_record),
+        ]);
+        let accepted_input_turns = BTreeMap::from([
+            (predecessor.accepted_input(), predecessor.turn()),
+            (active.accepted_input(), active.turn()),
+        ]);
+        let tail_input = SessionAcceptanceTailReconstitutionInput::new(
+            session.id(),
+            active.accepted_input(),
+            active_consumed.position(),
+            vec![
+                SessionAcceptanceTailEntryReconstitutionInput::new(
+                    session.id(),
+                    AcceptedInputLifecycle::new(
+                        active.accepted_input(),
+                        AcceptedInputDisposition::OriginOf(active.turn()),
+                    ),
+                    active.position(),
+                    default_origin_delivery(),
+                ),
+                SessionAcceptanceTailEntryReconstitutionInput::new(
+                    session.id(),
+                    AcceptedInputLifecycle::new(
+                        predecessor_consumed.accepted_input(),
+                        AcceptedInputDisposition::ConsumedAsSteering {
+                            call: model_call_id(74),
+                        },
+                    ),
+                    predecessor_consumed.position(),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: predecessor.turn(),
+                    },
+                ),
+                SessionAcceptanceTailEntryReconstitutionInput::new(
+                    session.id(),
+                    AcceptedInputLifecycle::new(
+                        active_consumed.accepted_input(),
+                        AcceptedInputDisposition::ConsumedAsSteering {
+                            call: model_call_id(75),
+                        },
+                    ),
+                    active_consumed.position(),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: active.turn(),
+                    },
+                ),
+            ],
+        );
+        let tail = reconstitute_active_acceptance_tail(
+            session.id(),
+            Some(active.turn()),
+            Some(&tail_input),
+            &records,
+            &accepted_input_turns,
+            &BTreeSet::new(),
+        )
+        .expect("the terminal predecessor's consumed steering remains valid history")
+        .expect("an active turn retains its complete acceptance tail");
+        let (pending, consumed) = active_execution_steering_inputs(active.turn(), &tail);
+
+        assert!(pending.is_empty());
+        assert_eq!(consumed.len(), 1);
+        assert_eq!(
+            consumed[0].accepted_input(),
+            active_consumed.accepted_input()
+        );
+        assert_eq!(consumed[0].source_turn(), active.turn());
     }
 
     /// S03 / S09 / INV-009 / INV-016: a scheduler-gap start remains

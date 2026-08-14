@@ -4,6 +4,9 @@ The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
 (`agent/runner-awaiting-recovery-persistence`).
 
+The active-tail predecessor-steering correction was verified against this PR
+(`agent/daemon-ops-overnight`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -851,8 +854,12 @@ are conclusions derived from complete owner facts, never trusted discriminators.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session
-  membership, and per-entry delivery/disposition correlation. A filtered
-  pending-steering list or bare maximum cannot substitute (INV-007, INV-016).
+  membership, and per-entry delivery/disposition correlation. When an origin was
+  queued before a later input was consumed by the then-active predecessor, that
+  predecessor-consumed position remains in the complete tail after the queued
+  origin activates; only steering consumed by the new active turn enters its
+  execution aggregate. A filtered pending-steering list or bare maximum cannot
+  substitute (INV-007, INV-016).
 - A tail entry recording an accepted interrupt against the active turn is
   admitted only when the current stop/recovery state carries its exact
   `AppliedInterruptProof`; an evidence-free active phase rejects it as
