@@ -5,7 +5,7 @@ verified against PR #796 (`agent/agent-docs-skills-spec`). Bounded filesystem
 discovery, typed registration construction, and explicit-root configuration were
 verified against PR #798 (`agent/agent-docs-skills-foundation`). Durable
 registration, empty eligibility, turn-start evidence, and model-call correlation
-were verified against PR #803 (`agent/agent-docs-skills-model-call`).
+were verified against PR #810 (`agent/agent-docs-skills-model-call-followup`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
