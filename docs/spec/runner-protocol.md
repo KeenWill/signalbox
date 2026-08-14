@@ -41,9 +41,11 @@ lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
 `result_recorded`, plus fail-closed reconstitution of `lease_claim` and
 `result`, is re-verified through this PR (`agent/runner-dispatch-wire-adapter`).
 The runner-local workspace-release journal and exact acknowledgement boundary
-are verified against this PR (`agent/runner-workspace-operation-journal`).
-Established-connection routing of those inbound claim and result frames through
-the durable transactions before acknowledgement is re-verified through this PR
+are verified against this PR (`agent/runner-workspace-operation-journal`). Its
+exact live acknowledgement and heartbeat projection are verified against this PR
+(`agent/runner-workspace-release-acknowledgements`). Established-connection
+routing of those inbound claim and result frames through the durable
+transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -770,18 +772,20 @@ accepted release it refuses, and its exact failure acknowledgement atomically
 frees both slots. A result acknowledgement preserves this independent workspace
 state. The root rejects provisioning and leak slots, cross-wired correlations,
 and journals belonging to another enrolled runner. The live serving loop
-consumes the exact result and lease-offer-failure acknowledgements for evidence
-produced on the current connection. On resume the runner sends the complete
+consumes the exact result, lease-offer-failure, completed-release, and
+release-failure acknowledgements for evidence naming the current runner. Its
+heartbeat repeats an accepted or completed release phase, or the exact
+`failure_unrecorded` release correlation after cleanup failure, from the durable
+journal rather than process memory. On resume the runner sends the complete
 stored inventory. It accepts only matching paired `discard_as_recorded` or
 paired `fail_stale` directives for retained terminal evidence and atomically
 frees both slots. For a retained lease-offer failure, `resend` emits the exact
 stored envelope while retaining it, and `discard_as_recorded` or `fail_stale`
 frees it. Unsupported actions preserve the journal and fail closed. No present
-serving-loop or filesystem producer invokes the release journal methods or
-consumes their resumed directives or wire acknowledgements. The only live
-failure producer is the registration-only empty catalog refusing an offered
-unknown tool; this boundary supplies neither workspace cleanup nor a workstation
-tool inventory.
+filesystem producer begins or advances a release, and resumed release directives
+remain unsupported. The only live failure producer is the registration-only
+empty catalog refusing an offered unknown tool; this boundary supplies neither
+workspace cleanup nor a workstation tool inventory.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
