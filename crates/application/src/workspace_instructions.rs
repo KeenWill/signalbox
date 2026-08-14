@@ -241,8 +241,11 @@ fn walk_root(
     state: &mut DiscoveryState,
 ) -> bool {
     let root_path = PathBuf::from(root.path().as_str());
-    let root_descriptor = match open_directory_no_follow(&root_path) {
-        Ok(descriptor) => descriptor,
+    let root_descriptor = match open_directory_no_follow(&root_path, || {
+        check_elapsed(root.path(), findings, state)
+    }) {
+        Ok(Some(descriptor)) => descriptor,
+        Ok(None) => return false,
         Err(_) => {
             return push_finding(
                 root.path().clone(),
@@ -258,8 +261,11 @@ fn walk_root(
             return false;
         }
         let directory_descriptor =
-            match open_directory_beneath(&root_descriptor, &relative_directory) {
-                Ok(descriptor) => descriptor,
+            match open_directory_beneath(&root_descriptor, &relative_directory, || {
+                check_elapsed(root.path(), findings, state)
+            }) {
+                Ok(Some(descriptor)) => descriptor,
+                Ok(None) => return false,
                 Err(_) => {
                     let kind = if is_root {
                         InstructionDiscoveryFindingKind::RootUnavailable
@@ -590,7 +596,10 @@ fn read_candidate_from(
 }
 
 #[cfg(unix)]
-fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
+fn open_directory_no_follow(
+    source: &std::path::Path,
+    mut continue_opening: impl FnMut() -> bool,
+) -> io::Result<Option<OwnedFd>> {
     use rustix::fs::{CWD, Mode, OFlags, openat};
 
     let mut descriptor = openat(
@@ -600,6 +609,9 @@ fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
         Mode::empty(),
     )?;
     for component in source.components() {
+        if !continue_opening() {
+            return Ok(None);
+        }
         match component {
             std::path::Component::RootDir => {}
             std::path::Component::Normal(name) => {
@@ -608,19 +620,32 @@ fn open_directory_no_follow(source: &std::path::Path) -> io::Result<OwnedFd> {
             _ => return Err(io::Error::other("instruction root is not canonical")),
         }
     }
-    Ok(descriptor)
+    if !continue_opening() {
+        return Ok(None);
+    }
+    Ok(Some(descriptor))
 }
 
 #[cfg(unix)]
-fn open_directory_beneath(root: &OwnedFd, relative: &std::path::Path) -> io::Result<OwnedFd> {
+fn open_directory_beneath(
+    root: &OwnedFd,
+    relative: &std::path::Path,
+    mut continue_opening: impl FnMut() -> bool,
+) -> io::Result<Option<OwnedFd>> {
     let mut descriptor = rustix::io::dup(root)?;
     for component in relative.components() {
+        if !continue_opening() {
+            return Ok(None);
+        }
         let std::path::Component::Normal(name) = component else {
             return Err(io::Error::other("instruction path is not relative"));
         };
         descriptor = open_directory_at_no_follow(&descriptor, name)?;
     }
-    Ok(descriptor)
+    if !continue_opening() {
+        return Ok(None);
+    }
+    Ok(Some(descriptor))
 }
 
 #[cfg(unix)]
@@ -803,8 +828,12 @@ impl<T> OptionalFrontmatterField<T> {
 }
 
 fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
-    let body = text.strip_prefix("---\n")?;
-    let boundary = body.find("\n---\n")?;
+    let (body, closing) = if let Some(body) = text.strip_prefix("---\n") {
+        (body, "\n---\n")
+    } else {
+        (text.strip_prefix("---\r\n")?, "\r\n---\r\n")
+    };
+    let boundary = body.find(closing)?;
     let parsed: PortableSkillFrontmatter = serde_yaml_ng::from_str(&body[..boundary]).ok()?;
     if parsed
         .compatibility
@@ -1087,7 +1116,9 @@ mod tests {
         fs::write(&outside, "outside instructions").expect("outside source exists");
         symlink(&outside, &candidate).expect("candidate link exists");
         let root = workspace_root(&temporary);
-        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
         let mut findings = Vec::new();
         let mut state = test_state(test_limits(4, 4, 64, Duration::from_secs(1)));
 
@@ -1116,7 +1147,9 @@ mod tests {
     fn candidate_descriptor_is_nonblocking_before_type_validation() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
         fs::write(temporary.path().join("AGENTS.md"), "instructions").expect("candidate exists");
-        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
 
         let candidate = open_candidate_at_no_follow(&descriptor, OsStr::new("AGENTS.md"))
             .expect("regular candidate opens");
@@ -1134,7 +1167,9 @@ mod tests {
         let outside = tempfile::tempdir().expect("outside root exists");
         let child = temporary.path().join("child");
         symlink(outside.path(), &child).expect("child link exists");
-        let descriptor = open_directory_no_follow(temporary.path()).expect("root descriptor opens");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
 
         let result = open_directory_at_no_follow(&descriptor, OsStr::new("child"));
 
@@ -1186,6 +1221,36 @@ mod tests {
         assert!(parse_skill(compatibility, "review-rust").is_none());
         assert!(parse_skill(metadata, "review-rust").is_none());
         assert!(parse_skill(allowed_tools, "review-rust").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_reopen_stops_when_the_deadline_expires() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        fs::create_dir_all(temporary.path().join("first/second"))
+            .expect("nested fixture directories exist");
+        let descriptor = open_directory_no_follow(temporary.path(), || true)
+            .expect("root descriptor opens")
+            .expect("the unlimited fixture keeps opening");
+        let mut checks = [true, false].into_iter();
+
+        let reopened =
+            open_directory_beneath(&descriptor, PathBuf::from("first/second").as_path(), || {
+                checks.next().unwrap_or(false)
+            })
+            .expect("the deadline stop is not an I/O failure");
+
+        assert!(reopened.is_none());
+    }
+
+    #[test]
+    fn crlf_portable_skill_frontmatter_is_accepted() {
+        let source = "---\r\nname: review-rust\r\ndescription: Review Rust.\r\n---\r\n# Review\r\n";
+
+        let skill = parse_skill(source, "review-rust").expect("CRLF frontmatter is portable");
+
+        assert_eq!(skill.name(), "review-rust");
+        assert_eq!(skill.description(), "Review Rust.");
     }
 
     fn workspace_root(temporary: &tempfile::TempDir) -> InstructionDiscoveryRoot {
