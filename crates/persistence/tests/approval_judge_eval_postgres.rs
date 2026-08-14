@@ -126,7 +126,7 @@ async fn migrated_postgres_in_configured_schema()
 
     let pool = PgPoolOptions::new()
         .max_connections(4)
-        .connect_with(connection_options)
+        .connect_with((*connection_options).clone())
         .await?;
     migrate(&pool).await?;
     Ok((container, pool))
@@ -722,7 +722,7 @@ async fn recording_uses_the_configured_migration_schema() -> Result<(), Box<dyn 
     pool.close().await;
     let pool = PgPoolOptions::new()
         .max_connections(4)
-        .connect_with(connection_options)
+        .connect_with((*connection_options).clone())
         .await?;
     let schema = verify_recording_schema(&pool).await?;
     let run = run_record_with(
