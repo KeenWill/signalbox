@@ -142,6 +142,17 @@ named constant or checking function. A bound admitted by the process protocol is
 a public constant in the protocol crate; consumers import it rather than
 restating its literal.
 
+A numeric bound declares whether it is a **ceiling** or **tunable** and carries
+a one-line rationale naming what it protects. A ceiling is a hard-coded safety
+property against runaway memory, latency, spend, or storage. Configuration may
+lower it for a deployment, never raise it; raising it is a reviewed code change
+with a test and rationale, not a configuration change.
+
+Choose a ceiling at the real production limit where more work would genuinely
+endanger the protected resource, never at a merely comfortable value. Real work
+must not reach a correctly set ceiling: if ordinary workloads do, the bound is
+an unintentional product limit rather than runaway protection.
+
 Each closed discriminator written to PostgreSQL has one encoder and one decoder
 in `crates/persistence/src/mapping.rs`. A module lifts an unknown spelling into
 its own typed corruption error, but does not define another spelling table.
