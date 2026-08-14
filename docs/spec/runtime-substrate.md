@@ -289,16 +289,16 @@ withholding in every adapter.
 
 **Implemented behavior — provider non-acceptance evidence.**
 `ProviderErrorEvidence::non_acceptance_proven` is an adapter-owned typed fact,
-never inferred from `ProviderErrorKind` or provider prose. This proof separates the
-`successor` and `terminal` endings of
+never inferred from `ProviderErrorKind` or provider prose. This proof separates
+the `successor` and `terminal` endings of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine);
 this page owns the evidence algebra that carries it. Adapters set the proof
-alongside `ProviderError` for the exact
-quota-exhausted, rate-limited, and overloaded provider responses whose protocol
-semantics establish non-acceptance. Each adapter owns its exhaustive native
-mapping; the provider bridge preserves the proof without deriving it from
-`ProviderErrorKind`, status retryability, or native prose. Classification alone
-remains insufficient, and absence of the proof keeps the known failure terminal.
+alongside `ProviderError` for the exact quota-exhausted, rate-limited, and
+overloaded provider responses whose protocol semantics establish non-acceptance.
+Each adapter owns its exhaustive native mapping; the provider bridge preserves
+the proof without deriving it from `ProviderErrorKind`, status retryability, or
+native prose. Classification alone remains insufficient, and absence of the
+proof keeps the known failure terminal.
 
 The admitting condition is fixed here rather than left to that child, because
 the two readings differ in whether another provider call happens. A proof is
@@ -307,8 +307,8 @@ decoded native token names one of the three causes in that adapter's exhaustive
 mapping — `rate_limit_error` or `overloaded_error` for Anthropic, and
 `rate_limit_exceeded`, `rate_limit_error`, or `insufficient_quota` for OpenAI.
 Codex additionally admits a classified availability cause only when its JSONL
-lifecycle reaches the exact, noncontradictory `turn.failed` closure.
-Every status-derived fallback carries no proof: a response whose body is absent,
+lifecycle reaches the exact, noncontradictory `turn.failed` closure. Every
+status-derived fallback carries no proof: a response whose body is absent,
 undecodable, or names a token the mapping does not cover keeps its
 status-classified kind and stays an ordinary terminal known failure. A native
 token that contradicts its status carries none either, and the existing

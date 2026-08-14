@@ -1015,10 +1015,10 @@ there. Claude CLI's `file` pair is in the set because this branch lands that
 adapter's contract, which [the `file` delivery](#the-file-delivery) routes.
 Admission is not delivery: of the pairs above, this build supplies a surface for
 Anthropic and OpenAI `file`, Claude CLI `ambient` and `file`, and Codex CLI
-`ambient` and `codex_home`, and validates then refuses the rest as undelivered. OpenAI admits the
-reasoning levels `none` through `max` — `ultra` is the Codex effort value and is
-rejected — and the provider-tagged tiers `auto`, `default`, `flex`, `scale`,
-`priority`, and `fast`.
+`ambient` and `codex_home`, and validates then refuses the rest as undelivered.
+OpenAI admits the reasoning levels `none` through `max` — `ultra` is the Codex
+effort value and is rejected — and the provider-tagged tiers `auto`, `default`,
+`flex`, `scale`, `priority`, and `fast`.
 
 A Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
@@ -1183,8 +1183,8 @@ cannot; this contract says which for every delivery, and there is no third case.
   an ordinary `cp` defeats anyway.
 - `codex_home` — *admitted by normalized path.* Two profiles may not name the
   same normalized directory. Independence of the token families inside distinct
-  directories remains a deployment assertion, because the daemon never reads
-  the authentication material that could reveal a copied login.
+  directories remains a deployment assertion, because the daemon never reads the
+  authentication material that could reveal a copied login.
 - `oauth` — *established by the delivery, which this build does not admit*, by
   the provider account identity that provisioning harvests and stores alongside
   the refresh token. That identity is what the provider meters, throttles, and
@@ -1306,10 +1306,10 @@ unchanged.
 
 ### Credential-home and reserved deliveries
 
-This build delivers `codex_home`. `oauth` and `codex_cli` `file` remain committed
-unimplemented functionality: parsing validates their fields and then rejects
-the profile. The agreement between a delivery and its `billing_kind` is enforced
-for every spelling, including reserved ones, as
+This build delivers `codex_home`. `oauth` and `codex_cli` `file` remain
+committed unimplemented functionality: parsing validates their fields and then
+rejects the profile. The agreement between a delivery and its `billing_kind` is
+enforced for every spelling, including reserved ones, as
 [the credential catalog](#the-static-model-alias-and-web-fetch-catalog) states.
 
 #### The `codex_home` delivery
@@ -1324,12 +1324,12 @@ failure, and an empty directory are distinct typed per-profile startup failures.
 Error display and debug output carry the profile reference and closed cause but
 never the path.
 
-The daemon treats the directory only as a path reference. It never opens, copies,
-parses, serializes, or logs authentication material inside it. For each Codex CLI
-spawn, the selected pool member replaces the child's inherited `CODEX_HOME` with
-that member's admitted path; every other member's path remains absent from that
-process environment. The CLI itself owns every read and write beneath the
-selected home.
+The daemon treats the directory only as a path reference. It never opens,
+copies, parses, serializes, or logs authentication material inside it. For each
+Codex CLI spawn, the selected pool member replaces the child's inherited
+`CODEX_HOME` with that member's admitted path; every other member's path remains
+absent from that process environment. The CLI itself owns every read and write
+beneath the selected home.
 
 Two `codex_home` profiles for Codex must name different normalized paths, and a
 Codex document may not combine an `ambient` profile with any `codex_home`
@@ -1344,6 +1344,7 @@ forbids it to inspect.
 1,024, but this build rejects every profile that supplies it. Capacity
 reservations, contention waits, and refresh-race coordination become admissible
 together; no accepted bound is inert.
+
 #### The `oauth` delivery
 
 `oauth` is spelled `delivery = "oauth"` with exactly four required fields: TOML
@@ -1651,16 +1652,16 @@ This build maps a model family to exactly one credential pool. Each
 `[[credential_pools]]` entry whose adapter agrees with the mapping's.
 
 Selection happens for each model-call availability chain. Configuration parsing
-still derives the session's initial preferred reference, while preparation
-loads the target's admitted pool and skips durable chain exclusions, pending
-next-turn displacements, membership exclusions, and global quarantines. A
-`switch_now` failure starts after the failed member and cannot select any member
-already tried in that chain. The settings whose effect this build cannot supply
-are typed startup failures rather than retained-and-inert — `round_robin`,
-`least_used`, any `headroom_reserve_percent`, a non-`stay` `on_headroom_low`, and
-a `switch_now` whose adapter cannot prove the cause. What each admitted value is
-defined to mean is stated below, and what a selection attempt can end as is owned
-by
+still derives the session's initial preferred reference, while preparation loads
+the target's admitted pool and skips durable chain exclusions, pending next-turn
+displacements, membership exclusions, and global quarantines. A `switch_now`
+failure starts after the failed member and cannot select any member already
+tried in that chain. The settings whose effect this build cannot supply are
+typed startup failures rather than retained-and-inert — `round_robin`,
+`least_used`, any `headroom_reserve_percent`, a non-`stay` `on_headroom_low`,
+and a `switch_now` whose adapter cannot prove the cause. What each admitted
+value is defined to mean is stated below, and what a selection attempt can end
+as is owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
 
 A credential pool is the set of profiles that may substitute for one another for
@@ -1721,9 +1722,9 @@ unimplemented functionality where called out below.
 Each adapter maps native terminal evidence to a closed `ProviderErrorKind`, and
 model-call execution consumes that typed evidence without reinterpreting prose.
 The observation transaction stores the frozen action together with its exact
-correlation; preparation reads the resulting chain exclusion, pending
-next-turn displacement, membership exclusion, or global quarantine. `stay`
-writes no action row.
+correlation; preparation reads the resulting chain exclusion, pending next-turn
+displacement, membership exclusion, or global quarantine. `stay` writes no
+action row.
 
 `switch_next_turn` creates a durable pending displacement scoped to the session,
 pool-policy snapshot, member, and exact source turn that observed the trigger.
@@ -2383,10 +2384,10 @@ reader can take an entry's position for its tier.
   reference delivered through per-process `CODEX_HOME`; the daemon never reads,
   copies, or logs its authentication material. `oauth` remains reserved and is
   rejected as `UndeliveredCredentialDelivery`. The child that admits `oauth`
-  must invert the home-owned boundary: it must hold the rotating authorization itself and
-  hand each process a scratch home carrying everything that home requires except
-  the refresh token, which is the one value it must never place there. The
-  complete contents are stated once by
+  must invert the home-owned boundary: it must hold the rotating authorization
+  itself and hand each process a scratch home carrying everything that home
+  requires except the refresh token, which is the one value it must never place
+  there. The complete contents are stated once by
   [the `oauth` delivery](#the-oauth-delivery) and are not enumerated again here.
 
 - **Codex file resolution.** No present composition or runtime delivers a Codex
