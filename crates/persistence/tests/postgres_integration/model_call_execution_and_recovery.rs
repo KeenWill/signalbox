@@ -18,6 +18,9 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 4));
     let target =
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 5)));
+    let pool_name_fixture = "codex-main";
+    let first_member_fixture = "codex-a";
+    let second_member_fixture = "codex-b";
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
             seed + 6,
@@ -52,10 +55,10 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
         ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
             .expect("one pool fixture target forms a catalog");
     let policy = CredentialPoolRuntimePolicy::new(
-        "codex-main",
+        pool_name_fixture,
         vec![
-            CredentialPoolRuntimeMember::new("codex-a", 1),
-            CredentialPoolRuntimeMember::new("codex-b", 2),
+            CredentialPoolRuntimeMember::new(first_member_fixture, 1),
+            CredentialPoolRuntimeMember::new(second_member_fixture, 2),
         ],
         signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
         CredentialPoolRuntimeAction::SwitchNow,
@@ -114,7 +117,7 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
     else {
         panic!("member A must reload")
     };
-    assert_eq!(first_reference.as_str(), "codex-a");
+    assert_eq!(first_reference.as_str(), first_member_fixture);
     let AuthorizeModelCallOutcome::Authorized(first_authorized) = repository
         .authorize_send(session, first_request.call().id())
         .await?
@@ -196,7 +199,7 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
     else {
         panic!("member B must reload")
     };
-    assert_eq!(second_reference.as_str(), "codex-b");
+    assert_eq!(second_reference.as_str(), second_member_fixture);
     let AuthorizeModelCallOutcome::Authorized(second_authorized) = repository
         .authorize_send(session, second_request.call().id())
         .await?
@@ -231,7 +234,7 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
     else {
         panic!("the last unavailable member must exhaust the pool")
     };
-    assert_eq!(pool_name.as_ref(), "codex-main");
+    assert_eq!(pool_name.as_ref(), pool_name_fixture);
     let durable_rotation: (i64, i64) = sqlx::query_as(
         "SELECT
              (SELECT count(*) FROM credential_pool_chain_exclusion
