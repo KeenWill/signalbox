@@ -1,6 +1,5 @@
 [Unit]
 Description=Signalbox dogfood lifecycle watchdog
-After=default.target
 
 [Service]
 Type=simple
