@@ -3015,6 +3015,7 @@ impl RunnerProtocolStore {
     pub async fn stage_workspace_free_pinned_replacement(
         &self,
         command: ReplaceLostRunner,
+        identities: PinnedRunnerReplacementIdentities,
     ) -> Result<PinnedRunnerReplacementOutcome, RunnerProtocolStoreError> {
         if command.command().as_uuid().is_nil() || command.command().as_uuid().is_max() {
             return Err(RunnerProtocolStoreError::Domain(
@@ -3111,6 +3112,7 @@ impl RunnerProtocolStore {
             command,
             lost_event_ordinal,
             requested_working_directory,
+            identities,
         )
         .await?;
         commit_mutation(transaction).await?;
@@ -3129,7 +3131,7 @@ impl RunnerProtocolStore {
         identities: PinnedRunnerReplacementIdentities,
     ) -> Result<PinnedRunnerReplacementOutcome, RunnerProtocolStoreError> {
         let staged = self
-            .stage_workspace_free_pinned_replacement(command)
+            .stage_workspace_free_pinned_replacement(command, identities)
             .await?;
         if !matches!(staged, PinnedRunnerReplacementOutcome::Staged { .. }) {
             return Ok(staged);
@@ -3290,7 +3292,8 @@ impl RunnerProtocolStore {
         };
         let stage = sqlx::query(
             "SELECT lost_placement_event_ordinal, lost_placement_revision,
-                    requested_working_directory
+                    requested_working_directory, boundary_entry_id,
+                    boundary_frontier_id
                FROM runner_workspace_free_replacement_stage
               WHERE command_id = $1 AND session_id = $2",
         )
@@ -3305,6 +3308,14 @@ impl RunnerProtocolStore {
         let working_directory =
             RunnerWorkingDirectory::try_new(stage.decode_column("requested_working_directory")?)
                 .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+        let identities = PinnedRunnerReplacementIdentities::new(
+            signalbox_domain::SemanticTranscriptEntryId::from_uuid(
+                stage.decode_column("boundary_entry_id")?,
+            ),
+            signalbox_domain::ContextFrontierId::from_uuid(
+                stage.decode_column("boundary_frontier_id")?,
+            ),
+        );
         if stage_event_ordinal != current_event_ordinal
             || stage_revision != current_revision
             || placement.request().credential_profile.is_some()
@@ -7203,18 +7214,22 @@ async fn insert_workspace_free_replacement_stage(
     command: ReplaceLostRunner,
     lost_event_ordinal: u64,
     requested_working_directory: &RunnerWorkingDirectory,
+    identities: PinnedRunnerReplacementIdentities,
 ) -> Result<(), RunnerProtocolStoreError> {
     sqlx::query(
         "INSERT INTO runner_workspace_free_replacement_stage
             (command_id, session_id, lost_placement_event_ordinal,
-             lost_placement_revision, requested_working_directory)
-         VALUES ($1, $2, $3, $4, $5)",
+             lost_placement_revision, requested_working_directory,
+             boundary_entry_id, boundary_frontier_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(command.command().into_uuid())
     .bind(command.session().into_uuid())
     .bind(Decimal::from(lost_event_ordinal))
     .bind(Decimal::from(command.expected_placement_revision().get()))
     .bind(requested_working_directory.as_str())
+    .bind(identities.semantic_entry().into_uuid())
+    .bind(identities.context_frontier().into_uuid())
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -7506,6 +7521,8 @@ async fn load_workspace_free_replacement_outcome(
                 workspace_free.lost_placement_event_ordinal,
                 workspace_free.lost_placement_revision,
                 workspace_free.requested_working_directory,
+                workspace_free.boundary_entry_id,
+                workspace_free.boundary_frontier_id,
                 EXISTS (
                     SELECT 1
                       FROM replace_lost_runner_result AS result
@@ -7555,6 +7572,8 @@ async fn load_workspace_free_replacement_outcome(
         let _stage_directory =
             RunnerWorkingDirectory::try_new(row.decode_column("requested_working_directory")?)
                 .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+        let _: Uuid = row.decode_column("boundary_entry_id")?;
+        let _: Uuid = row.decode_column("boundary_frontier_id")?;
         if stage_command != command.command()
             || stage_revision != command.expected_placement_revision()
         {
@@ -7598,6 +7617,8 @@ async fn load_pinned_replacement_record(
                 stage.lost_placement_event_ordinal,
                 stage.lost_placement_revision,
                 stage.requested_working_directory AS stage_working_directory,
+                stage.boundary_entry_id AS stage_boundary_entry_id,
+                stage.boundary_frontier_id AS stage_boundary_frontier_id,
                 lost.event_kind AS lost_event_kind,
                 lost.state_kind AS lost_state_kind,
                 lost.lost_runner_id AS lost_runner_id,
@@ -7607,7 +7628,8 @@ async fn load_pinned_replacement_record(
                 placement.requested_working_directory AS placement_requested_directory,
                 placement.pinned_working_directory AS placement_working_directory,
                 placement.requested_sandbox_profile AS placement_sandbox_profile,
-                boundary.semantic_entry_id AS boundary_entry_id
+                boundary.semantic_entry_id AS boundary_entry_id,
+                pointer.context_frontier_id AS boundary_frontier_id
            FROM replace_lost_runner_command AS command
            JOIN replace_lost_runner_result AS result
              ON result.command_id = command.command_id
@@ -7710,7 +7732,10 @@ async fn load_pinned_replacement_record(
         row.decode_column("placement_requested_directory")?;
     let placement_working_directory: String = row.decode_column("placement_working_directory")?;
     let placement_sandbox_profile: String = row.decode_column("placement_sandbox_profile")?;
-    let _: Uuid = row.decode_column("boundary_entry_id")?;
+    let stage_boundary_entry: Uuid = row.decode_column("stage_boundary_entry_id")?;
+    let stage_boundary_frontier: Uuid = row.decode_column("stage_boundary_frontier_id")?;
+    let boundary_entry: Uuid = row.decode_column("boundary_entry_id")?;
+    let boundary_frontier: Uuid = row.decode_column("boundary_frontier_id")?;
     if target_registration_runner != new_runner
         || runner_connection_state_from_str(&target_connection_state)
             != Some(RunnerConnectionState::Connected)
@@ -7726,6 +7751,8 @@ async fn load_pinned_replacement_record(
         || placement_requested_directory != working_directory.as_str()
         || placement_working_directory != working_directory.as_str()
         || runner_sandbox_from_str(&placement_sandbox_profile) != Some(sandbox)
+        || boundary_entry != stage_boundary_entry
+        || boundary_frontier != stage_boundary_frontier
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
