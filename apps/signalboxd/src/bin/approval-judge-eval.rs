@@ -722,6 +722,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "repeats": verdicts.iter().map(|verdict| serde_json::json!({
                 "recommendation": recommendation_label(verdict.recommendation),
                 "rationale": verdict.rationale,
+                "provider_reported_model": verdict.provider_reported_model,
             })).collect::<Vec<_>>(),
             "notes": case.notes,
         }));

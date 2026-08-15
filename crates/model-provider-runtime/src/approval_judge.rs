@@ -73,6 +73,8 @@ pub struct ApprovalJudgeModelResult {
     pub recommendation: DelegateApprovalRecommendation,
     /// Checked nonempty rationale emitted with the recommendation.
     pub rationale: ToolDecisionRationale,
+    /// Model identity reported by the provider, when one was observable.
+    pub reported_model: Option<ProviderReportedModel>,
     /// Provider-reported usage, independently optional by field.
     pub usage: TokenUsage,
 }
@@ -301,8 +303,9 @@ where
         TerminalEvidence::CancellationConfirmed(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::BoundaryLoss(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::ProvenUnsent(_) => None,
-    };
-    if let Some(reported) = reported_model {
+    }
+    .cloned();
+    if let Some(reported) = &reported_model {
         require_same_target(&resolved, reported, usage)?;
     }
     let completed = match report.evidence {
@@ -340,6 +343,7 @@ where
         call,
         recommendation,
         rationale,
+        reported_model,
         usage: completed.usage,
     })
 }
@@ -754,6 +758,13 @@ mod tests {
             DelegateApprovalRecommendation::Approve
         );
         assert_eq!(result.rationale.as_str(), APPROVAL_RATIONALE);
+        assert_eq!(
+            result
+                .reported_model
+                .as_ref()
+                .map(ProviderReportedModel::as_str),
+            Some(PROVIDER_MODEL)
+        );
         assert_eq!(result.usage.input_tokens, Some(INPUT_TOKENS));
         assert_eq!(result.usage.output_tokens, Some(OUTPUT_TOKENS));
         assert_eq!(
