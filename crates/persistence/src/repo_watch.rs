@@ -798,10 +798,10 @@ impl PostgresRepoWatchStore {
                 transaction.rollback().await?;
                 return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
             }
-            let assessment_id = sqlx::query_scalar::<_, Uuid>(
-                "SELECT assessment_id
+            let (assessment_id, base_revision) = sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT assessment_id, base_revision
                    FROM (
-                         SELECT assessment_id, head_sha, review_decision,
+                         SELECT assessment_id, head_sha, base_revision, review_decision,
                                 unresolved_threads, non_green_gating_checks,
                                 mergeable_state, verdict_kind
                            FROM repo_watch_pull_request_convergence_assessment
@@ -828,9 +828,9 @@ impl PostgresRepoWatchStore {
             sqlx::query(
                 "INSERT INTO repo_watch_stale_review_clearance
                     (clearance_id, assessment_id, repository,
-                     pull_request_number, current_head_sha, review_node_id,
+                     pull_request_number, current_head_sha, base_revision, review_node_id,
                      reviewer, reviewed_head_sha, dismissal_message)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                  ON CONFLICT (assessment_id, review_node_id) DO NOTHING",
             )
             .bind(clearance_id)
@@ -838,6 +838,7 @@ impl PostgresRepoWatchStore {
             .bind(repository.as_str())
             .bind(Decimal::from(candidate.number().get()))
             .bind(candidate.current_head_sha().as_str())
+            .bind(&base_revision)
             .bind(candidate.review_node_id())
             .bind(candidate.reviewer().as_str())
             .bind(candidate.reviewed_head_sha().as_str())
@@ -856,14 +857,16 @@ impl PostgresRepoWatchStore {
                     AND clearance.repository = $3
                     AND clearance.pull_request_number = $4
                     AND clearance.current_head_sha = $5
-                    AND clearance.reviewer = $6
-                    AND clearance.reviewed_head_sha = $7",
+                    AND clearance.base_revision = $6
+                    AND clearance.reviewer = $7
+                    AND clearance.reviewed_head_sha = $8",
             )
             .bind(assessment_id)
             .bind(candidate.review_node_id())
             .bind(repository.as_str())
             .bind(Decimal::from(candidate.number().get()))
             .bind(candidate.current_head_sha().as_str())
+            .bind(&base_revision)
             .bind(candidate.reviewer().as_str())
             .bind(candidate.reviewed_head_sha().as_str())
             .fetch_optional(&mut *transaction)
