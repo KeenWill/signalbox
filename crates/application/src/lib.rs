@@ -13,6 +13,7 @@ mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
 mod repo_watch;
+mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
@@ -86,6 +87,15 @@ pub use repo_watch::{
     RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
     RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+};
+pub use repo_watch_webhook::{
+    RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,
+    RepoWatchObservationPatchV1, RepoWatchPullRequestHeadGuardV1,
+    RepoWatchPullRequestMissingPolicyV1, RepoWatchTargetedRefreshV1, RepoWatchWebhookApplyError,
+    RepoWatchWebhookBodyReferenceV1, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
+    RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
+    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, apply_repo_watch_observation_patch_v1,
+    map_repo_watch_webhook_delivery_v1,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
