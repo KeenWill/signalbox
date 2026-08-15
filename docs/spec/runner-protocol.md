@@ -126,7 +126,9 @@ daemon's checked lease-only resume directives and canonical claim/dispatch
 replay are re-verified through this PR
 (`agent/runner-claimed-resume-transaction`). The reusable runner-restricted
 bubblewrap request profile is re-verified through this PR
-(`agent/runner-strict-sandbox-profile`). Runner consumption of the exact
+(`agent/runner-strict-sandbox-profile`). Its single explicit, bounded,
+debug-redacted environment channel is verified against this PR
+(`agent/runner-restricted-command-environment`). Runner consumption of the exact
 lease-only resume directive is re-verified through this PR
 (`agent/runner-claimed-resume-client`). Runner ingestion of the daemon's
 canonical claim and dispatch replay is re-verified through this PR
@@ -1767,6 +1769,17 @@ aliases only when their targets are inside the configured mounts, and derives
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
 remain separate work, with first-release resource limits still owner-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
+
+The reusable process core can add one explicit environment value only to the
+runner-restricted dispatch request. The name is a canonical uppercase
+environment identifier and cannot replace `HOME`, `HTTPS_PROXY`, `LANG`,
+`LC_ALL`, or `PATH`; the UTF-8 value is nonempty, NUL-free, and at most 65,536
+bytes. The bubblewrap process receives it through the exact cleared environment,
+not argv, while the availability probe receives no caller value. Debug output
+retains only the name and a redaction marker. The daemon-local sandbox profile
+cannot use this channel. This core does not resolve credential files or redact
+captured command output; the runner preparer that owns a selected credential
+must do both before and after this boundary.
 
 Confinement is defined over that writable root, which need not be a repository.
 The root is the provisioned repository when the placement requires a worktree,
