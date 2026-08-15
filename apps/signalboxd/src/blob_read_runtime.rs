@@ -141,7 +141,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn INV_060_direct_read_bound_matches_the_wire_and_store_contract() {
+    /// INV-060: direct reads share the wire and store range bound.
+    fn direct_read_bound_matches_the_wire_and_store_contract() {
         assert_eq!(
             MAX_BLOB_RANGE_BYTES,
             signalbox_process_protocol::MAX_BLOB_READ_BYTES as u64
