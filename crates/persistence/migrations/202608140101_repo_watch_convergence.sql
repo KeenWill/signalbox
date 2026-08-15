@@ -1,6 +1,8 @@
 -- Record exact-head pull-request convergence, stop its commission, and seal
 -- that head against later repository-watch dispatch.
 
+-- Supersedes the outcome vocabulary from
+-- 202608140100_repo_watch_dispatch_release.sql.
 ALTER TABLE repo_watch_rule_evaluation
     DROP CONSTRAINT repo_watch_rule_evaluation_outcome_kind_check;
 
@@ -11,6 +13,8 @@ ALTER TABLE repo_watch_rule_evaluation
         'coalesced', 'cooldown', 'dispatched'
     ));
 
+-- Supersedes the settlement vocabulary and shape from
+-- 202608140100_repo_watch_dispatch_release.sql.
 ALTER TABLE repo_watch_dispatch_obligation
     DROP CONSTRAINT repo_watch_dispatch_obligation_settled_kind_check,
     DROP CONSTRAINT repo_watch_dispatch_obligation_settlement_shape_check;
