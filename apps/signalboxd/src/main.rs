@@ -27,7 +27,7 @@ use signalbox_application::{
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{DurableCommandId, SessionId, TurnId};
 use signalbox_model_provider_runtime::{
     ApprovalJudgeModel, ContextCompactionModel, RuntimeApprovalJudgeModel,
     RuntimeContextCompactionModel, RuntimeModelCallProvider,
@@ -1454,19 +1454,20 @@ async fn run_hub(
         pool.clone(),
         model_configuration.session_credential_pin(),
     );
-    match await_while_guarded(
-        &mut database,
-        repository_watch_store.deactivate_unconfigured_repositories(&configured_repositories),
-    )
-    .await
-    {
+    let repository_watch_reconciliation = async {
+        repository_watch_store
+            .deactivate_unconfigured_repositories(&configured_repositories)
+            .await?;
+        repository_watch_store
+            .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
+            .await
+    };
+    match await_while_guarded(&mut database, repository_watch_reconciliation).await {
         GuardedAwait::Completed(Ok(())) => {}
         GuardedAwait::Completed(Err(_)) => {
             let failure = erase_startup_cause(
                 RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static(
-                    "repository_watch_configuration_reconciliation_failed",
-                ),
+                SanitizedStartupCause::Static("repository_watch_startup_reconciliation_failed"),
             );
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
