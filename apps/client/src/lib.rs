@@ -464,6 +464,12 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatusStart {}
+        | ServerMessage::OperatorStatusHeldSlot { .. }
+        | ServerMessage::OperatorStatusQueuedObligation { .. }
+        | ServerMessage::OperatorStatusPullRequestConvergence { .. }
+        | ServerMessage::OperatorStatusPendingStaleReviewClearance { .. }
+        | ServerMessage::OperatorStatusEnd { .. }
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -569,6 +575,12 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatusStart {}
+        | ServerMessage::OperatorStatusHeldSlot { .. }
+        | ServerMessage::OperatorStatusQueuedObligation { .. }
+        | ServerMessage::OperatorStatusPullRequestConvergence { .. }
+        | ServerMessage::OperatorStatusPendingStaleReviewClearance { .. }
+        | ServerMessage::OperatorStatusEnd { .. }
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -682,6 +694,12 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatusStart {}
+        | ServerMessage::OperatorStatusHeldSlot { .. }
+        | ServerMessage::OperatorStatusQueuedObligation { .. }
+        | ServerMessage::OperatorStatusPullRequestConvergence { .. }
+        | ServerMessage::OperatorStatusPendingStaleReviewClearance { .. }
+        | ServerMessage::OperatorStatusEnd { .. }
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -879,6 +897,7 @@ async fn execute(
         | Command::Session(_)
         | Command::Goal(_)
         | Command::Imported { .. }
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -904,6 +923,7 @@ async fn execute(
         | Command::Session(_)
         | Command::Goal(_)
         | Command::Imported { .. }
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -937,6 +957,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -1043,6 +1064,7 @@ async fn execute(
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::Session(command) => session_delegation(&mut client, &mut output, command).await,
         Command::Goal(command) => goal(&mut client, &mut output, command).await,
+        Command::Status => status(&mut client, &mut output).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
@@ -4757,6 +4779,122 @@ fn write_assistant_texts(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+enum OperatorStatusPhase {
+    HeldSlots,
+    QueuedObligations,
+    PullRequestConvergences,
+    PendingStaleReviewClearances,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct OperatorStatusCounts {
+    held_slots: u64,
+    queued_obligations: u64,
+    pull_request_convergences: u64,
+    pending_stale_review_clearances: u64,
+}
+
+async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
+    let mut connection = client.request(ClientRequest::ReadOperatorStatus {}).await?;
+    match connection.message().await? {
+        ServerMessage::OperatorStatusStart {} => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "operator status did not begin with its start frame",
+            ));
+        }
+    }
+    let mut spool = tempfile::tempfile()?;
+    let mut phase = OperatorStatusPhase::HeldSlots;
+    let mut counts = OperatorStatusCounts::default();
+    loop {
+        let frame = connection.frame().await?;
+        let item_phase = match frame.message() {
+            ServerMessage::OperatorStatusHeldSlot { .. } => {
+                counts.held_slots = status_increment(counts.held_slots)?;
+                Some(OperatorStatusPhase::HeldSlots)
+            }
+            ServerMessage::OperatorStatusQueuedObligation { .. } => {
+                counts.queued_obligations = status_increment(counts.queued_obligations)?;
+                Some(OperatorStatusPhase::QueuedObligations)
+            }
+            ServerMessage::OperatorStatusPullRequestConvergence { .. } => {
+                counts.pull_request_convergences =
+                    status_increment(counts.pull_request_convergences)?;
+                Some(OperatorStatusPhase::PullRequestConvergences)
+            }
+            ServerMessage::OperatorStatusPendingStaleReviewClearance { .. } => {
+                counts.pending_stale_review_clearances =
+                    status_increment(counts.pending_stale_review_clearances)?;
+                Some(OperatorStatusPhase::PendingStaleReviewClearances)
+            }
+            ServerMessage::OperatorStatusEnd {
+                held_slot_count,
+                queued_obligation_count,
+                pull_request_convergence_count,
+                pending_stale_review_clearance_count,
+            } if counts
+                == (OperatorStatusCounts {
+                    held_slots: held_slot_count.value(),
+                    queued_obligations: queued_obligation_count.value(),
+                    pull_request_convergences: pull_request_convergence_count.value(),
+                    pending_stale_review_clearances: pending_stale_review_clearance_count.value(),
+                }) =>
+            {
+                break;
+            }
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "operator status sequence or count was invalid",
+                ));
+            }
+        };
+        let Some(item_phase) = item_phase else {
+            return Err(ClientError::Protocol(
+                "operator status sequence was invalid",
+            ));
+        };
+        if item_phase < phase {
+            return Err(ClientError::Protocol(
+                "operator status sections were out of order",
+            ));
+        }
+        phase = item_phase;
+        spool.write_all(&encode_server_line(&frame)?)?;
+    }
+    output.operator_status_counts(
+        counts.held_slots,
+        counts.queued_obligations,
+        counts.pull_request_convergences,
+        counts.pending_stale_review_clearances,
+    )?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        output.operator_status_item(decode_server_line(&line)?.message())?;
+        line.clear();
+    }
+    Ok(output.operator_status_model_usage_omitted()?)
+}
+
+fn status_increment(value: u64) -> Result<u64, ClientError> {
+    value
+        .checked_add(1)
+        .ok_or(ClientError::Protocol("operator status count overflowed"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -14,14 +14,17 @@ use signalbox_process_protocol::{
     FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
     GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
     ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
+    ModelCallCostLabel, ModelCallDisposition, ModelCallState, OperatorStatusConvergenceSeal,
+    OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker, OperatorStatusMergeableState,
+    OperatorStatusReviewDecision, OperatorStatusSingletonScope, ReviewDiffSide,
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth, RunnerProjection,
     RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
-    RunnerStateTransitionState, SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision,
-    ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
+    RunnerStateTransitionState, ServerMessage, SessionEvent, ToolApprovalEventDecider,
+    ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -1100,6 +1103,207 @@ impl<'a> Output<'a> {
     /// the durable command that consumes it can become ambiguous.
     pub(crate) fn resolved_through_position(&mut self, position: u64) -> io::Result<()> {
         self.recovery_value("through_position", &position.to_string())
+    }
+
+    pub(crate) fn operator_status_counts(
+        &mut self,
+        held_slots: u64,
+        queued_obligations: u64,
+        pull_request_convergences: u64,
+        pending_stale_review_clearances: u64,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "status held_slots={held_slots} queued_obligations={queued_obligations} \
+             pull_request_convergences={pull_request_convergences} \
+             pending_stale_review_clearances={pending_stale_review_clearances}"
+        )
+    }
+
+    pub(crate) fn operator_status_item(
+        &mut self,
+        message: &ServerMessage,
+    ) -> Result<(), ClientError> {
+        match message {
+            ServerMessage::OperatorStatusHeldSlot {
+                dispatch_id,
+                repository,
+                pull_request_number,
+                rule_id,
+                rule_version,
+                singleton_scope,
+                singleton_repository,
+                singleton_pull_request_number,
+                singleton_stack_root_pull_request_number,
+                held_for_seconds,
+                session_ids,
+                blockers,
+            } => {
+                let repository = self.render_field(repository, TextField::DelimitedOnLine);
+                let rule_id = self.render_field(rule_id, TextField::DelimitedOnLine);
+                let singleton = operator_status_singleton_label(
+                    *singleton_scope,
+                    singleton_repository.as_deref(),
+                    *singleton_pull_request_number,
+                    *singleton_stack_root_pull_request_number,
+                );
+                let singleton = self.render_field(&singleton, TextField::DelimitedOnLine);
+                let sessions = session_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let blockers = blockers
+                    .iter()
+                    .copied()
+                    .map(operator_status_blocker_label)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(
+                    self.stdout,
+                    "held repository={repository} pr={} rule={rule_id}@{} singleton={singleton} \
+                     held={} blockers={} sessions={} dispatch={dispatch_id}",
+                    pull_request_number.value(),
+                    rule_version.value(),
+                    duration_label(held_for_seconds.value()),
+                    if blockers.is_empty() {
+                        "none"
+                    } else {
+                        &blockers
+                    },
+                    sessions,
+                )?;
+                Ok(())
+            }
+            ServerMessage::OperatorStatusQueuedObligation {
+                obligation_id,
+                repository,
+                rule_id,
+                rule_version,
+                singleton_scope,
+                singleton_repository,
+                singleton_pull_request_number,
+                singleton_stack_root_pull_request_number,
+                first_event_id,
+                latest_event_id,
+                matched_event_count,
+                waiting_for_seconds,
+                occupying_dispatch_id,
+                occupying_session_ids,
+                cooldown_remaining_seconds,
+                ready,
+            } => {
+                let repository = self.render_field(repository, TextField::DelimitedOnLine);
+                let rule_id = self.render_field(rule_id, TextField::DelimitedOnLine);
+                let singleton = operator_status_singleton_label(
+                    *singleton_scope,
+                    singleton_repository.as_deref(),
+                    *singleton_pull_request_number,
+                    *singleton_stack_root_pull_request_number,
+                );
+                let singleton = self.render_field(&singleton, TextField::DelimitedOnLine);
+                let occupancy = occupying_dispatch_id.map_or_else(
+                    || String::from("none"),
+                    |dispatch| {
+                        let sessions = occupying_session_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("{dispatch}:{sessions}")
+                    },
+                );
+                let cooldown = cooldown_remaining_seconds.map_or_else(
+                    || String::from("none"),
+                    |seconds| duration_label(seconds.value()),
+                );
+                writeln!(
+                    self.stdout,
+                    "queued repository={repository} rule={rule_id}@{} singleton={singleton} \
+                     waiting={} matches={} ready={ready} occupying={occupancy} cooldown={cooldown} \
+                     first_event={first_event_id} latest_event={latest_event_id} \
+                     obligation={obligation_id}",
+                    rule_version.value(),
+                    duration_label(waiting_for_seconds.value()),
+                    matched_event_count.value(),
+                )?;
+                Ok(())
+            }
+            ServerMessage::OperatorStatusPullRequestConvergence {
+                repository,
+                pull_request_number,
+                head_sha,
+                base_branch,
+                base_revision,
+                mergeable_state,
+                review_decision,
+                unresolved_thread_count,
+                gating_check_count,
+                non_green_gating_checks,
+                verdict,
+                seal,
+                assessed_seconds_ago,
+            } => {
+                let repository = self.render_field(repository, TextField::DelimitedOnLine);
+                let base_branch = self.render_field(base_branch, TextField::DelimitedOnLine);
+                let checks = non_green_gating_checks
+                    .iter()
+                    .map(|check| self.render_field(check, TextField::DelimitedOnLine))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                writeln!(
+                    self.stdout,
+                    "convergence repository={repository} pr={} verdict={} seal={} \
+                     unresolved_threads={} gating_checks={} non_green={} mergeable={} review={} \
+                     assessed_ago={} head={} base={base_branch}@{}",
+                    pull_request_number.value(),
+                    operator_status_verdict_label(*verdict),
+                    seal.map_or("none", operator_status_seal_label),
+                    unresolved_thread_count.value(),
+                    gating_check_count.value(),
+                    if checks.is_empty() { "none" } else { &checks },
+                    operator_status_mergeable_label(*mergeable_state),
+                    operator_status_review_decision_label(*review_decision),
+                    duration_label(assessed_seconds_ago.value()),
+                    head_sha,
+                    base_revision,
+                )?;
+                Ok(())
+            }
+            ServerMessage::OperatorStatusPendingStaleReviewClearance {
+                repository,
+                pull_request_number,
+                current_head_sha,
+                review_node_id,
+                reviewer,
+                reviewed_head_sha,
+                pending_for_seconds,
+            } => {
+                let repository = self.render_field(repository, TextField::DelimitedOnLine);
+                let review_node_id = self.render_field(review_node_id, TextField::DelimitedOnLine);
+                let reviewer = self.render_field(reviewer, TextField::DelimitedOnLine);
+                writeln!(
+                    self.stdout,
+                    "stale_review_clearance repository={repository} pr={} reviewer={reviewer} \
+                     pending={} review={review_node_id} reviewed_head={} current_head={}",
+                    pull_request_number.value(),
+                    duration_label(pending_for_seconds.value()),
+                    reviewed_head_sha,
+                    current_head_sha,
+                )?;
+                Ok(())
+            }
+            _ => Err(ClientError::Protocol(
+                "operator-status spool contained an unexpected frame",
+            )),
+        }
+    }
+
+    pub(crate) fn operator_status_model_usage_omitted(&mut self) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "model_usage=omitted reason=no_cheap_status_aggregate"
+        )
     }
 
     pub(crate) fn session_summary(
@@ -2515,6 +2719,91 @@ impl<'a> Output<'a> {
         } else {
             control_safe(value, field)
         }
+    }
+}
+
+fn operator_status_singleton_label(
+    scope: OperatorStatusSingletonScope,
+    repository: Option<&str>,
+    pull_request_number: Option<signalbox_process_protocol::CanonicalU64>,
+    stack_root_pull_request_number: Option<signalbox_process_protocol::CanonicalU64>,
+) -> String {
+    match scope {
+        OperatorStatusSingletonScope::PullRequest => format!(
+            "pull_request:{}#{}",
+            repository.unwrap_or("?"),
+            pull_request_number.map_or(0, |number| number.value())
+        ),
+        OperatorStatusSingletonScope::Stack => format!(
+            "stack:{}#{}",
+            repository.unwrap_or("?"),
+            stack_root_pull_request_number.map_or(0, |number| number.value())
+        ),
+        OperatorStatusSingletonScope::Rule => String::from("rule"),
+        OperatorStatusSingletonScope::Repo => {
+            format!("repo:{}", repository.unwrap_or("?"))
+        }
+    }
+}
+
+const fn operator_status_blocker_label(blocker: OperatorStatusHeldSlotBlocker) -> &'static str {
+    match blocker {
+        OperatorStatusHeldSlotBlocker::UndeliveredAction => "undelivered_action",
+        OperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant => {
+            "delivery_turn_runtime_relevant"
+        }
+        OperatorStatusHeldSlotBlocker::LiveRuntimeTurn => "live_runtime_turn",
+        OperatorStatusHeldSlotBlocker::PursuingGoal => "pursuing_goal",
+    }
+}
+
+const fn operator_status_mergeable_label(state: OperatorStatusMergeableState) -> &'static str {
+    match state {
+        OperatorStatusMergeableState::Mergeable => "mergeable",
+        OperatorStatusMergeableState::Conflicting => "conflicting",
+        OperatorStatusMergeableState::Unknown => "unknown",
+    }
+}
+
+const fn operator_status_review_decision_label(
+    decision: OperatorStatusReviewDecision,
+) -> &'static str {
+    match decision {
+        OperatorStatusReviewDecision::None => "none",
+        OperatorStatusReviewDecision::Approved => "approved",
+        OperatorStatusReviewDecision::ReviewRequired => "review_required",
+        OperatorStatusReviewDecision::ChangesRequested => "changes_requested",
+    }
+}
+
+const fn operator_status_verdict_label(verdict: OperatorStatusConvergenceVerdict) -> &'static str {
+    match verdict {
+        OperatorStatusConvergenceVerdict::NotConverged => "not_converged",
+        OperatorStatusConvergenceVerdict::InternallyConverged => "internally_converged",
+        OperatorStatusConvergenceVerdict::MergeReady => "merge_ready",
+    }
+}
+
+const fn operator_status_seal_label(seal: OperatorStatusConvergenceSeal) -> &'static str {
+    match seal {
+        OperatorStatusConvergenceSeal::InternallyConverged => "internally_converged",
+        OperatorStatusConvergenceSeal::MergeReady => "merge_ready",
+    }
+}
+
+fn duration_label(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = seconds % 86_400 / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}d{hours}h{minutes}m{seconds}s")
+    } else if hours > 0 {
+        format!("{hours}h{minutes}m{seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
