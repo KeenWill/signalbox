@@ -288,3 +288,36 @@ async fn inv061_registered_source_path_accepts_a_unicode_root() -> Result<(), Bo
     drop(container);
     Ok(())
 }
+
+/// INV-061: append-only registration evidence enforces the filename implied by
+/// its closed bundle kind.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_registered_agent_document_requires_the_agents_filename()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO registered_instruction_bundle
+            (instruction_bundle_id, root_kind, root_path, source_path,
+             bundle_kind, skill_name, skill_description, source_byte_length,
+             source_hash_algorithm, source_hash)
+         VALUES ($1, 'workspace', '/workspace', '/workspace/README.md',
+                 'agent_document', NULL, NULL, 1, 'sha256_v1', $2)",
+    )
+    .bind(Uuid::from_u128(0x6852))
+    .bind([0_u8; 32].as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("agent-document evidence requires the AGENTS.md filename");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("registered_instruction_bundle_source_kind_shape")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

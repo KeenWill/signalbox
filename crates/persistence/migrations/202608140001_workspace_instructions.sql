@@ -84,6 +84,16 @@ CREATE TABLE registered_instruction_bundle (
             OR
             (bundle_kind = 'agent_skill' AND skill_name IS NOT NULL AND skill_description IS NOT NULL)
         ),
+    CONSTRAINT registered_instruction_bundle_source_kind_shape
+        CHECK (
+            (bundle_kind = 'agent_document' AND right(source_path, 10) = '/AGENTS.md')
+            OR
+            (
+                bundle_kind = 'agent_skill'
+                AND right(source_path, char_length(skill_name) + 10)
+                    = '/' || skill_name || '/SKILL.md'
+            )
+        ),
     CONSTRAINT registered_instruction_bundle_skill_name_valid
         CHECK (
             skill_name IS NULL
@@ -247,6 +257,75 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+CREATE FUNCTION validate_instruction_discovery_seal()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    root_count bigint;
+    root_max_ordinal bigint;
+    candidate_count bigint;
+    candidate_max_ordinal bigint;
+    actual_finding_count bigint;
+    finding_max_ordinal bigint;
+BEGIN
+    SELECT count(*), coalesce(max(root_ordinal), 0)
+      INTO root_count, root_max_ordinal
+      FROM instruction_discovery_root
+     WHERE instruction_discovery_id = NEW.instruction_discovery_id;
+    IF root_count <> root_max_ordinal THEN
+        RAISE EXCEPTION 'instruction discovery root inventory is not contiguous'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'instruction_discovery_root_inventory_exact';
+    END IF;
+
+    SELECT count(*), coalesce(max(candidate_ordinal), 0)
+      INTO candidate_count, candidate_max_ordinal
+      FROM instruction_discovery_candidate AS candidate
+     WHERE candidate.instruction_discovery_id = NEW.instruction_discovery_id;
+    IF candidate_count <> candidate_max_ordinal THEN
+        RAISE EXCEPTION 'instruction discovery candidate inventory is not contiguous'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'instruction_discovery_candidate_inventory_exact';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM instruction_discovery_candidate AS candidate
+          JOIN registered_instruction_bundle AS bundle
+            ON bundle.instruction_bundle_id = candidate.instruction_bundle_id
+         WHERE candidate.instruction_discovery_id = NEW.instruction_discovery_id
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM instruction_discovery_root AS root
+                 WHERE root.instruction_discovery_id = NEW.instruction_discovery_id
+                   AND root.root_kind = bundle.root_kind
+                   AND root.root_path = bundle.root_path
+           )
+    ) THEN
+        RAISE EXCEPTION 'instruction discovery candidate root is absent from inventory'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'instruction_discovery_candidate_root_in_inventory';
+    END IF;
+
+    SELECT count(*), coalesce(max(finding_ordinal), 0)
+      INTO actual_finding_count, finding_max_ordinal
+      FROM instruction_discovery_finding
+     WHERE instruction_discovery_id = NEW.instruction_discovery_id;
+    IF actual_finding_count <> NEW.finding_count
+        OR actual_finding_count <> finding_max_ordinal
+    THEN
+        RAISE EXCEPTION 'instruction discovery finding count disagrees with inventory'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'instruction_discovery_finding_inventory_exact';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER instruction_discovery_validates_before_seal
+BEFORE INSERT ON instruction_discovery
+FOR EACH ROW EXECUTE FUNCTION validate_instruction_discovery_seal();
 
 CREATE TRIGGER instruction_discovery_root_insert_before_seal
 BEFORE INSERT ON instruction_discovery_root

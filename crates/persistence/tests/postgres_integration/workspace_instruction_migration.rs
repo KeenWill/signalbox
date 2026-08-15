@@ -262,3 +262,113 @@ async fn inv061_workspace_instruction_finding_rejects_a_noncanonical_path()
     drop(container);
     Ok(())
 }
+
+/// INV-061: sealing authenticates both the stored finding count and contiguous
+/// finding ordinals against the exact child inventory.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_discovery_seal_rejects_a_finding_ordinal_gap()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x6890).await?;
+    let discovery = Uuid::from_u128(0x6897);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery_finding
+            (instruction_discovery_id, finding_ordinal, source_path, finding_kind)
+         VALUES ($1, 2, '/workspace/AGENTS.md', 'entry_unreadable')",
+    )
+    .bind(discovery)
+    .execute(&mut *transaction)
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 1, 1, 0, 0, true)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("a finding ordinal gap prevents the discovery seal");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("instruction_discovery_finding_inventory_exact")
+    );
+    transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: sealing rejects a candidate whose registered authorizing root is
+/// absent from the discovery's own ordered root inventory.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_discovery_seal_requires_the_candidate_root()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68a0).await?;
+    let discovery = Uuid::from_u128(0x68a7);
+    let bundle = Uuid::from_u128(0x68a8);
+    sqlx::query(
+        "INSERT INTO registered_instruction_bundle
+            (instruction_bundle_id, root_kind, root_path, source_path,
+             bundle_kind, skill_name, skill_description, source_byte_length,
+             source_hash_algorithm, source_hash)
+         VALUES ($1, 'workspace', '/other', '/other/AGENTS.md',
+                 'agent_document', NULL, NULL, 1, 'sha256_v1', $2)",
+    )
+    .bind(bundle)
+    .bind([0_u8; 32].as_slice())
+    .execute(&pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery_root
+            (instruction_discovery_id, root_ordinal, root_kind, root_path)
+         VALUES ($1, 1, 'workspace', '/workspace')",
+    )
+    .bind(discovery)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery_candidate
+            (instruction_discovery_id, candidate_ordinal, instruction_bundle_id)
+         VALUES ($1, 1, $2)",
+    )
+    .bind(discovery)
+    .bind(bundle)
+    .execute(&mut *transaction)
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 1, 0, 1, 0, true)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("a candidate authorized by an uninventoried root prevents the seal");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("instruction_discovery_candidate_root_in_inventory")
+    );
+    transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
