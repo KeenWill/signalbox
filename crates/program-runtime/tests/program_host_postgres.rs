@@ -1,0 +1,303 @@
+//! PostgreSQL integration coverage for the JavaScript program host.
+
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
+)]
+
+use std::{collections::VecDeque, error::Error, future::Future, pin::Pin};
+
+use signalbox_domain::{
+    DeliveryKind, InlineFramePayload, JournalFrame, ProgramFault, ProgramRunId, RequestFrame,
+    RequestKind, RequestOrdinal,
+};
+use signalbox_persistence::{
+    disposable_test_container_labels, local_test_connection_options, migrate,
+    program_journal::ProgramJournalRepository,
+};
+use signalbox_program_runtime::{
+    LiveDeliveryFailure, LiveDeliverySource, PROGRAM_SDK_V1_SPECIFIER, ProgramArtifact,
+    ProgramExecutionOutcome, ProgramHost, ProgramHostError,
+};
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+use uuid::Uuid;
+
+const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+const DATABASE_NAME: &str = "signalbox_program_host";
+const DATABASE_USER: &str = "signalbox";
+const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const RUN_ID: u128 = 0x5100_0200;
+const REPLAY_REQUEST_BYTE: u8 = 1;
+const REPLAY_ANSWER_BYTE: u8 = 11;
+const FIRST_LIVE_REQUEST_BYTE: u8 = 2;
+const FIRST_LIVE_ANSWER_BYTE: u8 = 22;
+const SECOND_LIVE_REQUEST_BYTE: u8 = 3;
+const SECOND_LIVE_ANSWER_BYTE: u8 = 33;
+const DIVERGENT_REQUEST_BYTE: u8 = 9;
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    migrate(&pool).await?;
+    Ok((container, pool))
+}
+
+fn run_id() -> ProgramRunId {
+    ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID))
+}
+
+fn payload(bytes: &'static [u8]) -> InlineFramePayload {
+    InlineFramePayload::new(bytes)
+}
+
+fn request(ordinal: u64, kind: RequestKind) -> RequestFrame {
+    RequestFrame::new(
+        RequestOrdinal::try_from_u64(ordinal).expect("fixture request ordinal is positive"),
+        None,
+        kind,
+    )
+}
+
+struct ScriptedDeliveries {
+    deliveries: VecDeque<DeliveryKind>,
+    observed_outstanding: Vec<Vec<RequestFrame>>,
+}
+
+impl ScriptedDeliveries {
+    fn new(deliveries: impl IntoIterator<Item = DeliveryKind>) -> Self {
+        Self {
+            deliveries: deliveries.into_iter().collect(),
+            observed_outstanding: Vec::new(),
+        }
+    }
+}
+
+impl LiveDeliverySource for ScriptedDeliveries {
+    fn next_delivery<'a>(
+        &'a mut self,
+        outstanding: &'a [RequestFrame],
+    ) -> Pin<Box<dyn Future<Output = Result<DeliveryKind, LiveDeliveryFailure>> + 'a>> {
+        self.observed_outstanding.push(outstanding.to_vec());
+        let delivery = self.deliveries.pop_front();
+        Box::pin(async move {
+            delivery.ok_or_else(|| LiveDeliveryFailure::new("scripted deliveries exhausted"))
+        })
+    }
+}
+
+fn tail_transition_artifact() -> ProgramArtifact {
+    ProgramArtifact::new(format!(
+        r#"
+import {{ now, random }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+if (typeof Date !== "undefined" || typeof Math.random !== "undefined" || typeof Deno !== "undefined") {{
+  throw new Error("ambient nondeterminism or engine ops reached the artifact");
+}}
+const first = await now(new Uint8Array([{REPLAY_REQUEST_BYTE}]));
+if (first.kind !== "answer" || first.payload[0] !== {REPLAY_ANSWER_BYTE}) {{
+  throw new Error("unexpected replayed answer");
+}}
+const [second, third] = await Promise.all([
+  random(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}])),
+  now(new Uint8Array([{SECOND_LIVE_REQUEST_BYTE}])),
+]);
+if (second.kind !== "answer" || second.payload[0] !== {FIRST_LIVE_ANSWER_BYTE}) {{
+  throw new Error("unexpected first live answer");
+}}
+if (third.kind !== "answer" || third.payload[0] !== {SECOND_LIVE_ANSWER_BYTE}) {{
+  throw new Error("unexpected second live answer");
+}}
+"#
+    ))
+}
+
+fn divergent_artifact() -> ProgramArtifact {
+    ProgramArtifact::new(format!(
+        r#"
+import {{ now }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+await now(new Uint8Array([{DIVERGENT_REQUEST_BYTE}]));
+"#
+    ))
+}
+
+/// INV-067: a real isolate consumes recorded deliveries and appends only after the durable tail.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv067_isolate_replays_then_transitions_to_live_at_the_durable_tail()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let recorded_request = repository
+        .append_request(run, None, RequestKind::Now(payload(&[REPLAY_REQUEST_BYTE])))
+        .await?;
+    let recorded_delivery = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: recorded_request.ordinal(),
+                payload: payload(&[REPLAY_ANSWER_BYTE]),
+            },
+        )
+        .await?;
+    let expected_live_request =
+        request(2, RequestKind::Random(payload(&[FIRST_LIVE_REQUEST_BYTE])));
+    let expected_live_kind = DeliveryKind::Answer {
+        resolves: expected_live_request.ordinal(),
+        payload: payload(&[FIRST_LIVE_ANSWER_BYTE]),
+    };
+    let expected_concurrent_request =
+        request(3, RequestKind::Now(payload(&[SECOND_LIVE_REQUEST_BYTE])));
+    let expected_concurrent_kind = DeliveryKind::Answer {
+        resolves: expected_concurrent_request.ordinal(),
+        payload: payload(&[SECOND_LIVE_ANSWER_BYTE]),
+    };
+    let artifact = tail_transition_artifact();
+    let host = ProgramHost::new(repository.clone());
+    let mut live =
+        ScriptedDeliveries::new([expected_concurrent_kind.clone(), expected_live_kind.clone()]);
+
+    let first_outcome = host
+        .execute(run, &artifact, &mut live)
+        .await
+        .expect("partial-journal execution must reach live and complete");
+
+    assert_eq!(first_outcome, ProgramExecutionOutcome::Completed);
+    assert_eq!(
+        live.observed_outstanding,
+        vec![
+            vec![
+                expected_live_request.clone(),
+                expected_concurrent_request.clone()
+            ],
+            vec![expected_live_request.clone()]
+        ]
+    );
+    let after_live = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(after_live.entries().len(), 6);
+    assert_eq!(
+        after_live.entries()[0].frame(),
+        &JournalFrame::Request(recorded_request)
+    );
+    assert_eq!(
+        after_live.entries()[1].frame(),
+        &JournalFrame::Delivery(recorded_delivery)
+    );
+    assert_eq!(
+        after_live.entries()[2].frame(),
+        &JournalFrame::Request(expected_live_request)
+    );
+    assert_eq!(
+        after_live.entries()[3].frame(),
+        &JournalFrame::Request(expected_concurrent_request)
+    );
+    let first_appended_delivery = after_live.entries()[4].frame().clone();
+    let JournalFrame::Delivery(first_appended_delivery) = first_appended_delivery else {
+        panic!("the fifth frame must be the first live delivery");
+    };
+    assert_eq!(first_appended_delivery.kind(), &expected_concurrent_kind);
+    let second_appended_delivery = after_live.entries()[5].frame().clone();
+    let JournalFrame::Delivery(second_appended_delivery) = second_appended_delivery else {
+        panic!("the sixth frame must be the second live delivery");
+    };
+    assert_eq!(second_appended_delivery.kind(), &expected_live_kind);
+    let mut replay_must_not_go_live = ScriptedDeliveries::new([]);
+
+    let replay_outcome = host
+        .execute(run, &artifact, &mut replay_must_not_go_live)
+        .await
+        .expect("complete-journal replay must complete");
+
+    assert_eq!(replay_outcome, ProgramExecutionOutcome::Completed);
+    assert!(replay_must_not_go_live.observed_outstanding.is_empty());
+    let after_replay = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(after_replay, after_live);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-068: isolate divergence is typed, persisted once, and replays as the same fault.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv068_isolate_divergence_persists_and_replays_the_nondeterminism_fault()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let expected = repository
+        .append_request(run, None, RequestKind::Now(payload(&[REPLAY_REQUEST_BYTE])))
+        .await?;
+    let observed = request(1, RequestKind::Now(payload(&[DIVERGENT_REQUEST_BYTE])));
+    let artifact = divergent_artifact();
+    let host = ProgramHost::new(repository.clone());
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let failure = host
+        .execute(run, &artifact, &mut live_must_not_run)
+        .await
+        .expect_err("different request bytes must stop the isolate host");
+    let ProgramHostError::Nondeterminism {
+        expected: failed_expected,
+        observed: failed_observed,
+        fault,
+    } = failure
+    else {
+        panic!("expected the typed nondeterminism failure, got {failure:?}");
+    };
+
+    assert_eq!(*failed_expected, expected.clone());
+    assert_eq!(*failed_observed, observed.clone());
+    assert!(live_must_not_run.observed_outstanding.is_empty());
+    let persisted = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(
+        persisted.entries()[1].frame(),
+        &JournalFrame::Delivery(fault)
+    );
+    let mut restarted_live_must_not_run = ScriptedDeliveries::new([]);
+
+    let restarted = host
+        .execute(run, &artifact, &mut restarted_live_must_not_run)
+        .await?;
+
+    assert_eq!(
+        restarted,
+        ProgramExecutionOutcome::Faulted(ProgramFault::Nondeterminism { expected, observed })
+    );
+    assert!(restarted_live_must_not_run.observed_outstanding.is_empty());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
