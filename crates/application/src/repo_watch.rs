@@ -225,6 +225,7 @@ pub struct RepoWatchConvergenceAssessmentInput {
     pub number: PullRequestNumber,
     pub head_sha: CommitSha,
     pub base_branch: BranchName,
+    pub base_revision: CommitSha,
     pub mergeable_state: MergeableState,
     pub review_decision: RepoWatchReviewDecision,
     pub unresolved_threads: Vec<ReviewThreadId>,
@@ -238,6 +239,7 @@ pub struct RepoWatchConvergenceAssessment {
     number: PullRequestNumber,
     head_sha: CommitSha,
     base_branch: BranchName,
+    base_revision: CommitSha,
     mergeable_state: MergeableState,
     review_decision: RepoWatchReviewDecision,
     unresolved_threads: Box<[ReviewThreadId]>,
@@ -274,6 +276,7 @@ impl RepoWatchConvergenceAssessment {
             number: input.number,
             head_sha: input.head_sha,
             base_branch: input.base_branch,
+            base_revision: input.base_revision,
             mergeable_state: input.mergeable_state,
             review_decision: input.review_decision,
             unresolved_threads: input.unresolved_threads.into_boxed_slice(),
@@ -293,6 +296,10 @@ impl RepoWatchConvergenceAssessment {
 
     pub const fn base_branch(&self) -> &BranchName {
         &self.base_branch
+    }
+
+    pub const fn base_revision(&self) -> &CommitSha {
+        &self.base_revision
     }
 
     pub const fn mergeable_state(&self) -> MergeableState {
@@ -1851,6 +1858,7 @@ mod tests {
                 number: pull_request_number(PULL_REQUEST_NUMBER),
                 head_sha: CommitSha::try_new(String::from(INITIAL_HEAD))?,
                 base_branch: BranchName::try_new(String::from(facts.base_branch))?,
+                base_revision: CommitSha::try_new(String::from(CHANGED_HEAD))?,
                 mergeable_state: facts.mergeable_state,
                 review_decision: facts.review_decision,
                 unresolved_threads: facts.unresolved_threads,

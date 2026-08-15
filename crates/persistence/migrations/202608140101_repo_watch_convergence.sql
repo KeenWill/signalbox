@@ -87,6 +87,7 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
     pull_request_number numeric(20, 0) NOT NULL,
     head_sha text NOT NULL,
     base_branch text NOT NULL,
+    base_revision text NOT NULL,
     mergeable_state text NOT NULL,
     review_decision text NOT NULL,
     unresolved_threads text[] NOT NULL,
@@ -105,6 +106,7 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
     ),
     CHECK (head_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
     CHECK (repo_watch_branch_is_valid(base_branch)),
+    CHECK (base_revision COLLATE "C" ~ '^[0-9a-f]{40}$'),
     CHECK (mergeable_state IN ('mergeable', 'conflicting', 'unknown')),
     CHECK (review_decision IN (
         'none', 'approved', 'review_required', 'changes_requested'
@@ -128,7 +130,8 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
         )
     ),
     UNIQUE (
-        assessment_id, repository, pull_request_number, head_sha, verdict_kind
+        assessment_id, repository, pull_request_number, head_sha,
+        base_revision, verdict_kind
     )
 );
 
@@ -136,18 +139,21 @@ CREATE TABLE repo_watch_pull_request_convergence (
     repository text NOT NULL,
     pull_request_number numeric(20, 0) NOT NULL,
     head_sha text NOT NULL,
+    base_revision text NOT NULL,
     assessment_id uuid NOT NULL UNIQUE,
     convergence_kind text NOT NULL CHECK (
         convergence_kind IN ('internally_converged', 'merge_ready')
     ),
     converged_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (repository, pull_request_number, head_sha),
+    PRIMARY KEY (repository, pull_request_number, head_sha, base_revision),
+    CHECK (base_revision COLLATE "C" ~ '^[0-9a-f]{40}$'),
     CONSTRAINT repo_watch_convergence_assessment_matches
     FOREIGN KEY (
         assessment_id, repository, pull_request_number, head_sha,
-        convergence_kind
+        base_revision, convergence_kind
     ) REFERENCES repo_watch_pull_request_convergence_assessment(
-        assessment_id, repository, pull_request_number, head_sha, verdict_kind
+        assessment_id, repository, pull_request_number, head_sha,
+        base_revision, verdict_kind
     )
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
@@ -185,6 +191,7 @@ SELECT DISTINCT ON (assessment.repository, assessment.pull_request_number)
        assessment.pull_request_number,
        assessment.head_sha,
        assessment.base_branch,
+       assessment.base_revision,
        assessment.mergeable_state,
        assessment.review_decision,
        cardinality(assessment.unresolved_threads) AS unresolved_thread_count,
@@ -199,6 +206,7 @@ SELECT DISTINCT ON (assessment.repository, assessment.pull_request_number)
     ON convergence.repository = assessment.repository
    AND convergence.pull_request_number = assessment.pull_request_number
    AND convergence.head_sha = assessment.head_sha
+   AND convergence.base_revision = assessment.base_revision
  ORDER BY assessment.repository, assessment.pull_request_number,
           assessment.recorded_at DESC, assessment.assessment_id DESC;
 
