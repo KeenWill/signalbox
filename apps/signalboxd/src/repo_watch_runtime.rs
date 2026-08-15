@@ -107,7 +107,8 @@ query RepositoryWatchReviewThreads(
 
 const CONVERGENCE_QUERY: &str = r#"
 query RepositoryWatchConvergence(
-  $namespace: String!, $name: String!, $number: Int!, $after: String
+  $namespace: String!, $name: String!, $number: Int!, $after: String,
+  $includeThreads: Boolean!
 ) {
   repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
@@ -115,6 +116,10 @@ query RepositoryWatchConvergence(
       baseRefName
       mergeable
       reviewDecision
+      reviewThreads(first: 100) @include(if: $includeThreads) {
+        nodes { id isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
       commits(last: 1) {
         nodes {
           commit {
@@ -1527,8 +1532,8 @@ impl GitHubRepositoryPoller {
             && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
-            let convergence_evidence = self.fetch_convergence_evidence(previous.context()).await?;
-            let threads = self.fetch_threads(number).await?;
+            let (convergence_evidence, threads) =
+                self.fetch_convergence_evidence(previous.context()).await?;
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
                 .await?;
@@ -1663,7 +1668,7 @@ impl GitHubRepositoryPoller {
                 previous_pull_request.map(RepoWatchPullRequestState::reviews),
             )
             .await?;
-        let convergence_evidence = self.fetch_convergence_evidence(&context).await?;
+        let (convergence_evidence, threads) = self.fetch_convergence_evidence(&context).await?;
         let mergeable_state = convergence_evidence.mergeable_state;
         // Neither a check completion nor GitHub finishing its background
         // mergeability calculation moves the listing's updated_at, so a pull
@@ -1676,7 +1681,6 @@ impl GitHubRepositoryPoller {
         } else {
             PullRequestSettlement::Unsettled
         };
-        let threads = self.fetch_threads(number).await?;
         let reactions = self
             .fetch_reactions(
                 number,
@@ -1856,9 +1860,11 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    async fn fetch_threads(
+    async fn fetch_remaining_threads(
         &self,
         number: u64,
+        mut observations: Vec<RepoWatchThreadObservation>,
+        mut after: Option<String>,
     ) -> Result<Vec<RepoWatchThreadObservation>, RepositoryWatchAttemptError> {
         let (namespace, name) = self
             .repository
@@ -1869,10 +1875,8 @@ impl GitHubRepositoryPoller {
         let name = name.to_owned();
         let number =
             i64::try_from(number).map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        let mut observations = Vec::new();
-        let mut after: Option<String> = None;
-        let mut page = 1_u16;
-        loop {
+        let mut page = 2_u16;
+        while after.is_some() {
             let body = serde_json::to_vec(&GraphQlRequest {
                 query: REVIEW_THREADS_QUERY,
                 variables: ThreadVariables {
@@ -1909,21 +1913,28 @@ impl GitHubRepositoryPoller {
                     },
                 ));
             }
-            if !connection.page_info.has_next_page {
-                return Ok(observations);
+            if connection.page_info.has_next_page {
+                after = Some(
+                    connection
+                        .page_info
+                        .end_cursor
+                        .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                );
+                page = next_page(page)?;
+            } else {
+                after = None;
             }
-            after = connection.page_info.end_cursor;
-            if after.is_none() {
-                return Err(RepositoryWatchAttemptError::InvalidResponse);
-            }
-            page = next_page(page)?;
         }
+        Ok(observations)
     }
 
     async fn fetch_convergence_evidence(
         &self,
         context: &PullRequestEventContext,
-    ) -> Result<FetchedConvergenceEvidence, RepositoryWatchAttemptError> {
+    ) -> Result<
+        (FetchedConvergenceEvidence, Vec<RepoWatchThreadObservation>),
+        RepositoryWatchAttemptError,
+    > {
         let (namespace, name) = self
             .repository
             .as_str()
@@ -1937,14 +1948,17 @@ impl GitHubRepositoryPoller {
         let mut non_green_gating_checks = Vec::new();
         let mut retained_review_decision = None;
         let mut retained_mergeable_state = None;
+        let mut threads = Vec::new();
+        let mut next_thread_cursor = None;
         loop {
             let body = serde_json::to_vec(&GraphQlRequest {
                 query: CONVERGENCE_QUERY,
-                variables: ThreadVariables {
+                variables: ConvergenceVariables {
                     namespace,
                     name,
                     number,
                     after: after.as_deref(),
+                    include_threads: page == 1,
                 },
             })
             .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
@@ -1962,6 +1976,32 @@ impl GitHubRepositoryPoller {
                 .and_then(|data| data.repository)
                 .and_then(|repository| repository.pull_request)
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+            if page == 1 {
+                let connection = pull_request
+                    .review_threads
+                    .as_ref()
+                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+                for thread in &connection.nodes {
+                    threads.push(RepoWatchThreadObservation::new(
+                        ReviewThreadId::try_new(thread.id.clone())
+                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                        if thread.is_resolved {
+                            RepoWatchThreadState::Resolved
+                        } else {
+                            RepoWatchThreadState::Open
+                        },
+                    ));
+                }
+                if connection.page_info.has_next_page {
+                    next_thread_cursor = Some(
+                        connection
+                            .page_info
+                            .end_cursor
+                            .clone()
+                            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                    );
+                }
+            }
             let provider_mergeable_state = normalize_graphql_mergeable(&pull_request.mergeable)?;
             if pull_request.head_ref_oid != context.head_sha().as_str()
                 || pull_request.base_ref_name != context.base_branch().as_str()
@@ -2018,14 +2058,20 @@ impl GitHubRepositoryPoller {
             }
             page = next_page(page)?;
         }
-        Ok(FetchedConvergenceEvidence {
-            mergeable_state: retained_mergeable_state
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
-            review_decision: retained_review_decision
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
-            gating_check_count,
-            non_green_gating_checks,
-        })
+        let threads = self
+            .fetch_remaining_threads(context.number().get(), threads, next_thread_cursor)
+            .await?;
+        Ok((
+            FetchedConvergenceEvidence {
+                mergeable_state: retained_mergeable_state
+                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                review_decision: retained_review_decision
+                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                gating_check_count,
+                non_green_gating_checks,
+            },
+            threads,
+        ))
     }
 
     async fn fetch_stale_review_clearances(
@@ -3420,6 +3466,16 @@ struct ThreadVariables<'a> {
 }
 
 #[derive(Serialize)]
+struct ConvergenceVariables<'a> {
+    namespace: &'a str,
+    name: &'a str,
+    number: i64,
+    after: Option<&'a str>,
+    #[serde(rename = "includeThreads")]
+    include_threads: bool,
+}
+
+#[derive(Serialize)]
 struct DismissReviewVariables<'a> {
     review: &'a str,
     message: &'a str,
@@ -3519,6 +3575,8 @@ struct ConvergencePullRequest {
     mergeable: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    #[serde(rename = "reviewThreads")]
+    review_threads: Option<ThreadConnection>,
     commits: ConvergenceCommitConnection,
 }
 
@@ -4171,25 +4229,6 @@ mod tests {
         .to_string()
     }
 
-    fn threads() -> String {
-        serde_json::json!({
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "reviewThreads": {
-                            "nodes": [
-                                { "id": REVIEW_THREADS[0], "isResolved": false },
-                                { "id": REVIEW_THREADS[1], "isResolved": true }
-                            ],
-                            "pageInfo": { "hasNextPage": false, "endCursor": null }
-                        }
-                    }
-                }
-            }
-        })
-        .to_string()
-    }
-
     fn convergence() -> String {
         convergence_with_mergeability("CONFLICTING")
     }
@@ -4203,6 +4242,13 @@ mod tests {
                         "baseRefName": BASE_BRANCH,
                         "mergeable": mergeable,
                         "reviewDecision": "APPROVED",
+                        "reviewThreads": {
+                            "nodes": [
+                                { "id": REVIEW_THREADS[0], "isResolved": false },
+                                { "id": REVIEW_THREADS[1], "isResolved": true }
+                            ],
+                            "pageInfo": { "hasNextPage": false, "endCursor": null }
+                        },
                         "commits": {
                             "nodes": [{
                                 "commit": {
@@ -4949,10 +4995,6 @@ mod tests {
                 RequestTarget(THREADS_TARGET.to_owned()),
                 ResponseBody(convergence()),
             ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(threads()),
-            ),
             ScriptedResponse::ok(
                 RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
                 ResponseBody(pull_reactions()),
@@ -5050,6 +5092,10 @@ mod tests {
                         "baseRefName": BASE_BRANCH,
                         "mergeable": "MERGEABLE",
                         "reviewDecision": null,
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": { "hasNextPage": false, "endCursor": null }
+                        },
                         "commits": {
                             "nodes": [{
                                 "commit": {
@@ -5094,11 +5140,6 @@ mod tests {
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
                 ResponseBody(minimal_convergence(number)),
-            )
-            .matching_request_body(format!("\"number\":{number}")),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(empty_threads()),
             )
             .matching_request_body(format!("\"number\":{number}")),
             ScriptedResponse::ok(
@@ -5147,10 +5188,6 @@ mod tests {
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
                 ResponseBody(convergence()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(threads()),
             ),
             ScriptedResponse::ok(
                 RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
@@ -5208,10 +5245,6 @@ mod tests {
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
                 ResponseBody(convergence()),
-            ),
-            ScriptedResponse::post(
-                RequestTarget(THREADS_TARGET.to_owned()),
-                ResponseBody(threads()),
             ),
             ScriptedResponse::conditional_ok(
                 RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
