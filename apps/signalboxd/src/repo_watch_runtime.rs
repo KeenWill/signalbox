@@ -77,6 +77,9 @@ const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
 const MAX_CONCURRENT_PULL_REQUEST_FETCHES: usize = 8;
 const MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS: usize = 4;
+// Hard safety ceiling that prevents an untrusted provider error from turning
+// one failed poll into an unbounded log record while retaining its diagnosis.
+const MAX_GRAPHQL_ERROR_LOG_MESSAGE_CHARS: usize = 512;
 // One polling attempt may transfer this many response bytes. The dogfooded
 // repository exceeds 64 MiB in a single attempt, and the bound fails the
 // attempt rather than shedding, so it has to clear real event volume.
@@ -1893,9 +1896,7 @@ impl GitHubRepositoryPoller {
                     Some(body),
                 )
                 .await?;
-            if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
-            }
+            reject_graphql_errors("threads", &response.errors)?;
             let connection = response
                 .data
                 .and_then(|data| data.repository)
@@ -1960,9 +1961,7 @@ impl GitHubRepositoryPoller {
                     Some(body),
                 )
                 .await?;
-            if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
-            }
+            reject_graphql_errors("convergence", &response.errors)?;
             let pull_request = response
                 .data
                 .and_then(|data| data.repository)
@@ -2074,9 +2073,7 @@ impl GitHubRepositoryPoller {
                     Some(body),
                 )
                 .await?;
-            if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
-            }
+            reject_graphql_errors("blocking-reviews", &response.errors)?;
             let pull_request = response
                 .data
                 .and_then(|data| data.repository)
@@ -2164,9 +2161,7 @@ impl GitHubRepositoryPoller {
                 Some(body),
             )
             .await?;
-        if !response.errors.is_empty() {
-            return Err(RepositoryWatchAttemptError::Rejected);
-        }
+        reject_graphql_errors("dismiss-review", &response.errors)?;
         let review = response
             .data
             .and_then(|data| data.dismiss_pull_request_review)
@@ -2197,9 +2192,7 @@ impl GitHubRepositoryPoller {
                 Some(body),
             )
             .await?;
-        if !response.errors.is_empty() {
-            return Err(RepositoryWatchAttemptError::Rejected);
-        }
+        reject_graphql_errors("review-clearance-state", &response.errors)?;
         let review = response
             .data
             .and_then(|data| data.node)
@@ -3450,7 +3443,35 @@ struct GraphQlEnvelope<T> {
 }
 
 #[derive(Clone, Deserialize)]
-struct GraphQlError {}
+struct GraphQlError {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    message: String,
+}
+
+fn reject_graphql_errors(
+    resource_kind: &'static str,
+    errors: &[GraphQlError],
+) -> Result<(), RepositoryWatchAttemptError> {
+    let Some(first) = errors.first() else {
+        return Ok(());
+    };
+    let mut message_chars = first.message.chars();
+    let first_error_message = message_chars
+        .by_ref()
+        .take(MAX_GRAPHQL_ERROR_LOG_MESSAGE_CHARS)
+        .collect::<String>();
+    let first_error_message_truncated = message_chars.next().is_some();
+    tracing::warn!(
+        resource_kind,
+        graphql_error_count = errors.len(),
+        graphql_error_type = first.kind.as_deref(),
+        graphql_error_message = first_error_message,
+        graphql_error_message_truncated = first_error_message_truncated,
+        "repository-watch GitHub GraphQL response rejected"
+    );
+    Err(RepositoryWatchAttemptError::Rejected)
+}
 
 #[derive(Clone, Deserialize)]
 struct ThreadData {
@@ -3730,19 +3751,20 @@ mod tests {
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
-        MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
-        PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
-        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
-        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
-        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, ResourceKey,
-        ReviewState, Url, UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse,
-        derive_repo_watch_events, dispatch_context_json, normalize_checks_outcome,
-        normalize_pull_request_context, object_id, owed_dispatch_context_json_parts,
-        remaining_interval, rule_activation_error, supervise_repository_tasks,
+        GraphQlEnvelope, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
+        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PollCycleTiming,
+        PullRequestSettlement, PullResponse, ReactionContent, RepoWatchAuthorLogin,
+        RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
+        RepoWatchCursorGeneration, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+        RepoWatchReactionObservation, RepoWatchReviewDecision, RepoWatchReviewObservation,
+        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
+        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
+        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
+        dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
+        owed_dispatch_context_json_parts, reject_graphql_errors, remaining_interval,
+        rule_activation_error, supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -7264,6 +7286,25 @@ mod tests {
         assert_eq!(encoded["event"]["target"]["head_branch"], HEAD_BRANCH);
         assert_eq!(encoded["event"]["kind"], "MergeableStateChanged");
         assert_eq!(encoded["event"]["payload"]["current"], "conflicting");
+    }
+
+    #[test]
+    fn graphql_rejection_retains_provider_diagnostics() {
+        const ERROR_TYPE: &str = "RATE_LIMITED";
+        const ERROR_MESSAGE: &str = "API rate limit exceeded";
+        let envelope: GraphQlEnvelope<()> = serde_json::from_value(serde_json::json!({
+            "data": null,
+            "errors": [{ "type": ERROR_TYPE, "message": ERROR_MESSAGE }]
+        }))
+        .expect("GraphQL error fixture is valid");
+
+        assert_eq!(envelope.errors.len(), 1);
+        assert_eq!(envelope.errors[0].kind.as_deref(), Some(ERROR_TYPE));
+        assert_eq!(envelope.errors[0].message, ERROR_MESSAGE);
+        assert_eq!(
+            reject_graphql_errors(THREADS_TARGET, &envelope.errors),
+            Err(RepositoryWatchAttemptError::Rejected)
+        );
     }
 
     #[tokio::test]
