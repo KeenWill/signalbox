@@ -52,7 +52,10 @@ verified against this PR
 (`agent/runner-workspace-release-authority-persistence`). The immutable
 completed-release acknowledgement, exact replay, and pending-delivery exclusion
 are verified against this PR (`agent/runner-workspace-release-acknowledgement`).
-The immutable repository replacement workspace-receipt representation and typed
+The immutable unowned-release proof installed by exact connection-loss
+propagation, together with pending-delivery exclusion and typed readback, is
+verified against this PR (`agent/runner-workspace-release-loss-retirement`). The
+immutable repository replacement workspace-receipt representation and typed
 replay are verified against this PR
 (`agent/runner-replacement-workspace-receipt-persistence`). Workspace-ready
 admission under the exact current staging authority and equal receipt replay are
@@ -1376,15 +1379,15 @@ Locks per transaction, in acquisition order:
   no transition able to clear it. Release acknowledgement uses the same
   scheduler-then-placement order and never mutates turn lifecycle. The
   implemented release acknowledgement retains immutable completion evidence and
-  removes that correlation from pending delivery. **Committed unimplemented
-  functionality.** Two other transitions will retire the durable release record
-  and no other may do so: durable admission of the runner's
-  `workspace_cleanup_failed` operation failure naming that same release will
-  resolve it as refused when the runner cannot complete the deletion, and
-  durable loss of the connection that owed it will resolve it as unowned and
-  leave its workspace under that same recorded-leak response. Until one of the
-  three commits, an unacknowledged release is redelivered after restart exactly
-  as an unacknowledged result is.
+  removes that correlation from pending delivery. Exact connection-loss
+  propagation now atomically installs an immutable unowned-release proof before
+  advancing that session's cursor and removes the same correlation from pending
+  delivery. **Committed unimplemented functionality.** One other transition will
+  retire the durable release record and no other may do so: durable admission of
+  the runner's `workspace_cleanup_failed` operation failure naming that same
+  release will resolve it as refused when the runner cannot complete the
+  deletion. Until one of the three terminal commits, an unacknowledged release
+  is redelivered after restart exactly as an unacknowledged result is.
 
 - **Runner operation failure**: durable admission takes `session_scheduler` for
   the correlated session, then the applicable enrollment, connection/loss,

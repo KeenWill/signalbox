@@ -78,9 +78,11 @@ durable pending/recorded state, together with exact runner replay or retirement,
 is verified against this PR (`agent/runner-workspace-release-resume`).
 Post-resume revalidation and exact accepted-release redelivery on the newly
 observed connection are verified against this PR
-(`agent/runner-workspace-release-redelivery`). Established-connection routing of
-those inbound claim and result frames through the durable transactions before
-acknowledgement is re-verified through this PR
+(`agent/runner-workspace-release-redelivery`). Durable connection-loss
+retirement of an exact pending release is verified against this PR
+(`agent/runner-workspace-release-loss-retirement`). Established-connection
+routing of those inbound claim and result frames through the durable
+transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -2268,6 +2270,13 @@ The top-level runner constructs a descriptor-pinned store from the locked runner
 root and invokes private-root cleanup on a blocking thread. Store construction,
 thread completion, and filesystem failures all reach the same bounded protocol
 failure boundary; none blocks connection heartbeat service.
+
+When the cleanup-owning physical connection becomes durably lost, the same
+per-session loss-propagation transaction installs an immutable unowned-release
+proof before advancing its cursor. Typed pending readback excludes that exact
+release, while the original correlation remains durable as recorded-leak
+evidence. Completed cleanup and connection-loss retirement are mutually
+exclusive terminal facts.
 
 **Committed unimplemented functionality.** Repository workspace cleanup remains
 absent. A cleanup failure's existing `operation_failure_recorded`
