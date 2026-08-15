@@ -656,15 +656,29 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                 for clearance in &planned_clearances {
-                    self.poller.dismiss_stale_review(clearance).await?;
-                    self.store
-                        .record_stale_review_clearance_outcome(
-                            clearance.clearance_id(),
-                            RepoWatchStaleReviewClearanceOutcome::Dismissed,
-                            RepoWatchObservedReviewState::Dismissed,
-                        )
-                        .await
-                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                    match isolate_stale_review_clearance_provider_result(
+                        self.poller.dismiss_stale_review(clearance).await,
+                    )? {
+                        StaleReviewClearanceProviderResult::Completed(()) => {
+                            self.store
+                                .record_stale_review_clearance_outcome(
+                                    clearance.clearance_id(),
+                                    RepoWatchStaleReviewClearanceOutcome::Dismissed,
+                                    RepoWatchObservedReviewState::Dismissed,
+                                )
+                                .await
+                                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                        }
+                        StaleReviewClearanceProviderResult::Deferred(error) => {
+                            tracing::warn!(
+                                repository = %self.repository.as_str(),
+                                pull_request_number = clearance.number().get(),
+                                clearance_id = %clearance.clearance_id(),
+                                cause_code = error.cause_code(),
+                                "repository-watch stale-review dismissal deferred after provider failure"
+                            );
+                        }
+                    }
                 }
                 self.poller.publish_freshness(cursor.generation());
                 Ok(())
@@ -684,13 +698,25 @@ impl RepositoryWatchTask {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         for clearance in &pending {
+            let observation = match isolate_stale_review_clearance_provider_result(
+                self.poller.observe_stale_review_clearance(clearance).await,
+            )? {
+                StaleReviewClearanceProviderResult::Completed(observation) => observation,
+                StaleReviewClearanceProviderResult::Deferred(error) => {
+                    tracing::warn!(
+                        repository = %self.repository.as_str(),
+                        pull_request_number = clearance.number().get(),
+                        clearance_id = %clearance.clearance_id(),
+                        cause_code = error.cause_code(),
+                        "repository-watch stale-review reconciliation deferred after provider failure"
+                    );
+                    continue;
+                }
+            };
             let StaleReviewClearanceObservation::Terminal {
                 outcome,
                 provider_state,
-            } = self
-                .poller
-                .observe_stale_review_clearance(clearance)
-                .await?
+            } = observation
             else {
                 continue;
             };
@@ -1117,6 +1143,32 @@ enum RepositoryWatchAttemptError {
     Persistence,
     RetiredRuleIdentity,
     ChangedRuleIdentity,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum StaleReviewClearanceProviderResult<T> {
+    Completed(T),
+    Deferred(RepositoryWatchAttemptError),
+}
+
+fn isolate_stale_review_clearance_provider_result<T>(
+    result: Result<T, RepositoryWatchAttemptError>,
+) -> Result<StaleReviewClearanceProviderResult<T>, RepositoryWatchAttemptError> {
+    match result {
+        Ok(value) => Ok(StaleReviewClearanceProviderResult::Completed(value)),
+        Err(
+            error @ (RepositoryWatchAttemptError::Credential
+            | RepositoryWatchAttemptError::Request
+            | RepositoryWatchAttemptError::Rejected
+            | RepositoryWatchAttemptError::ResponseTooLarge
+            | RepositoryWatchAttemptError::InvalidResponse
+            | RepositoryWatchAttemptError::InvalidEntityTag
+            | RepositoryWatchAttemptError::MissingCachedResource
+            | RepositoryWatchAttemptError::ResourceLimit
+            | RepositoryWatchAttemptError::Normalization),
+        ) => Ok(StaleReviewClearanceProviderResult::Deferred(error)),
+        Err(error) => Err(error),
+    }
 }
 
 impl RepositoryWatchAttemptError {
@@ -3813,11 +3865,13 @@ mod tests {
         RepoWatchReactionObservation, RepoWatchReviewDecision, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
-        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
-        dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
-        owed_dispatch_context_json_parts, reject_graphql_errors, remaining_interval,
-        rule_activation_error, supervise_repository_tasks,
+        RepositoryWatchRuntimeError, ResourceKey, ReviewState, StaleReviewClearanceProviderResult,
+        Url, UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse,
+        derive_repo_watch_events, dispatch_context_json,
+        isolate_stale_review_clearance_provider_result, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, owed_dispatch_context_json_parts,
+        reject_graphql_errors, remaining_interval, rule_activation_error,
+        supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -7324,6 +7378,28 @@ mod tests {
         assert_eq!(
             reject_graphql_errors(THREADS_TARGET, &envelope.errors),
             Err(RepositoryWatchAttemptError::Rejected)
+        );
+    }
+
+    #[test]
+    fn stale_review_provider_rejection_is_deferred() {
+        assert_eq!(
+            isolate_stale_review_clearance_provider_result::<()>(Err(
+                RepositoryWatchAttemptError::Rejected,
+            )),
+            Ok(StaleReviewClearanceProviderResult::Deferred(
+                RepositoryWatchAttemptError::Rejected,
+            ))
+        );
+    }
+
+    #[test]
+    fn stale_review_persistence_failure_remains_fatal() {
+        assert_eq!(
+            isolate_stale_review_clearance_provider_result::<()>(Err(
+                RepositoryWatchAttemptError::Persistence,
+            )),
+            Err(RepositoryWatchAttemptError::Persistence)
         );
     }
 

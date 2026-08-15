@@ -612,9 +612,13 @@ review completes the audit, a newer pull-request head supersedes the intent, and
 a review decision cleared by another actor is recorded as cleared elsewhere. A
 still-blocking intent is retried only when a current poll again proves the full
 dismissal predicate. The pending-intent projection makes every unsettled
-external action directly observable. The next poll observes the dismissal
-through the ordinary review and convergence projections; no synthetic approval
-is created and no fresh review is requested.
+external action directly observable. A provider failure while observing or
+sending one of these durable intents leaves that intent pending without failing
+the already committed repository poll, invalidating its accepted cache, or
+preventing dispatch of its durable events; persistence failures remain fatal to
+the attempt. The next poll observes the dismissal through the ordinary review
+and convergence projections; no synthetic approval is created and no fresh
+review is requested.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
