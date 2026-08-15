@@ -19,7 +19,7 @@ pub use https_broker::{
 pub use protocol::{
     ConnectionEnd, EnrollmentOutcome, MessageKind, ProtocolViolation, RecoveryGap,
     RecoveryUnavailable, RunnerConnection, RunnerConnectionError, RunnerDispatchReady,
-    ServeOutcome, SocketConnectError, connect_verified,
+    RunnerWorkspaceReleaseReady, ServeOutcome, SocketConnectError, connect_verified,
 };
 pub use state::{
     AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, RunnerState,

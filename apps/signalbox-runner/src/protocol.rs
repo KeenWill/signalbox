@@ -18,7 +18,7 @@ use signalbox_runner_wire::{
     OperationCorrelation, OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives,
     ReconnectInventory, Registered, Rejected, RejectionCode, ResultFrame, Resume, SandboxProfile,
     Shutdown, ShutdownReason, TerminalResult, ValueError, WorkspaceFailureCorrelation,
-    WorkspaceOperation, advertisement_digest, decode_line, encode_line,
+    WorkspaceOperation, WorkspaceReleased, advertisement_digest, decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -29,7 +29,8 @@ use tokio::{
 };
 
 use crate::{
-    EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
+    AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, RunnerState,
+    RunnerStateError, RunnerStateRoot,
 };
 use signalbox_tools_exec::{ExecArguments, SANDBOXED_EXEC_NAME};
 
@@ -41,6 +42,8 @@ const TOOL_UNAVAILABLE_DETAIL_CODE: &str = "tool-unavailable";
 const TOOL_UNAVAILABLE_DETAIL_MESSAGE: &str = "offered tool is absent from the registered catalog";
 const LEASE_REFUSED_DETAIL_CODE: &str = "lease-admission-refused";
 const LEASE_REFUSED_DETAIL_MESSAGE: &str = "offered execution facts are not locally admissible";
+const WORKSPACE_CLEANUP_DETAIL_CODE: &str = "workspace-cleanup-failed";
+const WORKSPACE_CLEANUP_DETAIL_MESSAGE: &str = "the accepted workspace cleanup failed";
 
 /// Connects only to one stable owner-only same-user Unix socket identity.
 pub async fn connect_verified(path: &Path) -> Result<UnixStream, SocketConnectError> {
@@ -289,6 +292,8 @@ pub enum ServeOutcome {
     ShutdownReady,
     /// Canonical claim and dispatch reached the local executor boundary.
     DispatchReady(Box<RunnerDispatchReady>),
+    /// One exact release was durably accepted before local cleanup handoff.
+    WorkspaceReleaseReady(Box<RunnerWorkspaceReleaseReady>),
 }
 
 impl ServeOutcome {
@@ -296,6 +301,14 @@ impl ServeOutcome {
     pub fn into_dispatch_ready(self) -> Result<RunnerDispatchReady, Self> {
         match self {
             Self::DispatchReady(dispatch) => Ok(*dispatch),
+            other => Err(other),
+        }
+    }
+
+    /// Consumes only the release-ready arm for cleanup composition.
+    pub fn into_workspace_release_ready(self) -> Result<RunnerWorkspaceReleaseReady, Self> {
+        match self {
+            Self::WorkspaceReleaseReady(release) => Ok(*release),
             other => Err(other),
         }
     }
@@ -321,11 +334,30 @@ impl RunnerDispatchReady {
     }
 }
 
+/// One exact workspace release whose accepted journal precedes cleanup.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerWorkspaceReleaseReady {
+    accepted: AcceptedWorkspaceRelease,
+    connection_epoch: PositiveU64,
+}
+
+impl RunnerWorkspaceReleaseReady {
+    /// Borrows the exact accepted release correlation.
+    pub const fn correlation(&self) -> &signalbox_runner_wire::ReleaseCorrelation {
+        self.accepted.correlation()
+    }
+
+    /// Borrows the journal-backed authority passed to the cleanup adapter.
+    pub const fn accepted(&self) -> &AcceptedWorkspaceRelease {
+        &self.accepted
+    }
+}
+
 /// Closed local recovery gap; no wire recovery facts are fabricated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryGap {
-    /// No live workspace operation is composed with the protocol connection.
-    WorkspaceOperationUnavailable,
+    /// No live workspace provisioning operation is composed with the connection.
+    WorkspaceProvisioningUnavailable,
 }
 
 /// Typed proof that recovery is deliberately unavailable.
@@ -344,7 +376,7 @@ impl RecoveryUnavailable {
 impl fmt::Display for RecoveryUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .write_str("runner recovery is unavailable because no workspace operation is composed")
+            .write_str("runner recovery is unavailable because workspace provisioning is absent")
     }
 }
 
@@ -398,6 +430,8 @@ pub enum ProtocolViolation {
     LeaseAcknowledgementMismatch,
     DispatchMismatch,
     ExecutionHandoffMismatch,
+    WorkspaceReleaseHandoffMismatch,
+    WorkspaceReleaseHandoffUncomposed,
     InvalidShutdownReason,
     PendingRegistrationMutation,
     ConnectionCorrelationMismatch,
@@ -481,6 +515,12 @@ impl fmt::Display for ProtocolViolation {
             }
             Self::ExecutionHandoffMismatch => {
                 formatter.write_str("dispatch handoff belongs to another connection")
+            }
+            Self::WorkspaceReleaseHandoffMismatch => {
+                formatter.write_str("workspace release handoff belongs to another connection")
+            }
+            Self::WorkspaceReleaseHandoffUncomposed => {
+                formatter.write_str("workspace release handoff has no cleanup composition")
             }
             Self::InvalidShutdownReason => {
                 formatter.write_str("daemon sent a shutdown frame with runner reason")
@@ -723,7 +763,7 @@ where
     /// Reports the recovery design gap without constructing wire recovery facts.
     pub const fn recovery_unavailable(&self) -> RecoveryUnavailable {
         RecoveryUnavailable {
-            gap: RecoveryGap::WorkspaceOperationUnavailable,
+            gap: RecoveryGap::WorkspaceProvisioningUnavailable,
         }
     }
 
@@ -880,9 +920,13 @@ where
                         ProtocolViolation::ConnectionCorrelationMismatch,
                     ));
                 }
-                Err(RunnerConnectionError::RecoveryUnavailable(
-                    self.recovery_unavailable(),
-                ))
+                let accepted = state.accept_workspace_release(release.correlation)?;
+                Ok(Some(ServeOutcome::WorkspaceReleaseReady(Box::new(
+                    RunnerWorkspaceReleaseReady {
+                        accepted,
+                        connection_epoch: self.connection_epoch,
+                    },
+                ))))
             }
             Message::LeaseOffer(offer) => {
                 self.validate_connection_correlation(
@@ -1240,6 +1284,87 @@ where
             }
         }
     }
+
+    /// Runs accepted cleanup while continuing to serve heartbeats.
+    ///
+    /// Success advances the journal before projecting `workspace_released`.
+    /// Failure retains the accepted release beside one bounded failure frame.
+    pub async fn release_while_serving<F, E>(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        release: RunnerWorkspaceReleaseReady,
+        cleanup: F,
+    ) -> Result<(), RunnerConnectionError>
+    where
+        F: Future<Output = Result<(), E>>,
+    {
+        if release.connection_epoch != self.connection_epoch {
+            return Err(RunnerConnectionError::Violation(
+                ProtocolViolation::WorkspaceReleaseHandoffMismatch,
+            ));
+        }
+        let correlation = release.correlation().clone();
+        tokio::pin!(cleanup);
+        loop {
+            tokio::select! {
+                result = &mut cleanup => {
+                    match result {
+                        Ok(()) => {
+                            state.record_workspace_release_phase(
+                                correlation.clone(),
+                                signalbox_runner_wire::ReleasePhase::ReleaseCompleted,
+                            )?;
+                            send_message(
+                                &mut self.io,
+                                Message::WorkspaceReleased(WorkspaceReleased {
+                                    correlation,
+                                }),
+                            )
+                            .await?;
+                        }
+                        Err(_) => {
+                            let failure = workspace_cleanup_failure(correlation)?;
+                            state.record_workspace_release_failure(failure.clone())?;
+                            send_message(
+                                &mut self.io,
+                                Message::OperationFailed(OperationFailed { failure }),
+                            )
+                            .await?;
+                        }
+                    }
+                    return Ok(());
+                }
+                message = receive_message(&mut self.io) => {
+                    let message = message?;
+                    let received = MessageKind::of(&message);
+                    if self.serve_message(state, message).await?.is_some() {
+                        return Err(RunnerConnectionError::Violation(
+                            ProtocolViolation::UnexpectedFrame {
+                                expected: MessageKind::Heartbeat,
+                                received,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn workspace_cleanup_failure(
+    correlation: signalbox_runner_wire::ReleaseCorrelation,
+) -> Result<OperationFailure, RunnerConnectionError> {
+    Ok(OperationFailure {
+        correlation: OperationCorrelation::Release(correlation),
+        category: FailureCategory::WorkspaceCleanupFailed,
+        detail: FailureDetail::try_new(
+            DetailName::try_new(WORKSPACE_CLEANUP_DETAIL_CODE.to_owned())
+                .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+            WORKSPACE_CLEANUP_DETAIL_MESSAGE.to_owned(),
+            serde_json::json!({}),
+        )
+        .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+    })
 }
 
 fn heartbeat_workspace_phase(inventory: &ReconnectInventory) -> Option<HeartbeatWorkspacePhase> {
@@ -1649,7 +1774,7 @@ mod tests {
         ReleasePhase, RepositoryKey, ResultBounds, ResultRecorded, Resumed, RetainedResult,
         SandboxProfile, Shutdown, TerminalResult, WireToolName, WorkingDirectory,
         WorkspaceManifest, WorkspaceOperation, WorkspaceProvision, WorkspaceReady,
-        WorkspaceRecorded, WorkspaceReleaseRecorded, workspace_manifest_digest,
+        WorkspaceRecorded, WorkspaceRelease, WorkspaceReleaseRecorded, workspace_manifest_digest,
     };
 
     use super::*;
@@ -1679,11 +1804,21 @@ mod tests {
     const NEXT_REGISTRATION_REVISION: u64 = 2;
     const FIRST_CHALLENGE_SEQUENCE: u64 = 7;
     const CONNECTION_EPOCH: u64 = 11;
+    const EXPECTED_WORKSPACE_CLEANUP_DETAIL_CODE: &str = "workspace-cleanup-failed";
+    const EXPECTED_WORKSPACE_CLEANUP_DETAIL_MESSAGE: &str = "the accepted workspace cleanup failed";
 
     #[test]
     fn non_dispatch_outcome_cannot_form_an_executor_handoff() {
         assert_eq!(
             ServeOutcome::ShutdownReady.into_dispatch_ready(),
+            Err(ServeOutcome::ShutdownReady)
+        );
+    }
+
+    #[test]
+    fn non_release_outcome_cannot_form_a_cleanup_handoff() {
+        assert_eq!(
+            ServeOutcome::ShutdownReady.into_workspace_release_ready(),
             Err(ServeOutcome::ShutdownReady)
         );
     }
@@ -1835,6 +1970,20 @@ mod tests {
                 serde_json::json!({}),
             )
             .expect("the fixture failure detail is bounded"),
+        }
+    }
+
+    fn expected_workspace_cleanup_failure(correlation: ReleaseCorrelation) -> OperationFailure {
+        OperationFailure {
+            correlation: OperationCorrelation::Release(correlation),
+            category: FailureCategory::WorkspaceCleanupFailed,
+            detail: FailureDetail::try_new(
+                DetailName::try_new(EXPECTED_WORKSPACE_CLEANUP_DETAIL_CODE.to_owned())
+                    .expect("the expected cleanup detail code is valid"),
+                EXPECTED_WORKSPACE_CLEANUP_DETAIL_MESSAGE.to_owned(),
+                serde_json::json!({}),
+            )
+            .expect("the expected cleanup failure detail is bounded"),
         }
     }
 
@@ -3746,6 +3895,170 @@ mod tests {
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
     }
 
+    /// INV-011 / INV-024: accepted cleanup remains responsive to heartbeat and
+    /// records completion before projecting the exact release frame.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_serves_heartbeat_before_release_projection() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let (complete_cleanup, cleanup_completed) = tokio::sync::oneshot::channel();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            let cleanup = async {
+                cleanup_completed
+                    .await
+                    .expect("the cleanup fixture is released");
+                Ok::<(), ()>(())
+            };
+            connection
+                .release_while_serving(&mut state, release, cleanup)
+                .await
+                .expect("cleanup completes while the connection stays live");
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+            let acknowledgement = receive_hub_message(&mut hub_io).await;
+            complete_cleanup
+                .send(())
+                .expect("the cleanup fixture receives completion");
+            let released = receive_hub_message(&mut hub_io).await;
+            (acknowledgement, released)
+        };
+        let ((), (acknowledgement, released)) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: None,
+                workspace_phase: Some(HeartbeatWorkspacePhase::ReleaseAccepted {
+                    correlation: correlation.clone(),
+                }),
+            })
+        );
+        assert_eq!(
+            released,
+            Message::WorkspaceReleased(WorkspaceReleased {
+                correlation: correlation.clone(),
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation,
+                phase: ReleasePhase::ReleaseCompleted,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: cleanup failure is retained beside the accepted
+    /// release before the bounded two-layer failure frame is projected.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_failure_is_journaled_before_projection() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            connection
+                .release_while_serving(&mut state, release, async { Err::<(), ()>(()) })
+                .await
+                .expect("the cleanup failure is durably projected");
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            receive_hub_message(&mut hub_io).await
+        };
+        let ((), failure) = tokio::join!(runner, hub);
+        let expected = expected_workspace_cleanup_failure(correlation.clone());
+
+        assert_eq!(
+            failure,
+            Message::OperationFailed(OperationFailed {
+                failure: expected.clone(),
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation,
+                phase: ReleasePhase::ReleaseAccepted,
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory().operation_failure,
+            Some(expected)
+        );
+    }
+
     /// INV-011 / INV-024: the live exact acknowledgement clears one completed
     /// workspace release through the serving loop.
     #[tokio::test]
@@ -4171,7 +4484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_seam_names_the_uncomposed_workspace_operation() {
+    async fn recovery_seam_names_unavailable_workspace_provisioning() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -4200,7 +4513,7 @@ mod tests {
 
         assert_eq!(
             connection.recovery_unavailable().gap(),
-            RecoveryGap::WorkspaceOperationUnavailable
+            RecoveryGap::WorkspaceProvisioningUnavailable
         );
     }
 
@@ -4357,7 +4670,7 @@ mod tests {
         assert!(matches!(
             error,
             RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
-                gap: RecoveryGap::WorkspaceOperationUnavailable,
+                gap: RecoveryGap::WorkspaceProvisioningUnavailable,
             })
         ));
     }
