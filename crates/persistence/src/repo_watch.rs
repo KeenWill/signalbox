@@ -778,8 +778,7 @@ impl PostgresRepoWatchStore {
             assessments,
         )
         .await?;
-        transaction.commit().await?;
-        Ok(())
+        commit_repo_watch_transaction(transaction).await
     }
 
     async fn record_convergence_assessments_in_transaction(

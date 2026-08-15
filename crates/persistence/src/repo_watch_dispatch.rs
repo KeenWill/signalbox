@@ -409,6 +409,7 @@ impl PostgresRepoWatchDispatchStore {
         .bind(pull_request_number)
         .fetch_all(&mut *transaction)
         .await?;
+        let mut cutoff_corruption = None;
         for session_id in sessions {
             let session = SessionId::from_uuid(session_id);
             let command = GoalUserCommand::new(
@@ -418,23 +419,40 @@ impl PostgresRepoWatchDispatchStore {
                     descendant_scope: DescendantTerminationScope::ParentAlone,
                 },
             );
-            if crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+            let mut savepoint = transaction.begin().await?;
+            match crate::goal::insert_repo_watch_composed_stop(&mut savepoint, command.clone())
                 .await
-                .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?
             {
-                sqlx::query(
-                    "INSERT INTO repo_watch_convergence_cutoff_goal
-                        (assessment_id, session_id, goal_command_id)
-                     VALUES ($1, $2, $3)",
-                )
-                .bind(assessment_id)
-                .bind(session_id)
-                .bind(command.command_id().as_uuid())
-                .execute(&mut *transaction)
-                .await?;
+                Ok(stopped) => {
+                    if stopped {
+                        sqlx::query(
+                            "INSERT INTO repo_watch_convergence_cutoff_goal
+                                (assessment_id, session_id, goal_command_id)
+                             VALUES ($1, $2, $3)",
+                        )
+                        .bind(assessment_id)
+                        .bind(session_id)
+                        .bind(command.command_id().as_uuid())
+                        .execute(&mut *savepoint)
+                        .await?;
+                    }
+                    savepoint.commit().await?;
+                }
+                Err(crate::goal::GoalRepositoryError::Corruption(error)) => {
+                    savepoint.rollback().await?;
+                    cutoff_corruption
+                        .get_or_insert(crate::goal::GoalRepositoryError::Corruption(error));
+                }
+                Err(error) => {
+                    savepoint.rollback().await?;
+                    return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+                }
             }
         }
         commit(transaction).await?;
+        if let Some(error) = cutoff_corruption {
+            return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+        }
         Ok(true)
     }
 
