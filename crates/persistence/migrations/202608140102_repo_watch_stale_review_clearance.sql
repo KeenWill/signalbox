@@ -6,7 +6,6 @@ CREATE TABLE repo_watch_stale_review_clearance (
     repository text NOT NULL,
     pull_request_number numeric(20, 0) NOT NULL,
     current_head_sha text NOT NULL,
-    base_revision text NOT NULL,
     review_node_id text NOT NULL,
     reviewer text NOT NULL,
     reviewed_head_sha text NOT NULL,
@@ -19,10 +18,9 @@ CREATE TABLE repo_watch_stale_review_clearance (
     CONSTRAINT repo_watch_stale_review_clearance_assessment_matches
     FOREIGN KEY (
         assessment_id, repository, pull_request_number, current_head_sha,
-        base_revision, assessment_verdict
+        assessment_verdict
     ) REFERENCES repo_watch_pull_request_convergence_assessment(
-        assessment_id, repository, pull_request_number, head_sha,
-        base_revision, verdict_kind
+        assessment_id, repository, pull_request_number, head_sha, verdict_kind
     )
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CHECK (repo_watch_repository_is_valid(repository)),
@@ -31,7 +29,6 @@ CREATE TABLE repo_watch_stale_review_clearance (
         AND pull_request_number <= 18446744073709551615
     ),
     CHECK (current_head_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
-    CHECK (base_revision COLLATE "C" ~ '^[0-9a-f]{40}$'),
     CHECK (reviewed_head_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
     CHECK (reviewed_head_sha <> current_head_sha),
     CHECK (octet_length(review_node_id) BETWEEN 1 AND 256),
