@@ -819,7 +819,7 @@ fn map_review(
             RepoWatchWebhookIgnoredReasonV1::UnmappedAction,
         ));
     }
-    let pull_request = pull_request_number(root)?;
+    let pull_request = nested_pull_request_number(root)?;
     let expected_head = commit_at(
         root,
         &["pull_request", "head", "sha"],
@@ -862,7 +862,7 @@ fn map_thread(
     Ok(RepoWatchWebhookMappingV1::Patch(
         RepoWatchObservationPatchV1::new(
             vec![RepoWatchObservationChangeV1::ThreadState {
-                pull_request: pull_request_number(root)?,
+                pull_request: nested_pull_request_number(root)?,
                 expected_head: commit_at(
                     root,
                     &["pull_request", "head", "sha"],
@@ -1058,6 +1058,13 @@ fn pull_request_number(
     root: &Map<String, Value>,
 ) -> Result<PullRequestNumber, RepoWatchWebhookMappingError> {
     positive_at(root, &["number"], "number").map(PullRequestNumber::new)
+}
+
+fn nested_pull_request_number(
+    root: &Map<String, Value>,
+) -> Result<PullRequestNumber, RepoWatchWebhookMappingError> {
+    positive_at(root, &["pull_request", "number"], "pull_request.number")
+        .map(PullRequestNumber::new)
 }
 
 fn pull_request_numbers_for_repository(
@@ -1537,9 +1544,11 @@ mod tests {
         let payload = format!(
             r#"{{
                 "action":"submitted",
-                "number":{PULL_REQUEST},
                 "repository":{{"full_name":"{REPOSITORY}"}},
-                "pull_request":{{"head":{{"sha":"{CURRENT_HEAD}"}}}},
+                "pull_request":{{
+                    "number":{PULL_REQUEST},
+                    "head":{{"sha":"{CURRENT_HEAD}"}}
+                }},
                 "review":{{
                     "id":{MAPPED_REVIEW},
                     "user":{{"login":"Reviewer"}},
@@ -1581,9 +1590,11 @@ mod tests {
         let payload = format!(
             r#"{{
                 "action":"resolved",
-                "number":{PULL_REQUEST},
                 "repository":{{"full_name":"{REPOSITORY}"}},
-                "pull_request":{{"head":{{"sha":"{CURRENT_HEAD}"}}}},
+                "pull_request":{{
+                    "number":{PULL_REQUEST},
+                    "head":{{"sha":"{CURRENT_HEAD}"}}
+                }},
                 "thread":{{"node_id":"{MAPPED_THREAD}"}}
             }}"#
         );
@@ -1854,9 +1865,11 @@ mod tests {
         let payload = format!(
             r#"{{
                 "action":"submitted",
-                "number":{PULL_REQUEST},
                 "repository":{{"full_name":"{REPOSITORY}"}},
-                "pull_request":{{"head":{{"sha":"{CURRENT_HEAD}"}}}},
+                "pull_request":{{
+                    "number":{PULL_REQUEST},
+                    "head":{{"sha":"{CURRENT_HEAD}"}}
+                }},
                 "review":{{
                     "id":{UNIONED_REVIEW},
                     "user":{{"login":"Reviewer"}},
