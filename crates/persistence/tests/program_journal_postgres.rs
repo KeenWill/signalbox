@@ -10,7 +10,7 @@ use std::error::Error;
 
 use signalbox_domain::{
     DeliveryKind, InlineFramePayload, JournalFrame, ProgramFault, ProgramRunId, ReplayCursor,
-    ReplayInstruction, ReplayedRequest, RequestKind,
+    ReplayInstruction, ReplayedRequest, RequestFrame, RequestKind,
 };
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -176,7 +176,17 @@ async fn inv065_nondeterminism_fault_round_trips_both_frames() -> Result<(), Box
         .last()
         .expect("the persisted fault is present");
 
-    assert_eq!(last.frame(), &JournalFrame::Delivery(fault),);
+    assert_eq!(last.frame(), &JournalFrame::Delivery(fault.clone()));
+
+    let mut restarted_replay = ReplayCursor::new(reloaded);
+    assert_eq!(
+        restarted_replay.submit_request(observed),
+        Ok(ReplayedRequest::Matched)
+    );
+    assert_eq!(
+        restarted_replay.next_instruction(),
+        ReplayInstruction::Deliver(fault)
+    );
 
     pool.close().await;
     drop(container);
@@ -415,6 +425,118 @@ async fn nondeterminism_evidence_cannot_attach_to_request() -> Result<(), Box<dy
     assert_trigger_error(
         insert.expect_err("evidence cannot attach to a request"),
         "nondeterminism fault and its complete twin frames must commit together",
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn generic_delivery_append_rejects_nondeterminism_fault() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let expected = repository
+        .append_request(run, None, RequestKind::Now(payload(b"expected")))
+        .await?;
+    let observed = RequestFrame::new(
+        expected.ordinal(),
+        expected.scope(),
+        RequestKind::Now(payload(b"observed")),
+    );
+
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Fault(ProgramFault::Nondeterminism { expected, observed }),
+        )
+        .await
+        .expect_err("generic delivery append cannot persist replay divergence");
+
+    assert_eq!(
+        error.corruption(),
+        Some(&ProgramJournalCorruption::Inconsistent(
+            "nondeterminism fault without replay failure"
+        ))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn nondeterminism_scope_evidence_bounds_declared_ordinal() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let fault = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Fault(ProgramFault::Timeout(payload(b"ordinary-fault"))),
+        )
+        .await?;
+
+    let insert = sqlx::query(
+        "INSERT INTO program_run_journal_nondeterminism (
+             run_id, journal_position,
+             expected_request_ordinal, expected_kind, expected_scope_operation,
+             expected_declared_scope_ordinal, expected_payload_inline,
+             observed_request_ordinal, observed_kind, observed_payload_inline
+         )
+         SELECT run_id, journal_position,
+                1, 'scope', 'open', 0, '',
+                1, 'now', ''
+           FROM program_run_journal_entry
+          WHERE run_id = $1 AND delivery_ordinal = $2",
+    )
+    .bind(run.into_uuid())
+    .bind(rust_decimal::Decimal::from(fault.ordinal().as_u64()))
+    .execute(&pool)
+    .await;
+
+    assert_constraint_error(
+        insert.expect_err("scope evidence requires a positive declared ordinal"),
+        "program_run_journal_nondeterminism_ordinals_positive",
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn initial_sequence_state_must_match_empty_journal() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let run = run_id();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO program_run_journal_stream (run_id, frame_contract_version)
+         VALUES ($1, 1)",
+    )
+    .bind(run.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO program_run_journal_sequence_state (
+             run_id, last_position, last_request_ordinal, last_delivery_ordinal
+         ) VALUES ($1, 1, 1, 0)",
+    )
+    .bind(run.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+
+    let commit = transaction.commit().await;
+
+    assert_trigger_error(
+        commit.expect_err("initial sequence counters must match the empty journal"),
+        "program journal sequence state disagrees with committed frames",
     );
 
     pool.close().await;

@@ -233,6 +233,22 @@ CREATE TABLE program_run_journal_nondeterminism (
                 observed_request_scope_ordinal IS NULL
                 OR observed_request_scope_ordinal BETWEEN 1 AND 18446744073709551615
             )
+            AND (
+                expected_declared_scope_ordinal IS NULL
+                OR expected_declared_scope_ordinal BETWEEN 1 AND 18446744073709551615
+            )
+            AND (
+                expected_parent_scope_ordinal IS NULL
+                OR expected_parent_scope_ordinal BETWEEN 1 AND 18446744073709551615
+            )
+            AND (
+                observed_declared_scope_ordinal IS NULL
+                OR observed_declared_scope_ordinal BETWEEN 1 AND 18446744073709551615
+            )
+            AND (
+                observed_parent_scope_ordinal IS NULL
+                OR observed_parent_scope_ordinal BETWEEN 1 AND 18446744073709551615
+            )
         ),
     CONSTRAINT program_run_journal_nondeterminism_request_kinds
         CHECK (
@@ -400,7 +416,7 @@ FOR EACH ROW
 EXECUTE FUNCTION require_program_journal_sequence_matches_entries();
 
 CREATE CONSTRAINT TRIGGER program_run_journal_sequence_state_complete
-AFTER UPDATE ON program_run_journal_sequence_state
+AFTER INSERT OR UPDATE ON program_run_journal_sequence_state
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_program_journal_sequence_matches_entries();
