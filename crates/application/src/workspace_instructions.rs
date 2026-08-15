@@ -360,7 +360,7 @@ fn walk_root(
     let root_descriptor =
         match open_directory_no_follow_before_deadline(root_path.clone(), root_deadline) {
             Ok(Ok(Some(descriptor))) => descriptor,
-            Err(FilesystemTaskError::Deadline) => {
+            Ok(Ok(None)) | Err(FilesystemTaskError::Deadline) => {
                 return reach_limit(
                     root.path().clone(),
                     InstructionDiscoveryLimitKind::ElapsedTime,
@@ -368,7 +368,7 @@ fn walk_root(
                     state,
                 );
             }
-            Ok(Ok(None)) | Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
+            Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
                 return push_finding(
                     root.path().clone(),
                     InstructionDiscoveryFindingKind::RootUnavailable,
@@ -399,7 +399,7 @@ fn walk_root(
             directory_deadline,
         ) {
             Ok(Ok(Some(descriptor))) => descriptor,
-            Err(FilesystemTaskError::Deadline) => {
+            Ok(Ok(None)) | Err(FilesystemTaskError::Deadline) => {
                 return reach_limit(
                     root.path().clone(),
                     InstructionDiscoveryLimitKind::ElapsedTime,
@@ -407,7 +407,7 @@ fn walk_root(
                     state,
                 );
             }
-            Ok(Ok(None)) | Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
+            Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
                 let kind = if is_root {
                     InstructionDiscoveryFindingKind::RootUnavailable
                 } else {
