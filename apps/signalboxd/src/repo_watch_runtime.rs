@@ -1193,6 +1193,7 @@ struct FetchedPullRequest {
 }
 
 struct FetchedConvergenceEvidence {
+    mergeable_state: MergeableState,
     review_decision: RepoWatchReviewDecision,
     gating_check_count: u64,
     non_green_gating_checks: Vec<CheckRunName>,
@@ -1207,7 +1208,7 @@ impl FetchedConvergenceEvidence {
             number: state.context().number(),
             head_sha: state.context().head_sha().clone(),
             base_branch: state.context().base_branch().clone(),
-            mergeable_state: state.mergeable_state(),
+            mergeable_state: self.mergeable_state,
             review_decision: self.review_decision,
             unresolved_threads: state
                 .threads()
@@ -1523,15 +1524,19 @@ impl GitHubRepositoryPoller {
             && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
-            let convergence_evidence = self
-                .fetch_convergence_evidence(previous.context(), previous.mergeable_state())
-                .await?;
+            let convergence_evidence = self.fetch_convergence_evidence(previous.context()).await?;
             let threads = self.fetch_threads(number).await?;
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
                 .await?;
-            self.record_skipped_poll(number);
-            let state = reuse_pull_request(previous, reviews, threads, reactions)?;
+            self.record_skipped_poll(number, convergence_evidence.mergeable_state);
+            let state = reuse_pull_request(
+                previous,
+                convergence_evidence.mergeable_state,
+                reviews,
+                threads,
+                reactions,
+            )?;
             let convergence = convergence_evidence.assess(&state)?;
             let stale_review_clearances = self.fetch_stale_review_clearances(&convergence).await?;
             return Ok(FetchedPullRequest {
@@ -1570,9 +1575,12 @@ impl GitHubRepositoryPoller {
         })
     }
 
-    fn record_skipped_poll(&self, number: u64) {
+    fn record_skipped_poll(&self, number: u64, mergeable_state: MergeableState) {
         if let Some(freshness) = self.freshness().get_mut(&number) {
             freshness.skipped_polls = freshness.skipped_polls.saturating_add(1);
+            if mergeable_state == MergeableState::Unknown {
+                freshness.settlement = PullRequestSettlement::Unsettled;
+            }
         }
     }
 
@@ -1647,11 +1655,14 @@ impl GitHubRepositoryPoller {
         let (completed_check_suites, check_suite_ids) = self.fetch_check_suites(&head_sha).await?;
         let (completed_check_runs, every_run_completed) =
             self.fetch_check_runs(&check_suite_ids).await?;
-        let mergeable_state = match detail.mergeable {
-            Some(true) => MergeableState::Mergeable,
-            Some(false) => MergeableState::Conflicting,
-            None => MergeableState::Unknown,
-        };
+        let reviews = self
+            .fetch_reviews(
+                number,
+                previous_pull_request.map(RepoWatchPullRequestState::reviews),
+            )
+            .await?;
+        let convergence_evidence = self.fetch_convergence_evidence(&context).await?;
+        let mergeable_state = convergence_evidence.mergeable_state;
         // Neither a check completion nor GitHub finishing its background
         // mergeability calculation moves the listing's updated_at, so a pull
         // request is only reusable when both have already come to rest.
@@ -1663,15 +1674,6 @@ impl GitHubRepositoryPoller {
         } else {
             PullRequestSettlement::Unsettled
         };
-        let reviews = self
-            .fetch_reviews(
-                number,
-                previous_pull_request.map(RepoWatchPullRequestState::reviews),
-            )
-            .await?;
-        let convergence_evidence = self
-            .fetch_convergence_evidence(&context, mergeable_state)
-            .await?;
         let threads = self.fetch_threads(number).await?;
         let reactions = self
             .fetch_reactions(
@@ -1925,7 +1927,6 @@ impl GitHubRepositoryPoller {
     async fn fetch_convergence_evidence(
         &self,
         context: &PullRequestEventContext,
-        mergeable_state: MergeableState,
     ) -> Result<FetchedConvergenceEvidence, RepositoryWatchAttemptError> {
         let (namespace, name) = self
             .repository
@@ -1939,6 +1940,7 @@ impl GitHubRepositoryPoller {
         let mut gating_check_count = 0_u64;
         let mut non_green_gating_checks = Vec::new();
         let mut retained_review_decision = None;
+        let mut retained_mergeable_state = None;
         loop {
             let body = serde_json::to_vec(&GraphQlRequest {
                 query: CONVERGENCE_QUERY,
@@ -1969,7 +1971,12 @@ impl GitHubRepositoryPoller {
             let provider_mergeable_state = normalize_graphql_mergeable(&pull_request.mergeable)?;
             if pull_request.head_ref_oid != context.head_sha().as_str()
                 || pull_request.base_ref_name != context.base_branch().as_str()
-                || provider_mergeable_state != mergeable_state
+            {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            if retained_mergeable_state
+                .replace(provider_mergeable_state)
+                .is_some_and(|retained| retained != provider_mergeable_state)
             {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
             }
@@ -2018,6 +2025,8 @@ impl GitHubRepositoryPoller {
             page = next_page(page)?;
         }
         Ok(FetchedConvergenceEvidence {
+            mergeable_state: retained_mergeable_state
+                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
             review_decision: retained_review_decision
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
             gating_check_count,
@@ -3060,6 +3069,7 @@ const fn remaining_interval(timing: PollCycleTiming) -> Duration {
 
 fn reuse_pull_request(
     previous: &RepoWatchPullRequestState,
+    mergeable_state: MergeableState,
     reviews: Vec<RepoWatchReviewObservation>,
     threads: Vec<RepoWatchThreadObservation>,
     reactions: Vec<RepoWatchReactionObservation>,
@@ -3067,7 +3077,7 @@ fn reuse_pull_request(
     RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
         context: previous.context().clone(),
         lifecycle: previous.lifecycle(),
-        mergeable_state: previous.mergeable_state(),
+        mergeable_state,
         completed_check_suites: previous.completed_check_suites().to_vec(),
         completed_check_runs: previous.completed_check_runs().to_vec(),
         reviews,
@@ -3246,7 +3256,6 @@ struct PullResponse {
     number: u64,
     state: String,
     merged_at: Option<String>,
-    mergeable: Option<bool>,
     head: PullReferenceResponse,
     base: PullReferenceResponse,
     title: String,
@@ -5265,6 +5274,25 @@ mod tests {
             .collect()
     }
 
+    fn with_graphql_mergeability(
+        responses: Vec<ScriptedResponse>,
+        mergeable: &str,
+    ) -> Vec<ScriptedResponse> {
+        responses
+            .into_iter()
+            .map(|response| {
+                if response.body == convergence() {
+                    ScriptedResponse {
+                        body: convergence_with_mergeability(mergeable),
+                        ..response
+                    }
+                } else {
+                    response
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn with_pending_mergeability_rewrites_the_pull_detail_response() {
         let responses = with_pending_mergeability(vec![ScriptedResponse::conditional_ok(
@@ -6129,6 +6157,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reused_pull_request_refreshes_mergeability_from_exact_head_evidence() {
+        let responses = settled_typed_observation_responses()
+            .into_iter()
+            .chain(with_graphql_mergeability(
+                skipped_pull_request_responses(),
+                "CONFLICTING",
+            ))
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("mergeability drift does not reject the repository poll");
+        server.finish().await;
+
+        assert_eq!(
+            second.state().pull_requests()[0].mergeable_state(),
+            MergeableState::Conflicting
+        );
+    }
+
+    #[tokio::test]
     async fn a_reused_pull_request_emits_every_deferred_review_once() {
         let responses = settled_typed_observation_responses()
             .into_iter()
@@ -6547,14 +6608,18 @@ mod tests {
             previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
-        fixture.poller.record_skipped_poll(number);
+        fixture
+            .poller
+            .record_skipped_poll(number, MergeableState::Mergeable);
         assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
             &listed,
             previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
-        fixture.poller.record_skipped_poll(number);
+        fixture
+            .poller
+            .record_skipped_poll(number, MergeableState::Mergeable);
         assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
             &listed,

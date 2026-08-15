@@ -23,10 +23,10 @@ to that goal's generation, and the occupied-refusal obligation and collapsed
 current-state delivery are verified against PR #812
 (`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
 against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
-held-slot diagnostics, and terminal-target cutoff are also verified against this
-PR. Exact-head convergence assessment and cutoff are verified against
-`agent/dispatch-autonomy-convergence`. Conservative stale blocking-review
-dismissal is verified against this PR
+held-slot diagnostics, terminal-target cutoff, and the exact-head mergeability
+projection are also verified against this PR. Exact-head convergence assessment
+and cutoff are verified against `agent/dispatch-autonomy-convergence`.
+Conservative stale blocking-review dismissal is verified against this PR
 (`agent/dispatch-autonomy-review-clearance`). The provider members the poller
 adopts as check-suite and check-run completion generations are verified against
 PR #541 (`fix/check-run-updated-at`).
@@ -133,8 +133,13 @@ suite and check run in a terminal state and a known mergeable state, because
 neither a check completion nor the provider's background mergeability
 calculation moves `updated_at`; and the pull request has been reused fewer than
 four consecutive attempts, which bounds how long another check or detail fact
-that never moves either listing member can go unobserved. Reviews and threads
-are re-fetched on every attempt and replace their prior projections before
+that never moves either listing member can go unobserved. Exact-head GraphQL
+mergeability is re-fetched on every attempt and replaces the prior projection,
+so a base advance that changes mergeability without moving `updated_at` cannot
+wedge the repository poll on disagreement between separately timed REST and
+GraphQL reads. An `unknown` replacement makes the baseline unsettled and forces
+a full detail refresh on the next attempt. Reviews and threads are likewise
+re-fetched on every attempt and replace their prior projections before
 comparison, so a delayed detail/check refresh cannot absorb or defer review
 dispatch signals. Reactions are likewise re-fetched on every attempt because a
 reaction does not move `updated_at` at all; with no configured signal reviewer
@@ -547,9 +552,11 @@ check-rollup and review-thread connections are read through every bounded page.
 The head, check, and aggregate-review evidence is read before the thread
 inventory, matching the operational reference's ordering so a review thread
 opened between those reads cannot be hidden by an earlier thread snapshot. The
-rollup's commit, head, base, and mergeability evidence must agree with the REST
-pull-request projection and the cursor generation or the poll fails without
-recording an assessment.
+rollup's commit, head, and base evidence must agree with the pull-request
+projection and cursor generation or the poll fails without recording an
+assessment. The exact-head GraphQL mergeability member supplies both the
+pull-request projection and assessment, preventing a separately timed REST
+mergeability calculation from invalidating otherwise coherent evidence.
 
 **Implemented behavior.** A passing assessment for a pull request based on
 `main` is `merge_ready`. A passing assessment based on another branch is
