@@ -160,6 +160,12 @@ pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
 
+A migration becomes immutable as soon as its version is recorded in the target
+database's `_sqlx_migrations` table, regardless of whether the migration's
+branch or pull request has merged. Correct an already-recorded migration with a
+new forward migration; never edit, replace, or renumber the recorded migration
+file.
+
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
 slot range — in its description, and sibling stacks pick disjoint blocks. Once a

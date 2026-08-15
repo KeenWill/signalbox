@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_stop_reason_is_boundary_loss_with_retained_facts() {
+    fn missing_required_fields_are_boundary_loss_with_retained_facts() {
         let (evidence, _) = decode(
             r#"{
                 "id": "msg_1",
