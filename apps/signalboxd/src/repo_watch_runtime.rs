@@ -59,7 +59,7 @@ use signalbox_persistence::repo_watch_webhook::{
 use sqlx::PgPool;
 use tokio::{
     select,
-    sync::{mpsc, watch},
+    sync::watch,
     task::JoinSet,
     time::{Instant, sleep_until},
 };
@@ -92,9 +92,17 @@ const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
 const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
-const WEBHOOK_WORK_CHANNEL_CAPACITY: usize = 1;
 const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
     NonZeroU16::new(100).expect("webhook pending page size is positive");
+const WEBHOOK_DRAIN_RETRY_DELAY: Duration = Duration::from_secs(5);
+// A separate task inspects durable pending work at this cadence, so a wedged
+// serialized repository owner cannot also silence the observer meant to
+// expose it.
+const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
+// Pending webhook work ordinarily drains in seconds. One minute leaves ample
+// room for an in-flight bounded provider request while ensuring an owner wedge
+// becomes an operator-visible error well before the next full poll.
+const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -128,6 +136,7 @@ impl Error for RepositoryWatchRuntimeConstructionError {}
 pub enum RepositoryWatchRuntimeError {
     RepositoryTaskExited,
     RepositoryTaskPanicked,
+    WebhookMonitorExited,
     WebhookListenerExited,
     WebhookListenerFailed,
     TaskSetEmpty,
@@ -138,6 +147,9 @@ impl fmt::Display for RepositoryWatchRuntimeError {
         formatter.write_str(match self {
             Self::RepositoryTaskExited => "repository-watch task exited before shutdown",
             Self::RepositoryTaskPanicked => "repository-watch task panicked",
+            Self::WebhookMonitorExited => {
+                "repository-watch webhook drain monitor exited before shutdown"
+            }
             Self::WebhookListenerExited => {
                 "repository-watch webhook listener exited before shutdown"
             }
@@ -169,7 +181,7 @@ impl RepositoryWatchRuntime {
         let mut webhook_workers = HashMap::new();
         for repository in configuration.repositories() {
             let webhook_work = repository.webhook().map(|_| {
-                let (sender, receiver) = mpsc::channel(WEBHOOK_WORK_CHANNEL_CAPACITY);
+                let (sender, receiver) = watch::channel(());
                 webhook_workers.insert(repository.repository().clone(), sender);
                 receiver
             });
@@ -203,6 +215,15 @@ impl RepositoryWatchRuntime {
         let mut tasks = JoinSet::new();
         let mut pollers = Vec::with_capacity(self.tasks.len());
         for task in self.tasks {
+            if task.webhook_work.is_some() {
+                let repository = task.repository.clone();
+                let store = task.webhook_store.clone();
+                let monitor_shutdown = shutdown.clone();
+                tasks.spawn(async move {
+                    monitor_webhook_drain(repository, store, monitor_shutdown).await;
+                    RepositoryWatchChildExit::WebhookMonitor
+                });
+            }
             pollers.push(Arc::clone(&task.poller));
             let task_shutdown = shutdown.clone();
             tasks.spawn(async move {
@@ -222,6 +243,7 @@ impl RepositoryWatchRuntime {
 
 enum RepositoryWatchChildExit {
     Repository,
+    WebhookMonitor,
     Webhook(Result<(), RepoWatchWebhookRuntimeError>),
 }
 
@@ -259,6 +281,9 @@ async fn supervise_repository_tasks(
                         Some(Ok(RepositoryWatchChildExit::Repository)) => {
                             Err(RepositoryWatchRuntimeError::RepositoryTaskExited)
                         }
+                        Some(Ok(RepositoryWatchChildExit::WebhookMonitor)) => {
+                            Err(RepositoryWatchRuntimeError::WebhookMonitorExited)
+                        }
                         Some(Ok(RepositoryWatchChildExit::Webhook(Ok(())))) => {
                             Err(RepositoryWatchRuntimeError::WebhookListenerExited)
                         }
@@ -282,15 +307,119 @@ async fn supervise_repository_tasks(
     result
 }
 
-async fn receive_webhook_work(receiver: &mut Option<mpsc::Receiver<()>>) -> bool {
+async fn receive_webhook_work(receiver: &mut Option<watch::Receiver<()>>) -> bool {
     let received = match receiver {
-        Some(receiver) => receiver.recv().await.is_some(),
+        Some(receiver) => receiver.changed().await.is_ok(),
         None => std::future::pending().await,
     };
     if !received {
         *receiver = None;
     }
     received
+}
+
+#[derive(Default)]
+struct WebhookDrainRetry {
+    deadline: Option<Instant>,
+}
+
+impl WebhookDrainRetry {
+    fn schedule(&mut self) {
+        self.deadline = Some(Instant::now() + WEBHOOK_DRAIN_RETRY_DELAY);
+    }
+
+    fn clear(&mut self) {
+        self.deadline = None;
+    }
+
+    fn update_after(&mut self, result: &Result<(), RepositoryWatchAttemptError>) {
+        match result {
+            Ok(()) => self.clear(),
+            Err(_) => self.schedule(),
+        }
+    }
+
+    async fn due(&self) {
+        match self.deadline {
+            Some(deadline) => sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+async fn monitor_webhook_drain(
+    repository: RepositorySlug,
+    store: PostgresRepoWatchWebhookStore,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(WEBHOOK_DRAIN_MONITOR_INTERVAL) => {
+                inspect_webhook_drain(
+                    &repository,
+                    &store,
+                    WEBHOOK_DRAIN_STALL_THRESHOLD,
+                ).await;
+            }
+        }
+    }
+}
+
+async fn inspect_webhook_drain(
+    repository: &RepositorySlug,
+    store: &PostgresRepoWatchWebhookStore,
+    stall_threshold: Duration,
+) {
+    let page_size = match RepoWatchWebhookPendingPageSize::try_new(NonZeroU16::MIN) {
+        Ok(page_size) => page_size,
+        Err(error) => {
+            tracing::error!(
+                repository = %repository.as_str(),
+                cause_code = "webhook_drain_monitor_configuration_invalid",
+                cause = %error,
+                "repository-watch webhook drain monitor cannot inspect durable work"
+            );
+            return;
+        }
+    };
+    let pending = match store.load_pending(repository, page_size).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::error!(
+                repository = %repository.as_str(),
+                cause_code = "webhook_drain_monitor_query_failed",
+                cause = %error,
+                "repository-watch webhook drain monitor cannot inspect durable work"
+            );
+            return;
+        }
+    };
+    let Some(oldest) = pending.first() else {
+        return;
+    };
+    let Ok(pending_for) =
+        std::time::SystemTime::now().duration_since(oldest.receipt().received_at())
+    else {
+        return;
+    };
+    if pending_for < stall_threshold {
+        return;
+    }
+    tracing::error!(
+        repository = %repository.as_str(),
+        hook_id = oldest.key().hook_id().get(),
+        delivery_id = %oldest.key().delivery_id(),
+        receipt_sequence = oldest.receipt().sequence().get(),
+        pending_seconds = pending_for.as_secs(),
+        cause_code = "webhook_projection_drain_stalled",
+        "durable repository-watch webhook delivery remains undispositioned"
+    );
 }
 
 struct RepositoryWatchTask {
@@ -304,7 +433,7 @@ struct RepositoryWatchTask {
     models: HubModelConfiguration,
     eligibility_nudge: InProcessEligibilityNudge,
     webhook_store: PostgresRepoWatchWebhookStore,
-    webhook_work: Option<mpsc::Receiver<()>>,
+    webhook_work: Option<watch::Receiver<()>>,
     rules_activated: bool,
 }
 
@@ -316,7 +445,7 @@ struct RepositoryWatchTaskContext {
     models: HubModelConfiguration,
     credential_pin: signalbox_persistence::SessionCredentialPin,
     eligibility_nudge: InProcessEligibilityNudge,
-    webhook_work: Option<mpsc::Receiver<()>>,
+    webhook_work: Option<watch::Receiver<()>>,
 }
 
 impl RepositoryWatchTask {
@@ -366,29 +495,28 @@ impl RepositoryWatchTask {
         if *shutdown.borrow() {
             return;
         }
+        let mut webhook_retry = WebhookDrainRetry::default();
         if self.webhook_work.is_some() {
-            let result = select! {
-                result = self.run_webhook_attempt() => Some(result),
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        return;
-                    }
-                    None
-                }
-            };
-            let Some(result) = result else {
+            let Some(result) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await else {
                 return;
             };
             match &result {
-                Ok(()) => tracing::debug!(
-                    repository = %self.repository.as_str(),
-                    "repository-watch startup webhook backlog drained"
-                ),
-                Err(error) => tracing::warn!(
-                    repository = %self.repository.as_str(),
-                    cause_code = error.cause_code(),
-                    "repository-watch startup webhook backlog awaits retry"
-                ),
+                Ok(()) => {
+                    webhook_retry.update_after(&result);
+                    tracing::debug!(
+                        repository = %self.repository.as_str(),
+                        "repository-watch startup webhook backlog drained"
+                    );
+                }
+                Err(error) => {
+                    webhook_retry.update_after(&result);
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = error.cause_code(),
+                        retry_seconds = WEBHOOK_DRAIN_RETRY_DELAY.as_secs(),
+                        "repository-watch startup webhook drain failed; retry scheduled"
+                    );
+                }
             }
             if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                 return;
@@ -428,19 +556,27 @@ impl RepositoryWatchTask {
                     };
                     let metrics = self.poller.attempt_metrics();
                     match &result {
-                        Ok(()) => tracing::debug!(
-                            repository = %self.repository.as_str(),
-                            "repository-watch polling attempt completed"
-                        ),
-                        Err(error) => tracing::warn!(
-                            repository = %self.repository.as_str(),
-                            cause_code = error.cause_code(),
-                            request_count = metrics.requests,
-                            poll_wire_bytes = metrics.poll_wire_bytes,
-                            cached_resource_count = metrics.cached_resources,
-                            cached_wire_bytes = metrics.cached_wire_bytes,
-                            "repository-watch polling attempt failed closed"
-                        ),
+                        Ok(()) => {
+                            webhook_retry.update_after(&result);
+                            tracing::debug!(
+                                repository = %self.repository.as_str(),
+                                "repository-watch polling attempt completed"
+                            );
+                        }
+                        Err(error) => {
+                            if self.webhook_work.is_some() {
+                                webhook_retry.update_after(&result);
+                            }
+                            tracing::warn!(
+                                repository = %self.repository.as_str(),
+                                cause_code = error.cause_code(),
+                                request_count = metrics.requests,
+                                poll_wire_bytes = metrics.poll_wire_bytes,
+                                cached_resource_count = metrics.cached_resources,
+                                cached_wire_bytes = metrics.cached_wire_bytes,
+                                "repository-watch polling attempt failed closed"
+                            );
+                        }
                     }
                     if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
@@ -451,37 +587,78 @@ impl RepositoryWatchTask {
                     if !admitted {
                         continue;
                     }
-                    let mut attempt_cancelled = false;
-                    let result = select! {
-                        result = self.run_webhook_attempt() => Some(result),
-                        changed = shutdown.changed() => {
-                            if changed.is_err() || *shutdown.borrow() {
-                                attempt_cancelled = true;
-                            }
-                            None
-                        }
-                    };
-                    if attempt_cancelled {
+                    let Some(result) = self
+                        .run_webhook_attempt_until_shutdown(&mut shutdown)
+                        .await
+                    else {
                         return;
-                    }
-                    let Some(result) = result else {
-                        continue;
                     };
                     match &result {
-                        Ok(()) => tracing::debug!(
-                            repository = %self.repository.as_str(),
-                            "repository-watch webhook work completed"
-                        ),
-                        Err(error) => tracing::warn!(
-                            repository = %self.repository.as_str(),
-                            cause_code = error.cause_code(),
-                            "repository-watch webhook work failed closed"
-                        ),
+                        Ok(()) => {
+                            webhook_retry.update_after(&result);
+                            tracing::debug!(
+                                repository = %self.repository.as_str(),
+                                "repository-watch webhook work completed"
+                            );
+                        }
+                        Err(error) => {
+                            webhook_retry.update_after(&result);
+                            tracing::error!(
+                                repository = %self.repository.as_str(),
+                                cause_code = error.cause_code(),
+                                retry_seconds = WEBHOOK_DRAIN_RETRY_DELAY.as_secs(),
+                                "repository-watch webhook drain failed; retry scheduled"
+                            );
+                        }
                     }
                     if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
                     }
                 }
+                () = webhook_retry.due() => {
+                    let Some(result) = self
+                        .run_webhook_attempt_until_shutdown(&mut shutdown)
+                        .await
+                    else {
+                        return;
+                    };
+                    match &result {
+                        Ok(()) => {
+                            webhook_retry.update_after(&result);
+                            tracing::debug!(
+                                repository = %self.repository.as_str(),
+                                "repository-watch webhook retry drained durable work"
+                            );
+                        }
+                        Err(error) => {
+                            webhook_retry.update_after(&result);
+                            tracing::error!(
+                                repository = %self.repository.as_str(),
+                                cause_code = error.cause_code(),
+                                retry_seconds = WEBHOOK_DRAIN_RETRY_DELAY.as_secs(),
+                                "repository-watch webhook retry failed; another retry scheduled"
+                            );
+                        }
+                    }
+                    if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_webhook_attempt_until_shutdown(
+        &mut self,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Option<Result<(), RepositoryWatchAttemptError>> {
+        select! {
+            result = self.run_webhook_attempt() => Some(result),
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return None;
+                }
+                None
             }
         }
     }
@@ -541,8 +718,22 @@ impl RepositoryWatchTask {
             if deliveries.is_empty() {
                 return Ok(());
             }
+            let mut first_error = None;
             for delivery in deliveries {
-                self.process_webhook_delivery(&delivery).await?;
+                if let Err(error) = self.process_webhook_delivery(&delivery).await {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        hook_id = delivery.key().hook_id().get(),
+                        delivery_id = %delivery.key().delivery_id(),
+                        receipt_sequence = delivery.receipt().sequence().get(),
+                        cause_code = error.cause_code(),
+                        "repository-watch webhook delivery projection failed"
+                    );
+                    first_error.get_or_insert(error);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
             }
         }
     }
@@ -3488,7 +3679,9 @@ struct PageInfo {
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
+        error::Error,
         fs,
+        io::{self, Write},
         num::NonZeroU64,
         path::PathBuf,
         sync::{
@@ -3504,7 +3697,7 @@ mod tests {
         net::{TcpListener, TcpStream},
         sync::{Notify, watch},
         task::{JoinHandle, JoinSet},
-        time::sleep,
+        time::{Instant, sleep},
     };
 
     use super::{
@@ -3516,14 +3709,18 @@ mod tests {
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
-        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, ResourceKey,
-        ReviewState, TargetedPullRequest, Url, UuidV7RepoWatchEventIdGenerator, WorkflowName,
-        WorkflowResponse, derive_repo_watch_events, dispatch_context_json,
+        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
+        ResourceKey, ReviewState, TargetedPullRequest, Url, UuidV7RepoWatchEventIdGenerator,
+        WEBHOOK_DRAIN_RETRY_DELAY, WebhookDrainRetry, WorkflowName, WorkflowResponse,
+        derive_repo_watch_events, dispatch_context_json, inspect_webhook_drain,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
         supervise_repository_tasks, targeted_pull_requests,
     };
-    use signalbox_application::{RepoWatchEventIdentityFrontierV1, RepoWatchTargetedRefreshV1};
+    use signalbox_application::{
+        InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
+        RepoWatchTargetedRefreshV1,
+    };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
@@ -3531,7 +3728,24 @@ mod tests {
         RepoWatchRuleVersion,
     };
     use signalbox_model_runtime::CredentialReference;
-    use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
+    use signalbox_persistence::{
+        disposable_test_container_labels, local_test_connection_options, migrate,
+        repo_watch::{PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate},
+        repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
+        repo_watch_webhook::{
+            PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission, RepoWatchWebhookDeliveryKey,
+        },
+        scheduler::PostgresEligibilitySweep,
+    };
+    use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+    };
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use crate::{SessionTemplateConfiguration, configuration::checked_in_example_configuration};
 
     const WATCHED_REPOSITORY: &str = "namespace/project";
     const CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
@@ -3663,6 +3877,281 @@ mod tests {
     const PROVIDER_PULL_AUTHOR: &str = "Pull-Author";
     const PROVIDER_REVIEWER: &str = "Signal-Reviewer";
     const SCRIPTED_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+    const DATABASE_NAME: &str = "signalbox_webhook_drain";
+    const DATABASE_USER: &str = "signalbox";
+    const DATABASE_PASSWORD: &str = "signalbox-test-only";
+    const FIRST_WEBHOOK_DELIVERY: u128 = 0x7a01;
+    const SECOND_WEBHOOK_DELIVERY: u128 = 0x7a02;
+    const FIRST_WEBHOOK_REVIEW: u64 = 9_001;
+    const SECOND_WEBHOOK_REVIEW: u64 = 9_002;
+    const WEBHOOK_BODY_DIGEST_FILL: u8 = 0x71;
+    const WEBHOOK_HOOK_ID: NonZeroU64 =
+        NonZeroU64::new(7_001).expect("fixture webhook hook ID is positive");
+    const WEBHOOK_PROJECTION_ADVISORY_LOCK: i64 = 70_001;
+
+    async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+        let container = Postgres::default()
+            .with_db_name(DATABASE_NAME)
+            .with_user(DATABASE_USER)
+            .with_password(DATABASE_PASSWORD)
+            .with_fsync_enabled()
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let database_url =
+            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(local_test_connection_options(&database_url)?)
+            .await?;
+        migrate(&pool).await?;
+        Ok((container, pool))
+    }
+
+    fn webhook_delivery_key(value: u128) -> RepoWatchWebhookDeliveryKey {
+        RepoWatchWebhookDeliveryKey::new(WEBHOOK_HOOK_ID, Uuid::from_u128(value))
+    }
+
+    fn submitted_review_admission(
+        delivery: u128,
+        review: u64,
+    ) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
+        let body = serde_json::json!({
+            "action": "submitted",
+            "number": PULL_NUMBER,
+            "repository": {"full_name": WATCHED_REPOSITORY},
+            "pull_request": {"head": {"sha": HEAD_SHA}},
+            "review": {
+                "id": review,
+                "user": {"login": "reviewer"},
+                "state": "approved",
+                "commit_id": HEAD_SHA,
+            },
+        })
+        .to_string()
+        .into_bytes();
+        Ok(RepoWatchWebhookAdmission::try_new(
+            webhook_delivery_key(delivery),
+            RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?,
+            "pull_request_review".to_owned(),
+            Some("submitted".to_owned()),
+            [WEBHOOK_BODY_DIGEST_FILL; 32],
+            body,
+        )?)
+    }
+
+    async fn webhook_task(pool: &PgPool) -> Result<RepositoryWatchTask, Box<dyn Error>> {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
+        let observation = complete_typed_observation().await;
+        let store = PostgresRepoWatchStore::new(pool.clone());
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(observation),
+                    Vec::new(),
+                ),
+            )
+            .await?;
+        let models = checked_in_example_configuration()?;
+        let credential_pin = models.session_credential_pin();
+        let (eligibility_nudge, _work_source) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+        let poller = poller_fixture(
+            Url::parse("http://127.0.0.1:9/").expect("fixture poller base URL is valid"),
+        )?
+        .poller;
+        Ok(RepositoryWatchTask {
+            repository,
+            interval: POLL_INTERVAL,
+            poller,
+            store,
+            dispatch_store: PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin),
+            rules: Vec::new(),
+            templates: SessionTemplateConfiguration::default(),
+            models,
+            eligibility_nudge,
+            webhook_store: PostgresRepoWatchWebhookStore::new(pool.clone()),
+            webhook_work: None,
+            rules_activated: true,
+        })
+    }
+
+    async fn install_first_projection_rejection(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+        let first_delivery = Uuid::from_u128(FIRST_WEBHOOK_DELIVERY);
+        sqlx::query("CREATE TABLE fixture_rejected_webhook (delivery_id uuid PRIMARY KEY)")
+            .execute(pool)
+            .await?;
+        sqlx::query("INSERT INTO fixture_rejected_webhook (delivery_id) VALUES ($1)")
+            .bind(first_delivery)
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE FUNCTION reject_first_webhook_projection()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 IF EXISTS (
+                     SELECT 1
+                       FROM fixture_rejected_webhook
+                      WHERE delivery_id = NEW.delivery_id
+                 ) THEN
+                     RAISE EXCEPTION 'fixture rejects the first projection';
+                 END IF;
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_first_webhook_projection
+             BEFORE INSERT ON repo_watch_webhook_projection
+             FOR EACH ROW
+             EXECUTE FUNCTION reject_first_webhook_projection()",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_first_projection_rejection(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+        sqlx::query(
+            "DROP TRIGGER reject_first_webhook_projection ON repo_watch_webhook_projection",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("DROP FUNCTION reject_first_webhook_projection()")
+            .execute(pool)
+            .await?;
+        sqlx::query("DROP TABLE fixture_rejected_webhook")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn install_first_projection_wedge(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+        let first_delivery = Uuid::from_u128(FIRST_WEBHOOK_DELIVERY);
+        sqlx::query("CREATE TABLE fixture_wedged_webhook (delivery_id uuid PRIMARY KEY)")
+            .execute(pool)
+            .await?;
+        sqlx::query("INSERT INTO fixture_wedged_webhook (delivery_id) VALUES ($1)")
+            .bind(first_delivery)
+            .execute(pool)
+            .await?;
+        let function = format!(
+            "CREATE FUNCTION wedge_first_webhook_projection()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 IF EXISTS (
+                     SELECT 1
+                       FROM fixture_wedged_webhook
+                      WHERE delivery_id = NEW.delivery_id
+                 ) THEN
+                     PERFORM pg_advisory_xact_lock({WEBHOOK_PROJECTION_ADVISORY_LOCK});
+                 END IF;
+                 RETURN NEW;
+             END
+             $$"
+        );
+        // The only interpolated value is the code-owned integer above; no
+        // provider, deployment, or test input contributes SQL text.
+        sqlx::query(sqlx::AssertSqlSafe(function))
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE TRIGGER wedge_first_webhook_projection
+             BEFORE INSERT ON repo_watch_webhook_projection
+             FOR EACH ROW
+             EXECUTE FUNCTION wedge_first_webhook_projection()",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn wait_for_webhook_projection_wedge(pool: &PgPool) {
+        let wait = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1
+                          FROM pg_stat_activity
+                         WHERE wait_event = 'advisory'
+                     )",
+                )
+                .fetch_one(pool)
+                .await
+                .expect("fixture can inspect PostgreSQL wait state");
+                if waiting {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(SCRIPTED_SERVER_TIMEOUT, wait)
+            .await
+            .expect("the first webhook projection reaches its deliberate wedge");
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().expect("captured log locks").clone())
+                .expect("captured webhook telemetry is UTF-8")
+        }
+    }
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured log locks")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CapturedLog {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    async fn webhook_disposition_exists(
+        pool: &PgPool,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM repo_watch_webhook_disposition
+                 WHERE hook_id = $1 AND delivery_id = $2
+             )",
+        )
+        .bind(rust_decimal::Decimal::from(key.hook_id().get()))
+        .bind(key.delivery_id())
+        .fetch_one(pool)
+        .await
+    }
 
     fn pulls_with_one() -> String {
         serde_json::json!([{
@@ -5072,6 +5561,110 @@ mod tests {
         let result = targeted_pull_requests(&previous, &refreshes);
 
         assert_eq!(result, Err(RepositoryWatchAttemptError::Normalization));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_webhook_drain_schedules_an_independent_retry() {
+        let scheduled_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+
+        retry.update_after(&Err(RepositoryWatchAttemptError::Persistence));
+
+        assert_eq!(
+            retry.deadline,
+            Some(scheduled_at + WEBHOOK_DRAIN_RETRY_DELAY)
+        );
+        tokio::time::advance(WEBHOOK_DRAIN_RETRY_DELAY).await;
+        retry.due().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn one_projection_error_does_not_halt_the_page_and_the_retry_drains_it()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&first).await?;
+        webhook_store.admit(&second).await?;
+        install_first_projection_rejection(&pool).await?;
+        let mut task = webhook_task(&pool).await?;
+
+        let first_attempt = task.process_webhook_deliveries().await;
+
+        assert_eq!(first_attempt, Err(RepositoryWatchAttemptError::Persistence));
+        assert!(!webhook_disposition_exists(&pool, first.key()).await?);
+        assert!(webhook_disposition_exists(&pool, second.key()).await?);
+        remove_first_projection_rejection(&pool).await?;
+
+        task.process_webhook_deliveries()
+            .await
+            .expect("the scheduled retry drains the retained delivery");
+
+        assert!(webhook_disposition_exists(&pool, first.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn admission_during_a_concurrent_drain_is_drained_by_the_same_owner_run()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&first).await?;
+        install_first_projection_wedge(&pool).await?;
+        let mut blocker = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .execute(&mut *blocker)
+            .await?;
+        let mut task = webhook_task(&pool).await?;
+        let drain = tokio::spawn(async move { task.process_webhook_deliveries().await });
+        wait_for_webhook_projection_wedge(&pool).await;
+
+        webhook_store.admit(&second).await?;
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .fetch_one(&mut *blocker)
+            .await?;
+        drain
+            .await?
+            .expect("the concurrent owner run drains both deliveries");
+
+        assert!(unlocked, "the fixture releases its deliberate drain wedge");
+        assert!(webhook_disposition_exists(&pool, first.key()).await?);
+        assert!(webhook_disposition_exists(&pool, second.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn wedged_webhook_drain_emits_an_error_with_its_cause() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let store = PostgresRepoWatchWebhookStore::new(pool);
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        store.admit(&admission).await?;
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(captured.clone())
+            .finish();
+
+        inspect_webhook_drain(&repository, &store, Duration::ZERO)
+            .with_subscriber(subscriber)
+            .await;
+
+        let telemetry = captured.text();
+        assert!(telemetry.contains("ERROR"));
+        assert!(telemetry.contains("cause_code=\"webhook_projection_drain_stalled\""));
+        assert!(telemetry.contains(&admission.key().delivery_id().to_string()));
+        Ok(())
     }
 
     #[tokio::test]
