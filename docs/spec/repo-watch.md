@@ -195,7 +195,10 @@ value as a completed check suite's completion generation and the provider's
 `completed_at` value as a completed check run's: the provider defines
 `updated_at` on a check suite only, while a check run carries `started_at` and
 `completed_at`. A completed run whose payload carries no `completed_at` fails
-the poll as an invalid response. A rerequested suite therefore emits its later
+the poll as an invalid response. Check suites and their completion generations
+come from the head's suite pages, while check runs come from the head's
+commit-scoped run pages; run-request fan-out is therefore independent of the
+number of suites on that head. A rerequested suite therefore emits its later
 completion even when its provider identity and conclusion are unchanged, and a
 rerequested run emits when the provider gives it a new identity, a different
 completion time, or a different conclusion, so a conclusion edited under one

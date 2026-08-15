@@ -1656,8 +1656,7 @@ impl GitHubRepositoryPoller {
             previous_pull_request.map(RepoWatchPullRequestState::context),
         )?;
         let (completed_check_suites, check_suite_ids) = self.fetch_check_suites(&head_sha).await?;
-        let (completed_check_runs, every_run_completed) =
-            self.fetch_check_runs(&check_suite_ids).await?;
+        let (completed_check_runs, every_run_completed) = self.fetch_check_runs(&head_sha).await?;
         let reviews = self
             .fetch_reviews(
                 number,
@@ -1753,54 +1752,50 @@ impl GitHubRepositoryPoller {
 
     async fn fetch_check_runs(
         &self,
-        suite_ids: &[GitHubObjectId],
+        head: &CommitSha,
     ) -> Result<(Vec<RepoWatchCheckRunObservation>, bool), RepositoryWatchAttemptError> {
         let mut observations = Vec::new();
         let mut every_run_completed = true;
-        for suite_id in suite_ids {
-            let suite_id = suite_id.get().to_string();
-            let mut page = 1_u16;
-            loop {
-                let response = self
-                    .conditional_json_page::<CheckRunsResponse>(
-                        "check-runs",
-                        Method::GET,
-                        self.repository_url(
-                            &["check-suites", &suite_id, "check-runs"],
-                            &[
-                                ("filter", "all".to_owned()),
-                                ("per_page", PAGE_SIZE.to_string()),
-                                ("page", page.to_string()),
-                            ],
-                        )?,
-                        None,
-                    )
-                    .await?;
-                let has_next = response.has_next_page;
-                for run in response.value.check_runs {
-                    if run.status == "completed" {
-                        observations.push(RepoWatchCheckRunObservation::new(
-                            object_id(run.id)?,
-                            RepoWatchCheckCompletionGeneration::try_new(
-                                run.completed_at
-                                    .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
-                            )
+        let mut page = 1_u16;
+        loop {
+            let response = self
+                .conditional_json_page::<CheckRunsResponse>(
+                    "check-runs",
+                    Method::GET,
+                    self.repository_url(
+                        &["commits", head.as_str(), "check-runs"],
+                        &[
+                            ("filter", "all".to_owned()),
+                            ("per_page", PAGE_SIZE.to_string()),
+                            ("page", page.to_string()),
+                        ],
+                    )?,
+                    None,
+                )
+                .await?;
+            let has_next = response.has_next_page;
+            for run in response.value.check_runs {
+                if run.status == "completed" {
+                    observations.push(RepoWatchCheckRunObservation::new(
+                        object_id(run.id)?,
+                        RepoWatchCheckCompletionGeneration::try_new(
+                            run.completed_at
+                                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+                        )
+                        .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                        CheckRunName::try_new(run.name)
                             .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
-                            CheckRunName::try_new(run.name)
-                                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
-                            normalize_conclusion(run.conclusion.as_deref())?,
-                        ));
-                    } else {
-                        every_run_completed = false;
-                    }
+                        normalize_conclusion(run.conclusion.as_deref())?,
+                    ));
+                } else {
+                    every_run_completed = false;
                 }
-                if !has_next {
-                    break;
-                }
-                page = next_page(page)?;
             }
+            if !has_next {
+                return Ok((observations, every_run_completed));
+            }
+            page = next_page(page)?;
         }
-        Ok((observations, every_run_completed))
     }
 
     async fn fetch_reviews(
@@ -3788,10 +3783,7 @@ mod tests {
         "/repos/namespace/project/actions/workflows?per_page=100&page=2";
     const PULL_DETAIL_TARGET: &str = "/repos/namespace/project/pulls/7";
     const CHECK_SUITES_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-suites?filter=all&per_page=100&page=1";
-    const COMPLETED_SUITE_CHECK_RUNS_TARGET: &str =
-        "/repos/namespace/project/check-suites/11/check-runs?filter=all&per_page=100&page=1";
-    const QUEUED_SUITE_CHECK_RUNS_TARGET: &str =
-        "/repos/namespace/project/check-suites/12/check-runs?filter=all&per_page=100&page=1";
+    const COMMIT_CHECK_RUNS_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&per_page=100&page=1";
     const REVIEWS_TARGET: &str = "/repos/namespace/project/pulls/7/reviews?per_page=100&page=1";
     const THREADS_TARGET: &str = "/graphql";
     const PULL_REACTIONS_TARGET: &str =
@@ -4946,12 +4938,8 @@ mod tests {
                 ResponseBody(check_suites()),
             ),
             ScriptedResponse::ok(
-                RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                RequestTarget(COMMIT_CHECK_RUNS_TARGET.to_owned()),
                 ResponseBody(check_runs()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(QUEUED_SUITE_CHECK_RUNS_TARGET.to_owned()),
-                ResponseBody(empty_check_runs().to_owned()),
             ),
             ScriptedResponse::ok(
                 RequestTarget(REVIEWS_TARGET.to_owned()),
@@ -5093,6 +5081,12 @@ mod tests {
             ),
             ScriptedResponse::ok(
                 RequestTarget(format!(
+                    "/repos/{WATCHED_REPOSITORY}/commits/{head_sha}/check-runs?filter=all&per_page=100&page=1"
+                )),
+                ResponseBody(empty_check_runs().to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(format!(
                     "/repos/{WATCHED_REPOSITORY}/pulls/{number}/reviews?per_page=100&page=1"
                 )),
                 ResponseBody(EMPTY_LIST.to_owned()),
@@ -5143,7 +5137,7 @@ mod tests {
                 ResponseBody(settled_check_suites()),
             ),
             ScriptedResponse::ok(
-                RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                RequestTarget(COMMIT_CHECK_RUNS_TARGET.to_owned()),
                 ResponseBody(settled_check_runs()),
             ),
             ScriptedResponse::ok(
@@ -5262,9 +5256,9 @@ mod tests {
         complete_typed_observation_responses()
             .into_iter()
             .map(|response| {
-                if response.target == COMPLETED_SUITE_CHECK_RUNS_TARGET {
+                if response.target == COMMIT_CHECK_RUNS_TARGET {
                     ScriptedResponse::ok(
-                        RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                        RequestTarget(COMMIT_CHECK_RUNS_TARGET.to_owned()),
                         ResponseBody(settled_check_runs()),
                     )
                 } else {
@@ -5283,8 +5277,6 @@ mod tests {
                         RequestTarget(CHECK_SUITES_TARGET.to_owned()),
                         ResponseBody(settled_check_suites()),
                     ))
-                } else if response.target == QUEUED_SUITE_CHECK_RUNS_TARGET {
-                    None
                 } else {
                     Some(response)
                 }
@@ -6104,7 +6096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_complete_poll_enumerates_completed_check_runs_through_suites() {
+    async fn a_complete_poll_enumerates_completed_check_runs_from_commit_scoped_pages() {
         let observation = complete_typed_observation().await;
         let pull = &observation.state().pull_requests()[0];
 
@@ -6701,17 +6693,16 @@ mod tests {
     #[tokio::test]
     async fn every_check_run_member_the_decoder_requires_exists_in_the_provider_payload() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            RequestTarget(COMMIT_CHECK_RUNS_TARGET.to_owned()),
             ResponseBody(provider_defined_check_runs()),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let suite =
-            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+        let head = CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head is valid");
 
         let (runs, _) = fixture
             .poller
-            .fetch_check_runs(std::slice::from_ref(&suite))
+            .fetch_check_runs(&head)
             .await
             .expect("a page carrying the provider's complete check-run member set must decode");
         server.finish().await;
@@ -6726,18 +6717,14 @@ mod tests {
     #[tokio::test]
     async fn a_completed_check_run_without_a_completion_time_is_an_invalid_response() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
-            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            RequestTarget(COMMIT_CHECK_RUNS_TARGET.to_owned()),
             ResponseBody(completed_check_run_without_a_completion_time()),
         )])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let suite =
-            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+        let head = CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head is valid");
 
-        let result = fixture
-            .poller
-            .fetch_check_runs(std::slice::from_ref(&suite))
-            .await;
+        let result = fixture.poller.fetch_check_runs(&head).await;
         server.finish().await;
 
         assert_eq!(result, Err(RepositoryWatchAttemptError::InvalidResponse));
