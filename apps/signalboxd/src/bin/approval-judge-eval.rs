@@ -38,11 +38,12 @@ use signalboxd::{
     usage_limits,
 };
 
-const HELP: &str =
-    "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
+fn help_text() -> String {
+    format!(
+        "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
 
 Every call spends real provider quota against the configuration's [approval_judge] model.
-One run is limited to 1000 total paid calls after filter and limit selection.
+One run is limited to {MAX_PAID_CALLS} total paid calls after filter and limit selection.
 
 Usage:
   approval-judge-eval --config <daemon-config.toml> --cases <cases.jsonl> [options]
@@ -53,7 +54,9 @@ Options:
   --repeats <n>     Judge calls per case, n >= 1. Default 3; repeats measure verdict stability.
   --filter <text>   Keep only cases whose name or category contains <text>. Default: all cases.
   --limit <n>       Stop after selecting n cases, n >= 1. Default: no bound.
-  --help            Print this reference and exit without spending quota.";
+  --help            Print this reference and exit without spending quota."
+    )
+}
 
 /// Hard per-invocation ceiling on provider traffic from the Cartesian product
 /// of selected cases and repeats.
@@ -343,7 +346,7 @@ fn main() -> ExitCode {
     let options = match parse_arguments() {
         Ok(ParsedArguments::Run(options)) => options,
         Ok(ParsedArguments::Help) => {
-            println!("{HELP}");
+            println!("{}", help_text());
             return ExitCode::SUCCESS;
         }
         Err(message) => {
