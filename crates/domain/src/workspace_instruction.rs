@@ -1,6 +1,13 @@
 //! Typed workspace-instruction registration and turn-start provenance.
 
-use std::{error::Error, fmt, path::Path};
+use std::{
+    cmp::Ordering,
+    error::Error,
+    fmt,
+    hash::{Hash, Hasher},
+    path::Path,
+    sync::Arc,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -47,7 +54,7 @@ impl InstructionDigest {
 
 /// One canonical absolute UTF-8 path admitted to durable instruction evidence.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct InstructionPath(String);
+pub struct InstructionPath(Arc<str>);
 
 impl InstructionPath {
     /// Validates an absolute canonical spelling without touching the filesystem.
@@ -71,7 +78,7 @@ impl InstructionPath {
         {
             return Err(InstructionPathError::NotCanonical);
         }
-        Ok(Self(value))
+        Ok(Self(value.into()))
     }
 
     /// Borrows the exact path spelling.
@@ -82,14 +89,20 @@ impl InstructionPath {
 
 /// One canonical absolute UTF-8 candidate path admitted to durable evidence.
 ///
-/// Its bound includes one independently bounded root and root-relative path,
-/// plus their separating slash.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct InstructionSourcePath(String);
+/// The representation shares its independently bounded root and retains only
+/// the root-relative suffix per source.
+#[derive(Clone, Debug)]
+pub struct InstructionSourcePath {
+    root_path: InstructionPath,
+    relative_path: Arc<str>,
+}
 
 impl InstructionSourcePath {
-    /// Validates an absolute canonical source spelling without filesystem I/O.
-    pub fn try_new(value: String) -> Result<Self, InstructionPathError> {
+    /// Validates an absolute source spelling beneath its authorizing root.
+    pub fn try_new(
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError> {
         if value.is_empty() {
             return Err(InstructionPathError::Empty);
         }
@@ -109,12 +122,66 @@ impl InstructionSourcePath {
         {
             return Err(InstructionPathError::NotCanonical);
         }
-        Ok(Self(value))
+        let Some(relative_path) = value
+            .strip_prefix(root_path.as_str())
+            .and_then(|suffix| suffix.strip_prefix('/'))
+        else {
+            return Err(InstructionPathError::NotCanonical);
+        };
+        if relative_path.len() > MAX_INSTRUCTION_PATH_BYTES {
+            return Err(InstructionPathError::TooLong);
+        }
+        Ok(Self {
+            root_path,
+            relative_path: relative_path.into(),
+        })
     }
 
-    /// Borrows the exact source path spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Renders the exact canonical absolute source path.
+    pub fn absolute_path(&self) -> String {
+        format!("{}/{}", self.root_path.as_str(), self.relative_path)
+    }
+
+    /// Borrows the source path relative to its authorizing root.
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    fn absolute_bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.root_path
+            .as_str()
+            .bytes()
+            .chain(std::iter::once(b'/'))
+            .chain(self.relative_path.bytes())
+    }
+}
+
+impl PartialEq for InstructionSourcePath {
+    fn eq(&self, other: &Self) -> bool {
+        self.absolute_bytes().eq(other.absolute_bytes())
+    }
+}
+
+impl Eq for InstructionSourcePath {}
+
+impl PartialOrd for InstructionSourcePath {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for InstructionSourcePath {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.absolute_bytes().cmp(other.absolute_bytes())
+    }
+}
+
+impl Hash for InstructionSourcePath {
+    fn hash<State: Hasher>(&self, state: &mut State) {
+        (self.root_path.as_str().len() + 1 + self.relative_path.len()).hash(state);
+        for byte in self.absolute_bytes() {
+            byte.hash(state);
+        }
     }
 }
 
@@ -289,7 +356,7 @@ impl InstructionBundleRegistration {
             source_hash,
             skill,
         } = input;
-        let source = Path::new(source_path.as_str());
+        let source = Path::new(source_path.relative_path());
         let shape_matches = match (kind, skill.as_ref()) {
             (InstructionBundleKind::AgentDocument, None) => {
                 source.file_name().is_some_and(|name| name == "AGENTS.md")
@@ -304,12 +371,7 @@ impl InstructionBundleRegistration {
             }
             _ => false,
         };
-        let relative_source = source_path
-            .as_str()
-            .strip_prefix(root_path.as_str())
-            .and_then(|suffix| suffix.strip_prefix('/'));
-        let below_root =
-            relative_source.is_some_and(|relative| relative.len() <= MAX_INSTRUCTION_PATH_BYTES);
+        let below_root = source_path.root_path == root_path;
         (shape_matches && below_root).then_some(Self {
             kind,
             root_kind,
@@ -448,6 +510,7 @@ impl TurnInstructionManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn identity<T>(value: u128, constructor: impl FnOnce(uuid::Uuid) -> T) -> T {
         constructor(uuid::Uuid::from_u128(value))
@@ -513,12 +576,13 @@ mod tests {
     fn source_path_bound_keeps_root_and_relative_budgets_independent() {
         let root_text = format!("/{}", "a".repeat(MAX_INSTRUCTION_PATH_BYTES - 1));
         let source_text = format!("{root_text}/AGENTS.md");
+        let root_path = InstructionPath::try_new(root_text)
+            .expect("the fixture consumes the complete root-path budget");
         let registration = InstructionBundleRegistration::new(InstructionBundleRegistrationInput {
             kind: InstructionBundleKind::AgentDocument,
             root_kind: InstructionDiscoveryRootKind::Configured,
-            root_path: InstructionPath::try_new(root_text)
-                .expect("the fixture consumes the complete root-path budget"),
-            source_path: InstructionSourcePath::try_new(source_text)
+            root_path: root_path.clone(),
+            source_path: InstructionSourcePath::try_new(root_path, source_text)
                 .expect("a short relative source retains its own budget"),
             source_bytes: 1,
             source_hash: InstructionDigest::sha256(b"fixture"),
@@ -526,6 +590,45 @@ mod tests {
         });
 
         assert!(registration.is_some());
+    }
+
+    #[test]
+    fn cloned_paths_share_their_validated_storage() {
+        let root =
+            InstructionPath::try_new(String::from("/workspace")).expect("fixture root is valid");
+        let source =
+            InstructionSourcePath::try_new(root.clone(), String::from("/workspace/AGENTS.md"))
+                .expect("fixture source is valid");
+
+        let cloned_root = root.clone();
+        let cloned_source = source.clone();
+
+        assert!(Arc::ptr_eq(&root.0, &cloned_root.0));
+        assert!(Arc::ptr_eq(&root.0, &source.root_path.0));
+        assert!(Arc::ptr_eq(
+            &source.relative_path,
+            &cloned_source.relative_path
+        ));
+    }
+
+    #[test]
+    fn source_identity_is_independent_of_authorizing_root_segmentation() {
+        let workspace_root =
+            InstructionPath::try_new(String::from("/workspace")).expect("workspace root is valid");
+        let nested_root =
+            InstructionPath::try_new(String::from("/workspace/sub")).expect("nested root is valid");
+        let from_workspace = InstructionSourcePath::try_new(
+            workspace_root,
+            String::from("/workspace/sub/AGENTS.md"),
+        )
+        .expect("workspace source is valid");
+        let from_nested =
+            InstructionSourcePath::try_new(nested_root, String::from("/workspace/sub/AGENTS.md"))
+                .expect("nested source is valid");
+
+        let distinct_sources = BTreeSet::from([from_workspace, from_nested]);
+
+        assert_eq!(distinct_sources.len(), 1);
     }
 
     fn review_skill() -> InstructionSkillMetadata {
@@ -542,12 +645,13 @@ mod tests {
         source_path: &str,
         skill: Option<InstructionSkillMetadata>,
     ) -> InstructionBundleRegistrationInput {
+        let root_path =
+            InstructionPath::try_new(String::from("/workspace")).expect("fixture root is valid");
         InstructionBundleRegistrationInput {
             kind,
             root_kind: InstructionDiscoveryRootKind::Workspace,
-            root_path: InstructionPath::try_new(String::from("/workspace"))
-                .expect("fixture root is valid"),
-            source_path: InstructionSourcePath::try_new(source_path.to_owned())
+            root_path: root_path.clone(),
+            source_path: InstructionSourcePath::try_new(root_path, source_path.to_owned())
                 .expect("fixture source is valid"),
             source_bytes: 1,
             source_hash: InstructionDigest::sha256(b"fixture"),

@@ -324,20 +324,27 @@ fn walk_root(
     state: &mut DiscoveryState,
 ) -> bool {
     let root_path = PathBuf::from(root.path().as_str());
-    let root_descriptor = match open_directory_no_follow(&root_path, || {
-        check_elapsed(root.path(), findings, state)
-    }) {
-        Ok(Some(descriptor)) => descriptor,
-        Ok(None) => return false,
-        Err(_) => {
-            return push_finding(
-                root.path().clone(),
-                InstructionDiscoveryFindingKind::RootUnavailable,
-                findings,
-                state,
-            );
-        }
-    };
+    let root_deadline = state.started + state.limits.elapsed;
+    let root_descriptor =
+        match open_directory_no_follow_before_deadline(root_path.clone(), root_deadline) {
+            Ok(Ok(Some(descriptor))) => descriptor,
+            Err(FilesystemTaskError::Deadline) => {
+                return reach_limit(
+                    root.path().clone(),
+                    InstructionDiscoveryLimitKind::ElapsedTime,
+                    findings,
+                    state,
+                );
+            }
+            Ok(Ok(None)) | Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
+                return push_finding(
+                    root.path().clone(),
+                    InstructionDiscoveryFindingKind::RootUnavailable,
+                    findings,
+                    state,
+                );
+            }
+        };
     let mut pending = vec![PendingDirectory {
         parent: None,
         name: None,
@@ -350,33 +357,44 @@ fn walk_root(
         if !check_elapsed(root.path(), findings, state) {
             return false;
         }
-        let directory_descriptor =
-            match open_directory_beneath(&root_descriptor, &relative_directory, || {
-                check_elapsed(root.path(), findings, state)
-            }) {
-                Ok(Some(descriptor)) => descriptor,
-                Ok(None) => return false,
-                Err(_) => {
-                    let kind = if is_root {
-                        InstructionDiscoveryFindingKind::RootUnavailable
-                    } else {
-                        InstructionDiscoveryFindingKind::EntryUnreadable
-                    };
-                    if !push_path_finding(&directory, root.path(), kind, findings, state) {
-                        return false;
-                    }
-                    continue;
+        let directory_deadline = state.started + state.limits.elapsed;
+        let directory_descriptor = match open_directory_beneath_before_deadline(
+            &root_descriptor,
+            relative_directory.clone(),
+            directory_deadline,
+        ) {
+            Ok(Ok(Some(descriptor))) => descriptor,
+            Err(FilesystemTaskError::Deadline) => {
+                return reach_limit(
+                    root.path().clone(),
+                    InstructionDiscoveryLimitKind::ElapsedTime,
+                    findings,
+                    state,
+                );
+            }
+            Ok(Ok(None)) | Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
+                let kind = if is_root {
+                    InstructionDiscoveryFindingKind::RootUnavailable
+                } else {
+                    InstructionDiscoveryFindingKind::EntryUnreadable
+                };
+                if !push_path_finding(&directory, root.path(), kind, findings, state) {
+                    return false;
                 }
-            };
+                continue;
+            }
+        };
         let remaining_entries = state
             .limits
             .classified_entries
             .saturating_sub(state.classified_entries);
         let deadline = state.started + state.limits.elapsed;
+        let classified = Arc::new(AtomicU64::new(0));
         let directory_read = match read_directory_before_deadline(
             &directory_descriptor,
             remaining_entries,
             deadline,
+            Arc::clone(&classified),
         ) {
             Ok(Ok(directory_read)) => directory_read,
             Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => {
@@ -391,6 +409,8 @@ fn walk_root(
                 continue;
             }
             Err(FilesystemTaskError::Deadline) => {
+                state.classified_entries +=
+                    classified.load(Ordering::Relaxed).min(remaining_entries);
                 return reach_limit(
                     root.path().clone(),
                     InstructionDiscoveryLimitKind::ElapsedTime,
@@ -580,19 +600,10 @@ fn register_file(
     state: &mut DiscoveryState,
 ) -> bool {
     let source = location.directory.join(location.source_name);
-    let source_path = match source
-        .to_str()
-        .and_then(|value| InstructionSourcePath::try_new(value.to_owned()).ok())
-    {
-        Some(path) => path,
-        None => {
-            return push_path_finding(
-                &source,
-                root.path(),
-                InstructionDiscoveryFindingKind::NonUtf8SourcePath,
-                findings,
-                state,
-            );
+    let source_path = match source_path_for_registration(root.path(), &source) {
+        Ok(path) => path,
+        Err(kind) => {
+            return push_path_finding(&source, root.path(), kind, findings, state);
         }
     };
     if !state.seen_sources.insert(source_path.clone()) {
@@ -650,11 +661,23 @@ fn register_file(
     true
 }
 
+fn source_path_for_registration(
+    root_path: &InstructionPath,
+    source: &std::path::Path,
+) -> Result<InstructionSourcePath, InstructionDiscoveryFindingKind> {
+    let source = source
+        .to_str()
+        .ok_or(InstructionDiscoveryFindingKind::NonUtf8SourcePath)?;
+    InstructionSourcePath::try_new(root_path.clone(), source.to_owned())
+        .map_err(|_| InstructionDiscoveryFindingKind::EntryUnreadable)
+}
+
 #[cfg(unix)]
 fn read_directory_before_deadline(
     directory: &OwnedFd,
     remaining_entries: u64,
     deadline: Instant,
+    classified: Arc<AtomicU64>,
 ) -> Result<io::Result<DirectoryRead>, FilesystemTaskError> {
     let directory = rustix::io::dup(directory).map_err(|_| FilesystemTaskError::Unavailable)?;
     run_bounded_filesystem_task(
@@ -662,12 +685,16 @@ fn read_directory_before_deadline(
         MAX_FILESYSTEM_WORKERS,
         deadline,
         "signalbox-instruction-directory",
-        move || read_directory(directory, remaining_entries),
+        move || read_directory(directory, remaining_entries, classified),
     )
 }
 
 #[cfg(unix)]
-fn read_directory(directory: OwnedFd, remaining_entries: u64) -> io::Result<DirectoryRead> {
+fn read_directory(
+    directory: OwnedFd,
+    remaining_entries: u64,
+    classified: Arc<AtomicU64>,
+) -> io::Result<DirectoryRead> {
     let mut directory_entries = rustix::fs::Dir::read_from(&directory)?;
     let mut names = Vec::new();
     let mut read_errors = 0_u64;
@@ -694,10 +721,17 @@ fn read_directory(directory: OwnedFd, remaining_entries: u64) -> io::Result<Dire
                 }
                 observations += 1;
                 read_errors += 1;
+                classified.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
-    let entries = classify_sorted_names(names, |name| classify_entry_at(&directory, name));
+    let entries = classify_sorted_names(
+        names,
+        |name| classify_entry_at(&directory, name),
+        || {
+            classified.fetch_add(1, Ordering::Relaxed);
+        },
+    );
     Ok(DirectoryRead {
         entries,
         read_errors,
@@ -709,17 +743,20 @@ fn read_directory(directory: OwnedFd, remaining_entries: u64) -> io::Result<Dire
 fn classify_sorted_names(
     mut names: Vec<OsString>,
     mut classify: impl FnMut(&OsStr) -> io::Result<rustix::fs::FileType>,
+    mut classified: impl FnMut(),
 ) -> Vec<Result<ClassifiedDirectoryEntry, OsString>> {
     names.sort();
     names
         .into_iter()
         .map(|name| {
-            classify(&name)
+            let result = classify(&name)
                 .map(|file_type| ClassifiedDirectoryEntry {
                     name: name.clone(),
                     file_type,
                 })
-                .map_err(|_| name)
+                .map_err(|_| name);
+            classified();
+            result
         })
         .collect()
 }
@@ -799,23 +836,73 @@ fn read_candidate(
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
 ) -> Result<Vec<u8>, bool> {
-    let file =
-        match open_candidate_at_no_follow(location.directory_descriptor, location.source_name) {
-            Ok(file) => file,
-            Err(_) => {
-                return Err(push_path_finding(
-                    source,
-                    fallback,
-                    InstructionDiscoveryFindingKind::EntryUnreadable,
-                    findings,
-                    state,
-                ));
+    let directory = match rustix::io::dup(location.directory_descriptor) {
+        Ok(directory) => directory,
+        Err(_) => {
+            return Err(push_path_finding(
+                source,
+                fallback,
+                InstructionDiscoveryFindingKind::EntryUnreadable,
+                findings,
+                state,
+            ));
+        }
+    };
+    let source_name = location.source_name.to_os_string();
+    let remaining_bytes = state
+        .limits
+        .candidate_source_bytes
+        .saturating_sub(state.candidate_source_bytes);
+    let deadline = state.started + state.limits.elapsed;
+    let observed = Arc::new(AtomicU64::new(0));
+    let worker_observed = Arc::clone(&observed);
+    let read_result = run_bounded_filesystem_task(
+        Arc::clone(&FILESYSTEM_WORKERS),
+        MAX_FILESYSTEM_WORKERS,
+        deadline,
+        "signalbox-instruction-read",
+        move || {
+            let source_file = open_candidate_at_no_follow(&directory, &source_name)?;
+            let mut bytes = Vec::new();
+            let result = CountingReader {
+                source: source_file,
+                observed: worker_observed,
             }
-        };
-    read_candidate_before_deadline(file, source, fallback, findings, state)
+            .take(remaining_bytes.saturating_add(1))
+            .read_to_end(&mut bytes);
+            Ok::<_, io::Error>((bytes, result))
+        },
+    );
+    match read_result {
+        Ok(Ok((bytes, result))) => finish_candidate_read(
+            bytes,
+            result,
+            source,
+            fallback,
+            findings,
+            state,
+            remaining_bytes,
+        ),
+        Ok(Err(_)) | Err(FilesystemTaskError::Unavailable) => Err(push_path_finding(
+            source,
+            fallback,
+            InstructionDiscoveryFindingKind::EntryUnreadable,
+            findings,
+            state,
+        )),
+        Err(FilesystemTaskError::Deadline) => {
+            state.candidate_source_bytes += observed.load(Ordering::Relaxed).min(remaining_bytes);
+            Err(reach_limit(
+                path_for_finding(source, fallback),
+                InstructionDiscoveryLimitKind::ElapsedTime,
+                findings,
+                state,
+            ))
+        }
+    }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn read_candidate_before_deadline(
     source_file: impl Read + Send + 'static,
     source: &std::path::Path,
@@ -970,6 +1057,20 @@ fn open_directory_no_follow(
 }
 
 #[cfg(unix)]
+fn open_directory_no_follow_before_deadline(
+    source: PathBuf,
+    deadline: Instant,
+) -> Result<io::Result<Option<OwnedFd>>, FilesystemTaskError> {
+    run_bounded_filesystem_task(
+        Arc::clone(&FILESYSTEM_WORKERS),
+        MAX_FILESYSTEM_WORKERS,
+        deadline,
+        "signalbox-instruction-directory-open",
+        move || open_directory_no_follow(&source, || true),
+    )
+}
+
+#[cfg(unix)]
 fn open_directory_beneath(
     root: &OwnedFd,
     relative: &std::path::Path,
@@ -989,6 +1090,22 @@ fn open_directory_beneath(
         return Ok(None);
     }
     Ok(Some(descriptor))
+}
+
+#[cfg(unix)]
+fn open_directory_beneath_before_deadline(
+    root: &OwnedFd,
+    relative: PathBuf,
+    deadline: Instant,
+) -> Result<io::Result<Option<OwnedFd>>, FilesystemTaskError> {
+    let root = rustix::io::dup(root).map_err(|_| FilesystemTaskError::Unavailable)?;
+    run_bounded_filesystem_task(
+        Arc::clone(&FILESYSTEM_WORKERS),
+        MAX_FILESYSTEM_WORKERS,
+        deadline,
+        "signalbox-instruction-directory-open",
+        move || open_directory_beneath(&root, &relative, || true),
+    )
 }
 
 #[cfg(unix)]
@@ -1229,12 +1346,15 @@ impl<T> OptionalFrontmatterField<T> {
 }
 
 fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
-    let (body, closing) = if let Some(body) = text.strip_prefix("---\n") {
-        (body, "\n---\n")
+    let (body, closing, closing_at_eof) = if let Some(body) = text.strip_prefix("---\n") {
+        (body, "\n---\n", "\n---")
     } else {
-        (text.strip_prefix("---\r\n")?, "\r\n---\r\n")
+        (text.strip_prefix("---\r\n")?, "\r\n---\r\n", "\r\n---")
     };
-    let boundary = body.find(closing)?;
+    let boundary = body.find(closing).or_else(|| {
+        body.strip_suffix(closing_at_eof)
+            .map(|frontmatter| frontmatter.len())
+    })?;
     let parsed: PortableSkillFrontmatter = serde_yaml_ng::from_str(&body[..boundary]).ok()?;
     if parsed
         .compatibility
@@ -1605,13 +1725,33 @@ mod tests {
     fn raw_entry_names_sort_before_classification_failures() {
         let names = vec![OsString::from("zeta"), OsString::from("alpha")];
 
-        let entries = classify_sorted_names(names, |_name| {
-            Err(io::Error::other("fixture classification failure"))
-        });
+        let entries = classify_sorted_names(
+            names,
+            |_name| Err(io::Error::other("fixture classification failure")),
+            || {},
+        );
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].as_ref().expect_err("alpha fails"), "alpha");
         assert_eq!(entries[1].as_ref().expect_err("zeta fails"), "zeta");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_classification_publishes_finished_entry_progress() {
+        let names = vec![OsString::from("alpha"), OsString::from("beta")];
+        let classified = AtomicU64::new(0);
+
+        let entries = classify_sorted_names(
+            names,
+            |_name| Ok(rustix::fs::FileType::RegularFile),
+            || {
+                classified.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(classified.load(Ordering::Relaxed), 2);
     }
 
     #[cfg(unix)]
@@ -1803,12 +1943,16 @@ mod tests {
 
     #[test]
     fn portable_skill_metadata_validates_without_becoming_retained_metadata() {
-        let source = "---\nname: review-rust\ndescription: Review.\nmetadata:\n  alpha: one\n  beta: two\n---\n";
+        let expected_name = "review-rust";
+        let expected_description = "Review.";
+        let source = format!(
+            "---\nname: {expected_name}\ndescription: {expected_description}\nmetadata:\n  alpha: one\n  beta: two\n---\n"
+        );
 
-        let skill = parse_skill(source, "review-rust").expect("string metadata is portable");
+        let skill = parse_skill(&source, expected_name).expect("string metadata is portable");
 
-        assert_eq!(skill.name(), "review-rust");
-        assert_eq!(skill.description(), "Review.");
+        assert_eq!(skill.name(), expected_name);
+        assert_eq!(skill.description(), expected_description);
     }
 
     #[cfg(unix)]
@@ -1839,6 +1983,38 @@ mod tests {
 
         assert_eq!(skill.name(), "review-rust");
         assert_eq!(skill.description(), "Review Rust.");
+    }
+
+    #[test]
+    fn portable_skill_frontmatter_closing_delimiter_may_end_the_file() {
+        let expected_name = "review-rust";
+        let expected_lf_description = "Review LF.";
+        let expected_crlf_description = "Review CRLF.";
+        let lf_source =
+            format!("---\nname: {expected_name}\ndescription: {expected_lf_description}\n---");
+        let crlf_source = format!(
+            "---\r\nname: {expected_name}\r\ndescription: {expected_crlf_description}\r\n---"
+        );
+
+        let lf_skill = parse_skill(&lf_source, expected_name).expect("LF frontmatter is portable");
+        let crlf_skill =
+            parse_skill(&crlf_source, expected_name).expect("CRLF frontmatter is portable");
+
+        assert_eq!(lf_skill.description(), expected_lf_description);
+        assert_eq!(crlf_skill.description(), expected_crlf_description);
+    }
+
+    #[test]
+    fn source_relative_path_must_fit_the_independent_path_bound() {
+        let root = InstructionPath::try_new(String::from("/r")).expect("fixture root is valid");
+        let source = PathBuf::from(format!("/r/{}", "a".repeat(4_097)));
+
+        let result = source_path_for_registration(&root, &source);
+
+        assert_eq!(
+            result,
+            Err(InstructionDiscoveryFindingKind::EntryUnreadable)
+        );
     }
 
     fn workspace_root(temporary: &tempfile::TempDir) -> InstructionDiscoveryRoot {
