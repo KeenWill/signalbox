@@ -2083,7 +2083,7 @@ mod tests {
     };
 
     #[test]
-    fn workspace_instruction_root_and_bundle_mappings_are_closed() {
+    fn inv061_workspace_instruction_root_and_bundle_mappings_are_closed() {
         assert_eq!(
             instruction_root_kind_to_str(InstructionDiscoveryRootKind::Workspace),
             "workspace"
@@ -2130,7 +2130,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_instruction_finding_mapping_is_closed() {
+    fn inv061_workspace_instruction_finding_mapping_is_closed() {
         assert_instruction_finding_mapping(
             InstructionDiscoveryFindingKind::RootUnavailable,
             "root_unavailable",
@@ -2177,7 +2177,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_instruction_placement_authority_mapping_is_closed() {
+    fn inv061_workspace_instruction_placement_authority_mapping_is_closed() {
         assert_eq!(
             workspace_instruction_authority_from_placement_state("unpinned"),
             Some(WorkspaceInstructionAuthorityStorageKind::Runner)
