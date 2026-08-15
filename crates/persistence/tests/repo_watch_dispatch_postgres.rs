@@ -64,6 +64,8 @@ const CORRUPT_GOAL_FIRST_CUTOFF_EVENT_ID: u128 = 0x51_200;
 const CORRUPT_GOAL_SECOND_CUTOFF_EVENT_ID: u128 = 0x51_300;
 const TERMINAL_RULE_OPENED_EVENT_ID: u128 = 0x54_000;
 const TERMINAL_RULE_MERGED_EVENT_ID: u128 = 0x54_100;
+const STARTUP_DRAIN_CUTOFF_EVENT_ID: u128 = 0x57_100;
+const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -1504,7 +1506,7 @@ async fn removed_repository_deactivates_its_rule_identities() -> Result<(), Box<
 async fn startup_drain_processes_cutoff_after_repository_removal() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let session = fixture.session(0);
-    commit_merge(&fixture, 0x57_100).await?;
+    commit_merge(&fixture, STARTUP_DRAIN_CUTOFF_EVENT_ID).await?;
     fixture
         .store
         .deactivate_unconfigured_repositories(&[])
@@ -1513,7 +1515,7 @@ async fn startup_drain_processes_cutoff_after_repository_removal() -> Result<(),
     fixture
         .store
         .process_pending_lifecycle_cutoffs(|| {
-            DurableCommandId::from_uuid(Uuid::from_u128(0x57_110))
+            DurableCommandId::from_uuid(Uuid::from_u128(STARTUP_DRAIN_STOP_COMMAND_ID))
         })
         .await?;
 
