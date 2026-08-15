@@ -863,6 +863,27 @@ impl PostgresRunnerRegistrationService {
                         .map(|pending| (release_correlation, pending)),
                 )
             }
+            ResumeOperation::WorkspaceCleanupFailure(failure) => {
+                let action = self
+                    .workspace_cleanup_failure_resume_action(&failure, identities)
+                    .await
+                    .map_err(|error| {
+                        store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                    })?;
+                (
+                    workspace_cleanup_failure_directives(&request.inventory, action).map_err(
+                        |code| {
+                            RunnerRegistrationFailure::new(
+                                RunnerInboundFrameKind::Resume,
+                                correlation.clone(),
+                                code,
+                            )
+                        },
+                    )?,
+                    None,
+                    None,
+                )
+            }
             ResumeOperation::Empty => (ReconnectDirectives::default(), None, None),
         };
         let previous_registration_revision = match self
@@ -1014,6 +1035,29 @@ impl PostgresRunnerRegistrationService {
         Ok(WorkspaceReleaseResumeDecision::new(
             workspace_release_recorded_action(phase, is_exact),
             None,
+        ))
+    }
+
+    async fn workspace_cleanup_failure_resume_action(
+        &self,
+        failure: &signalbox_runner_wire::OperationFailure,
+        identities: IssuedRunnerEnrollmentIdentities,
+    ) -> Result<DirectiveAction, RunnerProtocolStoreError> {
+        let supplied = workspace_cleanup_failure(&OperationFailed {
+            failure: failure.clone(),
+        })
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ))?;
+        if supplied.runner() != identities.runner() {
+            return Ok(DirectiveAction::FailStale);
+        }
+        let recorded = self
+            .store
+            .load_workspace_cleanup_failure(supplied.session(), supplied.placement_revision())
+            .await?;
+        Ok(workspace_cleanup_failure_recorded_action(
+            recorded.as_ref() == Some(&supplied),
         ))
     }
 
@@ -1287,6 +1331,7 @@ enum ResumeOperation {
         correlation: ReleaseCorrelation,
         phase: ReleasePhase,
     },
+    WorkspaceCleanupFailure(signalbox_runner_wire::OperationFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1306,6 +1351,32 @@ fn classify_resume_inventory(
 ) -> Result<ResumeOperation, RejectionCode> {
     if inventory == &ReconnectInventory::default() {
         return Ok(ResumeOperation::Empty);
+    }
+    if let (
+        Some(WorkspaceOperation::Release {
+            correlation,
+            phase: ReleasePhase::ReleaseAccepted,
+        }),
+        Some(failure),
+    ) = (
+        inventory.workspace_operation.as_ref(),
+        inventory.operation_failure.as_ref(),
+    ) {
+        if inventory.lease.is_some() || inventory.result.is_some() || inventory.leak_page.is_some()
+        {
+            return Err(RejectionCode::CorrelationMismatch);
+        }
+        return match &failure.correlation {
+            OperationCorrelation::Release(failure_correlation)
+                if failure_correlation == correlation
+                    && failure.category == FailureCategory::WorkspaceCleanupFailed =>
+            {
+                Ok(ResumeOperation::WorkspaceCleanupFailure(failure.clone()))
+            }
+            OperationCorrelation::Provision(_)
+            | OperationCorrelation::Release(_)
+            | OperationCorrelation::LeaseOffer(_) => Err(RejectionCode::CorrelationMismatch),
+        };
     }
     if let Some(operation) = inventory.workspace_operation.as_ref() {
         if inventory.lease.is_some()
@@ -1445,6 +1516,55 @@ fn workspace_release_directives(
         .validate_against(inventory)
         .map_err(|_| RejectionCode::CorrelationMismatch)?;
     Ok(directives)
+}
+
+fn workspace_cleanup_failure_directives(
+    inventory: &ReconnectInventory,
+    action: DirectiveAction,
+) -> Result<ReconnectDirectives, RejectionCode> {
+    if !matches!(
+        action,
+        DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale
+    ) {
+        return Err(RejectionCode::CorrelationMismatch);
+    }
+    let Some(WorkspaceOperation::Release {
+        correlation,
+        phase: ReleasePhase::ReleaseAccepted,
+    }) = inventory.workspace_operation.as_ref()
+    else {
+        return Err(RejectionCode::CorrelationMismatch);
+    };
+    let Some(failure) = inventory.operation_failure.as_ref() else {
+        return Err(RejectionCode::CorrelationMismatch);
+    };
+    let operation_correlation = OperationCorrelation::Release(correlation.clone());
+    if failure.correlation != operation_correlation {
+        return Err(RejectionCode::CorrelationMismatch);
+    }
+    let directives = ReconnectDirectives {
+        workspace_operation: Some(Directive {
+            correlation: operation_correlation.clone(),
+            action,
+        }),
+        operation_failure: Some(Directive {
+            correlation: operation_correlation,
+            action,
+        }),
+        ..ReconnectDirectives::default()
+    };
+    directives
+        .validate_against(inventory)
+        .map_err(|_| RejectionCode::CorrelationMismatch)?;
+    Ok(directives)
+}
+
+const fn workspace_cleanup_failure_recorded_action(is_exact: bool) -> DirectiveAction {
+    if is_exact {
+        DirectiveAction::DiscardAsRecorded
+    } else {
+        DirectiveAction::FailStale
+    }
 }
 
 const fn workspace_release_pending_action(phase: ReleasePhase, is_exact: bool) -> DirectiveAction {
@@ -4091,6 +4211,17 @@ mod tests {
         }
     }
 
+    fn workspace_cleanup_failure_inventory() -> ReconnectInventory {
+        ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Release {
+                correlation: workspace_released().correlation,
+                phase: ReleasePhase::ReleaseAccepted,
+            }),
+            operation_failure: Some(workspace_cleanup_failed().failure),
+            ..ReconnectInventory::default()
+        }
+    }
+
     /// INV-024: accepted resume evidence retains the exact pending release
     /// correlation selected for post-receipt redelivery.
     #[test]
@@ -4193,6 +4324,85 @@ mod tests {
                 .action,
             DirectiveAction::FailStale
         );
+    }
+
+    #[test]
+    fn s32_inv011_inv024_recorded_cleanup_failure_resume_discards_both_items() {
+        let inventory = workspace_cleanup_failure_inventory();
+        let expected_failure = inventory
+            .operation_failure
+            .as_ref()
+            .expect("the failure fixture exists")
+            .clone();
+
+        let operation = classify_resume_inventory(&inventory)
+            .expect("the complete cleanup-failure pair is recoverable");
+        let directives = workspace_cleanup_failure_directives(
+            &inventory,
+            workspace_cleanup_failure_recorded_action(true),
+        )
+        .expect("the exact recorded failure accepts paired directives");
+
+        assert_eq!(
+            operation,
+            ResumeOperation::WorkspaceCleanupFailure(expected_failure)
+        );
+        assert_eq!(directives.validate_against(&inventory), Ok(()));
+        assert_eq!(
+            directives
+                .workspace_operation
+                .expect("the workspace directive exists")
+                .action,
+            DirectiveAction::DiscardAsRecorded
+        );
+        assert_eq!(
+            directives
+                .operation_failure
+                .expect("the failure directive exists")
+                .action,
+            DirectiveAction::DiscardAsRecorded
+        );
+    }
+
+    #[test]
+    fn s32_inv011_inv024_stale_cleanup_failure_resume_fails_both_items() {
+        let inventory = workspace_cleanup_failure_inventory();
+
+        let directives = workspace_cleanup_failure_directives(
+            &inventory,
+            workspace_cleanup_failure_recorded_action(false),
+        )
+        .expect("the exact stale failure accepts paired directives");
+
+        assert_eq!(directives.validate_against(&inventory), Ok(()));
+        assert_eq!(
+            directives
+                .workspace_operation
+                .expect("the workspace directive exists")
+                .action,
+            DirectiveAction::FailStale
+        );
+        assert_eq!(
+            directives
+                .operation_failure
+                .expect("the failure directive exists")
+                .action,
+            DirectiveAction::FailStale
+        );
+    }
+
+    #[test]
+    fn s32_inv011_inv024_cleanup_failure_resume_requires_an_accepted_release() {
+        let mut inventory = workspace_cleanup_failure_inventory();
+        inventory.workspace_operation = Some(WorkspaceOperation::Release {
+            correlation: workspace_released().correlation,
+            phase: ReleasePhase::ReleaseCompleted,
+        });
+
+        let rejected = classify_resume_inventory(&inventory)
+            .expect_err("a cleanup failure requires its exact accepted release");
+
+        assert_eq!(rejected, RejectionCode::CorrelationMismatch);
     }
 
     #[test]

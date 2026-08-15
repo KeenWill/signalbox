@@ -1629,6 +1629,57 @@ fn apply_resume_directives(
             )),
         };
     }
+    if let (
+        Some(WorkspaceOperation::Release {
+            correlation,
+            phase: ReleasePhase::ReleaseAccepted,
+        }),
+        Some(failure),
+        Some(workspace_directive),
+        Some(failure_directive),
+    ) = (
+        inventory.workspace_operation.as_ref(),
+        inventory.operation_failure.as_ref(),
+        directives.workspace_operation.as_ref(),
+        directives.operation_failure.as_ref(),
+    ) && inventory.lease.is_none()
+        && inventory.result.is_none()
+        && inventory.leak_page.is_none()
+        && directives.lease.is_none()
+        && directives.result.is_none()
+        && directives.leak_page.is_none()
+    {
+        let expected = OperationCorrelation::Release(correlation.clone());
+        if failure.correlation != expected
+            || workspace_directive.correlation != expected
+            || failure_directive.correlation != expected
+        {
+            return Err(RunnerConnectionError::Violation(
+                ProtocolViolation::ResumeDirectives,
+            ));
+        }
+        return match (workspace_directive.action, failure_directive.action) {
+            (DirectiveAction::DiscardAsRecorded, DirectiveAction::DiscardAsRecorded)
+            | (DirectiveAction::FailStale, DirectiveAction::FailStale) => {
+                state
+                    .acknowledge_workspace_release_failure(correlation)
+                    .map_err(resume_state_error)?;
+                Ok(None)
+            }
+            (
+                DirectiveAction::Resend
+                | DirectiveAction::Await
+                | DirectiveAction::DiscardAsRecorded
+                | DirectiveAction::FailStale,
+                DirectiveAction::Resend
+                | DirectiveAction::Await
+                | DirectiveAction::DiscardAsRecorded
+                | DirectiveAction::FailStale,
+            ) => Err(RunnerConnectionError::Violation(
+                ProtocolViolation::ResumeDirectives,
+            )),
+        };
+    }
     if let (Some(failure), Some(directive)) = (
         inventory.operation_failure.as_ref(),
         directives.operation_failure.as_ref(),
@@ -2020,6 +2071,14 @@ mod tests {
         state
     }
 
+    fn state_with_workspace_release_failure(parent: &TempDir) -> RunnerStateRoot {
+        let mut state = state_with_accepted_workspace_release(parent);
+        state
+            .record_workspace_release_failure(release_failure())
+            .expect("the cleanup failure is durable");
+        state
+    }
+
     fn release_failure() -> OperationFailure {
         OperationFailure {
             correlation: OperationCorrelation::Release(release_correlation()),
@@ -2144,6 +2203,21 @@ mod tests {
         ReconnectDirectives {
             workspace_operation: Some(signalbox_runner_wire::Directive {
                 correlation: OperationCorrelation::Release(release_correlation()),
+                action,
+            }),
+            ..ReconnectDirectives::default()
+        }
+    }
+
+    fn retained_release_failure_directives(action: DirectiveAction) -> ReconnectDirectives {
+        let correlation = OperationCorrelation::Release(release_correlation());
+        ReconnectDirectives {
+            workspace_operation: Some(signalbox_runner_wire::Directive {
+                correlation: correlation.clone(),
+                action,
+            }),
+            operation_failure: Some(signalbox_runner_wire::Directive {
+                correlation,
                 action,
             }),
             ..ReconnectDirectives::default()
@@ -3617,6 +3691,116 @@ mod tests {
             EnrollmentOutcome::Resumed
         );
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: durable cleanup-failure evidence retires the exact
+    /// accepted-release and failure pair before serving begins.
+    #[tokio::test]
+    async fn inv011_inv024_resume_discards_the_recorded_workspace_cleanup_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_workspace_release_failure(&parent);
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_release_failure_directives(
+                        DirectiveAction::DiscardAsRecorded,
+                    ),
+                })),
+            )
+            .await;
+        };
+        let (connection, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            connection
+                .expect("the recorded directives establish the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: stale cleanup-failure evidence retires the exact
+    /// accepted-release and failure pair without replay.
+    #[tokio::test]
+    async fn inv011_inv024_resume_fails_the_stale_workspace_cleanup_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_workspace_release_failure(&parent);
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_release_failure_directives(DirectiveAction::FailStale),
+                })),
+            )
+            .await;
+        };
+        let (connection, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            connection
+                .expect("the stale directives establish the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    #[tokio::test]
+    async fn inv011_inv024_resume_rejects_mixed_cleanup_failure_directives() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_workspace_release_failure(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let mut directives = retained_release_failure_directives(DirectiveAction::FailStale);
+        directives
+            .operation_failure
+            .as_mut()
+            .expect("the failure directive exists")
+            .action = DirectiveAction::DiscardAsRecorded;
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives,
+                })),
+            )
+            .await;
+        };
+        let (rejected, ()) = tokio::join!(runner, hub);
+        let rejected = rejected
+            .err()
+            .expect("mixed cleanup-failure actions fail closed");
+
+        assert!(matches!(
+            rejected,
+            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
     }
 
     #[tokio::test]
