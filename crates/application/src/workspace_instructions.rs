@@ -21,7 +21,7 @@ use serde::Deserialize;
 use signalbox_domain::{
     InstructionBundleKind, InstructionBundleRegistration, InstructionBundleRegistrationInput,
     InstructionDigest, InstructionDiscoveryRootKind, InstructionPath, InstructionSkillMetadata,
-    InstructionSkillMetadataInput, InstructionSourcePath,
+    InstructionSkillMetadataInput, InstructionSourcePath, InstructionSourcePathInterner,
 };
 
 /// One explicit authority root to scan.
@@ -177,6 +177,7 @@ struct DiscoveryState {
     started: Instant,
     classified_entries: u64,
     candidate_source_bytes: u64,
+    source_paths: InstructionSourcePathInterner,
     seen_sources: BTreeSet<InstructionSourcePath>,
     complete: bool,
 }
@@ -220,6 +221,13 @@ struct FilesystemWorkerState {
 enum FilesystemTaskError {
     Deadline,
     Unavailable,
+}
+
+#[cfg(unix)]
+enum SkillParseResult {
+    Parsed(InstructionSkillMetadata),
+    NonUtf8,
+    Invalid,
 }
 
 #[cfg(unix)]
@@ -295,6 +303,7 @@ fn discover_with_limits(
         started: Instant::now(),
         classified_entries: 0,
         candidate_source_bytes: 0,
+        source_paths: InstructionSourcePathInterner::new(),
         seen_sources: BTreeSet::new(),
         complete: true,
     };
@@ -603,12 +612,13 @@ fn register_file(
     state: &mut DiscoveryState,
 ) -> bool {
     let source = location.directory.join(location.source_name);
-    let source_path = match source_path_for_registration(root.path(), &source) {
-        Ok(path) => path,
-        Err(kind) => {
-            return push_path_finding(&source, root.path(), kind, findings, state);
-        }
-    };
+    let source_path =
+        match source_path_for_registration(root.path(), &source, &mut state.source_paths) {
+            Ok(path) => path,
+            Err(kind) => {
+                return push_path_finding(&source, root.path(), kind, findings, state);
+            }
+        };
     if !state.seen_sources.insert(source_path.clone()) {
         return true;
     }
@@ -616,22 +626,25 @@ fn register_file(
         Ok(bytes) => bytes,
         Err(continue_scan) => return continue_scan,
     };
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(text) => text,
-        Err(_) => {
-            return push_path_finding(
-                &source,
-                root.path(),
-                InstructionDiscoveryFindingKind::NonUtf8Source,
-                findings,
-                state,
-            );
-        }
-    };
+    let source_bytes = bytes.len() as u64;
+    let source_hash = InstructionDigest::sha256(&bytes);
     let skill = match skill_parent {
-        Some(parent) => match parse_skill(text, parent) {
-            Some(skill) => Some(skill),
-            None => {
+        Some(parent) => match parse_skill_before_deadline(
+            bytes,
+            parent.to_owned(),
+            state.started + state.limits.elapsed,
+        ) {
+            Ok(SkillParseResult::Parsed(skill)) => Some(skill),
+            Ok(SkillParseResult::NonUtf8) => {
+                return push_path_finding(
+                    &source,
+                    root.path(),
+                    InstructionDiscoveryFindingKind::NonUtf8Source,
+                    findings,
+                    state,
+                );
+            }
+            Ok(SkillParseResult::Invalid) => {
                 return push_path_finding(
                     &source,
                     root.path(),
@@ -640,16 +653,44 @@ fn register_file(
                     state,
                 );
             }
+            Err(FilesystemTaskError::Deadline) => {
+                return reach_limit(
+                    path_for_finding(&source, root.path()),
+                    InstructionDiscoveryLimitKind::ElapsedTime,
+                    findings,
+                    state,
+                );
+            }
+            Err(FilesystemTaskError::Unavailable) => {
+                return push_path_finding(
+                    &source,
+                    root.path(),
+                    InstructionDiscoveryFindingKind::EntryUnreadable,
+                    findings,
+                    state,
+                );
+            }
         },
-        None => None,
+        None => {
+            if std::str::from_utf8(&bytes).is_err() {
+                return push_path_finding(
+                    &source,
+                    root.path(),
+                    InstructionDiscoveryFindingKind::NonUtf8Source,
+                    findings,
+                    state,
+                );
+            }
+            None
+        }
     };
     let Some(bundle) = InstructionBundleRegistration::new(InstructionBundleRegistrationInput {
         kind,
         root_kind: root.kind(),
         root_path: root.path().clone(),
         source_path: source_path.clone(),
-        source_bytes: bytes.len() as u64,
-        source_hash: InstructionDigest::sha256(&bytes),
+        source_bytes,
+        source_hash,
         skill,
     }) else {
         return push_path_finding(
@@ -664,14 +705,38 @@ fn register_file(
     true
 }
 
+#[cfg(unix)]
+fn parse_skill_before_deadline(
+    bytes: Vec<u8>,
+    parent: String,
+    deadline: Instant,
+) -> Result<SkillParseResult, FilesystemTaskError> {
+    run_bounded_filesystem_task(
+        Arc::clone(&FILESYSTEM_WORKERS),
+        MAX_FILESYSTEM_WORKERS,
+        deadline,
+        "signalbox-instruction-skill-parse",
+        move || {
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                return SkillParseResult::NonUtf8;
+            };
+            match parse_skill(text, &parent) {
+                Some(skill) => SkillParseResult::Parsed(skill),
+                None => SkillParseResult::Invalid,
+            }
+        },
+    )
+}
+
 fn source_path_for_registration(
     root_path: &InstructionPath,
     source: &std::path::Path,
+    interner: &mut InstructionSourcePathInterner,
 ) -> Result<InstructionSourcePath, InstructionDiscoveryFindingKind> {
     let source = source
         .to_str()
         .ok_or(InstructionDiscoveryFindingKind::NonUtf8SourcePath)?;
-    InstructionSourcePath::try_new(root_path.clone(), source.to_owned())
+    InstructionSourcePath::try_new_in(interner, root_path.clone(), source.to_owned())
         .map_err(|_| InstructionDiscoveryFindingKind::EntryUnreadable)
 }
 
@@ -808,6 +873,9 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
         if waited.1.timed_out() && Instant::now() >= deadline {
             return Err(FilesystemTaskError::Deadline);
         }
+    }
+    if Instant::now() >= deadline {
+        return Err(FilesystemTaskError::Deadline);
     }
 
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -1734,6 +1802,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn expired_deadline_does_not_spawn_a_filesystem_worker() {
+        let registry = Arc::new(FilesystemWorkerRegistry::default());
+
+        let result = run_bounded_filesystem_task(
+            Arc::clone(&registry),
+            1,
+            Instant::now() - Duration::from_millis(1),
+            "signalbox-test-filesystem-worker",
+            || (),
+        );
+        let worker_count = registry
+            .state
+            .lock()
+            .expect("registry is readable")
+            .workers
+            .len();
+
+        assert_eq!(result, Err(FilesystemTaskError::Deadline));
+        assert_eq!(worker_count, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn raw_entry_names_sort_before_classification_failures() {
         let names = vec![OsString::from("zeta"), OsString::from("alpha")];
 
@@ -2022,8 +2113,9 @@ mod tests {
     fn source_relative_path_must_fit_the_independent_path_bound() {
         let root = InstructionPath::try_new(String::from("/r")).expect("fixture root is valid");
         let source = PathBuf::from(format!("/r/{}", "a".repeat(4_097)));
+        let mut interner = InstructionSourcePathInterner::new();
 
-        let result = source_path_for_registration(&root, &source);
+        let result = source_path_for_registration(&root, &source, &mut interner);
 
         assert_eq!(
             result,
@@ -2060,6 +2152,7 @@ mod tests {
             started: Instant::now(),
             classified_entries: 0,
             candidate_source_bytes: 0,
+            source_paths: InstructionSourcePathInterner::new(),
             seen_sources: BTreeSet::new(),
             complete: true,
         }
