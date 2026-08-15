@@ -134,8 +134,11 @@ debug-redacted environment channel is verified against this PR
 (`agent/runner-restricted-command-environment`). Dispatch-scoped resolution of
 one exact configured runner credential into that restricted environment channel,
 together with raw and JSON-escaped text scrubbing, is verified against this PR
-(`agent/runner-credential-resolution`). Runner consumption of the exact
-lease-only resume directive is re-verified through this PR
+(`agent/runner-credential-resolution`). Live claim and dispatch consumption of
+that exact granted authorization, including pre-claim availability refusal and
+captured-result scrubbing, is verified against this PR
+(`agent/runner-credential-dispatch-composition`). Runner consumption of the
+exact lease-only resume directive is re-verified through this PR
 (`agent/runner-claimed-resume-client`). Runner ingestion of the daemon's
 canonical claim and dispatch replay is re-verified through this PR
 (`agent/runner-claimed-dispatch-replay`). Runner execution-phase journaling,
@@ -1918,16 +1921,17 @@ against checked configuration. It opens the configured credential path without
 following symlinks, validates and reads the bounded value, projects it only into
 the restricted execution environment, and scrubs the exact and
 JSON-string-escaped forms from complete captured text. It neither selects a
-profile nor retains a value between calls.
-
-**Committed unimplemented functionality.** Lease admission does not yet invoke
-that preparer, so an unknown granted name does not yet reject a live claim and
-no credential-bearing execution path injects or scrubs the value. The composed
-path will resolve immediately before every provisioning or tool dispatch, keep
-the value absent from argv, wire state, manifests, and logs, and apply
-exact-value output redaction before forwarding. Redaction limits accidental echo
-but is not a claim that arbitrary model-controlled execution cannot misuse a
-credential within its scope.
+profile nor retains a value between calls. Live lease admission invokes the
+preparer before claim and reports `credential_unavailable` without a claim when
+the advertised exact profile cannot be resolved. After the durable claim
+acknowledgement, execution resolves that same retained profile again immediately
+before the physical dispatch, injects it only through the cleared restricted
+environment, and scrubs complete captured result text before the bounded result
+frame is formed. A rotation or loss between admission and dispatch is therefore
+observed rather than replaced with another profile. The value stays absent from
+argv, wire state, manifests, and logs. Redaction limits accidental echo but is
+not a claim that arbitrary model-controlled execution cannot misuse a credential
+within its scope.
 
 Session creation records the requested profile as a placement axis, and that
 choice is always explicit and never inferred. A session may be created with no
