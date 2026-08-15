@@ -44,6 +44,39 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Model-input projection
 
+### Graded approval judging
+
+The proposed graded-judge design is recorded in
+[`docs/proposals/graded-approval-judging.md`](proposals/graded-approval-judging.md).
+Its score contract, threshold semantics, audit shape, and shadow-first sequence
+are proposed decisions; these choices still require an owner ruling:
+
+- **Corpus location and governance.** Whether recorded approval cases live in a
+  repository file, a project-owned artifact, evaluation rows, or another
+  admitted store remains deliberately undecided, together with access,
+  redaction, retention, and deletion rules. The proposal fixes only the logical
+  case shape needed by either judge subject.
+
+- **Promotion bounds.** The maximum false-allow rate, minimum acceptable
+  improvement, minimum labeled case count, required slices, and statistical
+  treatment for promotion from shadow to live graded authority remain open.
+
+- **Label semantics.** Whether an ordinary user allow or deny is the final
+  quality label, or evaluation needs a separate “judge correct” ruling and an
+  approval rationale, remains open.
+
+- **Unparked sampling.** Whether and how operators may provide post-hoc labels
+  for automatically allowed or denied requests remains open. Without it, the
+  recorded corpus is selected toward parked requests.
+
+- **Shadow budget.** The graded shadow sampling fraction, provider-cost ceiling,
+  concurrency, and retention duration remain open. They block production shadow
+  traffic, not the offline dual-subject harness.
+
+- **Configuration actor audit.** Whether source-control and deployment audit are
+  sufficient provenance for threshold changes, or Signalbox needs an
+  authenticated configuration-change command, remains open.
+
 - **Projection and summarization beyond the implemented role mappings.**
   [Model-call execution](spec/model-call-execution.md) owns the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
