@@ -5544,14 +5544,23 @@ impl InstructionPath {
     pub fn try_new(value: String) -> Result<Self, InstructionPathError>;
     pub fn as_str(&self) -> &str;
 }
+pub struct InstructionSourcePathInterner { /* private */ }
+impl InstructionSourcePathInterner {
+    pub const fn new() -> Self;
+}
 pub struct InstructionSourcePath { /* private */ }
 impl InstructionSourcePath {
     pub fn try_new(
         root_path: InstructionPath,
         value: String,
     ) -> Result<Self, InstructionPathError>;
+    pub fn try_new_in(
+        interner: &mut InstructionSourcePathInterner,
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError>;
     pub fn absolute_path(&self) -> String;
-    pub fn relative_path(&self) -> &str;
+    pub fn relative_path(&self) -> String;
 }
 pub enum InstructionPathError {
     Empty,
@@ -10455,8 +10464,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| domain: workspace_instruction                      | 16                    |
-| **signalbox-domain total**                         | **790 (+12 free fn)** |
+| domain: workspace_instruction                      | 17                    |
+| **signalbox-domain total**                         | **791 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
