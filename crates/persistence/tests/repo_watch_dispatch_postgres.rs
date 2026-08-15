@@ -60,6 +60,8 @@ const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
 const FIRST_TERMINAL_IDENTITY_SEED: u128 = 0x10_000;
 const CORRUPT_GOAL_GENERATION: i64 = 2;
 const MERGED_GOAL_CUTOFF_EVENT_ID: u128 = 0x51_000;
+const CORRUPT_GOAL_FIRST_CUTOFF_EVENT_ID: u128 = 0x51_200;
+const CORRUPT_GOAL_SECOND_CUTOFF_EVENT_ID: u128 = 0x51_300;
 const TERMINAL_RULE_OPENED_EVENT_ID: u128 = 0x54_000;
 const TERMINAL_RULE_MERGED_EVENT_ID: u128 = 0x54_100;
 
@@ -973,22 +975,15 @@ async fn close_reopen_close_classifies_each_cutoff_against_its_following_lifecyc
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn corrupt_goal_does_not_leave_lifecycle_cutoff_pending() -> Result<(), Box<dyn Error>> {
+async fn startup_drain_continues_after_corrupt_goal_cutoff() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     corrupt_goal_generation(&fixture.pool, fixture.session(0)).await?;
-    commit_merge(&fixture, 0x51_200).await?;
+    commit_merge(&fixture, CORRUPT_GOAL_FIRST_CUTOFF_EVENT_ID).await?;
+    commit_second_merge(&fixture, CORRUPT_GOAL_SECOND_CUTOFF_EVENT_ID).await?;
 
-    let quarantined = fixture
+    fixture
         .store
-        .process_next_lifecycle_cutoff(&fixture.repository, || {
-            DurableCommandId::from_uuid(Uuid::from_u128(0x51_300))
-        })
-        .await;
-    let pending = fixture
-        .store
-        .process_next_lifecycle_cutoff(&fixture.repository, || {
-            DurableCommandId::from_uuid(Uuid::from_u128(0x51_400))
-        })
+        .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(Uuid::now_v7()))
         .await?;
     let cutoff_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -997,12 +992,7 @@ async fn corrupt_goal_does_not_leave_lifecycle_cutoff_pending() -> Result<(), Bo
     .fetch_one(&fixture.pool)
     .await?;
 
-    assert!(matches!(
-        quarantined,
-        Err(RepoWatchDispatchRepositoryError::GoalCutoff(_))
-    ));
-    assert!(!pending);
-    assert_eq!(cutoff_count, 1);
+    assert_eq!(cutoff_count, 2);
     Ok(())
 }
 

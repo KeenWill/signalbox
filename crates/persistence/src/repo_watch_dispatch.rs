@@ -323,8 +323,21 @@ impl PostgresRepoWatchDispatchStore {
                     "pending lifecycle cutoff has an invalid repository",
                 )
             })?;
-            self.process_next_lifecycle_cutoff(&repository, &mut next_command_id)
-                .await?;
+            match self
+                .process_next_lifecycle_cutoff(&repository, &mut next_command_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(RepoWatchDispatchRepositoryError::Corruption(
+                        "selected pending lifecycle cutoff disappeared",
+                    ));
+                }
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    crate::goal::GoalRepositoryError::Corruption(_),
+                )) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
 
