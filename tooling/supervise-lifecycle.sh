@@ -19,6 +19,11 @@ if [ ! -x "$lifecycle_program" ]; then
 	exit 2
 fi
 
+if [ -z "$process_name" ] || [ "${#process_name}" -gt 15 ]; then
+	echo "supervise-lifecycle: process-name must contain between 1 and 15 characters" >&2
+	exit 2
+fi
+
 case "$poll_seconds" in
 	'' | *[!0-9]*)
 		echo "supervise-lifecycle: poll-seconds must be a positive integer" >&2

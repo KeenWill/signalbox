@@ -105,6 +105,18 @@ class SuperviseLifecycleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("positive integer", result.stderr)
 
+    def test_process_name_beyond_kernel_command_limit_is_rejected(self) -> None:
+        result = subprocess.run(
+            [str(SCRIPT), "/bin/true", "fixture-daemon-x", POLL_SECONDS],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("between 1 and 15 characters", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
