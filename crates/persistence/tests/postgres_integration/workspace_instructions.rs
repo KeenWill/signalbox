@@ -125,6 +125,21 @@ fn assert_append_only_rejection(result: Result<sqlx::postgres::PgQueryResult, sq
     assert_eq!(database.code().as_deref(), Some("23514"));
 }
 
+async fn assert_truncate_rejection(
+    pool: &PgPool,
+    statement: &'static str,
+) -> Result<(), Box<dyn Error>> {
+    let error = sqlx::query(statement)
+        .execute(pool)
+        .await
+        .expect_err("append-only evidence rejects truncation");
+    let database = error
+        .as_database_error()
+        .expect("truncate rejection is a database error");
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    Ok(())
+}
+
 async fn queued_instruction_turn(
     pool: &PgPool,
     identity_base: u128,
@@ -765,6 +780,25 @@ async fn inv061_turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn
         )
     );
 
+    assert_truncate_rejection(&pool, "TRUNCATE TABLE instruction_discovery CASCADE").await?;
+    assert_truncate_rejection(&pool, "TRUNCATE TABLE instruction_discovery_root CASCADE").await?;
+    assert_truncate_rejection(
+        &pool,
+        "TRUNCATE TABLE registered_instruction_bundle CASCADE",
+    )
+    .await?;
+    assert_truncate_rejection(
+        &pool,
+        "TRUNCATE TABLE instruction_discovery_candidate CASCADE",
+    )
+    .await?;
+    assert_truncate_rejection(
+        &pool,
+        "TRUNCATE TABLE instruction_discovery_finding CASCADE",
+    )
+    .await?;
+    assert_truncate_rejection(&pool, "TRUNCATE TABLE turn_instruction_manifest CASCADE").await?;
+
     let discovery_update = sqlx::query(
         "UPDATE instruction_discovery SET elapsed_millis = elapsed_millis
           WHERE instruction_discovery_id = $1",
@@ -888,6 +922,12 @@ async fn inv061_counted_activation_records_a_queued_turn_manifest() -> Result<()
             .preflight_counted_activation(session, turn)
             .await?,
         signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::Absent
+    );
+    assert_eq!(
+        repository
+            .record_turn_start(discovery, manifest.clone(), &snapshot, || bundle_id)
+            .await?,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::TurnUnavailable
     );
     assert_eq!(
         repository
