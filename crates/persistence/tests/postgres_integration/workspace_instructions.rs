@@ -69,19 +69,19 @@ fn assert_persisted_candidate(
     persisted: &PersistedCandidate,
     ordinal: i64,
     identity: signalbox_domain::InstructionBundleId,
-    root_kind: signalbox_domain::InstructionDiscoveryRootKind,
-    bundle_kind: signalbox_domain::InstructionBundleKind,
+    root_kind: &str,
+    bundle_kind: &str,
     expected: &signalbox_domain::InstructionBundleRegistration,
 ) {
     assert_eq!(persisted.candidate_ordinal, ordinal);
     assert_eq!(persisted.instruction_bundle_id, identity.into_uuid());
-    assert_eq!(persisted.root_kind, persisted_root_kind(root_kind));
+    assert_eq!(persisted.root_kind, root_kind);
     assert_eq!(persisted.root_path, expected.root_path().as_str());
     assert_eq!(
         persisted.source_path,
         expected.source_path().absolute_path()
     );
-    assert_eq!(persisted.bundle_kind, persisted_bundle_kind(bundle_kind));
+    assert_eq!(persisted.bundle_kind, bundle_kind);
     assert_eq!(
         persisted.skill_name.as_deref(),
         expected
@@ -102,20 +102,6 @@ fn assert_persisted_candidate(
         persisted.source_hash,
         expected.source_hash().as_bytes().as_slice()
     );
-}
-
-fn persisted_root_kind(kind: signalbox_domain::InstructionDiscoveryRootKind) -> &'static str {
-    match kind {
-        signalbox_domain::InstructionDiscoveryRootKind::Workspace => "workspace",
-        signalbox_domain::InstructionDiscoveryRootKind::Configured => "configured",
-    }
-}
-
-fn persisted_bundle_kind(kind: signalbox_domain::InstructionBundleKind) -> &'static str {
-    match kind {
-        signalbox_domain::InstructionBundleKind::AgentDocument => "agent_document",
-        signalbox_domain::InstructionBundleKind::AgentSkill => "agent_skill",
-    }
 }
 
 #[track_caller]
@@ -381,19 +367,13 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
         .expect("the discovery contains the configured root");
     assert_eq!(persisted_roots.len(), snapshot.roots().len());
     assert_eq!(persisted_workspace_root.root_ordinal, 1);
-    assert_eq!(
-        persisted_workspace_root.root_kind,
-        persisted_root_kind(expected_workspace_root.kind())
-    );
+    assert_eq!(persisted_workspace_root.root_kind, "workspace");
     assert_eq!(
         persisted_workspace_root.root_path,
         expected_workspace_root.path().as_str()
     );
     assert_eq!(persisted_configured_root.root_ordinal, 2);
-    assert_eq!(
-        persisted_configured_root.root_kind,
-        persisted_root_kind(expected_configured_root.kind())
-    );
+    assert_eq!(persisted_configured_root.root_kind, "configured");
     assert_eq!(
         persisted_configured_root.root_path,
         expected_configured_root.path().as_str()
@@ -419,8 +399,8 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
             .expect("the agent document candidate is persisted"),
         1,
         agent_document_id,
-        signalbox_domain::InstructionDiscoveryRootKind::Workspace,
-        signalbox_domain::InstructionBundleKind::AgentDocument,
+        "workspace",
+        "agent_document",
         snapshot
             .bundles()
             .first()
@@ -432,8 +412,8 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
             .expect("the skill candidate is persisted"),
         2,
         agent_skill_id,
-        signalbox_domain::InstructionDiscoveryRootKind::Workspace,
-        signalbox_domain::InstructionBundleKind::AgentSkill,
+        "workspace",
+        "agent_skill",
         snapshot
             .bundles()
             .get(1)
@@ -445,8 +425,8 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
             .expect("the configured agent document candidate is persisted"),
         3,
         configured_document_id,
-        signalbox_domain::InstructionDiscoveryRootKind::Configured,
-        signalbox_domain::InstructionBundleKind::AgentDocument,
+        "configured",
+        "agent_document",
         snapshot
             .bundles()
             .get(2)
@@ -684,7 +664,20 @@ async fn inv061_mid_record_failure_rolls_back_all_instruction_evidence()
 
     assert_eq!(snapshot.bundles().len(), 2);
     assert_eq!(snapshot.findings().len(), 1);
-    assert!(result.is_err());
+    let error = result.expect_err("the duplicate bundle identity aborts the snapshot transaction");
+    let sqlx_error = error
+        .source()
+        .expect("the repository error retains its database source")
+        .downcast_ref::<sqlx::Error>()
+        .expect("the repository database source remains a sqlx error");
+    let database_error = sqlx_error
+        .as_database_error()
+        .expect("the duplicate identity is a database uniqueness violation");
+    assert_eq!(database_error.code().as_deref(), Some("23505"));
+    assert_eq!(
+        database_error.constraint(),
+        Some("registered_instruction_bundle_pkey")
+    );
     assert_eq!(counts.discovery_count, 0);
     assert_eq!(counts.root_count, 0);
     assert_eq!(counts.candidate_count, 0);
