@@ -516,16 +516,12 @@ impl PostgresRepoWatchWebhookStore {
         request: &RepoWatchWebhookTerminalRequest,
     ) -> Result<RepoWatchWebhookTerminalOutcome, RepoWatchWebhookStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let present = sqlx::query_scalar::<_, i64>(
-            "SELECT receipt_sequence
-               FROM repo_watch_webhook_delivery
-              WHERE hook_id = $1 AND delivery_id = $2
-              FOR UPDATE",
-        )
-        .bind(Decimal::from(key.hook_id.get()))
-        .bind(key.delivery_id)
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let present =
+            sqlx::query_scalar::<_, i64>(crate::lock_inventory::REPO_WATCH_WEBHOOK_DELIVERY)
+                .bind(Decimal::from(key.hook_id.get()))
+                .bind(key.delivery_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
         if present.is_none() {
             transaction.rollback().await?;
             return Err(RepoWatchWebhookStoreError::MissingDelivery);
