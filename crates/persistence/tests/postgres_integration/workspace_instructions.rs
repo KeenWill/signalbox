@@ -77,7 +77,10 @@ fn assert_persisted_candidate(
     assert_eq!(persisted.instruction_bundle_id, identity.into_uuid());
     assert_eq!(persisted.root_kind, persisted_root_kind(root_kind));
     assert_eq!(persisted.root_path, expected.root_path().as_str());
-    assert_eq!(persisted.source_path, expected.source_path().as_str());
+    assert_eq!(
+        persisted.source_path,
+        expected.source_path().absolute_path()
+    );
     assert_eq!(persisted.bundle_kind, persisted_bundle_kind(bundle_kind));
     assert_eq!(
         persisted.skill_name.as_deref(),
