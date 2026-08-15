@@ -72,6 +72,11 @@ struct PersistedRollbackCounts {
     manifest_count: i64,
 }
 
+struct TruncateRejectionExpectation {
+    enable_target_trigger: &'static str,
+    truncate_target: &'static str,
+}
+
 #[track_caller]
 fn assert_persisted_candidate(
     persisted: &PersistedCandidate,
@@ -128,8 +133,7 @@ fn assert_append_only_rejection(result: Result<sqlx::postgres::PgQueryResult, sq
 #[track_caller]
 fn assert_truncate_rejection<'a>(
     pool: &'a PgPool,
-    enable_target_trigger: &'static str,
-    truncate_target: &'static str,
+    expectation: TruncateRejectionExpectation,
 ) -> impl std::future::Future<Output = Result<(), Box<dyn Error>>> + 'a {
     let caller = std::panic::Location::caller();
     async move {
@@ -137,10 +141,10 @@ fn assert_truncate_rejection<'a>(
         sqlx::query("SET LOCAL session_replication_role = 'replica'")
             .execute(&mut *transaction)
             .await?;
-        sqlx::query(enable_target_trigger)
+        sqlx::query(expectation.enable_target_trigger)
             .execute(&mut *transaction)
             .await?;
-        let error = match sqlx::query(truncate_target)
+        let error = match sqlx::query(expectation.truncate_target)
             .execute(&mut *transaction)
             .await
         {
@@ -550,7 +554,8 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
 async fn inv061_losing_complete_record_observes_the_winning_manifest() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let (session, turn) = active_instruction_turn(&pool, 0x6900).await?;
+    let arbitrary_replay_identity_base = 0x6900;
+    let (session, turn) = active_instruction_turn(&pool, arbitrary_replay_identity_base).await?;
     let directory = tempfile::tempdir()?;
     let root_path = directory.path().canonicalize()?;
     std::fs::write(root_path.join("AGENTS.md"), "winning rule\n")?;
@@ -802,38 +807,50 @@ async fn inv061_turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn
 
     assert_truncate_rejection(
         &pool,
-        "ALTER TABLE instruction_discovery ENABLE ALWAYS TRIGGER instruction_discovery_rejects_truncate",
-        "TRUNCATE TABLE instruction_discovery CASCADE",
+        TruncateRejectionExpectation {
+            enable_target_trigger: "ALTER TABLE instruction_discovery ENABLE ALWAYS TRIGGER instruction_discovery_rejects_truncate",
+            truncate_target: "TRUNCATE TABLE instruction_discovery CASCADE",
+        },
     )
     .await?;
     assert_truncate_rejection(
         &pool,
-        "ALTER TABLE instruction_discovery_root ENABLE ALWAYS TRIGGER instruction_discovery_root_rejects_truncate",
-        "TRUNCATE TABLE instruction_discovery_root CASCADE",
+        TruncateRejectionExpectation {
+            enable_target_trigger: "ALTER TABLE instruction_discovery_root ENABLE ALWAYS TRIGGER instruction_discovery_root_rejects_truncate",
+            truncate_target: "TRUNCATE TABLE instruction_discovery_root CASCADE",
+        },
     )
     .await?;
     assert_truncate_rejection(
         &pool,
-        "ALTER TABLE registered_instruction_bundle ENABLE ALWAYS TRIGGER registered_instruction_bundle_rejects_truncate",
-        "TRUNCATE TABLE registered_instruction_bundle CASCADE",
+        TruncateRejectionExpectation {
+            enable_target_trigger: "ALTER TABLE registered_instruction_bundle ENABLE ALWAYS TRIGGER registered_instruction_bundle_rejects_truncate",
+            truncate_target: "TRUNCATE TABLE registered_instruction_bundle CASCADE",
+        },
     )
     .await?;
     assert_truncate_rejection(
         &pool,
-        "ALTER TABLE instruction_discovery_candidate ENABLE ALWAYS TRIGGER instruction_discovery_candidate_rejects_truncate",
-        "TRUNCATE TABLE instruction_discovery_candidate CASCADE",
+        TruncateRejectionExpectation {
+            enable_target_trigger: "ALTER TABLE instruction_discovery_candidate ENABLE ALWAYS TRIGGER instruction_discovery_candidate_rejects_truncate",
+            truncate_target: "TRUNCATE TABLE instruction_discovery_candidate CASCADE",
+        },
     )
     .await?;
     assert_truncate_rejection(
         &pool,
-        "ALTER TABLE instruction_discovery_finding ENABLE ALWAYS TRIGGER instruction_discovery_finding_rejects_truncate",
-        "TRUNCATE TABLE instruction_discovery_finding CASCADE",
+        TruncateRejectionExpectation {
+            enable_target_trigger: "ALTER TABLE instruction_discovery_finding ENABLE ALWAYS TRIGGER instruction_discovery_finding_rejects_truncate",
+            truncate_target: "TRUNCATE TABLE instruction_discovery_finding CASCADE",
+        },
     )
     .await?;
     assert_truncate_rejection(
         &pool,
-        "ALTER TABLE turn_instruction_manifest ENABLE ALWAYS TRIGGER turn_instruction_manifest_rejects_truncate",
-        "TRUNCATE TABLE turn_instruction_manifest CASCADE",
+        TruncateRejectionExpectation {
+            enable_target_trigger: "ALTER TABLE turn_instruction_manifest ENABLE ALWAYS TRIGGER turn_instruction_manifest_rejects_truncate",
+            truncate_target: "TRUNCATE TABLE turn_instruction_manifest CASCADE",
+        },
     )
     .await?;
 
@@ -935,14 +952,28 @@ async fn inv061_turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-061: counted activation records the empty manifest while the selected
+/// INV-061: counted activation records a nonempty discovery while the selected
 /// turn is still queued, and the active-turn boundary does not accept it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv061_counted_activation_records_a_queued_turn_manifest() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, turn) = queued_instruction_turn(&pool, 0x6300).await?;
-    let snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
+    let directory = tempfile::tempdir()?;
+    let root_path = directory.path().canonicalize()?;
+    std::fs::write(root_path.join("AGENTS.md"), "counted activation rule\n")?;
+    let root = signalbox_domain::InstructionPath::try_new(
+        root_path
+            .to_str()
+            .expect("temporary path is UTF-8")
+            .to_owned(),
+    )?;
+    let snapshot = signalbox_application::discover_workspace_instructions(vec![
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+            root,
+        ),
+    ]);
     let repository =
         signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
             pool.clone(),
@@ -982,6 +1013,33 @@ async fn inv061_counted_activation_records_a_queued_turn_manifest() -> Result<()
         signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::Available(
             manifest_id,
         )
+    );
+    let persisted_candidate = sqlx::query_as::<_, PersistedCandidate>(
+        "SELECT candidate.candidate_ordinal, bundle.instruction_bundle_id,
+                bundle.root_kind, bundle.root_path, bundle.source_path,
+                bundle.bundle_kind, bundle.skill_name, bundle.skill_description,
+                bundle.source_byte_length, bundle.source_hash
+           FROM instruction_discovery_candidate AS candidate
+           JOIN registered_instruction_bundle AS bundle
+             ON bundle.instruction_bundle_id = candidate.instruction_bundle_id
+          WHERE candidate.instruction_discovery_id = $1
+            AND candidate.candidate_ordinal = 1",
+    )
+    .bind(discovery.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_persisted_candidate(
+        &persisted_candidate,
+        PersistedCandidateExpectation {
+            ordinal: 1,
+            identity: bundle_id,
+            root_kind: "workspace",
+            bundle_kind: "agent_document",
+            registration: snapshot
+                .bundles()
+                .first()
+                .expect("the counted discovery contains the agent document"),
+        },
     );
     assert_eq!(
         repository.preflight_turn_start(session, turn).await?,
