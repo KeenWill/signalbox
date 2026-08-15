@@ -4,15 +4,19 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ClassifyOperatorFailure, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
-    InstructionDiscoverySnapshot, OperatorFailureClass,
+    ClassifyOperatorFailure, InstructionDiscoverySnapshot, OperatorFailureClass,
 };
 use signalbox_domain::{
-    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
-    InstructionDigest, InstructionDiscoveryId, InstructionDiscoveryRootKind, SessionId, TurnId,
-    TurnInstructionManifest, TurnInstructionManifestId,
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionDigest,
+    InstructionDiscoveryId, SessionId, TurnId, TurnInstructionManifest, TurnInstructionManifestId,
 };
 use sqlx::{PgPool, Row, types::Uuid};
+
+use crate::mapping::{
+    WorkspaceInstructionAuthorityStorageKind, instruction_bundle_kind_to_str,
+    instruction_finding_kind_to_str, instruction_root_kind_to_str,
+    workspace_instruction_authority_from_placement_state,
+};
 
 /// Result of idempotently recording one turn-start snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -468,7 +472,7 @@ impl WorkspaceInstructionRepository {
             )
             .bind(discovery.into_uuid())
             .bind((index + 1) as i64)
-            .bind(root_kind(root.kind()))
+            .bind(instruction_root_kind_to_str(root.kind()))
             .bind(root.path().as_str())
             .execute(&mut *connection)
             .await?;
@@ -486,10 +490,10 @@ impl WorkspaceInstructionRepository {
                  RETURNING instruction_bundle_id",
             )
             .bind(candidate.into_uuid())
-            .bind(root_kind(bundle.root_kind()))
+            .bind(instruction_root_kind_to_str(bundle.root_kind()))
             .bind(bundle.root_path().as_str())
             .bind(bundle.source_path().absolute_path())
-            .bind(bundle_kind(bundle.kind()))
+            .bind(instruction_bundle_kind_to_str(bundle.kind()))
             .bind(skill.map(signalbox_domain::InstructionSkillMetadata::name))
             .bind(skill.map(signalbox_domain::InstructionSkillMetadata::description))
             .bind(Decimal::from(bundle.source_bytes()))
@@ -505,7 +509,7 @@ impl WorkspaceInstructionRepository {
                       WHERE root_kind = $1 AND root_path = $2
                         AND source_path = $3 AND source_hash = $4",
                     )
-                    .bind(root_kind(bundle.root_kind()))
+                    .bind(instruction_root_kind_to_str(bundle.root_kind()))
                     .bind(bundle.root_path().as_str())
                     .bind(bundle.source_path().absolute_path())
                     .bind(bundle.source_hash().as_bytes().as_slice())
@@ -533,7 +537,7 @@ impl WorkspaceInstructionRepository {
             .bind(discovery.into_uuid())
             .bind((index + 1) as i64)
             .bind(finding.path().as_str())
-            .bind(finding_kind(finding.kind()))
+            .bind(instruction_finding_kind_to_str(finding.kind()))
             .execute(&mut *connection)
             .await?;
         }
@@ -621,11 +625,17 @@ fn placement_observation(
             "runner placement head",
         ));
     }
+    let authority = match state.as_deref() {
+        Some(state) => Some(
+            workspace_instruction_authority_from_placement_state(state).ok_or(
+                WorkspaceInstructionRepositoryError::Corruption("runner placement state_kind"),
+            )?,
+        ),
+        None => None,
+    };
     Ok(WorkspaceInstructionPlacementObservation {
         head,
-        runner_owned: state
-            .as_deref()
-            .is_some_and(|state| state != "runner_abandoned"),
+        runner_owned: authority == Some(WorkspaceInstructionAuthorityStorageKind::Runner),
     })
 }
 
@@ -728,36 +738,6 @@ fn digest(bytes: Vec<u8>) -> Result<InstructionDigest, WorkspaceInstructionRepos
         .try_into()
         .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("digest length"))?;
     Ok(InstructionDigest::from_sha256(bytes))
-}
-
-const fn root_kind(kind: InstructionDiscoveryRootKind) -> &'static str {
-    match kind {
-        InstructionDiscoveryRootKind::Workspace => "workspace",
-        InstructionDiscoveryRootKind::Configured => "configured",
-    }
-}
-
-const fn bundle_kind(kind: InstructionBundleKind) -> &'static str {
-    match kind {
-        InstructionBundleKind::AgentDocument => "agent_document",
-        InstructionBundleKind::AgentSkill => "agent_skill",
-    }
-}
-
-const fn finding_kind(kind: InstructionDiscoveryFindingKind) -> &'static str {
-    match kind {
-        InstructionDiscoveryFindingKind::RootUnavailable => "root_unavailable",
-        InstructionDiscoveryFindingKind::EntryUnreadable => "entry_unreadable",
-        InstructionDiscoveryFindingKind::NonUtf8SourcePath => "non_utf8_source_path",
-        InstructionDiscoveryFindingKind::NonUtf8Source => "non_utf8_source",
-        InstructionDiscoveryFindingKind::InvalidSkill => "invalid_skill",
-        InstructionDiscoveryFindingKind::LimitReached(limit) => match limit {
-            InstructionDiscoveryLimitKind::ClassifiedEntries => "limit_classified_entries",
-            InstructionDiscoveryLimitKind::Findings => "limit_findings",
-            InstructionDiscoveryLimitKind::CandidateSourceBytes => "limit_candidate_source_bytes",
-            InstructionDiscoveryLimitKind::ElapsedTime => "limit_elapsed_time",
-        },
-    }
 }
 
 #[cfg(test)]
