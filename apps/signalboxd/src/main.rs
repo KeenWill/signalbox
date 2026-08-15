@@ -59,7 +59,8 @@ use signalboxd::{
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
     SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    WorkspaceInstructionRuntime, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1257,8 +1258,8 @@ async fn run_hub(
             model_configuration.web_fetch_egress_policy(),
         ),
     };
-    let (tool_catalog, tool_executor) = match tools {
-        Ok(tools) => tools.into_parts(),
+    let tools = match tools {
+        Ok(tools) => tools,
         Err(error) => {
             let failure = erase_startup_cause(
                 RuntimePhase::Configuration,
@@ -1268,6 +1269,15 @@ async fn run_hub(
             return Err(failure);
         }
     };
+    let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
+        pool.clone(),
+        tools.workspace_instruction_root_resolver(),
+        model_configuration
+            .workspace_instructions()
+            .roots()
+            .to_vec(),
+    );
+    let (tool_catalog, tool_executor) = tools.into_parts();
 
     let tool_catalog =
         match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
@@ -1548,6 +1558,7 @@ async fn run_hub(
             UsageLimitedModelCallProvider::new(provider, &model_configuration),
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
+        .with_workspace_instructions(workspace_instruction_runtime)
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),

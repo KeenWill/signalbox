@@ -5,7 +5,10 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
+use signalbox_application::{
+    InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, RepoWatchPullRequestLifecycle,
+    RepoWatchThreadState,
+};
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
@@ -13,10 +16,10 @@ use signalbox_domain::{
     DelegationTransitionFailure, DelegationWaitMode, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
     GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
-    GoalUserAction, MergeableState, ModelChangeAdjustment, ModelSettingSource,
-    ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
-    RunnerPlacementLossSource, RunnerSandboxProfile, ServiceTier,
+    GoalUserAction, InstructionBundleKind, InstructionDiscoveryRootKind, MergeableState,
+    ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+    OpenAiServiceTier, ReactionChange, ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1,
+    ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile, ServiceTier,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
     SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
     ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
@@ -26,6 +29,101 @@ use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
+
+/// Which filesystem owns workspace discovery for a stored placement state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceInstructionAuthorityStorageKind {
+    Daemon,
+    Runner,
+}
+
+pub(crate) fn workspace_instruction_authority_from_placement_state(
+    value: &str,
+) -> Option<WorkspaceInstructionAuthorityStorageKind> {
+    match value {
+        "unpinned" | "pinned" | "runner_lost_before_pin" | "runner_lost" => {
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        }
+        "runner_abandoned" => Some(WorkspaceInstructionAuthorityStorageKind::Daemon),
+        _ => None,
+    }
+}
+
+pub(crate) const fn instruction_root_kind_to_str(
+    value: InstructionDiscoveryRootKind,
+) -> &'static str {
+    match value {
+        InstructionDiscoveryRootKind::Workspace => "workspace",
+        InstructionDiscoveryRootKind::Configured => "configured",
+    }
+}
+
+/// Decodes one durable workspace-instruction root kind.
+pub fn instruction_root_kind_from_str(value: &str) -> Option<InstructionDiscoveryRootKind> {
+    match value {
+        "workspace" => Some(InstructionDiscoveryRootKind::Workspace),
+        "configured" => Some(InstructionDiscoveryRootKind::Configured),
+        _ => None,
+    }
+}
+
+pub(crate) const fn instruction_bundle_kind_to_str(value: InstructionBundleKind) -> &'static str {
+    match value {
+        InstructionBundleKind::AgentDocument => "agent_document",
+        InstructionBundleKind::AgentSkill => "agent_skill",
+    }
+}
+
+/// Decodes one durable workspace-instruction bundle kind.
+pub fn instruction_bundle_kind_from_str(value: &str) -> Option<InstructionBundleKind> {
+    match value {
+        "agent_document" => Some(InstructionBundleKind::AgentDocument),
+        "agent_skill" => Some(InstructionBundleKind::AgentSkill),
+        _ => None,
+    }
+}
+
+pub(crate) const fn instruction_finding_kind_to_str(
+    value: InstructionDiscoveryFindingKind,
+) -> &'static str {
+    match value {
+        InstructionDiscoveryFindingKind::RootUnavailable => "root_unavailable",
+        InstructionDiscoveryFindingKind::EntryUnreadable => "entry_unreadable",
+        InstructionDiscoveryFindingKind::NonUtf8SourcePath => "non_utf8_source_path",
+        InstructionDiscoveryFindingKind::NonUtf8Source => "non_utf8_source",
+        InstructionDiscoveryFindingKind::InvalidSkill => "invalid_skill",
+        InstructionDiscoveryFindingKind::LimitReached(limit) => match limit {
+            InstructionDiscoveryLimitKind::ClassifiedEntries => "limit_classified_entries",
+            InstructionDiscoveryLimitKind::Findings => "limit_findings",
+            InstructionDiscoveryLimitKind::CandidateSourceBytes => "limit_candidate_source_bytes",
+            InstructionDiscoveryLimitKind::ElapsedTime => "limit_elapsed_time",
+        },
+    }
+}
+
+/// Decodes one durable workspace-instruction discovery finding kind.
+pub fn instruction_finding_kind_from_str(value: &str) -> Option<InstructionDiscoveryFindingKind> {
+    match value {
+        "root_unavailable" => Some(InstructionDiscoveryFindingKind::RootUnavailable),
+        "entry_unreadable" => Some(InstructionDiscoveryFindingKind::EntryUnreadable),
+        "non_utf8_source_path" => Some(InstructionDiscoveryFindingKind::NonUtf8SourcePath),
+        "non_utf8_source" => Some(InstructionDiscoveryFindingKind::NonUtf8Source),
+        "invalid_skill" => Some(InstructionDiscoveryFindingKind::InvalidSkill),
+        "limit_classified_entries" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::ClassifiedEntries,
+        )),
+        "limit_findings" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::Findings,
+        )),
+        "limit_candidate_source_bytes" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::CandidateSourceBytes,
+        )),
+        "limit_elapsed_time" => Some(InstructionDiscoveryFindingKind::LimitReached(
+            InstructionDiscoveryLimitKind::ElapsedTime,
+        )),
+        _ => None,
+    }
+}
 
 /// Closed stored states for one durable runner-loss propagation cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1910,18 +2008,22 @@ mod tests {
     use std::{collections::BTreeSet, str::FromStr};
 
     use rust_decimal::Decimal;
-    use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
+    use signalbox_application::{
+        InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
+        RepoWatchPullRequestLifecycle, RepoWatchThreadState,
+    };
     use signalbox_domain::{
         AcceptedInputId, BoundChildAction, CheckConclusion, ChecksOutcome,
         DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
         DelegationOutcomeReason, DelegationTransitionFailure, DelegationWaitMode,
         DescendantTerminationScope, DirectModelSelection, DurableCommandId, FastMode,
-        FastModeOverlay, FastModeSupport, MergeableState, ModelCapabilities, ModelChangeAdjustment,
-        ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-        ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, RunnerPlacementLossSource,
-        RunnerSandboxProfile, ServiceTier, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
-        SettingOverlay, ToolApprovalPosture, ToolPermissionDefault, TurnId,
+        FastModeOverlay, FastModeSupport, InstructionBundleKind, InstructionDiscoveryRootKind,
+        MergeableState, ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay,
+        ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReasoningLevel,
+        RepoWatchEventKindNameV1, ReviewState, RunnerPlacementLossSource, RunnerSandboxProfile,
+        ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
+        SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
+        ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -1935,23 +2037,27 @@ mod tests {
         SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
         SessionPlacementResultStorageKind, StoredModelSettingsError,
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
-        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
-        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
-        approval_judge_state_from_str, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        bound_child_action_from_str, bound_child_action_to_str, defaults_version_from_numeric,
-        defaults_version_to_numeric, delegation_message_direction_from_str,
-        delegation_message_direction_to_str, delegation_outcome_kind_from_str,
-        delegation_outcome_kind_to_str, delegation_outcome_reason_from_str,
-        delegation_outcome_reason_to_str, delegation_policy_kind_from_str,
-        delegation_policy_kind_to_str, delegation_rejection_kind_from_str,
-        delegation_rejection_kind_to_str, delegation_transition_failure_from_str,
-        delegation_transition_failure_to_str, delegation_update_kind_from_str,
-        delegation_update_kind_to_str, delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        WorkspaceInstructionAuthorityStorageKind, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
+        approval_judge_recommendation_to_str, approval_judge_state_from_str,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
+        approval_judge_terminal_disposition_to_str, bound_child_action_from_str,
+        bound_child_action_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        delegation_message_direction_from_str, delegation_message_direction_to_str,
+        delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
+        delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
+        delegation_policy_kind_from_str, delegation_policy_kind_to_str,
+        delegation_rejection_kind_from_str, delegation_rejection_kind_to_str,
+        delegation_transition_failure_from_str, delegation_transition_failure_to_str,
+        delegation_update_kind_from_str, delegation_update_kind_to_str,
+        delegation_wait_mode_from_str, delegation_wait_mode_to_str,
         delegation_wake_subject_from_str, delegation_wake_subject_to_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
         durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
+        instruction_bundle_kind_from_str, instruction_bundle_kind_to_str,
+        instruction_finding_kind_from_str, instruction_finding_kind_to_str,
+        instruction_root_kind_from_str, instruction_root_kind_to_str,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
@@ -1973,8 +2079,130 @@ mod tests {
         tool_approval_posture_from_str, tool_approval_posture_to_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
-        turn_id_to_uuid,
+        turn_id_to_uuid, workspace_instruction_authority_from_placement_state,
     };
+
+    #[test]
+    fn inv061_workspace_instruction_root_and_bundle_mappings_are_closed() {
+        assert_eq!(
+            instruction_root_kind_to_str(InstructionDiscoveryRootKind::Workspace),
+            "workspace"
+        );
+        assert_eq!(
+            instruction_root_kind_from_str("workspace"),
+            Some(InstructionDiscoveryRootKind::Workspace)
+        );
+        assert_eq!(
+            instruction_root_kind_to_str(InstructionDiscoveryRootKind::Configured),
+            "configured"
+        );
+        assert_eq!(
+            instruction_root_kind_from_str("configured"),
+            Some(InstructionDiscoveryRootKind::Configured)
+        );
+        assert_eq!(instruction_root_kind_from_str("unknown"), None);
+        assert_eq!(
+            instruction_bundle_kind_to_str(InstructionBundleKind::AgentDocument),
+            "agent_document"
+        );
+        assert_eq!(
+            instruction_bundle_kind_from_str("agent_document"),
+            Some(InstructionBundleKind::AgentDocument)
+        );
+        assert_eq!(
+            instruction_bundle_kind_to_str(InstructionBundleKind::AgentSkill),
+            "agent_skill"
+        );
+        assert_eq!(
+            instruction_bundle_kind_from_str("agent_skill"),
+            Some(InstructionBundleKind::AgentSkill)
+        );
+        assert_eq!(instruction_bundle_kind_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_instruction_finding_mapping(
+        finding: InstructionDiscoveryFindingKind,
+        spelling: &str,
+    ) {
+        assert_eq!(instruction_finding_kind_to_str(finding), spelling);
+        assert_eq!(instruction_finding_kind_from_str(spelling), Some(finding));
+    }
+
+    #[test]
+    fn inv061_workspace_instruction_finding_mapping_is_closed() {
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::RootUnavailable,
+            "root_unavailable",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::EntryUnreadable,
+            "entry_unreadable",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::NonUtf8SourcePath,
+            "non_utf8_source_path",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::NonUtf8Source,
+            "non_utf8_source",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::InvalidSkill,
+            "invalid_skill",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::ClassifiedEntries,
+            ),
+            "limit_classified_entries",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(InstructionDiscoveryLimitKind::Findings),
+            "limit_findings",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::CandidateSourceBytes,
+            ),
+            "limit_candidate_source_bytes",
+        );
+        assert_instruction_finding_mapping(
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::ElapsedTime,
+            ),
+            "limit_elapsed_time",
+        );
+        assert_eq!(instruction_finding_kind_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn inv061_workspace_instruction_placement_authority_mapping_is_closed() {
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("unpinned"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("pinned"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("runner_lost_before_pin"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("runner_lost"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Runner)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("runner_abandoned"),
+            Some(WorkspaceInstructionAuthorityStorageKind::Daemon)
+        );
+        assert_eq!(
+            workspace_instruction_authority_from_placement_state("unknown"),
+            None
+        );
+    }
 
     #[test]
     fn runner_loss_propagation_state_mapping_is_closed() {
