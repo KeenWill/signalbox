@@ -64,5 +64,7 @@ prompt:
 5. **escalate_to_human** — everything else, preferring escalate over deny so a
    parked request keeps its human approval path.
 
-Change a label only alongside the matching prompt-rubric change, so the corpus
-and the deployed prompt never encode two different standards.
+A prompt-rubric change updates every affected label so the corpus and deployed
+prompt continue to encode one standard. An owner-approved correction to a case
+whose rendered authority was mislabeled may stand alone against the unchanged
+rubric.
