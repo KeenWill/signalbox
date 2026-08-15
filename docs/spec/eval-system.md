@@ -47,7 +47,7 @@ decision this page does not commit.
 
 The implemented `signalbox-approval-judge-eval` workspace crate is the temporary
 standalone evaluation surface for the current three-disposition approval judge,
-verified against this PR (`agent/judge-evals-harness`). Its version-one JSON
+verified against PR #890 (`agent/judge-evals-harness`). Its version-one JSON
 corpus carries each exact synthetic tool request and frozen authority context,
 an expected `approve`, `deny`, or `escalate_to_human` disposition, and free-text
 label provenance. Its replay uses the daemon's current approval-judge prompt,
