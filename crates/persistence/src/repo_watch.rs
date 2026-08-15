@@ -1007,6 +1007,23 @@ impl PostgresRepoWatchStore {
         Ok(())
     }
 
+    /// Releases a reconciliation claim after the provider still reports the
+    /// review as blocking, allowing a current poll to revalidate and claim the
+    /// same intent for retry.
+    pub async fn release_stale_review_clearance_claim(
+        &self,
+        clearance_id: Uuid,
+    ) -> Result<(), RepoWatchStoreError> {
+        sqlx::query(
+            "DELETE FROM repo_watch_stale_review_clearance_claim
+              WHERE clearance_id = $1",
+        )
+        .bind(clearance_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn load_event_page(
         &self,
         repository: &RepositorySlug,
