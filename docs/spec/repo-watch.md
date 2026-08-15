@@ -17,15 +17,25 @@ session templates, without authority inherited from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
-(`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against this PR (`agent/repo-watch-review-reliability`). The provider members
-the poller adopts as check-suite and check-run completion generations are
-verified against PR #541 (`fix/check-run-updated-at`). The goal a dispatch
-commissions with its session, and the binding of the dispatched work turn to
-that goal's generation, are verified against this PR
-(`agent/commission-binding`). The occupied-refusal obligation and collapsed
-current-state delivery below are verified against this PR
-(`agent/repo-watch-dispatch-loop`). Runtime-relevance release, held-slot
+(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
+dispatch commissions with its session, the binding of the dispatched work turn
+to that goal's generation, and the occupied-refusal obligation and collapsed
+current-state delivery are verified against PR #812
+(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
+against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
+held-slot diagnostics, and terminal-target cutoff are also verified against this
+PR. The provider members the poller adopts as check-suite and check-run
+completion generations are verified against PR #541
+(`fix/check-run-updated-at`). Exact-head convergence assessment and cutoff are
+verified against this PR (`agent/dispatch-autonomy-convergence`).
+(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
+dispatch commissions with its session, the binding of the dispatched work turn
+to that goal's generation, and the occupied-refusal obligation and collapsed
+current-state delivery are verified against PR #812
+(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
+against PR #812 (`agent/daemon-ops-overnight`). The provider members the poller
+adopts as check-suite and check-run completion generations are verified against
+PR #541 (`fix/check-run-updated-at`). Runtime-relevance release, held-slot
 diagnostics, and terminal-target cutoff are verified against this PR
 (`agent/dispatch-autonomy`). Exact-head convergence assessment and cutoff are
 verified against this PR (`agent/dispatch-autonomy-convergence`). Conservative
@@ -118,7 +128,7 @@ has no webhook fallback and no speculative second polling transport.
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
 the fetched pull requests are ordered by number before comparison, so
-concurrency cannot reorder a baseline. A single attempt may transfer up to 512
+concurrency cannot reorder a baseline. A single attempt may transfer up to 768
 MiB of response bytes; what one poller retains between attempts is bounded
 separately and lower, because retention is per watched repository and therefore
 multiplies by the configured repository count.
@@ -521,8 +531,16 @@ the ordinary parent-only stop to each generation-one goal it commissioned for
 the pull request; it cannot stop descendants, a later user-authored generation,
 or an unrelated session. A later open event makes an earlier unprocessed cutoff
 a recorded reopen instead. Dispatch admission rechecks the latest durable
-lifecycle under the repository lock: a stale match or obligation for a terminal
-target settles as `target_closed` without creating a session.
+lifecycle under the repository lock. A terminal cutoff settles every outstanding
+obligation for that pull request immediately, without waiting for singleton or
+cooldown readiness; the admission recheck is the race-closing backstop. Either
+path settles stale nonterminal work as `target_closed` without creating a
+session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
+event itself remains dispatch-eligible; the terminal event is the cutoff fact,
+not work made stale by that fact. Corruption in one commissioned goal rolls back
+that goal's stop to a savepoint but does not roll back the cutoff: the terminal
+event remains durably dispositioned, healthy commissioned goals are stopped, and
+later cutoffs remain eligible for processing.
 
 **Implemented behavior.** Every completed poll atomically commits its cursor,
 events, and durable convergence evidence for each pull request at the exact head
