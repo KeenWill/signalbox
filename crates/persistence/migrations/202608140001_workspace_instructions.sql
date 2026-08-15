@@ -57,6 +57,7 @@ CREATE TABLE instruction_discovery_root (
         REFERENCES instruction_discovery (instruction_discovery_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE registered_instruction_bundle (
@@ -117,7 +118,7 @@ CREATE TABLE registered_instruction_bundle (
             AND source_path !~ '(^|/)(\.|\.\.)($|/)'
             AND source_path !~ '//'
             AND right(source_path, 1) <> '/'
-            AND left(source_path, octet_length(root_path) + 1) = root_path || '/'
+            AND left(source_path, char_length(root_path) + 1) = root_path || '/'
         )
 );
 
@@ -136,7 +137,8 @@ CREATE TABLE instruction_discovery_candidate (
         FOREIGN KEY (instruction_discovery_id)
         REFERENCES instruction_discovery (instruction_discovery_id)
         ON UPDATE RESTRICT
-        ON DELETE RESTRICT,
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT instruction_discovery_candidate_bundle_fk
         FOREIGN KEY (instruction_bundle_id)
         REFERENCES registered_instruction_bundle (instruction_bundle_id)
@@ -167,12 +169,19 @@ CREATE TABLE instruction_discovery_finding (
             'limit_elapsed_time'
         )),
     CONSTRAINT instruction_discovery_finding_path_bounded
-        CHECK (octet_length(source_path) BETWEEN 2 AND 4096 AND source_path LIKE '/%'),
+        CHECK (
+            octet_length(source_path) BETWEEN 2 AND 4096
+            AND source_path LIKE '/%'
+            AND source_path !~ '(^|/)(\.|\.\.)($|/)'
+            AND source_path !~ '//'
+            AND right(source_path, 1) <> '/'
+        ),
     CONSTRAINT instruction_discovery_finding_scan_fk
         FOREIGN KEY (instruction_discovery_id)
         REFERENCES instruction_discovery (instruction_discovery_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE turn_instruction_manifest (
@@ -220,6 +229,34 @@ BEGIN
         USING ERRCODE = '23514';
 END;
 $$;
+
+CREATE FUNCTION reject_instruction_discovery_child_after_seal()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM instruction_discovery
+         WHERE instruction_discovery_id = NEW.instruction_discovery_id
+    ) THEN
+        RAISE EXCEPTION 'instruction discovery child inventory is sealed'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'instruction_discovery_membership_sealed';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER instruction_discovery_root_insert_before_seal
+BEFORE INSERT ON instruction_discovery_root
+FOR EACH ROW EXECUTE FUNCTION reject_instruction_discovery_child_after_seal();
+CREATE TRIGGER instruction_discovery_candidate_insert_before_seal
+BEFORE INSERT ON instruction_discovery_candidate
+FOR EACH ROW EXECUTE FUNCTION reject_instruction_discovery_child_after_seal();
+CREATE TRIGGER instruction_discovery_finding_insert_before_seal
+BEFORE INSERT ON instruction_discovery_finding
+FOR EACH ROW EXECUTE FUNCTION reject_instruction_discovery_child_after_seal();
 
 CREATE TRIGGER instruction_discovery_is_append_only
 BEFORE UPDATE OR DELETE ON instruction_discovery

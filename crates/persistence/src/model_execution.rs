@@ -1009,7 +1009,11 @@ impl PostgresModelCallRepository {
                         call.state_kind, call.terminal_disposition_kind,
                         manifest.turn_instruction_manifest_id,
                         manifest.boundary_kind AS instruction_manifest_boundary_kind,
+                        manifest.eligibility_hash_algorithm
+                            AS instruction_eligibility_hash_algorithm,
                         manifest.eligibility_hash AS instruction_eligibility_hash,
+                        manifest.manifest_hash_algorithm
+                            AS instruction_manifest_hash_algorithm,
                         manifest.manifest_hash AS instruction_manifest_hash,
                         discovery.scan_complete AS instruction_discovery_complete
                    FROM model_call AS call
@@ -4358,7 +4362,11 @@ async fn load_live_turn_calls(
                 call.state_kind, call.terminal_disposition_kind,
                 manifest.turn_instruction_manifest_id,
                 manifest.boundary_kind AS instruction_manifest_boundary_kind,
+                manifest.eligibility_hash_algorithm
+                    AS instruction_eligibility_hash_algorithm,
                 manifest.eligibility_hash AS instruction_eligibility_hash,
+                manifest.manifest_hash_algorithm
+                    AS instruction_manifest_hash_algorithm,
                 manifest.manifest_hash AS instruction_manifest_hash,
                 discovery.scan_complete AS instruction_discovery_complete
            FROM model_call AS call
@@ -4434,7 +4442,7 @@ fn decode_model_call(
     ))
 }
 
-fn authenticate_model_call_instruction_manifest(
+pub(crate) fn authenticate_model_call_instruction_manifest(
     row: &PgRow,
     session: SessionId,
     turn: TurnId,
@@ -4447,6 +4455,13 @@ fn authenticate_model_call_instruction_manifest(
     }
     if !required::<bool>(row, "instruction_discovery_complete")? {
         return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
+    }
+    if required::<String>(row, "instruction_eligibility_hash_algorithm")? != "sha256_v1"
+        || required::<String>(row, "instruction_manifest_hash_algorithm")? != "sha256_v1"
+    {
+        return Err(
+            ModelCallCorruption::Inconsistent("turn instruction manifest hash algorithm").into(),
+        );
     }
     let eligibility_hash: Vec<u8> = required(row, "instruction_eligibility_hash")?;
     let manifest_hash: Vec<u8> = required(row, "instruction_manifest_hash")?;
@@ -4619,8 +4634,9 @@ pub(crate) async fn insert_prepared_call(
     .rows_affected();
     require_single(pinned_rows, "turn-level provider target pin")?;
     let instruction_manifest = sqlx::query(
-        "SELECT m.turn_instruction_manifest_id, m.eligibility_hash, m.manifest_hash,
-                d.scan_complete
+        "SELECT m.turn_instruction_manifest_id,
+                m.eligibility_hash_algorithm, m.eligibility_hash,
+                m.manifest_hash_algorithm, m.manifest_hash, d.scan_complete
            FROM turn_instruction_manifest AS m
            JOIN instruction_discovery AS d
              ON d.instruction_discovery_id = m.instruction_discovery_id
@@ -4635,6 +4651,13 @@ pub(crate) async fn insert_prepared_call(
     .ok_or(ModelCallCorruption::Missing("turn instruction manifest"))?;
     if !instruction_manifest.try_get::<bool, _>("scan_complete")? {
         return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
+    }
+    if instruction_manifest.try_get::<String, _>("eligibility_hash_algorithm")? != "sha256_v1"
+        || instruction_manifest.try_get::<String, _>("manifest_hash_algorithm")? != "sha256_v1"
+    {
+        return Err(
+            ModelCallCorruption::Inconsistent("turn instruction manifest hash algorithm").into(),
+        );
     }
     let instruction_manifest_id = TurnInstructionManifestId::from_uuid(
         instruction_manifest.try_get("turn_instruction_manifest_id")?,
