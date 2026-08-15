@@ -39,7 +39,10 @@ const OUTPUT_SCHEMA: &str = r#"{
 /// replay. U+0000 separators cannot occur inside any component.
 #[must_use]
 pub fn approval_judge_output_contract_text() -> String {
-    format!("{OUTPUT_NAME}\u{0}{OUTPUT_DESCRIPTION}\u{0}{OUTPUT_SCHEMA}")
+    format!(
+        "{OUTPUT_NAME}\u{0}{OUTPUT_DESCRIPTION}\u{0}{OUTPUT_SCHEMA}\u{0}rationale_decoder=nonempty,max_utf8_bytes={},exclude_u+0000",
+        ToolDecisionRationale::MAX_UTF8_BYTES
+    )
 }
 
 /// Exact inputs to one dedicated approval-judge model call.
@@ -882,5 +885,16 @@ mod tests {
                 reported_usage()
             )
         );
+    }
+
+    #[test]
+    fn output_contract_fingerprints_rationale_decoder_constraints() {
+        let contract = super::approval_judge_output_contract_text();
+
+        assert!(contract.contains(&format!(
+            "max_utf8_bytes={}",
+            signalbox_domain::ToolDecisionRationale::MAX_UTF8_BYTES
+        )));
+        assert!(contract.contains("exclude_u+0000"));
     }
 }
