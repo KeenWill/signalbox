@@ -1,7 +1,7 @@
 //! Deterministic filesystem discovery and registration validation.
 
 use std::{
-    collections::BTreeSet,
+    collections::HashSet,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -178,7 +178,7 @@ struct DiscoveryState {
     classified_entries: u64,
     candidate_source_bytes: u64,
     source_paths: InstructionSourcePathInterner,
-    seen_sources: BTreeSet<InstructionSourcePath>,
+    seen_sources: HashSet<InstructionSourcePath>,
     complete: bool,
 }
 
@@ -200,6 +200,26 @@ struct DirectoryRead {
     entries: Vec<Result<ClassifiedDirectoryEntry, OsString>>,
     read_errors: u64,
     entry_limit_exceeded: bool,
+}
+
+#[cfg(unix)]
+struct CandidateRead {
+    bytes: Vec<u8>,
+    source_hash: InstructionDigest,
+    is_utf8: bool,
+}
+
+#[cfg(unix)]
+impl CandidateRead {
+    fn new(bytes: Vec<u8>) -> Self {
+        let source_hash = InstructionDigest::sha256(&bytes);
+        let is_utf8 = std::str::from_utf8(&bytes).is_ok();
+        Self {
+            bytes,
+            source_hash,
+            is_utf8,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -304,7 +324,7 @@ fn discover_with_limits(
         classified_entries: 0,
         candidate_source_bytes: 0,
         source_paths: InstructionSourcePathInterner::new(),
-        seen_sources: BTreeSet::new(),
+        seen_sources: HashSet::new(),
         complete: true,
     };
     for root in &roots {
@@ -622,12 +642,16 @@ fn register_file(
     if !state.seen_sources.insert(source_path.clone()) {
         return true;
     }
-    let bytes = match read_candidate(location, &source, root.path(), findings, state) {
-        Ok(bytes) => bytes,
+    let candidate = match read_candidate(location, &source, root.path(), findings, state) {
+        Ok(candidate) => candidate,
         Err(continue_scan) => return continue_scan,
     };
+    let CandidateRead {
+        bytes,
+        source_hash,
+        is_utf8,
+    } = candidate;
     let source_bytes = bytes.len() as u64;
-    let source_hash = InstructionDigest::sha256(&bytes);
     let skill = match skill_parent {
         Some(parent) => match parse_skill_before_deadline(
             bytes,
@@ -672,7 +696,7 @@ fn register_file(
             }
         },
         None => {
-            if std::str::from_utf8(&bytes).is_err() {
+            if !is_utf8 {
                 return push_path_finding(
                     &source,
                     root.path(),
@@ -914,7 +938,7 @@ fn read_candidate(
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
-) -> Result<Vec<u8>, bool> {
+) -> Result<CandidateRead, bool> {
     let directory = match rustix::io::dup(location.directory_descriptor) {
         Ok(directory) => directory,
         Err(_) => {
@@ -949,7 +973,7 @@ fn read_candidate(
             }
             .take(remaining_bytes.saturating_add(1))
             .read_to_end(&mut bytes);
-            Ok::<_, io::Error>((bytes, result))
+            Ok::<_, io::Error>((CandidateRead::new(bytes), result))
         },
     );
     match read_result {
@@ -988,7 +1012,7 @@ fn read_candidate_before_deadline(
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
-) -> Result<Vec<u8>, bool> {
+) -> Result<CandidateRead, bool> {
     let remaining_bytes = state
         .limits
         .candidate_source_bytes
@@ -1009,7 +1033,7 @@ fn read_candidate_before_deadline(
             }
             .take(remaining_bytes.saturating_add(1))
             .read_to_end(&mut bytes);
-            (bytes, result)
+            (CandidateRead::new(bytes), result)
         },
     );
     match read_result {
@@ -1048,7 +1072,7 @@ fn read_candidate_from(
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
-) -> Result<Vec<u8>, bool> {
+) -> Result<CandidateRead, bool> {
     let remaining_bytes = state
         .limits
         .candidate_source_bytes
@@ -1058,7 +1082,7 @@ fn read_candidate_from(
         .take(remaining_bytes.saturating_add(1))
         .read_to_end(&mut bytes);
     finish_candidate_read(
-        bytes,
+        CandidateRead::new(bytes),
         read_result,
         source,
         fallback,
@@ -1070,15 +1094,15 @@ fn read_candidate_from(
 
 #[cfg(unix)]
 fn finish_candidate_read(
-    bytes: Vec<u8>,
+    candidate: CandidateRead,
     read_result: io::Result<usize>,
     source: &std::path::Path,
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
     state: &mut DiscoveryState,
     remaining_bytes: u64,
-) -> Result<Vec<u8>, bool> {
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > remaining_bytes {
+) -> Result<CandidateRead, bool> {
+    if u64::try_from(candidate.bytes.len()).unwrap_or(u64::MAX) > remaining_bytes {
         state.candidate_source_bytes = state.limits.candidate_source_bytes;
         reach_limit(
             path_for_finding(source, fallback),
@@ -1088,7 +1112,7 @@ fn finish_candidate_read(
         );
         return Err(false);
     }
-    state.candidate_source_bytes += u64::try_from(bytes.len()).unwrap_or(remaining_bytes);
+    state.candidate_source_bytes += u64::try_from(candidate.bytes.len()).unwrap_or(remaining_bytes);
     if read_result.is_err() {
         return Err(push_path_finding(
             source,
@@ -1101,7 +1125,7 @@ fn finish_candidate_read(
     if !check_elapsed(fallback, findings, state) {
         return Err(false);
     }
-    Ok(bytes)
+    Ok(candidate)
 }
 
 #[cfg(unix)]
@@ -1524,6 +1548,33 @@ mod tests {
 
         assert!(snapshot.bundles().is_empty());
         assert!(snapshot.findings().is_empty());
+    }
+
+    #[test]
+    fn configured_root_may_point_directly_at_one_skill() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        let skill = temporary.path().join("review-rust");
+        fs::create_dir(&skill).expect("skill directory exists");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: review-rust\ndescription: Review Rust changes.\n---\n# Review\n",
+        )
+        .expect("skill is written");
+        let canonical = skill.canonicalize().expect("root canonicalizes");
+        let root = InstructionDiscoveryRoot::new(
+            InstructionDiscoveryRootKind::Configured,
+            InstructionPath::try_new(canonical.to_string_lossy().into_owned())
+                .expect("path is valid"),
+        );
+
+        let snapshot = discover_workspace_instructions(vec![root]);
+
+        assert_eq!(snapshot.bundles().len(), 1);
+        assert!(snapshot.findings().is_empty());
+        assert_eq!(
+            snapshot.bundles()[0].kind(),
+            InstructionBundleKind::AgentSkill
+        );
     }
 
     #[cfg(unix)]
@@ -2153,7 +2204,7 @@ mod tests {
             classified_entries: 0,
             candidate_source_bytes: 0,
             source_paths: InstructionSourcePathInterner::new(),
-            seen_sources: BTreeSet::new(),
+            seen_sources: HashSet::new(),
             complete: true,
         }
     }
