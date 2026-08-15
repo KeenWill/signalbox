@@ -628,6 +628,21 @@ silently drop a configured setting. Input guarding, output reservation, and
 post-response usage enforcement use the effective serving record's limits for
 that enabled call rather than the selectable source record's limits.
 
+**Committed unimplemented functionality — workspace-instruction capability.**
+The instruction-admission slice extends every `[[models]]` and
+`[[serving_targets]]` record with an all-or-none pair:
+`workspace_instruction_transport = "typed_system"` and
+`workspace_instruction_capacity_bytes`, a positive `u32` measured over the exact
+serialized `WorkspaceInstructionRegion` bytes. Omission of both means
+unsupported; supplying only one, another transport spelling, or a capacity below
+the fixed 65,536-byte version-one region ceiling is a typed startup failure. The
+effective serving record, including an alternate fast target, is authoritative
+for a call. Its adapter mapping must declare support for the same typed-system
+transport and at least that byte capacity, or startup rejects the configuration.
+Context-window tokens are an independent limit and are never converted into this
+byte value. No present parser or adapter exposes these fields until the admission
+slice lands.
+
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
 exactly one `max_source_bytes` positive integer. It bounds both a single-shot
@@ -2648,6 +2663,15 @@ credential presence is never consulted (INV-008):
   alias catalog to the acceptance transaction. These model-selection freeze
   semantics are this page's material; the surrounding input-delivery lifecycle
   is [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope.
+  Once workspace-instruction admission exists, the same acceptance transaction
+  resolves an alias against the live immutable catalog and rejects the input
+  before freezing it when the selected direct target lacks typed-system
+  transport or byte capacity for the session's complete retained region. This
+  check runs even when no defaults replacement occurred, so restart or
+  configuration retargeting cannot strand an admitted session. A direct
+  selection receives the same check against its named target. The typed
+  rejection accepts no input, creates no turn, and changes neither defaults nor
+  admissions.
 - **At execution.** When the attempt pins its target, the frozen selection is
   resolved against the `ModelTargetCatalog`. An unresolvable selection fails the
   turn as a known failure before any model call exists; a credential or send

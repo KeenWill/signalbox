@@ -34,8 +34,8 @@ A **bundle** is one independently addressable instruction source. Version one
 admits two kinds:
 
 - `agent_document`, one file named exactly `AGENTS.md`; and
-- `agent_skill`, one directory containing a `SKILL.md` whose required `name` and
-  `description` satisfy the Agent Skills specification.
+- `agent_skill`, one directory containing a `SKILL.md` whose frontmatter
+  satisfies the closed version-one grammar below.
 
 Supporting skill files are bundle resources, not independent bundles. Other
 vendor filenames and rule formats are not aliases in version one; adding one
@@ -158,6 +158,28 @@ source path is not UTF-8 produces a typed `non_utf8_source_path` discovery
 finding and never reaches registration. Rejection is a typed finding and creates
 no partial bundle.
 
+Version-one skill frontmatter is intentionally narrower than the evolving
+external format. The source begins with a line containing exactly `---` and the
+frontmatter ends at the next line containing exactly `---`; lines may end in LF
+or CRLF, but mixed line endings are rejected. Between those delimiters every
+nonempty line is one top-level `key: value` pair. A key is ASCII letters or
+hyphen, a single ASCII space follows the colon, and a value is a nonempty
+single-line UTF-8 plain scalar with no leading or trailing whitespace, NUL,
+colon, number sign, quotation mark, reverse solidus, or YAML indicator. Duplicate
+keys, comments, quoting, escapes, tags, anchors, aliases, flow collections,
+multiline scalars, nested mappings, and sequences are rejected rather than
+delegated to a library-selected YAML revision.
+
+Exactly one `name` and one `description` are required. `name` is 1 through 64
+ASCII bytes, uses only lowercase letters, digits, and single interior hyphens,
+and may neither begin nor end with a hyphen; it must equal the parent directory
+name. `description` is 1 through 1,024 UTF-8 bytes. Version one additionally
+recognizes optional `license`, `compatibility`, and `allowed-tools` scalar keys,
+each at most 1,024 UTF-8 bytes; they are retained as source metadata but grant no
+authority. Every other key is a typed unsupported-metadata rejection. These
+local rules, rather than the unversioned external page, determine registration
+inventory until a later contract deliberately widens the grammar.
+
 SHA-256 is named in the representation rather than assumed. The MCP skill
 transfer proposal
 [SEP-2640](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/2640)
@@ -260,10 +282,31 @@ stale-cursor failure.
 
 `instructions.preview` returns bounded structure — headings for a document and
 validated metadata plus headings for a skill — with full source byte length and
-estimated model-token cost. Preview re-reads at most that one registered source
-under its authorizing root, revalidates the registered source hash, and returns
-typed stale-source evidence if the bytes changed or disappeared. It neither
-returns the full body nor admits content.
+an estimated model-token cost. It reads at most the registered source byte
+length plus one byte. EOF before the registered length, an extra byte, a changed
+hash, or disappearance is typed `stale_source` evidence; hashing never requires
+reading beyond that bound. It neither returns the full body nor admits content.
+
+Version one splits the revalidated UTF-8 source on LF and removes one terminal
+CR from each line only when the registered document consistently uses CRLF. It
+recognizes only ATX headings: zero through three leading ASCII spaces, one
+through six `#` bytes, then end of line or one ASCII space or tab. The returned
+heading records are in source order and contain the one-based line number, level,
+and heading text after removing leading and trailing spaces or tabs and an
+optional closing run of `#` bytes that is preceded by whitespace. A heading text
+longer than 512 UTF-8 bytes is shortened at a scalar boundary and reports its
+full byte length and truncation boundary. Setext headings, headings inside fenced
+blocks, and other Markdown constructs are not interpreted.
+
+Preview returns at most 128 heading records and at most 65,536 encoded result
+bytes using the compact canonical JSON rules of `instructions.list`. It stops
+before the first record that would exceed either bound and reports the total
+heading count, returned count, and `headings_truncated`; the bounded source read
+still counts all headings deterministically. The token estimate is
+`ceil(source_byte_length / 4)` and is explicitly an estimator versioned as
+`utf8_bytes_div_4_v1`, not a provider tokenizer claim. Skill previews prepend
+the validated `name`, `description`, and present recognized optional metadata to
+that same bounded heading projection.
 
 `instructions.read` names one eligible bundle and requests deliberate admission.
 The daemon re-reads and validates it under its registered root, compares the
@@ -337,7 +380,10 @@ frozen session system prompt and explicit user request remain higher priority
 than this repository-supplied region. When a provider exposes only a
 system-instruction transport, the daemon wrapper states that subordinate
 authority before the repository bytes rather than pretending they are daemon
-policy.
+policy. The provider-neutral prepared-operation field and adapter bridge are
+owned by [model-call execution](model-call-execution.md) and
+[runtime substrate](runtime-substrate.md); this page owns the region's bytes and
+authority, not a competing operation shape.
 
 The region orders admitted agent documents by authorizing root, increasing scope
 depth, and relative path, then skills by bundle identity bytes. Each bundle is
@@ -449,7 +495,10 @@ the current region plus its candidate against that aggregate budget and the
 active turn's pinned model target before committing its receipt or admission.
 Concurrent and same-batch reads therefore observe one ordered predecessor and
 cannot commit a set whose instruction region alone is unrenderable. Aggregate
-exhaustion is a typed failed read and changes no durable admitted set.
+exhaustion is a typed failed read and changes no durable admitted set. The owning
+model catalog declares transport support and its byte capacity for every
+selectable and serving target; no token-window conversion or adapter inference
+supplies this value.
 
 Later session-default replacement cannot strand existing admissions. The owning
 [session-default contract](sessions-and-transcript.md#session-defaults-and-replacement)

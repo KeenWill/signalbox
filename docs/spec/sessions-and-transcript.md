@@ -347,7 +347,12 @@ typed system-instruction transport and capacity for the complete retained
 workspace-instruction region. The replacement checks this before committing the
 successor defaults epoch under the session lock. Rejection is typed and leaves
 the current defaults and admitted set unchanged. No present replacement path
-performs this check because no present surface admits a bundle.
+performs this check because no present surface admits a bundle. The owning
+[model-selection validation](configuration-and-credentials.md#model-selection-validation)
+also performs the same retained-region check when each later origin is accepted,
+after resolving its alias against the then-current catalog. Replacement-time
+validation therefore does not stand in for acceptance-time validation after an
+alias retarget or daemon restart.
 
 ### Session system prompt
 
