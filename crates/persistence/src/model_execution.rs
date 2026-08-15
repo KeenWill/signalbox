@@ -5436,12 +5436,6 @@ pub(crate) async fn persist_tool_reconciliation_required(
     .await?
     .rows_affected();
     require_single(rows, "terminal tool-reconciliation lifecycle")?;
-    release_repo_watch_dispatch_for_terminal_turn(
-        connection,
-        reconciliation.session(),
-        reconciliation.turn(),
-    )
-    .await?;
     outbox::append(
         connection,
         OutboxEvent::TurnToolReconciliationRequired {
@@ -6826,19 +6820,6 @@ async fn terminalize_lifecycle(
     .await?
     .rows_affected();
     require_single(rows, "terminal model-call lifecycle")?;
-    release_repo_watch_dispatch_for_terminal_turn(connection, session, turn).await
-}
-
-async fn release_repo_watch_dispatch_for_terminal_turn(
-    connection: &mut PgConnection,
-    session: SessionId,
-    turn: TurnId,
-) -> Result<(), ModelCallRepositoryError> {
-    sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
-        .bind(turn_id_to_uuid(turn))
-        .bind(session_id_to_uuid(session))
-        .execute(&mut *connection)
-        .await?;
     Ok(())
 }
 
