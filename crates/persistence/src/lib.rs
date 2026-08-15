@@ -20,6 +20,7 @@ pub mod goal_turn;
 pub mod hub_fence;
 pub mod mapping;
 pub mod model_execution;
+pub mod operator_status;
 pub mod outbox;
 pub mod plan;
 pub mod process_read;

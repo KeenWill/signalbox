@@ -3072,6 +3072,62 @@ pub enum DescendantTerminationScope {
     ParentAndDescendants,
 }
 
+/// Singleton key class shown by repository-watch operator status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusSingletonScope {
+    PullRequest,
+    Stack,
+    Rule,
+    Repo,
+}
+
+/// One independently failing held-slot release clause.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusHeldSlotBlocker {
+    UndeliveredAction,
+    DeliveryTurnRuntimeRelevant,
+    LiveRuntimeTurn,
+    PursuingGoal,
+}
+
+/// Current provider mergeability shown by repository-watch operator status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusMergeableState {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+/// Current provider review decision shown by repository-watch operator status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusReviewDecision {
+    None,
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+/// Latest repository-watch convergence verdict.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusConvergenceVerdict {
+    NotConverged,
+    InternallyConverged,
+    MergeReady,
+}
+
+/// Durable convergence seal attached to the latest assessment, when any.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusConvergenceSeal {
+    InternallyConverged,
+    MergeReady,
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3106,6 +3162,8 @@ pub enum ClientRequest {
     ListTemplates {},
     /// List current sessions.
     ListSessions {},
+    /// Read one coherent repository-watch operator-status snapshot.
+    ReadOperatorStatus {},
     /// Append one explicit immutable session-placement update event.
     UpdateSessionPlacement {
         command_id: CommandId,
@@ -3624,6 +3682,7 @@ impl ClientRequest {
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
             | Self::ListSessions {}
+            | Self::ReadOperatorStatus {}
             | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }
@@ -6993,6 +7052,84 @@ pub enum ServerMessage {
         /// Number of preceding summaries.
         session_count: CanonicalU64,
     },
+    /// Begins one coherent repository-watch operator-status snapshot.
+    OperatorStatusStart {},
+    /// One active repository-watch dispatch slot.
+    OperatorStatusHeldSlot {
+        dispatch_id: CanonicalUuid,
+        repository: String,
+        pull_request_number: CanonicalU64,
+        rule_id: String,
+        rule_version: CanonicalU64,
+        singleton_scope: OperatorStatusSingletonScope,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        singleton_repository: Option<String>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        singleton_pull_request_number: Option<CanonicalU64>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        singleton_stack_root_pull_request_number: Option<CanonicalU64>,
+        held_for_seconds: CanonicalU64,
+        session_ids: Vec<CanonicalUuid>,
+        blockers: Vec<OperatorStatusHeldSlotBlocker>,
+    },
+    /// One owed repository-watch dispatch waiting for admission.
+    OperatorStatusQueuedObligation {
+        obligation_id: CanonicalUuid,
+        repository: String,
+        rule_id: String,
+        rule_version: CanonicalU64,
+        singleton_scope: OperatorStatusSingletonScope,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        singleton_repository: Option<String>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        singleton_pull_request_number: Option<CanonicalU64>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        singleton_stack_root_pull_request_number: Option<CanonicalU64>,
+        first_event_id: CanonicalUuid,
+        latest_event_id: CanonicalUuid,
+        matched_event_count: CanonicalU64,
+        waiting_for_seconds: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        occupying_dispatch_id: Option<CanonicalUuid>,
+        occupying_session_ids: Vec<CanonicalUuid>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        cooldown_remaining_seconds: Option<CanonicalU64>,
+        ready: bool,
+    },
+    /// One latest pull-request convergence assessment.
+    OperatorStatusPullRequestConvergence {
+        repository: String,
+        pull_request_number: CanonicalU64,
+        head_sha: String,
+        base_branch: String,
+        base_revision: String,
+        mergeable_state: OperatorStatusMergeableState,
+        review_decision: OperatorStatusReviewDecision,
+        unresolved_thread_count: CanonicalU64,
+        gating_check_count: CanonicalU64,
+        non_green_gating_checks: Vec<String>,
+        verdict: OperatorStatusConvergenceVerdict,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        seal: Option<OperatorStatusConvergenceSeal>,
+        assessed_seconds_ago: CanonicalU64,
+    },
+    /// One stale blocking review whose planned clearance is not yet settled.
+    OperatorStatusPendingStaleReviewClearance {
+        repository: String,
+        pull_request_number: CanonicalU64,
+        current_head_sha: String,
+        review_node_id: String,
+        reviewer: String,
+        reviewed_head_sha: String,
+        pending_for_seconds: CanonicalU64,
+    },
+    /// Completes one coherent repository-watch operator-status snapshot.
+    OperatorStatusEnd {
+        held_slot_count: CanonicalU64,
+        queued_obligation_count: CanonicalU64,
+        pull_request_convergence_count: CanonicalU64,
+        pending_stale_review_clearance_count: CanonicalU64,
+    },
     /// Begins the available-template sequence.
     TemplatesStart {},
     /// One available static template summary.
@@ -7461,6 +7598,7 @@ pub enum ServerMessage {
 
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        validate_operator_status_message(self)?;
         match self {
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
             Self::SessionAwaitRegistered {
@@ -7758,6 +7896,198 @@ impl ServerMessage {
         }
         Ok(())
     }
+}
+
+fn validate_operator_status_message(message: &ServerMessage) -> Result<(), FrameValidationError> {
+    let valid = match message {
+        ServerMessage::OperatorStatusHeldSlot {
+            repository,
+            pull_request_number,
+            rule_id,
+            rule_version,
+            singleton_scope,
+            singleton_repository,
+            singleton_pull_request_number,
+            singleton_stack_root_pull_request_number,
+            session_ids,
+            blockers,
+            ..
+        } => {
+            operator_status_text_is_valid(repository, 201)
+                && pull_request_number.value() > 0
+                && operator_status_text_is_valid(rule_id, 128)
+                && rule_version.value() > 0
+                && operator_status_singleton_is_valid(
+                    *singleton_scope,
+                    singleton_repository,
+                    *singleton_pull_request_number,
+                    *singleton_stack_root_pull_request_number,
+                )
+                && (1..=32).contains(&session_ids.len())
+                && values_are_distinct(session_ids)
+                && blockers.len() <= 4
+                && blockers.windows(2).all(|pair| {
+                    operator_status_blocker_rank(pair[0]) < operator_status_blocker_rank(pair[1])
+                })
+        }
+        ServerMessage::OperatorStatusQueuedObligation {
+            repository,
+            rule_id,
+            rule_version,
+            singleton_scope,
+            singleton_repository,
+            singleton_pull_request_number,
+            singleton_stack_root_pull_request_number,
+            matched_event_count,
+            occupying_dispatch_id,
+            occupying_session_ids,
+            cooldown_remaining_seconds,
+            ready,
+            ..
+        } => {
+            operator_status_text_is_valid(repository, 201)
+                && operator_status_text_is_valid(rule_id, 128)
+                && rule_version.value() > 0
+                && operator_status_singleton_is_valid(
+                    *singleton_scope,
+                    singleton_repository,
+                    *singleton_pull_request_number,
+                    *singleton_stack_root_pull_request_number,
+                )
+                && matched_event_count.value() > 0
+                && occupying_session_ids.len() <= 32
+                && values_are_distinct(occupying_session_ids)
+                && occupying_dispatch_id.is_some() == !occupying_session_ids.is_empty()
+                && !(*ready
+                    && (occupying_dispatch_id.is_some() || cooldown_remaining_seconds.is_some()))
+        }
+        ServerMessage::OperatorStatusPullRequestConvergence {
+            repository,
+            pull_request_number,
+            head_sha,
+            base_branch,
+            base_revision,
+            unresolved_thread_count,
+            gating_check_count,
+            non_green_gating_checks,
+            verdict,
+            seal,
+            ..
+        } => {
+            operator_status_text_is_valid(repository, 201)
+                && pull_request_number.value() > 0
+                && operator_status_sha_is_valid(head_sha)
+                && operator_status_text_is_valid(base_branch, 255)
+                && operator_status_sha_is_valid(base_revision)
+                && unresolved_thread_count.value() <= 10_000
+                && gating_check_count.value() <= 10_000
+                && u64::try_from(non_green_gating_checks.len())
+                    .is_ok_and(|count| count <= gating_check_count.value())
+                && non_green_gating_checks
+                    .iter()
+                    .all(|name| operator_status_text_is_valid(name, 256))
+                && non_green_gating_checks
+                    .windows(2)
+                    .all(|pair| pair[0] <= pair[1])
+                && seal.is_none_or(|seal| {
+                    matches!(
+                        (verdict, seal),
+                        (
+                            OperatorStatusConvergenceVerdict::InternallyConverged,
+                            OperatorStatusConvergenceSeal::InternallyConverged
+                        ) | (
+                            OperatorStatusConvergenceVerdict::MergeReady,
+                            OperatorStatusConvergenceSeal::MergeReady
+                        )
+                    )
+                })
+        }
+        ServerMessage::OperatorStatusPendingStaleReviewClearance {
+            repository,
+            pull_request_number,
+            current_head_sha,
+            review_node_id,
+            reviewer,
+            reviewed_head_sha,
+            ..
+        } => {
+            operator_status_text_is_valid(repository, 201)
+                && pull_request_number.value() > 0
+                && operator_status_sha_is_valid(current_head_sha)
+                && operator_status_text_is_valid(review_node_id, 256)
+                && operator_status_text_is_valid(reviewer, 44)
+                && operator_status_sha_is_valid(reviewed_head_sha)
+                && current_head_sha != reviewed_head_sha
+        }
+        ServerMessage::OperatorStatusStart {} | ServerMessage::OperatorStatusEnd { .. } | _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::OperatorStatusShape)
+    }
+}
+
+fn operator_status_singleton_is_valid(
+    scope: OperatorStatusSingletonScope,
+    repository: &Option<String>,
+    pull_request_number: Option<CanonicalU64>,
+    stack_root_pull_request_number: Option<CanonicalU64>,
+) -> bool {
+    let repository_is_valid = repository
+        .as_ref()
+        .is_none_or(|value| operator_status_text_is_valid(value, 201));
+    repository_is_valid
+        && match scope {
+            OperatorStatusSingletonScope::PullRequest => {
+                repository.is_some()
+                    && pull_request_number.is_some_and(|value| value.value() > 0)
+                    && stack_root_pull_request_number.is_none()
+            }
+            OperatorStatusSingletonScope::Stack => {
+                repository.is_some()
+                    && pull_request_number.is_none()
+                    && stack_root_pull_request_number.is_some_and(|value| value.value() > 0)
+            }
+            OperatorStatusSingletonScope::Rule => {
+                repository.is_none()
+                    && pull_request_number.is_none()
+                    && stack_root_pull_request_number.is_none()
+            }
+            OperatorStatusSingletonScope::Repo => {
+                repository.is_some()
+                    && pull_request_number.is_none()
+                    && stack_root_pull_request_number.is_none()
+            }
+        }
+}
+
+fn operator_status_text_is_valid(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && !value.contains('\0')
+}
+
+fn operator_status_sha_is_valid(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn operator_status_blocker_rank(blocker: OperatorStatusHeldSlotBlocker) -> u8 {
+    match blocker {
+        OperatorStatusHeldSlotBlocker::UndeliveredAction => 0,
+        OperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant => 1,
+        OperatorStatusHeldSlotBlocker::LiveRuntimeTurn => 2,
+        OperatorStatusHeldSlotBlocker::PursuingGoal => 3,
+    }
+}
+
+fn values_are_distinct<ValueT>(values: &[ValueT]) -> bool
+where
+    ValueT: Eq + std::hash::Hash,
+{
+    let mut distinct = HashSet::with_capacity(values.len());
+    values.iter().all(|value| distinct.insert(value))
 }
 
 fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
@@ -8188,6 +8518,8 @@ pub enum FrameValidationError {
     MetadataShape,
     /// A unified conversation-listing frame carried an invalid shape.
     ConversationListShape,
+    /// A repository-watch operator-status row carried an invalid shape.
+    OperatorStatusShape,
     SystemPromptShape,
     /// A chunked conversation-import frame carried a contradictory shape.
     ConversationImportShape,
@@ -8239,6 +8571,7 @@ impl fmt::Display for FrameValidationError {
             Self::ConversationListShape => {
                 "unified conversation-listing frame shape is inconsistent"
             }
+            Self::OperatorStatusShape => "operator-status frame shape is inconsistent",
             Self::SystemPromptShape => "frame omits its required system-prompt member",
             Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
             Self::BlobUploadShape => "blob-upload frame shape is inconsistent",
