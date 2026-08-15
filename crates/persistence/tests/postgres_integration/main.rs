@@ -26,6 +26,7 @@ mod tool_round_lifecycle;
 mod turn_activation;
 mod workspace_instruction_authority;
 mod workspace_instruction_migration;
+mod workspace_instructions;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
