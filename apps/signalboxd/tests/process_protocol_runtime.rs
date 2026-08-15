@@ -2937,7 +2937,8 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload,
             recording_transaction_id
-         ) VALUES ('example/repo', 1, 1, '{\"storage_version\": 1}',
+         ) VALUES ('example/repo', 1, 2,
+                   '{\"storage_version\": 2, \"event_identity_frontier\": []}',
                    pg_current_xact_id())",
     )
     .execute(&runtime.pool)
