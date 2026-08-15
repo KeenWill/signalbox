@@ -43,6 +43,9 @@ const TOOL_UNAVAILABLE_DETAIL_CODE: &str = "tool-unavailable";
 const TOOL_UNAVAILABLE_DETAIL_MESSAGE: &str = "offered tool is absent from the registered catalog";
 const LEASE_REFUSED_DETAIL_CODE: &str = "lease-admission-refused";
 const LEASE_REFUSED_DETAIL_MESSAGE: &str = "offered execution facts are not locally admissible";
+const CREDENTIAL_UNAVAILABLE_DETAIL_CODE: &str = "credential-unavailable";
+const CREDENTIAL_UNAVAILABLE_DETAIL_MESSAGE: &str =
+    "the selected runner credential is not locally available";
 const WORKSPACE_CLEANUP_DETAIL_CODE: &str = "workspace-cleanup-failed";
 const WORKSPACE_CLEANUP_DETAIL_MESSAGE: &str = "the accepted workspace cleanup failed";
 
@@ -848,13 +851,31 @@ where
     where
         F: Future<Output = ()>,
     {
+        self.serve_until_shutdown_with_credential_admission(state, shutdown, credential_unavailable)
+            .await
+    }
+
+    /// Serves while admitting a selected credential immediately before claim.
+    pub async fn serve_until_shutdown_with_credential_admission<F, C>(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        shutdown: F,
+        mut credential_available: C,
+    ) -> Result<ServeOutcome, RunnerConnectionError>
+    where
+        F: Future<Output = ()>,
+        C: FnMut(&signalbox_runner_wire::ProfileName) -> bool,
+    {
         tokio::pin!(shutdown);
         loop {
             let message = tokio::select! {
                 message = receive_message(&mut self.io) => message?,
                 () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
             };
-            if let Some(outcome) = self.serve_message(state, message).await? {
+            if let Some(outcome) = self
+                .serve_message_with_credential_admission(state, message, &mut credential_available)
+                .await?
+            {
                 return Ok(outcome);
             }
         }
@@ -865,8 +886,22 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ServeOutcome>, RunnerConnectionError> {
+        self.serve_one_with_credential_admission(state, credential_unavailable)
+            .await
+    }
+
+    /// Handles one frame with a caller-supplied credential availability check.
+    pub async fn serve_one_with_credential_admission<C>(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        mut credential_available: C,
+    ) -> Result<Option<ServeOutcome>, RunnerConnectionError>
+    where
+        C: FnMut(&signalbox_runner_wire::ProfileName) -> bool,
+    {
         let message = receive_message(&mut self.io).await?;
-        self.serve_message(state, message).await
+        self.serve_message_with_credential_admission(state, message, &mut credential_available)
+            .await
     }
 
     async fn serve_message(
@@ -874,6 +909,19 @@ where
         state: &mut RunnerStateRoot,
         message: Message,
     ) -> Result<Option<ServeOutcome>, RunnerConnectionError> {
+        self.serve_message_with_credential_admission(state, message, &mut credential_unavailable)
+            .await
+    }
+
+    async fn serve_message_with_credential_admission<C>(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        message: Message,
+        credential_available: &mut C,
+    ) -> Result<Option<ServeOutcome>, RunnerConnectionError>
+    where
+        C: FnMut(&signalbox_runner_wire::ProfileName) -> bool,
+    {
         match message {
             Message::Heartbeat(challenge) => {
                 let acknowledgement = self.heartbeat_acknowledgement(challenge, state)?;
@@ -944,11 +992,14 @@ where
                     .tools
                     .binary_search(&offer.correlation.tool_name)
                     .is_ok();
-                if advertised
-                    && self.pending_offer.is_none()
-                    && state.reconnect_inventory() == &ReconnectInventory::default()
-                    && live_offer_is_admissible(&offer)
-                {
+                let locally_available = self.pending_offer.is_none()
+                    && state.reconnect_inventory() == &ReconnectInventory::default();
+                let admission = if advertised && locally_available {
+                    live_offer_admission(&offer, &self.advertisement, credential_available)
+                } else {
+                    LiveOfferAdmission::Refused
+                };
+                if admission == LiveOfferAdmission::Admitted {
                     let correlation = offer.correlation.clone();
                     self.pending_offer = Some(offer);
                     send_message(
@@ -958,10 +1009,14 @@ where
                     .await?;
                     return Ok(None);
                 }
-                let failure = if advertised {
-                    refused_offer_failure(offer.correlation)?
-                } else {
-                    empty_catalog_offer_failure(offer.correlation)?
+                let failure = match (advertised, admission) {
+                    (false, _) => empty_catalog_offer_failure(offer.correlation)?,
+                    (true, LiveOfferAdmission::CredentialUnavailable) => {
+                        credential_unavailable_offer_failure(offer.correlation)?
+                    }
+                    (true, LiveOfferAdmission::Admitted | LiveOfferAdmission::Refused) => {
+                        refused_offer_failure(offer.correlation)?
+                    }
                 };
                 state.record_lease_offer_failure(failure.clone())?;
                 send_message(
@@ -1558,17 +1613,68 @@ fn refused_offer_failure(
     })
 }
 
-fn live_offer_is_admissible(offer: &LeaseOffer) -> bool {
+fn credential_unavailable_offer_failure(
+    correlation: LeaseCorrelation,
+) -> Result<OperationFailure, RunnerConnectionError> {
+    let code = DetailName::try_new(String::from(CREDENTIAL_UNAVAILABLE_DETAIL_CODE))
+        .map_err(RunnerConnectionError::InvalidLocalFrame)?;
+    let detail = FailureDetail::try_new(
+        code,
+        String::from(CREDENTIAL_UNAVAILABLE_DETAIL_MESSAGE),
+        serde_json::Value::Object(serde_json::Map::new()),
+    )
+    .map_err(RunnerConnectionError::InvalidLocalFrame)?;
+    Ok(OperationFailure {
+        correlation: OperationCorrelation::LeaseOffer(correlation),
+        category: FailureCategory::CredentialUnavailable,
+        detail,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveOfferAdmission {
+    Admitted,
+    CredentialUnavailable,
+    Refused,
+}
+
+fn live_offer_admission<C>(
+    offer: &LeaseOffer,
+    advertisement: &Advertisement,
+    credential_available: &mut C,
+) -> LiveOfferAdmission
+where
+    C: FnMut(&signalbox_runner_wire::ProfileName) -> bool,
+{
     let working_directory = Path::new(offer.correlation.working_directory.as_str());
-    offer.correlation.tool_name.as_str() == SANDBOXED_EXEC_NAME
+    let common_facts_are_admissible = offer.correlation.tool_name.as_str() == SANDBOXED_EXEC_NAME
         && offer.correlation.sandbox_profile == SandboxProfile::WorkspaceRestricted
         && offer.effect_class == EffectClass::SideEffecting
-        && offer.credential_profile.is_none()
-        && offer.grant_revision.is_none()
         && serde_json::from_value::<ExecArguments>(offer.normalized_arguments.clone()).is_ok()
         && working_directory
             .canonicalize()
-            .is_ok_and(|canonical| canonical == working_directory && canonical.is_dir())
+            .is_ok_and(|canonical| canonical == working_directory && canonical.is_dir());
+    if !common_facts_are_admissible {
+        return LiveOfferAdmission::Refused;
+    }
+    match (&offer.credential_profile, offer.grant_revision) {
+        (None, None) => LiveOfferAdmission::Admitted,
+        (Some(profile), Some(_))
+            if advertisement
+                .credential_profiles
+                .binary_search(profile)
+                .is_ok()
+                && credential_available(profile) =>
+        {
+            LiveOfferAdmission::Admitted
+        }
+        (Some(_), Some(_)) => LiveOfferAdmission::CredentialUnavailable,
+        (None, Some(_)) | (Some(_), None) => LiveOfferAdmission::Refused,
+    }
+}
+
+fn credential_unavailable(_profile: &signalbox_runner_wire::ProfileName) -> bool {
+    false
 }
 
 fn lease_credential_authorization(offer: &LeaseOffer) -> Option<LeaseCredentialAuthorization> {
@@ -2010,10 +2116,14 @@ mod tests {
 
     fn granted_lease_credential() -> LeaseCredentialAuthorization {
         LeaseCredentialAuthorization::Granted {
-            profile: signalbox_runner_wire::ProfileName::try_new("github-runner".to_owned())
-                .expect("the fixture profile is valid"),
+            profile: credential_profile(),
             grant_revision: positive(7),
         }
+    }
+
+    fn credential_profile() -> signalbox_runner_wire::ProfileName {
+        signalbox_runner_wire::ProfileName::try_new("github-runner".to_owned())
+            .expect("the fixture profile is valid")
     }
 
     fn release_correlation() -> ReleaseCorrelation {
@@ -2177,6 +2287,13 @@ mod tests {
         }
     }
 
+    fn advertisement_with_exec_and_credential() -> Advertisement {
+        Advertisement {
+            credential_profiles: vec![credential_profile()],
+            ..advertisement_with_exec_tool()
+        }
+    }
+
     fn record_terminal_result_fixture(state: &mut RunnerStateRoot) {
         let correlation = retained_lease_correlation();
         state
@@ -2296,6 +2413,20 @@ mod tests {
         }
     }
 
+    fn unavailable_credential_offer_failure(correlation: LeaseCorrelation) -> OperationFailure {
+        OperationFailure {
+            correlation: OperationCorrelation::LeaseOffer(correlation),
+            category: FailureCategory::CredentialUnavailable,
+            detail: FailureDetail::try_new(
+                DetailName::try_new(CREDENTIAL_UNAVAILABLE_DETAIL_CODE.to_owned())
+                    .expect("the credential failure detail code is valid"),
+                String::from(CREDENTIAL_UNAVAILABLE_DETAIL_MESSAGE),
+                serde_json::json!({}),
+            )
+            .expect("the credential failure detail is bounded"),
+        }
+    }
+
     fn unavailable_lease_offer() -> LeaseOffer {
         LeaseOffer {
             correlation: retained_lease_correlation(),
@@ -2304,6 +2435,14 @@ mod tests {
             grant_revision: None,
             normalized_arguments: serde_json::json!({ "program": "true" }),
             result_bounds: ResultBounds::version_one(),
+        }
+    }
+
+    fn credential_lease_offer() -> LeaseOffer {
+        LeaseOffer {
+            credential_profile: Some(credential_profile()),
+            grant_revision: Some(positive(7)),
+            ..unavailable_lease_offer()
         }
     }
 
@@ -2690,6 +2829,155 @@ mod tests {
         assert_eq!(
             state.retained_lease_credential(),
             Some(&LeaseCredentialAuthorization::Profileless)
+        );
+    }
+
+    /// INV-011 / INV-024 / INV-035: a configured credential must be available
+    /// before claim and its exact non-secret grant facts reach the handoff.
+    #[tokio::test]
+    async fn inv011_inv024_inv035_credential_offer_admits_and_retains_exact_grant() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_and_credential();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let mut offer = credential_lease_offer();
+        offer.correlation.working_directory = WorkingDirectory::try_new(
+            parent
+                .path()
+                .canonicalize()
+                .expect("the fixture directory canonicalizes")
+                .display()
+                .to_string(),
+        )
+        .expect("the canonical fixture directory is bounded");
+        let correlation = offer.correlation.clone();
+        let dispatch = Dispatch {
+            correlation: correlation.clone(),
+            normalized_arguments: offer.normalized_arguments.clone(),
+        };
+        let expected_claim = Message::LeaseClaim(LeaseClaim {
+            correlation: correlation.clone(),
+        });
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the credential lease offer");
+            let offered = connection
+                .serve_one_with_credential_admission(&mut state, |profile| {
+                    profile == &credential_profile()
+                })
+                .await
+                .expect("the available credential admits the exact claim");
+            let claimed = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical acknowledgement is accepted");
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the credential dispatch reaches its executor handoff");
+            (offered, claimed, ready)
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::LeaseOffer(offer)).await;
+            let claim = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+            claim
+        };
+        let ((offered, claimed, ready), observed_claim) = tokio::join!(runner, hub);
+        let ready = ready
+            .expect("the dispatch yields one executor handoff")
+            .into_dispatch_ready()
+            .expect("the handoff is the dispatch arm");
+
+        assert_eq!(offered, None);
+        assert_eq!(claimed, None);
+        assert_eq!(observed_claim, expected_claim);
+        assert_eq!(ready.credential(), &granted_lease_credential());
+        assert_eq!(
+            state.retained_lease_credential(),
+            Some(&granted_lease_credential())
+        );
+    }
+
+    /// INV-011 / INV-024 / INV-035: an unavailable selected credential is
+    /// durably refused before any claim or lease journal exists.
+    #[tokio::test]
+    async fn inv011_inv024_inv035_unavailable_credential_refuses_before_claim() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_and_credential();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let mut offer = credential_lease_offer();
+        offer.correlation.working_directory = WorkingDirectory::try_new(
+            parent
+                .path()
+                .canonicalize()
+                .expect("the fixture directory canonicalizes")
+                .display()
+                .to_string(),
+        )
+        .expect("the canonical fixture directory is bounded");
+        let expected_failure = unavailable_credential_offer_failure(offer.correlation.clone());
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the credential lease offer");
+            connection
+                .serve_one_with_credential_admission(&mut state, credential_unavailable)
+                .await
+                .expect("the unavailable credential is refused without closing the connection")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::LeaseOffer(offer)).await;
+            receive_hub_message(&mut hub_io).await
+        };
+        let (outcome, observed) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(
+            observed,
+            Message::OperationFailed(OperationFailed {
+                failure: expected_failure.clone(),
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory(),
+            &ReconnectInventory {
+                operation_failure: Some(expected_failure),
+                ..ReconnectInventory::default()
+            }
         );
     }
 
