@@ -861,6 +861,74 @@ async fn merged_pull_request_ends_the_commissioned_goal() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_cutoff_cleans_dispatches_from_later_same_observation_facts()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(cooldown_rule()?).await?;
+    let session = fixture.session(0);
+    let occupied = evaluate_conflict(&fixture, 102, SECOND_HEAD).await?;
+    assert_eq!(occupied.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    commit_merge(&fixture, MERGED_GOAL_CUTOFF_EVENT_ID).await?;
+    sqlx::query("ALTER TABLE repo_watch_event DISABLE TRIGGER ALL")
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "WITH cutoff AS (
+             SELECT cursor_generation
+               FROM repo_watch_event
+              WHERE event_id = $1
+         ), ordered AS (
+             SELECT event_id,
+                    row_number() OVER (ORDER BY event_id) + 1 AS event_ordinal
+               FROM repo_watch_event
+              WHERE event_id IN (
+                    SELECT event_id
+                      FROM repo_watch_dispatch_action
+                     WHERE session_id = $2
+                    UNION ALL
+                    SELECT $3
+              )
+         )
+         UPDATE repo_watch_event AS event
+            SET cursor_generation = cutoff.cursor_generation,
+                event_ordinal = ordered.event_ordinal
+           FROM cutoff, ordered
+          WHERE event.event_id = ordered.event_id",
+    )
+    .bind(Uuid::from_u128(MERGED_GOAL_CUTOFF_EVENT_ID))
+    .bind(session.as_uuid())
+    .bind(occupied.event_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query("ALTER TABLE repo_watch_event ENABLE TRIGGER ALL")
+        .execute(&fixture.pool)
+        .await?;
+
+    fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x51_105))
+        })
+        .await?;
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the stale dispatch goal remains readable");
+    let settlement: String = sqlx::query_scalar(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation
+          WHERE latest_event_id = $1",
+    )
+    .bind(occupied.event_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(settlement, "target_closed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn close_reopen_close_classifies_each_cutoff_against_its_following_lifecycle()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;

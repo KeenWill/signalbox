@@ -349,8 +349,7 @@ pub(crate) async fn settle_terminal_target_obligations(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     pull_request: Decimal,
-    cutoff_generation: i64,
-    cutoff_ordinal: i32,
+    cutoff_event: RepoWatchEventId,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
     sqlx::query(
         "UPDATE repo_watch_dispatch_obligation AS obligation
@@ -361,15 +360,14 @@ pub(crate) async fn settle_terminal_target_obligations(
             AND obligation.settled_kind IS NULL
             AND event.repository = $1
             AND event.pull_request_number = $2
-            AND (event.cursor_generation, event.event_ordinal) < ($4, $5)",
+            AND event.event_id <> $4",
     )
     .bind(repository.as_str())
     .bind(pull_request)
     .bind(repo_watch_obligation_settlement_to_str(
         RepoWatchObligationSettlementStorageKind::TargetClosed,
     ))
-    .bind(cutoff_generation)
-    .bind(cutoff_ordinal)
+    .bind(cutoff_event.as_uuid())
     .execute(&mut **transaction)
     .await?;
     Ok(())

@@ -211,8 +211,7 @@ impl PostgresRepoWatchDispatchStore {
                 &mut transaction,
                 repository,
                 pull_request_number,
-                cursor_generation,
-                event_ordinal,
+                RepoWatchEventId::from_uuid(event_id),
             )
             .await?;
             let sessions = sqlx::query_scalar::<_, Uuid>(
@@ -221,7 +220,7 @@ impl PostgresRepoWatchDispatchStore {
                    JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
                   WHERE origin.repository = $1
                     AND origin.pull_request_number = $2
-                    AND (origin.cursor_generation, origin.event_ordinal) < ($3, $4)
+                    AND origin.event_id <> $3
                     AND EXISTS (
                         SELECT 1
                           FROM goal_event AS commissioned_goal
@@ -231,8 +230,7 @@ impl PostgresRepoWatchDispatchStore {
             )
             .bind(repository.as_str())
             .bind(pull_request_number)
-            .bind(cursor_generation)
-            .bind(event_ordinal)
+            .bind(event_id)
             .fetch_all(&mut *transaction)
             .await?;
             for session_id in sessions {
