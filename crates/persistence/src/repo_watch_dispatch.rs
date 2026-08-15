@@ -14,8 +14,8 @@ use signalbox_application::{
 use signalbox_domain::{
     DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
     GoalUserCommand, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId,
-    RepoWatchRuleVersion, RepositorySlug, SessionId,
+    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, SessionId,
 };
 use sqlx::{Acquire, PgPool, Postgres, Row, Transaction, types::Uuid};
 
@@ -25,7 +25,8 @@ use crate::{
     mapping::{
         RepoWatchEvaluationOutcomeStorageKind, RepoWatchLifecycleCutoffDispositionStorageKind,
         RepoWatchSingletonScopeStorageKind, repo_watch_evaluation_outcome_from_str,
-        repo_watch_evaluation_outcome_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
+        repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
+        repo_watch_lifecycle_cutoff_disposition_from_str,
         repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_singleton_scope_to_str,
         session_id_to_uuid,
     },
@@ -194,7 +195,16 @@ impl PostgresRepoWatchDispatchStore {
         .bind(event_ordinal)
         .fetch_optional(&mut *transaction)
         .await?;
-        let disposition = if next_lifecycle.as_deref() == Some("pull_request_opened") {
+        let next_lifecycle = next_lifecycle
+            .map(|kind| {
+                repo_watch_event_kind_from_str(&kind).ok_or(
+                    RepoWatchDispatchRepositoryError::Corruption(
+                        "lifecycle cutoff has an unknown following event kind",
+                    ),
+                )
+            })
+            .transpose()?;
+        let disposition = if next_lifecycle == Some(RepoWatchEventKindNameV1::PullRequestOpened) {
             RepoWatchLifecycleCutoffDispositionStorageKind::Reopened
         } else {
             RepoWatchLifecycleCutoffDispositionStorageKind::Terminal
@@ -1298,7 +1308,12 @@ async fn event_target_is_open(
     .ok_or(RepoWatchDispatchRepositoryError::Corruption(
         "pull-request event has no durable lifecycle",
     ))?;
-    Ok(lifecycle == "pull_request_opened")
+    let lifecycle = repo_watch_event_kind_from_str(&lifecycle).ok_or(
+        RepoWatchDispatchRepositoryError::Corruption(
+            "pull-request lifecycle has an unknown event kind",
+        ),
+    )?;
+    Ok(lifecycle == RepoWatchEventKindNameV1::PullRequestOpened)
 }
 
 async fn terminal_event_has_later_terminal_cutoff(
