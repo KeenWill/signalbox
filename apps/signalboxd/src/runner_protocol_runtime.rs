@@ -30,10 +30,10 @@ use signalbox_runner_wire::{
     Enroll, Enrolled, Frame, FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase,
     LeaseClaim, LeaseCorrelation, LeasePhaseKind, MAX_FRAME_BYTES, Message, PositiveU64,
     ProvisionPhase, ReconnectDirectives, ReconnectInventory, Recovery as WireWorkspaceRecovery,
-    Registered, Rejected, RejectionCode, ReplacementPending, ResultFrame, Resume, Resumed,
-    SandboxProfile, Shutdown, ShutdownReason, WorkspaceFailureCorrelation, WorkspaceOperation,
-    WorkspaceReady, WorkspaceRecorded, WorkspaceReleaseRecorded, WorkspaceReleased,
-    advertisement_digest, decode_line, encode_line,
+    Registered, Rejected, RejectionCode, ReleaseCorrelation, ReleasePhase, ReplacementPending,
+    ResultFrame, Resume, Resumed, SandboxProfile, Shutdown, ShutdownReason,
+    WorkspaceFailureCorrelation, WorkspaceOperation, WorkspaceReady, WorkspaceRecorded,
+    WorkspaceReleaseRecorded, WorkspaceReleased, advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -767,6 +767,27 @@ impl PostgresRunnerRegistrationService {
                     None,
                 )
             }
+            ResumeOperation::WorkspaceRelease {
+                correlation: release_correlation,
+                phase,
+            } => {
+                let action = self
+                    .workspace_release_resume_action(&release_correlation, phase, identities)
+                    .await
+                    .map_err(|error| {
+                        store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                    })?;
+                (
+                    workspace_release_directives(&request.inventory, action).map_err(|code| {
+                        RunnerRegistrationFailure::new(
+                            RunnerInboundFrameKind::Resume,
+                            correlation.clone(),
+                            code,
+                        )
+                    })?,
+                    None,
+                )
+            }
             ResumeOperation::Empty => (ReconnectDirectives::default(), None),
         };
         let previous_registration_revision = match self
@@ -850,6 +871,42 @@ impl PostgresRunnerRegistrationService {
             None => None,
         };
         Ok(RunnerResumeAccepted::new(response, claimed_lease))
+    }
+
+    async fn workspace_release_resume_action(
+        &self,
+        correlation: &ReleaseCorrelation,
+        phase: ReleasePhase,
+        identities: IssuedRunnerEnrollmentIdentities,
+    ) -> Result<DirectiveAction, RunnerProtocolStoreError> {
+        let session = SessionId::from_uuid(correlation.session_id.into_uuid());
+        let placement_revision =
+            RunnerGeneration::try_from_u64(correlation.placement_revision.get()).ok_or(
+                RunnerProtocolStoreError::Domain(RunnerDomainError::CorrelationMismatch),
+            )?;
+        let runner = RunnerId::from_uuid(correlation.runner_id.into_uuid());
+        let manifest = WorkspaceManifestId::from_uuid(correlation.manifest_id.into_uuid());
+        if runner != identities.runner() {
+            return Ok(DirectiveAction::FailStale);
+        }
+        if let Some(release) = self
+            .store
+            .load_workspace_release(session, placement_revision)
+            .await?
+        {
+            let is_exact = release.runner() == runner
+                && release.manifest_id() == manifest
+                && release.enrollment() == identities.enrollment();
+            return Ok(workspace_release_pending_action(phase, is_exact));
+        }
+        let recorded = self
+            .store
+            .load_workspace_release_acknowledgement(session, placement_revision)
+            .await?;
+        let is_exact = recorded.is_some_and(|recorded| {
+            recorded.runner() == runner && recorded.manifest_id() == manifest
+        });
+        Ok(workspace_release_recorded_action(phase, is_exact))
     }
 
     async fn advertise_durably(
@@ -1118,6 +1175,10 @@ enum ResumeOperation {
     ClaimedLease(LeaseCorrelation),
     RetainedResult(ResultFrame),
     ReadyWorkspace(signalbox_runner_wire::ProvisionCorrelation),
+    WorkspaceRelease {
+        correlation: ReleaseCorrelation,
+        phase: ReleasePhase,
+    },
 }
 
 fn classify_resume_inventory(
@@ -1142,8 +1203,13 @@ fn classify_resume_inventory(
             WorkspaceOperation::Provision {
                 phase: ProvisionPhase::Provisioning,
                 ..
+            } => Err(RejectionCode::Unavailable),
+            WorkspaceOperation::Release { correlation, phase } => {
+                Ok(ResumeOperation::WorkspaceRelease {
+                    correlation: correlation.clone(),
+                    phase: *phase,
+                })
             }
-            | WorkspaceOperation::Release { .. } => Err(RejectionCode::Unavailable),
         };
     }
     if inventory.operation_failure.is_some() || inventory.leak_page.is_some() {
@@ -1237,6 +1303,48 @@ fn ready_workspace_directives(
         .validate_against(inventory)
         .map_err(|_| RejectionCode::CorrelationMismatch)?;
     Ok(directives)
+}
+
+fn workspace_release_directives(
+    inventory: &ReconnectInventory,
+    action: DirectiveAction,
+) -> Result<ReconnectDirectives, RejectionCode> {
+    let Some(WorkspaceOperation::Release { correlation, .. }) =
+        inventory.workspace_operation.as_ref()
+    else {
+        return Err(RejectionCode::CorrelationMismatch);
+    };
+    let directives = ReconnectDirectives {
+        workspace_operation: Some(Directive {
+            correlation: signalbox_runner_wire::OperationCorrelation::Release(correlation.clone()),
+            action,
+        }),
+        ..ReconnectDirectives::default()
+    };
+    directives
+        .validate_against(inventory)
+        .map_err(|_| RejectionCode::CorrelationMismatch)?;
+    Ok(directives)
+}
+
+const fn workspace_release_pending_action(phase: ReleasePhase, is_exact: bool) -> DirectiveAction {
+    match (phase, is_exact) {
+        (ReleasePhase::ReleaseAccepted, true) => DirectiveAction::Await,
+        (ReleasePhase::ReleaseCompleted, true) => DirectiveAction::Resend,
+        (ReleasePhase::ReleaseAccepted | ReleasePhase::ReleaseCompleted, false) => {
+            DirectiveAction::FailStale
+        }
+    }
+}
+
+const fn workspace_release_recorded_action(phase: ReleasePhase, is_exact: bool) -> DirectiveAction {
+    match (phase, is_exact) {
+        (ReleasePhase::ReleaseCompleted, true) => DirectiveAction::DiscardAsRecorded,
+        (ReleasePhase::ReleaseAccepted, true)
+        | (ReleasePhase::ReleaseAccepted | ReleasePhase::ReleaseCompleted, false) => {
+            DirectiveAction::FailStale
+        }
+    }
 }
 
 fn ready_workspace_resume_action(
@@ -3663,6 +3771,16 @@ mod tests {
         }
     }
 
+    fn workspace_release_inventory(phase: ReleasePhase) -> ReconnectInventory {
+        ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Release {
+                correlation: workspace_released().correlation,
+                phase,
+            }),
+            ..ReconnectInventory::default()
+        }
+    }
+
     #[test]
     fn s31_inv011_inv043_retained_terminal_resume_discards_the_exact_pair() {
         let correlation = canonical_lease_correlation();
@@ -3854,6 +3972,96 @@ mod tests {
         );
 
         assert_eq!(action, DirectiveAction::FailStale);
+    }
+
+    /// INV-011 / INV-024: an exact accepted release is preserved until the
+    /// daemon redelivers its durable operation.
+    #[test]
+    fn inv011_inv024_pending_accepted_release_resume_awaits_redelivery() {
+        let inventory = workspace_release_inventory(ReleasePhase::ReleaseAccepted);
+        let correlation = workspace_released().correlation;
+
+        let operation = classify_resume_inventory(&inventory)
+            .expect("one accepted release is a supported resume shape");
+        let action = workspace_release_pending_action(ReleasePhase::ReleaseAccepted, true);
+        let directives = workspace_release_directives(&inventory, action)
+            .expect("the exact accepted release accepts its directive");
+
+        assert_eq!(
+            operation,
+            ResumeOperation::WorkspaceRelease {
+                correlation: correlation.clone(),
+                phase: ReleasePhase::ReleaseAccepted,
+            }
+        );
+        assert_eq!(directives.validate_against(&inventory), Ok(()));
+        assert_eq!(
+            directives.workspace_operation,
+            Some(Directive {
+                correlation: signalbox_runner_wire::OperationCorrelation::Release(correlation),
+                action: DirectiveAction::Await,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: exact completed release evidence is resent while
+    /// the durable operation remains pending.
+    #[test]
+    fn inv011_inv024_pending_completed_release_resume_requests_resend() {
+        let inventory = workspace_release_inventory(ReleasePhase::ReleaseCompleted);
+
+        let action = workspace_release_pending_action(ReleasePhase::ReleaseCompleted, true);
+        let directives = workspace_release_directives(&inventory, action)
+            .expect("the exact completed release accepts its directive");
+
+        assert_eq!(directives.validate_against(&inventory), Ok(()));
+        assert_eq!(
+            directives
+                .workspace_operation
+                .expect("the workspace directive exists")
+                .action,
+            DirectiveAction::Resend
+        );
+    }
+
+    /// INV-011 / INV-024: a release that does not match pending durable
+    /// authority is failed stale.
+    #[test]
+    fn inv011_inv024_foreign_pending_release_resume_fails_stale() {
+        assert_eq!(
+            workspace_release_pending_action(ReleasePhase::ReleaseAccepted, false),
+            DirectiveAction::FailStale
+        );
+    }
+
+    /// INV-011 / INV-024: canonical completed evidence already recorded by
+    /// the daemon is discarded without another replay.
+    #[test]
+    fn inv011_inv024_recorded_completed_release_resume_discards_evidence() {
+        assert_eq!(
+            workspace_release_recorded_action(ReleasePhase::ReleaseCompleted, true),
+            DirectiveAction::DiscardAsRecorded
+        );
+    }
+
+    /// INV-011 / INV-024: accepted local state cannot claim a daemon-recorded
+    /// completion and is retired as stale.
+    #[test]
+    fn inv011_inv024_recorded_accepted_release_resume_fails_stale() {
+        assert_eq!(
+            workspace_release_recorded_action(ReleasePhase::ReleaseAccepted, true),
+            DirectiveAction::FailStale
+        );
+    }
+
+    /// INV-011 / INV-024: absent or foreign durable release evidence is
+    /// classified stale rather than recreated from reconnect inventory.
+    #[test]
+    fn inv011_inv024_unrecorded_release_resume_fails_stale() {
+        assert_eq!(
+            workspace_release_recorded_action(ReleasePhase::ReleaseCompleted, false),
+            DirectiveAction::FailStale
+        );
     }
 
     #[test]
@@ -5392,6 +5600,60 @@ mod tests {
         };
 
         assert_eq!(resumed, expected);
+    }
+
+    /// INV-011 / INV-024: reconnect inventory cannot create release authority
+    /// when no exact durable release or acknowledgement exists.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn inv011_inv024_resume_fails_an_unrecorded_workspace_release_stale() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store, []);
+        let advertisement = empty_advertisement();
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("the runner enrolls before reconnecting");
+        let correlation = ReleaseCorrelation {
+            session_id: identity(ARBITRARY_PROVISION_SESSION_ID_SEED),
+            placement_revision: PositiveU64::try_new(ARBITRARY_PROVISION_PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            runner_id: enrolled.runner_id(),
+            manifest_id: identity(ARBITRARY_WORKSPACE_MANIFEST_ID_SEED),
+        };
+        let inventory = ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Release {
+                correlation: correlation.clone(),
+                phase: ReleasePhase::ReleaseAccepted,
+            }),
+            ..ReconnectInventory::default()
+        };
+
+        let resumed = service
+            .resume(Resume {
+                request_id: enrolled.request_id(),
+                digest_version: DIGEST_VERSION,
+                enrollment_id: enrolled.enrollment_id(),
+                runner_id: enrolled.runner_id(),
+                authentication_id: enrolled.authentication_id(),
+                advertisement,
+                prior_registration_revision: enrolled.registration_revision(),
+                inventory,
+            })
+            .await
+            .expect("the exact runner resumes with stale release classification");
+
+        assert_eq!(
+            resumed.into_parts().0.directives.workspace_operation,
+            Some(Directive {
+                correlation: signalbox_runner_wire::OperationCorrelation::Release(correlation),
+                action: DirectiveAction::FailStale,
+            })
+        );
     }
 
     #[tokio::test]

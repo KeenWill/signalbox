@@ -73,8 +73,11 @@ composition is verified against this PR
 one inbound `workspace_released` frame through durable completion admission,
 followed by exact `workspace_release_recorded` projection, is verified against
 this PR (`agent/daemon-workspace-release-routing`). Established-connection
-routing of those inbound claim and result frames through the durable
-transactions before acknowledgement is re-verified through this PR
+resume classification of an accepted or completed workspace release against the
+durable pending/recorded state, together with exact runner replay or retirement,
+is verified against this PR (`agent/runner-workspace-release-resume`).
+Established-connection routing of those inbound claim and result frames through
+the durable transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -828,6 +831,19 @@ retained ready-workspace evidence, `resend` emits the complete stored frame
 while retaining it and `fail_stale` frees the exact correlation and payload
 together; every other action preserves them and fails closed.
 
+For a release-only reconnect inventory, the hub matches its complete correlation
+against the supplied enrollment and canonical durable release state before
+registration mutation, and returns the directive only after ordinary resume
+authenticates the issued identities. An exact pending `release_accepted` item
+receives `await` and remains journaled for canonical operation redelivery; an
+exact pending `release_completed` item receives `resend`. An exact completed
+item already acknowledged durably receives `discard_as_recorded`. Absent,
+foreign, or phase-inconsistent evidence receives `fail_stale`. The runner
+preserves accepted state for `await`, re-emits the exact `workspace_released`
+frame for `resend`, and atomically frees the exact journal for
+`discard_as_recorded` or `fail_stale`; any other action preserves the journal
+and fails closed. Reconnect inventory does not create release authority.
+
 On the hub, an established connection accepts `workspace_released` only when its
 correlation names that connection's runner. The daemon observes the exact
 current connection, commits or exactly replays the durable release-completion
@@ -838,8 +854,9 @@ pending release or sends the initiating `workspace_release` frame.
 
 **Committed unimplemented functionality.** No present repository-backed
 filesystem producer creates ready evidence or begins or advances a release, and
-resumed release directives remain unsupported. This boundary supplies neither
-repository provisioning, repository cleanup, nor a workstation tool inventory.
+resume of a retained workspace-cleanup failure remains unsupported. This
+boundary supplies neither repository provisioning, repository cleanup, nor a
+workstation tool inventory.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one

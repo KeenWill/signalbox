@@ -16,9 +16,10 @@ use signalbox_runner_wire::{
     FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, LeaseClaim, LeaseClaimed,
     LeaseCorrelation, LeaseOffer, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message,
     OperationCorrelation, OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives,
-    ReconnectInventory, Registered, Rejected, RejectionCode, ResultFrame, Resume, SandboxProfile,
-    Shutdown, ShutdownReason, TerminalResult, ValueError, WorkspaceFailureCorrelation,
-    WorkspaceOperation, WorkspaceReleased, advertisement_digest, decode_line, encode_line,
+    ReconnectInventory, Registered, Rejected, RejectionCode, ReleasePhase, ResultFrame, Resume,
+    SandboxProfile, Shutdown, ShutdownReason, TerminalResult, ValueError,
+    WorkspaceFailureCorrelation, WorkspaceOperation, WorkspaceReleased, advertisement_digest,
+    decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -714,6 +715,9 @@ where
                             Message::OperationFailed(OperationFailed { failure })
                         }
                         ResumeReplay::WorkspaceReady(ready) => Message::WorkspaceReady(ready),
+                        ResumeReplay::WorkspaceReleased(released) => {
+                            Message::WorkspaceReleased(released)
+                        }
                     };
                     send_message(&mut io, message).await?;
                 }
@@ -1571,6 +1575,7 @@ where
 enum ResumeReplay {
     OperationFailure(OperationFailure),
     WorkspaceReady(signalbox_runner_wire::WorkspaceReady),
+    WorkspaceReleased(WorkspaceReleased),
 }
 
 fn apply_resume_directives(
@@ -1655,6 +1660,47 @@ fn apply_resume_directives(
             )),
         };
     }
+    if let (Some(WorkspaceOperation::Release { correlation, phase }), Some(directive)) = (
+        inventory.workspace_operation.as_ref(),
+        directives.workspace_operation.as_ref(),
+    ) && inventory.lease.is_none()
+        && inventory.result.is_none()
+        && inventory.operation_failure.is_none()
+        && inventory.leak_page.is_none()
+        && directives.lease.is_none()
+        && directives.result.is_none()
+        && directives.operation_failure.is_none()
+        && directives.leak_page.is_none()
+    {
+        return match (*phase, directive.action) {
+            (ReleasePhase::ReleaseAccepted, DirectiveAction::Await) => Ok(None),
+            (ReleasePhase::ReleaseCompleted, DirectiveAction::Resend) => {
+                Ok(Some(ResumeReplay::WorkspaceReleased(WorkspaceReleased {
+                    correlation: correlation.clone(),
+                })))
+            }
+            (ReleasePhase::ReleaseCompleted, DirectiveAction::DiscardAsRecorded) => {
+                state
+                    .acknowledge_workspace_release(correlation)
+                    .map_err(resume_state_error)?;
+                Ok(None)
+            }
+            (
+                ReleasePhase::ReleaseAccepted | ReleasePhase::ReleaseCompleted,
+                DirectiveAction::FailStale,
+            ) => {
+                state
+                    .fail_stale_workspace_release(correlation)
+                    .map_err(resume_state_error)?;
+                Ok(None)
+            }
+            (ReleasePhase::ReleaseAccepted, DirectiveAction::Resend)
+            | (ReleasePhase::ReleaseAccepted, DirectiveAction::DiscardAsRecorded)
+            | (ReleasePhase::ReleaseCompleted, DirectiveAction::Await) => Err(
+                RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives),
+            ),
+        };
+    }
     if let (
         Some(WorkspaceOperation::Provision {
             correlation,
@@ -1691,13 +1737,7 @@ fn apply_resume_directives(
             DirectiveAction::FailStale => {
                 state
                     .fail_stale_workspace_ready(correlation)
-                    .map_err(|error| match error {
-                        RunnerStateError::InvalidTransition
-                        | RunnerStateError::OperationCorrelationMismatch => {
-                            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
-                        }
-                        other => RunnerConnectionError::State(other),
-                    })?;
+                    .map_err(resume_state_error)?;
                 Ok(None)
             }
             DirectiveAction::Await | DirectiveAction::DiscardAsRecorded => Err(
@@ -1737,6 +1777,15 @@ fn apply_resume_directives(
             other => RunnerConnectionError::State(other),
         })?;
     Ok(None)
+}
+
+fn resume_state_error(error: RunnerStateError) -> RunnerConnectionError {
+    match error {
+        RunnerStateError::InvalidTransition | RunnerStateError::OperationCorrelationMismatch => {
+            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+        }
+        other => RunnerConnectionError::State(other),
+    }
 }
 
 async fn receive_message<S>(io: &mut BufReader<S>) -> Result<Message, RunnerConnectionError>
@@ -1955,6 +2004,22 @@ mod tests {
         state
     }
 
+    fn state_with_accepted_workspace_release(parent: &TempDir) -> RunnerStateRoot {
+        let mut state = enrolled_state(parent);
+        state
+            .record_workspace_release_phase(release_correlation(), ReleasePhase::ReleaseAccepted)
+            .expect("the accepted release is durable");
+        state
+    }
+
+    fn state_with_completed_workspace_release(parent: &TempDir) -> RunnerStateRoot {
+        let mut state = state_with_accepted_workspace_release(parent);
+        state
+            .record_workspace_release_phase(release_correlation(), ReleasePhase::ReleaseCompleted)
+            .expect("the completed release is durable");
+        state
+    }
+
     fn release_failure() -> OperationFailure {
         OperationFailure {
             correlation: OperationCorrelation::Release(release_correlation()),
@@ -2069,6 +2134,16 @@ mod tests {
         ReconnectDirectives {
             workspace_operation: Some(signalbox_runner_wire::Directive {
                 correlation: OperationCorrelation::Provision(provision_correlation()),
+                action,
+            }),
+            ..ReconnectDirectives::default()
+        }
+    }
+
+    fn retained_release_directives(action: DirectiveAction) -> ReconnectDirectives {
+        ReconnectDirectives {
+            workspace_operation: Some(signalbox_runner_wire::Directive {
+                correlation: OperationCorrelation::Release(release_correlation()),
                 action,
             }),
             ..ReconnectDirectives::default()
@@ -3397,6 +3472,151 @@ mod tests {
         );
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
         assert_eq!(state.retained_workspace_ready(), None);
+    }
+
+    /// INV-011 / INV-024: an accepted cleanup remains durable while the hub
+    /// prepares to redeliver its canonical release frame.
+    #[tokio::test]
+    async fn inv011_inv024_resume_await_preserves_the_accepted_workspace_release() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_accepted_workspace_release(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_release_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+        };
+        let (connection, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            connection
+                .expect("the await directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024: a completed cleanup replays its exact release frame
+    /// and remains durable until the daemon acknowledges it.
+    #[tokio::test]
+    async fn inv011_inv024_resume_resends_the_completed_workspace_release() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_completed_workspace_release(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_release_directives(DirectiveAction::Resend),
+                })),
+            )
+            .await;
+            receive_hub_message(&mut hub_io).await
+        };
+        let (connection, replay) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            connection
+                .expect("the resend directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(
+            replay,
+            Message::WorkspaceReleased(WorkspaceReleased {
+                correlation: release_correlation(),
+            })
+        );
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024: canonical recorded evidence frees the exact
+    /// completed release journal during resume.
+    #[tokio::test]
+    async fn inv011_inv024_resume_discards_the_recorded_workspace_release() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_completed_workspace_release(&parent);
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_release_directives(DirectiveAction::DiscardAsRecorded),
+                })),
+            )
+            .await;
+        };
+        let (connection, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            connection
+                .expect("the recorded directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: durable stale classification retires the exact
+    /// accepted release without replaying cleanup authority.
+    #[tokio::test]
+    async fn inv011_inv024_resume_fails_the_stale_accepted_workspace_release() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_accepted_workspace_release(&parent);
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_release_directives(DirectiveAction::FailStale),
+                })),
+            )
+            .await;
+        };
+        let (connection, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            connection
+                .expect("the stale directive establishes the connection")
+                .outcome(),
+            EnrollmentOutcome::Resumed
+        );
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
     }
 
     #[tokio::test]

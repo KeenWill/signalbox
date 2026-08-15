@@ -943,6 +943,31 @@ impl RunnerStateRoot {
         Ok(())
     }
 
+    /// Atomically retires one exact release item classified stale on resume.
+    pub fn fail_stale_workspace_release(
+        &mut self,
+        correlation: &ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match self.inventory.workspace_operation.as_ref() {
+            Some(WorkspaceOperation::Release {
+                correlation: current,
+                ..
+            }) if current == correlation && self.inventory.operation_failure.is_none() => {}
+            Some(WorkspaceOperation::Release {
+                correlation: current,
+                ..
+            }) if current != correlation => {
+                return Err(RunnerStateError::OperationCorrelationMismatch);
+            }
+            Some(_) | None => return Err(RunnerStateError::InvalidTransition),
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.workspace_operation = None;
+        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        self.inventory = inventory;
+        Ok(())
+    }
+
     /// Atomically retains one failed release cleanup beside its accepted release.
     pub fn record_workspace_release_failure(
         &mut self,
@@ -2264,6 +2289,46 @@ mod tests {
             reopened.reconnect_inventory(),
             &ReconnectInventory::default()
         );
+    }
+
+    /// INV-011 / INV-024: a stale accepted release is retired atomically by
+    /// its exact reconnect correlation.
+    #[test]
+    fn inv011_inv024_stale_accepted_workspace_release_is_retired_durably() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = accepted_release_root(&parent);
+
+        root.fail_stale_workspace_release(&release_correlation())
+            .expect("the exact stale release is retired");
+        drop(root);
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &ReconnectInventory::default()
+        );
+    }
+
+    /// INV-011 / INV-024: stale retirement cannot clear another release.
+    #[test]
+    fn inv011_inv024_stale_workspace_release_rejects_another_correlation() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = accepted_release_root(&parent);
+        let retained = root.reconnect_inventory().clone();
+        let mut foreign = release_correlation();
+        foreign.manifest_id =
+            CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_MANIFEST_UUID + 1));
+
+        let error = root
+            .fail_stale_workspace_release(&foreign)
+            .expect_err("another correlation cannot retire the release");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory(), &retained);
     }
 
     /// INV-011 / INV-024: a cleanup refusal and its accepted release survive
