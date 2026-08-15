@@ -1504,6 +1504,12 @@ async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError>
     temporary
         .persist_noclobber(path)
         .map_err(|error| ClientError::blob_output_file(path, error.error))?;
+    tokio::fs::File::open(parent)
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?
+        .sync_all()
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
     Ok(())
 }
 
