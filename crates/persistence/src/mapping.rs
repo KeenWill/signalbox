@@ -837,6 +837,131 @@ pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommand
     }
 }
 
+/// Closed repository-watch singleton scopes stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchSingletonScopeStorageKind {
+    PullRequest,
+    Stack,
+    Rule,
+    Repository,
+}
+
+pub(crate) const fn repo_watch_singleton_scope_to_str(
+    value: RepoWatchSingletonScopeStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchSingletonScopeStorageKind::PullRequest => "pull_request",
+        RepoWatchSingletonScopeStorageKind::Stack => "stack",
+        RepoWatchSingletonScopeStorageKind::Rule => "rule",
+        RepoWatchSingletonScopeStorageKind::Repository => "repo",
+    }
+}
+
+pub(crate) fn repo_watch_singleton_scope_from_str(
+    value: &str,
+) -> Option<RepoWatchSingletonScopeStorageKind> {
+    match value {
+        "pull_request" => Some(RepoWatchSingletonScopeStorageKind::PullRequest),
+        "stack" => Some(RepoWatchSingletonScopeStorageKind::Stack),
+        "rule" => Some(RepoWatchSingletonScopeStorageKind::Rule),
+        "repo" => Some(RepoWatchSingletonScopeStorageKind::Repository),
+        _ => None,
+    }
+}
+
+/// Closed lifecycle-cutoff dispositions stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchLifecycleCutoffDispositionStorageKind {
+    Terminal,
+    Reopened,
+}
+
+pub(crate) const fn repo_watch_lifecycle_cutoff_disposition_to_str(
+    value: RepoWatchLifecycleCutoffDispositionStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchLifecycleCutoffDispositionStorageKind::Terminal => "terminal",
+        RepoWatchLifecycleCutoffDispositionStorageKind::Reopened => "reopened",
+    }
+}
+
+pub(crate) fn repo_watch_lifecycle_cutoff_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchLifecycleCutoffDispositionStorageKind> {
+    match value {
+        "terminal" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal),
+        "reopened" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened),
+        _ => None,
+    }
+}
+
+/// Closed outcomes stored for one repository-watch rule evaluation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEvaluationOutcomeStorageKind {
+    NotMatched,
+    TargetClosed,
+    Occupied,
+    Coalesced,
+    Cooldown,
+    Dispatched,
+}
+
+pub(crate) const fn repo_watch_evaluation_outcome_to_str(
+    value: RepoWatchEvaluationOutcomeStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEvaluationOutcomeStorageKind::NotMatched => "not_matched",
+        RepoWatchEvaluationOutcomeStorageKind::TargetClosed => "target_closed",
+        RepoWatchEvaluationOutcomeStorageKind::Occupied => "occupied",
+        RepoWatchEvaluationOutcomeStorageKind::Coalesced => "coalesced",
+        RepoWatchEvaluationOutcomeStorageKind::Cooldown => "cooldown",
+        RepoWatchEvaluationOutcomeStorageKind::Dispatched => "dispatched",
+    }
+}
+
+pub(crate) fn repo_watch_evaluation_outcome_from_str(
+    value: &str,
+) -> Option<RepoWatchEvaluationOutcomeStorageKind> {
+    match value {
+        "not_matched" => Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched),
+        "target_closed" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed),
+        "occupied" => Some(RepoWatchEvaluationOutcomeStorageKind::Occupied),
+        "coalesced" => Some(RepoWatchEvaluationOutcomeStorageKind::Coalesced),
+        "cooldown" => Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown),
+        "dispatched" => Some(RepoWatchEvaluationOutcomeStorageKind::Dispatched),
+        _ => None,
+    }
+}
+
+/// Closed settlement kinds stored for one repository-watch dispatch obligation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchObligationSettlementStorageKind {
+    Deactivated,
+    TargetClosed,
+    Dispatched,
+}
+
+pub(crate) const fn repo_watch_obligation_settlement_to_str(
+    value: RepoWatchObligationSettlementStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchObligationSettlementStorageKind::Deactivated => "deactivated",
+        RepoWatchObligationSettlementStorageKind::TargetClosed => "target_closed",
+        RepoWatchObligationSettlementStorageKind::Dispatched => "dispatched",
+    }
+}
+
+pub(crate) fn repo_watch_obligation_settlement_from_str(
+    value: &str,
+) -> Option<RepoWatchObligationSettlementStorageKind> {
+    match value {
+        "deactivated" => Some(RepoWatchObligationSettlementStorageKind::Deactivated),
+        "target_closed" => Some(RepoWatchObligationSettlementStorageKind::TargetClosed),
+        "dispatched" => Some(RepoWatchObligationSettlementStorageKind::Dispatched),
+        _ => None,
+    }
+}
+
 /// Stored target shape for one repository-watch event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventTargetStorageKind {
@@ -1931,11 +2056,12 @@ mod tests {
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, RunnerLossPropagationStateStorageKind,
-        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, StoredModelSettingsError,
-        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
-        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
+        RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
+        RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
+        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
+        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
@@ -1956,9 +2082,12 @@ mod tests {
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
-        repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
-        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_checks_outcome_to_str, repo_watch_evaluation_outcome_from_str,
+        repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
+        repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
+        repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
+        repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
         repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
         repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
@@ -1991,6 +2120,44 @@ mod tests {
             Some(RunnerLossPropagationStateStorageKind::Completed)
         );
         assert_eq!(runner_loss_propagation_state_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_target_closed_mappings_are_closed() {
+        assert_eq!(
+            repo_watch_evaluation_outcome_from_str(repo_watch_evaluation_outcome_to_str(
+                RepoWatchEvaluationOutcomeStorageKind::TargetClosed,
+            )),
+            Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed)
+        );
+        assert_eq!(repo_watch_evaluation_outcome_from_str("unknown"), None);
+        assert_eq!(
+            repo_watch_obligation_settlement_from_str(repo_watch_obligation_settlement_to_str(
+                RepoWatchObligationSettlementStorageKind::TargetClosed,
+            )),
+            Some(RepoWatchObligationSettlementStorageKind::TargetClosed)
+        );
+        assert_eq!(repo_watch_obligation_settlement_from_str("unknown"), None);
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str(
+                repo_watch_lifecycle_cutoff_disposition_to_str(
+                    RepoWatchLifecycleCutoffDispositionStorageKind::Terminal,
+                ),
+            ),
+            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal)
+        );
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str(
+                repo_watch_lifecycle_cutoff_disposition_to_str(
+                    RepoWatchLifecycleCutoffDispositionStorageKind::Reopened,
+                ),
+            ),
+            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened)
+        );
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str("unknown"),
+            None
+        );
     }
 
     #[test]
