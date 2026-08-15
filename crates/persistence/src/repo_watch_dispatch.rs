@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    num::NonZeroU64,
 };
 
 use rust_decimal::Decimal;
@@ -15,7 +16,8 @@ use signalbox_domain::{
     DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
     GoalUserCommand, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
     RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, SessionId,
+    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion,
+    RepositorySlug, SessionId,
 };
 use sqlx::{Acquire, PgPool, Postgres, Row, Transaction, types::Uuid};
 
@@ -34,6 +36,47 @@ use crate::{
 
 const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
 
+struct ConfiguredRuleIdentity {
+    content_digest: [u8; 32],
+    field_digests: Vec<(RepoWatchRuleIdentityField, [u8; 32])>,
+}
+
+impl ConfiguredRuleIdentity {
+    fn from_rule(rule: &RepoWatchRule) -> Self {
+        Self {
+            content_digest: *rule.content_digest().as_bytes(),
+            field_digests: rule
+                .identity_field_digests()
+                .into_iter()
+                .map(|(field, digest)| (field, *digest.as_bytes()))
+                .collect(),
+        }
+    }
+
+    fn encoded_field_digests(&self) -> Vec<u8> {
+        self.field_digests
+            .iter()
+            .flat_map(|(_, digest)| digest.iter().copied())
+            .collect()
+    }
+
+    fn changed_field(
+        &self,
+        stored: &[u8],
+    ) -> Result<Option<RepoWatchRuleIdentityField>, RepoWatchDispatchRepositoryError> {
+        if stored.len() != self.field_digests.len() * 32 {
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "stored rule field fingerprints have an invalid length",
+            ));
+        }
+        Ok(self
+            .field_digests
+            .iter()
+            .zip(stored.chunks_exact(32))
+            .find_map(|((field, configured), stored)| (configured != stored).then_some(*field)))
+    }
+}
+
 /// Database or durable-shape failure while evaluating one repository-watch rule.
 #[derive(Debug)]
 pub enum RepoWatchDispatchRepositoryError {
@@ -49,6 +92,11 @@ pub enum RepoWatchDispatchRepositoryError {
         rule_version: RepoWatchRuleVersion,
     },
     ChangedRuleIdentity {
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+        field: RepoWatchRuleIdentityField,
+    },
+    UnfingerprintedChangedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
     },
@@ -83,9 +131,20 @@ impl fmt::Display for RepoWatchDispatchRepositoryError {
             Self::ChangedRuleIdentity {
                 rule_id,
                 rule_version,
+                field,
             } => write!(
                 formatter,
-                "repository-watch rule {} version {} changed without a new identity",
+                "repository-watch rule {} version {} field `{}` changed without a version bump",
+                rule_id.as_str(),
+                rule_version.get(),
+                field.configuration_path()
+            ),
+            Self::UnfingerprintedChangedRuleIdentity {
+                rule_id,
+                rule_version,
+            } => write!(
+                formatter,
+                "repository-watch rule {} version {} changed from a legacy activation without field fingerprints; bump field `version`",
                 rule_id.as_str(),
                 rule_version.get()
             ),
@@ -110,6 +169,7 @@ impl Error for RepoWatchDispatchRepositoryError {
             Self::GoalCutoff(error) => Some(error),
             Self::ReusedRuleIdentity { .. }
             | Self::ChangedRuleIdentity { .. }
+            | Self::UnfingerprintedChangedRuleIdentity { .. }
             | Self::Corruption(_) => None,
         }
     }
@@ -410,16 +470,19 @@ impl PostgresRepoWatchDispatchStore {
                         rule.id().as_str().to_owned(),
                         stored_rule_version(rule.version())?,
                     ),
-                    *rule.content_digest().as_bytes(),
+                    ConfiguredRuleIdentity::from_rule(rule),
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, RepoWatchDispatchRepositoryError>>()?;
         let configured_identities = configured.keys().cloned().collect::<BTreeSet<_>>();
         let existing = sqlx::query(
             "SELECT activation.rule_id, activation.rule_version, activation.rule_digest,
+                    fingerprint.rule_field_digests,
                     deactivation.rule_id IS NOT NULL AS deactivated
                FROM repo_watch_rule_activation AS activation
                LEFT JOIN repo_watch_rule_deactivation AS deactivation
+                 USING (repository, rule_id, rule_version)
+               LEFT JOIN repo_watch_rule_field_fingerprint AS fingerprint
                  USING (repository, rule_id, rule_version)
               WHERE activation.repository = $1",
         )
@@ -433,17 +496,55 @@ impl PostgresRepoWatchDispatchStore {
             historical.insert(identity.clone());
             if !row.try_get::<bool, _>("deactivated")? {
                 let stored_digest: Vec<u8> = row.try_get("rule_digest")?;
-                if configured
-                    .get(&identity)
-                    .is_some_and(|digest| stored_digest.as_slice() != digest)
-                {
-                    transaction.rollback().await?;
-                    return Err(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
-                        rule_id: RepoWatchRuleId::try_new(identity.0).map_err(|_| {
-                            RepoWatchDispatchRepositoryError::Corruption("stored rule identifier")
-                        })?,
-                        rule_version: RepoWatchRuleVersion::V1,
-                    });
+                let stored_field_digests: Option<Vec<u8>> = row.try_get("rule_field_digests")?;
+                if let Some(configured_rule) = configured.get(&identity) {
+                    if stored_digest.as_slice() != configured_rule.content_digest.as_slice() {
+                        let rule_id = stored_rule_id(&identity.0)?;
+                        let rule_version = decoded_rule_version(identity.1)?;
+                        let Some(stored_field_digests) = stored_field_digests else {
+                            transaction.rollback().await?;
+                            return Err(
+                                RepoWatchDispatchRepositoryError::UnfingerprintedChangedRuleIdentity {
+                                    rule_id,
+                                    rule_version,
+                                },
+                            );
+                        };
+                        let field = configured_rule
+                            .changed_field(&stored_field_digests)?
+                            .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+                                "rule digest changed while every field fingerprint remained equal",
+                            ))?;
+                        transaction.rollback().await?;
+                        return Err(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
+                            rule_id,
+                            rule_version,
+                            field,
+                        });
+                    }
+                    match stored_field_digests {
+                        Some(stored) => {
+                            if configured_rule.changed_field(&stored)?.is_some() {
+                                transaction.rollback().await?;
+                                return Err(RepoWatchDispatchRepositoryError::Corruption(
+                                    "rule field fingerprint changed while its complete digest remained equal",
+                                ));
+                            }
+                        }
+                        None => {
+                            sqlx::query(
+                                "INSERT INTO repo_watch_rule_field_fingerprint
+                                    (repository, rule_id, rule_version, rule_field_digests)
+                                 VALUES ($1, $2, $3, $4)",
+                            )
+                            .bind(repository.as_str())
+                            .bind(&identity.0)
+                            .bind(identity.1)
+                            .bind(configured_rule.encoded_field_digests())
+                            .execute(&mut *transaction)
+                            .await?;
+                        }
+                    }
                 }
                 active.insert(identity);
             }
@@ -464,12 +565,13 @@ impl PostgresRepoWatchDispatchStore {
             if historical.contains(&(rule_id.clone(), *rule_version)) {
                 transaction.rollback().await?;
                 return Err(RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
-                    rule_id: RepoWatchRuleId::try_new(rule_id.clone()).map_err(|_| {
-                        RepoWatchDispatchRepositoryError::Corruption("stored rule identifier")
-                    })?,
-                    rule_version: RepoWatchRuleVersion::V1,
+                    rule_id: stored_rule_id(rule_id)?,
+                    rule_version: decoded_rule_version(*rule_version)?,
                 });
             }
+            let configured_rule = configured.get(&(rule_id.clone(), *rule_version)).ok_or(
+                RepoWatchDispatchRepositoryError::Corruption("configured rule identity missing"),
+            )?;
             sqlx::query(
                 "INSERT INTO repo_watch_rule_activation
                 (repository, rule_id, rule_version, rule_digest,
@@ -488,9 +590,18 @@ impl PostgresRepoWatchDispatchStore {
             .bind(repository.as_str())
             .bind(rule_id)
             .bind(rule_version)
-            .bind(configured.get(&(rule_id.clone(), *rule_version)).ok_or(
-                RepoWatchDispatchRepositoryError::Corruption("configured rule digest missing"),
-            )?)
+            .bind(configured_rule.content_digest.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO repo_watch_rule_field_fingerprint
+                    (repository, rule_id, rule_version, rule_field_digests)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(repository.as_str())
+            .bind(rule_id)
+            .bind(rule_version)
+            .bind(configured_rule.encoded_field_digests())
             .execute(&mut *transaction)
             .await?;
         }
@@ -1414,4 +1525,21 @@ pub(crate) fn stored_rule_version(
 ) -> Result<i64, RepoWatchDispatchRepositoryError> {
     i64::try_from(version.get())
         .map_err(|_| RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage"))
+}
+
+fn decoded_rule_version(
+    version: i64,
+) -> Result<RepoWatchRuleVersion, RepoWatchDispatchRepositoryError> {
+    let version = u64::try_from(version)
+        .ok()
+        .and_then(NonZeroU64::new)
+        .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+            "stored rule version is invalid",
+        ))?;
+    Ok(RepoWatchRuleVersion::new(version))
+}
+
+fn stored_rule_id(rule_id: &str) -> Result<RepoWatchRuleId, RepoWatchDispatchRepositoryError> {
+    RepoWatchRuleId::try_new(rule_id.to_owned())
+        .map_err(|_| RepoWatchDispatchRepositoryError::Corruption("stored rule identifier"))
 }

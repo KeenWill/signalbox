@@ -4,7 +4,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{error::Error, time::Duration};
+use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
     RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchObservation,
@@ -21,9 +21,10 @@ use signalbox_domain::{
     PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
     RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
     RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug, SessionConfigurationDefaults,
-    SessionId, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, TurnId, UserContent,
+    RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepositorySlug, SessionConfigurationDefaults, SessionId, SessionSystemPrompt,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
@@ -56,6 +57,8 @@ const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const THIRD_HEAD: &str = "3333333333333333333333333333333333333333";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
+const FRESH_RULE: &str = "merge-forward-on-conflict-replacement";
+const REPLACEMENT_RULE_VERSION: u64 = 2;
 const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
 const FIRST_TERMINAL_IDENTITY_SEED: u128 = 0x10_000;
 const CORRUPT_GOAL_GENERATION: i64 = 2;
@@ -167,11 +170,13 @@ fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Err
 }
 
 fn rule_with_actions_and_cooldown(
+    version: RepoWatchRuleVersion,
     actions: Vec<RepoWatchRuleActionV1>,
     cooldown: Duration,
 ) -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        version,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
             mergeable_state: vec![MergeableState::Conflicting],
@@ -184,20 +189,40 @@ fn rule_with_actions_and_cooldown(
 }
 
 fn rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_at_version(RepoWatchRuleVersion::V1)
+}
+
+fn rule_at_version(version: RepoWatchRuleVersion) -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_with_identity(RepoWatchRuleId::try_new(RULE.to_owned())?, version)
+}
+
+fn rule_with_identity(
+    id: RepoWatchRuleId,
+    version: RepoWatchRuleVersion,
+) -> Result<RepoWatchRule, Box<dyn Error>> {
     let template = SessionTemplateName::try_new(TEMPLATE.to_owned())?;
-    rule_with_actions_and_cooldown(
+    Ok(RepoWatchRule::try_new(
+        id,
+        version,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        }),
         vec![
             RepoWatchRuleActionV1::DispatchSession {
                 template: template.clone(),
             },
             RepoWatchRuleActionV1::DispatchSession { template },
         ],
+        RepoWatchSingletonScope::PullRequest,
         Duration::ZERO,
-    )
+    )?)
 }
 
 fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     rule_with_actions_and_cooldown(
+        RepoWatchRuleVersion::V1,
         vec![RepoWatchRuleActionV1::DispatchSession {
             template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
         }],
@@ -207,6 +232,7 @@ fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 
 fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> {
     rule_with_actions_and_cooldown(
+        RepoWatchRuleVersion::V1,
         vec![RepoWatchRuleActionV1::DispatchSession {
             template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
         }],
@@ -217,6 +243,7 @@ fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> 
 fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::PullRequestMerged],
             ..RepoWatchMatcherV1Input::default()
@@ -232,6 +259,7 @@ fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 fn conflict_and_merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![
                 RepoWatchEventKindNameV1::MergeableStateChanged,
@@ -383,11 +411,13 @@ fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
     )
 }
 
-fn changed_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
-    matches!(
-        error,
-        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. }
-    )
+fn changed_rule_field(
+    error: &RepoWatchDispatchRepositoryError,
+) -> Option<RepoWatchRuleIdentityField> {
+    match error {
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { field, .. } => Some(*field),
+        _ => None,
+    }
 }
 
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
@@ -1529,16 +1559,133 @@ async fn startup_drain_processes_cutoff_after_repository_removal() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn active_rule_identity_rejects_in_place_content_changes() -> Result<(), Box<dyn Error>> {
+async fn active_rule_identity_names_the_matcher_field_changed_without_a_version_bump()
+-> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
-    let changed_rule = cooldown_rule()?;
+    let changed_rule = merged_event_rule()?;
     let error = fixture
         .store
         .reconcile_rules(&fixture.repository, std::slice::from_ref(&changed_rule))
         .await
         .expect_err("active rule semantics require a new identity");
 
-    assert!(changed_rule_identity(&error));
+    assert_eq!(
+        changed_rule_field(&error),
+        Some(RepoWatchRuleIdentityField::MatcherEventKinds)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unchanged_legacy_activation_gains_field_fingerprints() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         DISABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM repo_watch_rule_field_fingerprint
+          WHERE repository = $1 AND rule_id = $2 AND rule_version = $3",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         ENABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&fixture.rule))
+        .await?;
+
+    let fingerprint_bytes: Option<i32> = sqlx::query_scalar(
+        "SELECT octet_length(rule_field_digests)
+           FROM repo_watch_rule_field_fingerprint
+          WHERE repository = $1 AND rule_id = $2 AND rule_version = $3",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(fingerprint_bytes, Some(512));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn version_bump_retires_the_old_rule_and_activates_the_replacement_after_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    );
+    let replacement = rule_at_version(replacement_version)?;
+
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&replacement))
+        .await?;
+
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(replacement.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(revisions, [(1, true), (2, false)]);
+    assert_eq!(
+        fixture
+            .store
+            .load_next_event(&fixture.repository, replacement.id(), replacement.version())
+            .await?,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn fresh_rule_identity_still_replaces_an_active_rule() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_id = RepoWatchRuleId::try_new(FRESH_RULE.to_owned())?;
+    let replacement = rule_with_identity(replacement_id, RepoWatchRuleVersion::V1)?;
+
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&replacement))
+        .await?;
+
+    let active_rule: String = sqlx::query_scalar(
+        "SELECT activation.rule_id
+           FROM repo_watch_rule_activation AS activation
+          WHERE activation.repository = $1
+            AND NOT EXISTS (
+                SELECT 1 FROM repo_watch_rule_deactivation AS deactivation
+                 WHERE deactivation.repository = activation.repository
+                   AND deactivation.rule_id = activation.rule_id
+                   AND deactivation.rule_version = activation.rule_version
+            )",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(active_rule, replacement.id().as_str());
     Ok(())
 }
 

@@ -990,7 +990,8 @@ fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryW
         RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
             RepositoryWatchAttemptError::RetiredRuleIdentity
         }
-        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. } => {
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. }
+        | RepoWatchDispatchRepositoryError::UnfingerprintedChangedRuleIdentity { .. } => {
             RepositoryWatchAttemptError::ChangedRuleIdentity
         }
         _ => RepositoryWatchAttemptError::Persistence,
@@ -2940,7 +2941,7 @@ mod tests {
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
         RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepoWatchRuleId,
-        RepoWatchRuleVersion,
+        RepoWatchRuleIdentityField, RepoWatchRuleVersion,
     };
     use signalbox_model_runtime::CredentialReference;
     use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
@@ -4541,6 +4542,7 @@ mod tests {
         let error = rule_activation_error(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
             rule_id,
             rule_version: RepoWatchRuleVersion::V1,
+            field: RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf,
         });
 
         assert_eq!(error, RepositoryWatchAttemptError::ChangedRuleIdentity);

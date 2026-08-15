@@ -24,9 +24,10 @@ current-state delivery are verified against PR #812
 (`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
 against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, and terminal-target cutoff are also verified against this
-PR. The provider members the poller adopts as check-suite and check-run
-completion generations are verified against PR #541
-(`fix/check-run-updated-at`).
+PR. Safe rule revision admission and configuration diagnostics are verified
+against this PR (`agent/repo-watch-rule-robustness`). The provider members the
+poller adopts as check-suite and check-run completion generations are verified
+against PR #541 (`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
 
@@ -53,7 +54,10 @@ exist.
 Invalid rules, unknown fields, duplicate rule identities, unsupported versions,
 more than 128 rules, more than 32 actions per rule, non-whole-second cooldowns,
 or cooldowns beyond signed 64-bit seconds fail startup configuration before
-polling begins.
+polling begins. A rule revision is a positive integer within signed 64-bit
+range. Changing the revision does not select a different matcher grammar: the
+section and its rule shape remain version one, while the revision distinguishes
+successive semantics under one stable operator-assigned rule identity.
 
 **Implemented behavior.** Repository identities normalize to ASCII lowercase at
 construction. Both slug segments are nonempty ASCII letters, digits, dots,
@@ -557,12 +561,24 @@ absent section still starts no watch runtime or polling task. Configuration
 reconciliation and evaluation are serialized per repository: an evaluation
 already committed may replay, but an already-loaded event cannot create a
 dispatch after deactivation commits. Activation stores a digest of the complete
-versioned matcher, ordered action list, singleton scope, and cooldown; changing
-any of those semantics while retaining an active identity is a permanent
-configuration failure. A deactivated rule identity and version cannot be
-configured again; either kind of replacement uses a new identity so no events
-can be evaluated under semantics different from the activation that admitted
-them.
+versioned matcher, ordered action list, singleton scope, and cooldown, plus
+content-free fingerprints labeled with the exact configuration fields they
+represent. Changing any of those semantics while retaining the same rule ID and
+revision fails in the Configuration phase before either local socket binds. The
+diagnostic names the rule and changed field and directs the operator to
+increment `version`; it never first appears as a repository-task runtime death.
+An unchanged digest-only activation created before field fingerprints existed
+gains them during guarded startup; a deployment upgrades with its active rules
+unchanged, or uses a revision bump on that first upgraded boot.
+
+**Implemented behavior.** A higher revision under the same rule ID is a
+replacement. Reconciliation appends deactivation of the active old revision and
+activation of the configured new revision after the current event tail. The old
+activation, deactivation, evaluations, dispatches, and sessions remain joined by
+the same rule ID and their original revisions, while only later events are
+eligible for the replacement. A deactivated `(rule ID, revision)` pair cannot be
+configured again. A fresh rule ID remains an admitted replacement path, but a
+revision bump is the ordinary way to preserve stable identity and history.
 
 **Committed unimplemented functionality.** The structured-rule dispatch surface
 converges onto the program substrate by replacing each rule with a subscription

@@ -38,10 +38,13 @@ use signalbox_model_runtime_anthropic::{
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
-    conversation_import::backfill_imported_conversation_display_titles, migrate,
+    conversation_import::backfill_imported_conversation_display_titles,
+    migrate,
     model_execution::PostgresModelCallRepository,
-    repo_watch_dispatch::PostgresRepoWatchDispatchStore, scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
+    repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
+    scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
+    startup::PostgresStartupScanRepository,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
 use signalboxd::runner_protocol_runtime::{
@@ -457,6 +460,53 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
         "daemon startup construction failed"
     );
     error
+}
+
+fn repository_watch_rule_configuration_error(
+    error: &RepoWatchDispatchRepositoryError,
+) -> Option<HubModelConfigurationError> {
+    match error {
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
+            rule_id,
+            rule_version,
+            field,
+        } => Some(HubModelConfigurationError::InvalidRepositoryWatchRule {
+            rule: rule_id.as_str().to_owned(),
+            reason: format!(
+                "field `{}` differs from active version {}; increment field `version`",
+                field.configuration_path(),
+                rule_version.get()
+            ),
+        }),
+        RepoWatchDispatchRepositoryError::UnfingerprintedChangedRuleIdentity {
+            rule_id,
+            rule_version,
+        } => Some(HubModelConfigurationError::InvalidRepositoryWatchRule {
+            rule: rule_id.as_str().to_owned(),
+            reason: format!(
+                "field `version` must be incremented from {} because its legacy activation has no field fingerprints",
+                rule_version.get()
+            ),
+        }),
+        RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
+            rule_id,
+            rule_version,
+        } => Some(HubModelConfigurationError::InvalidRepositoryWatchRule {
+            rule: rule_id.as_str().to_owned(),
+            reason: format!(
+                "field `version` reuses retired value {}",
+                rule_version.get()
+            ),
+        }),
+        RepoWatchDispatchRepositoryError::Database(_)
+        | RepoWatchDispatchRepositoryError::CommitAmbiguous(_)
+        | RepoWatchDispatchRepositoryError::EventStore(_)
+        | RepoWatchDispatchRepositoryError::SessionCreation(_)
+        | RepoWatchDispatchRepositoryError::InitialInput(_)
+        | RepoWatchDispatchRepositoryError::GoalCommission(_)
+        | RepoWatchDispatchRepositoryError::GoalCutoff(_)
+        | RepoWatchDispatchRepositoryError::Corruption(_) => None,
+    }
 }
 
 /// Converts Anthropic construction evidence to a closed classification.
@@ -1348,6 +1398,54 @@ async fn run_hub(
         let _ = database.close().await;
         return Ok(ShutdownOutcome::GuardLost);
     }
+    let configured_repositories =
+        model_configuration
+            .repository_watch()
+            .map_or_else(Vec::new, |configuration| {
+                configuration
+                    .repositories()
+                    .iter()
+                    .map(|repository| repository.repository().clone())
+                    .collect()
+            });
+    let repository_watch_store = PostgresRepoWatchDispatchStore::new(
+        pool.clone(),
+        model_configuration.session_credential_pin(),
+    );
+    let repository_watch_rule_admission = async {
+        if let Some(configuration) = model_configuration.repository_watch() {
+            for repository in &configured_repositories {
+                repository_watch_store
+                    .reconcile_rules(repository, configuration.rules())
+                    .await?;
+            }
+        }
+        repository_watch_store
+            .deactivate_unconfigured_repositories(&configured_repositories)
+            .await
+    };
+    match await_while_guarded(&mut database, repository_watch_rule_admission).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(error)) => {
+            let configuration_error = repository_watch_rule_configuration_error(&error);
+            let failure = match configuration_error.as_ref() {
+                Some(error) => erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::ModelConfiguration(error),
+                ),
+                None => erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("repository_watch_rule_admission_failed"),
+                ),
+            };
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
     let blob_store_registry = match await_while_guarded(
         &mut database,
         BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()),
@@ -1440,24 +1538,7 @@ async fn run_hub(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
-    let configured_repositories =
-        model_configuration
-            .repository_watch()
-            .map_or_else(Vec::new, |configuration| {
-                configuration
-                    .repositories()
-                    .iter()
-                    .map(|repository| repository.repository().clone())
-                    .collect()
-            });
-    let repository_watch_store = PostgresRepoWatchDispatchStore::new(
-        pool.clone(),
-        model_configuration.session_credential_pin(),
-    );
     let repository_watch_reconciliation = async {
-        repository_watch_store
-            .deactivate_unconfigured_repositories(&configured_repositories)
-            .await?;
         repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
             .await
@@ -2010,7 +2091,10 @@ mod tests {
         ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, OperatorFailureClass,
         SchedulerLoop,
     };
-    use signalbox_domain::{SessionId, TurnId};
+    use signalbox_domain::{
+        RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, SessionId, TurnId,
+    };
+    use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
     use tokio::{sync::oneshot, task::JoinSet};
     use tracing_subscriber::prelude::*;
     use uuid::Uuid;
@@ -2028,8 +2112,8 @@ mod tests {
         credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
         erase_startup_cause, migrate_scan_then_schedule, openai_construction_cause,
         operator_filter, process_runtime_failure_class, report_database_close_failure,
-        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
-        staging_sweep_failure_outcome,
+        repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
+        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -2045,6 +2129,24 @@ mod tests {
             process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
             runner_socket_path: Some(OsString::from("/tmp/signalbox-runner.sock")),
         }
+    }
+
+    #[test]
+    fn changed_repository_watch_rule_diagnostic_names_the_rule_and_matcher_field() {
+        let error = RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
+            rule_id: RepoWatchRuleId::try_new(String::from("merge-forward-on-conflict"))
+                .expect("fixture rule identity is valid"),
+            rule_version: RepoWatchRuleVersion::V1,
+            field: RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf,
+        };
+
+        let configuration_error = repository_watch_rule_configuration_error(&error)
+            .expect("changed rule identity is a configuration error");
+
+        assert_eq!(
+            configuration_error.to_string(),
+            "model configuration contains invalid repository-watch rule `merge-forward-on-conflict`: field `matcher.mergeable_state.any_of` differs from active version 1; increment field `version`"
+        );
     }
 
     thread_local! {
