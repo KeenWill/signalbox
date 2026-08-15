@@ -129,6 +129,45 @@ async fn assert_no_instruction_evidence(
     Ok(())
 }
 
+async fn insert_candidate_inventory(
+    connection: &mut PgConnection,
+    discovery: Uuid,
+    bundle: Uuid,
+    source_bytes: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO instruction_discovery_root
+            (instruction_discovery_id, root_ordinal, root_kind, root_path)
+         VALUES ($1, 1, 'workspace', '/workspace')",
+    )
+    .bind(discovery)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO registered_instruction_bundle
+            (instruction_bundle_id, root_kind, root_path, source_path,
+             bundle_kind, source_byte_length, source_hash_algorithm, source_hash)
+         VALUES
+            ($1, 'workspace', '/workspace', '/workspace/AGENTS.md',
+             'agent_document', $2, 'sha256_v1', $3)",
+    )
+    .bind(bundle)
+    .bind(Decimal::from(source_bytes))
+    .bind(vec![0_u8; 32])
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery_candidate
+            (instruction_discovery_id, candidate_ordinal, instruction_bundle_id)
+         VALUES ($1, 1, $2)",
+    )
+    .bind(discovery)
+    .bind(bundle)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 /// INV-061: migration leaves queued work without synthetic instruction
 /// evidence so its eventual first call performs ordinary discovery.
 #[tokio::test(flavor = "multi_thread")]
@@ -534,6 +573,137 @@ async fn inv061_workspace_instruction_incomplete_discovery_requires_a_terminal_l
             .and_then(|database_error| database_error.constraint()),
         Some("instruction_discovery_completeness_exact")
     );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: an append-only manifest cannot bind an incomplete diagnostic scan.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_manifest_requires_a_complete_discovery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68d0).await?;
+    let discovery = Uuid::from_u128(0x68d7);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery_finding
+            (instruction_discovery_id, finding_ordinal, source_path, finding_kind)
+         VALUES ($1, 1, '/workspace', 'limit_elapsed_time')",
+    )
+    .bind(discovery)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 0, 1, 0, 1, false)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let error = sqlx::query(
+        "INSERT INTO turn_instruction_manifest
+            (turn_instruction_manifest_id, session_id, turn_id,
+             instruction_discovery_id, boundary_kind,
+             eligibility_hash_algorithm, eligibility_hash,
+             manifest_hash_algorithm, manifest_hash)
+         VALUES ($1, $2, $3, $4, 'turn_start',
+                 'sha256_v1', $5, 'sha256_v1', $5)",
+    )
+    .bind(Uuid::from_u128(0x68d8))
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(discovery)
+    .bind(vec![0_u8; 32])
+    .execute(&pool)
+    .await
+    .expect_err("an incomplete discovery cannot acquire a manifest");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("turn_instruction_manifest_discovery_complete")
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: candidate inventory cannot exceed the scan's classified entries.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_candidates_require_classified_entry_usage()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68e0).await?;
+    let discovery = Uuid::from_u128(0x68e7);
+    let mut transaction = pool.begin().await?;
+    insert_candidate_inventory(&mut transaction, discovery, Uuid::from_u128(0x68e8), 1).await?;
+    let error = sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 0, 0, 1, 0, true)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("one candidate cannot be sealed with zero classified entries");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("instruction_discovery_candidate_usage_within_consumed")
+    );
+    transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: candidate inventory cannot exceed charged candidate-source bytes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_candidates_require_source_byte_usage()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68f0).await?;
+    let discovery = Uuid::from_u128(0x68f7);
+    let mut transaction = pool.begin().await?;
+    insert_candidate_inventory(&mut transaction, discovery, Uuid::from_u128(0x68f8), 1).await?;
+    let error = sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 1, 0, 0, 0, true)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("one source byte cannot be sealed with zero charged bytes");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("instruction_discovery_candidate_usage_within_consumed")
+    );
+    transaction.rollback().await?;
     pool.close().await;
     drop(container);
     Ok(())
