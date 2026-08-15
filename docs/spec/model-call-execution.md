@@ -1059,18 +1059,9 @@ prints the semantic transcript; it is deliberately not the client protocol.
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.
-- **Committed unimplemented functionality.** An
-  [availability successor call](#availability-successor-calls) — the `successor`
-  ending of
-  [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
-  — is designed as durable evidence, but no present migration, repository
-  operation, or reconstitution path stores or recovers one, as
-  [persistence protocol](persistence-protocol.md) states under its
-  availability-successor storage contract, so predecessor lineage is not
-  presently recoverable. Once its implementing child lands that storage, the
-  chain will still be visible only after the fact: no client surface renders
-  that a successor is being selected. That transient visibility surface is
-  routed through
+- Availability-successor chains are visible only after the fact: no client
+  surface renders that a successor is being selected. That transient visibility
+  surface remains routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.

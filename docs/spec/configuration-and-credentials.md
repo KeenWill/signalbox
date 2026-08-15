@@ -1016,10 +1016,10 @@ there. Claude CLI's `file` pair is in the set because this branch lands that
 adapter's contract, which [the `file` delivery](#the-file-delivery) routes.
 Admission is not delivery: of the pairs above, this build supplies a surface for
 Anthropic and OpenAI `file`, Claude CLI `ambient` and `file`, and Codex CLI
-`ambient` and `codex_home`, and validates then refuses the rest as undelivered.
-OpenAI admits the reasoning levels `none` through `max` — `ultra` is the Codex
-effort value and is rejected — and the provider-tagged tiers `auto`, `default`,
-`flex`, `scale`, `priority`, and `fast`.
+`ambient`, and validates then refuses the rest as undelivered. OpenAI admits the
+reasoning levels `none` through `max` — `ultra` is the Codex effort value and is
+rejected — and the provider-tagged tiers `auto`, `default`, `flex`, `scale`,
+`priority`, and `fast`.
 
 A Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
@@ -1137,9 +1137,9 @@ below. A field owned by another variant is unknown and rejected.
 
 Admitting a pair and supplying a surface for it stay separate questions, and
 this build answers them differently: `ambient` is delivered for both CLI
-adapters, `file` for `anthropic`, `openai`, and `claude_cli`, and `codex_home`
-for `codex_cli`. The `codex_cli` spellings of `file` and `oauth` are admitted by
-their sections and then rejected as `UndeliveredCredentialDelivery`
+adapters, and `file` for `anthropic`, `openai`, and `claude_cli`. The
+`codex_cli` spellings of `file`, `codex_home`, and `oauth` are admitted by their
+sections and then rejected as `UndeliveredCredentialDelivery`
 (`apps/signalboxd/src/credential_pools.rs:214`), so such a document fails
 startup rather than running with an inert setting. Their contracts are stated
 under
@@ -1307,10 +1307,10 @@ unchanged.
 
 ### Credential-home and reserved deliveries
 
-This build delivers `codex_home`. `oauth` and `codex_cli` `file` remain
-committed unimplemented functionality: parsing validates their fields and then
+**Committed unimplemented functionality.** Codex CLI `codex_home`, `oauth`, and
+`file` have no present delivery surface: parsing validates their fields and then
 rejects the profile. The agreement between a delivery and its `billing_kind` is
-enforced for every spelling, including reserved ones, as
+enforced for every spelling, including these reserved ones, as
 [the credential catalog](#the-static-model-alias-and-web-fetch-catalog) states.
 
 #### The `codex_home` delivery
