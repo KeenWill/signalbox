@@ -514,7 +514,8 @@ impl InstructionBundleRegistration {
                 source.file_name().is_some_and(|name| name == "SKILL.md")
                     && (nested_skill || configured_root_skill)
             }
-            _ => false,
+            (InstructionBundleKind::AgentDocument, Some(_))
+            | (InstructionBundleKind::AgentSkill, None) => false,
         };
         let below_root = source_path.root_path == root_path;
         (shape_matches && below_root).then_some(Self {
