@@ -842,9 +842,9 @@ fn read_directory(
                     entry_limit_exceeded = true;
                     break;
                 }
-                observations += 1;
                 read_errors += 1;
                 classified.fetch_add(1, Ordering::Relaxed);
+                break;
             }
         }
     }
@@ -1222,7 +1222,7 @@ fn open_directory_no_follow_before_deadline(
         MAX_FILESYSTEM_WORKERS,
         deadline,
         "signalbox-instruction-directory-open",
-        move || open_directory_no_follow(&source, || true),
+        move || open_directory_no_follow(&source, || Instant::now() < deadline),
     )
 }
 
@@ -1260,7 +1260,7 @@ fn open_directory_beneath_before_deadline(
         MAX_FILESYSTEM_WORKERS,
         deadline,
         "signalbox-instruction-directory-open",
-        move || open_directory_beneath(&root, &relative, || true),
+        move || open_directory_beneath(&root, &relative, || Instant::now() < deadline),
     )
 }
 
@@ -1482,15 +1482,10 @@ impl<T> OptionalFrontmatterField<T> {
 }
 
 fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
-    let (body, closing, closing_at_eof) = if let Some(body) = text.strip_prefix("---\n") {
-        (body, "\n---\n", "\n---")
-    } else {
-        (text.strip_prefix("---\r\n")?, "\r\n---\r\n", "\r\n---")
-    };
-    let boundary = body.find(closing).or_else(|| {
-        body.strip_suffix(closing_at_eof)
-            .map(|frontmatter| frontmatter.len())
-    })?;
+    let body = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
+    let boundary = frontmatter_boundary(body)?;
     let parsed: PortableSkillFrontmatter = serde_yaml_ng::from_str(&body[..boundary]).ok()?;
     if parsed
         .compatibility
@@ -1507,6 +1502,25 @@ fn parse_skill(text: &str, parent: &str) -> Option<InstructionSkillMetadata> {
         parent_directory: parent.to_owned(),
     })
     .ok()
+}
+
+fn frontmatter_boundary(body: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    body.match_indices("---").find_map(|(index, _)| {
+        let starts_line = index == 0 || bytes[index - 1] == b'\n';
+        let remainder = &body[index + 3..];
+        let ends_line =
+            remainder.is_empty() || remainder.starts_with('\n') || remainder.starts_with("\r\n");
+        (starts_line && ends_line).then(|| {
+            if index > 1 && bytes[index - 2..index] == *b"\r\n" {
+                index - 2
+            } else if index > 0 && bytes[index - 1] == b'\n' {
+                index - 1
+            } else {
+                index
+            }
+        })
+    })
 }
 
 #[cfg(test)]
@@ -2224,6 +2238,30 @@ mod tests {
 
         assert_eq!(skill.name(), expected_name);
         assert_eq!(skill.description(), expected_description);
+    }
+
+    #[test]
+    fn mixed_line_endings_around_portable_skill_frontmatter_are_accepted() {
+        let expected_name = "review-rust";
+        let expected_crlf_open_description = "Review CRLF opener.";
+        let expected_lf_open_description = "Review LF opener.";
+        let crlf_open_source = format!(
+            "---\r\nname: {expected_name}\ndescription: {expected_crlf_open_description}\n---\nsteps\n"
+        );
+        let lf_open_source = format!(
+            "---\nname: {expected_name}\r\ndescription: {expected_lf_open_description}\r\n---\r\nsteps\r\n"
+        );
+
+        let crlf_open_skill = parse_skill(&crlf_open_source, expected_name)
+            .expect("CRLF opener and LF closer are portable");
+        let lf_open_skill = parse_skill(&lf_open_source, expected_name)
+            .expect("LF opener and CRLF closer are portable");
+
+        assert_eq!(
+            crlf_open_skill.description(),
+            expected_crlf_open_description
+        );
+        assert_eq!(lf_open_skill.description(), expected_lf_open_description);
     }
 
     #[test]
