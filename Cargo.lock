@@ -3162,6 +3162,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-approval-judge-eval"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "signalbox-domain",
+ "signalbox-model-provider-runtime",
+ "signalbox-model-runtime",
+ "signalboxd",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-blob-store"
 version = "0.0.0"
 dependencies = [
