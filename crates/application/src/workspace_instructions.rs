@@ -1,7 +1,7 @@
 //! Deterministic filesystem discovery and registration validation.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::PathBuf,
     rc::Rc,
     time::{Duration, Instant},
@@ -13,6 +13,7 @@ use std::{
     fs,
     io::{self, Read},
     os::{fd::OwnedFd, unix::ffi::OsStrExt},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Condvar, LazyLock, Mutex, mpsc},
     thread::JoinHandle,
 };
@@ -190,7 +191,7 @@ struct ClassifiedDirectoryEntry {
 
 #[cfg(unix)]
 struct PendingDirectory {
-    parent: Rc<PathBuf>,
+    parent: Option<Rc<PendingDirectory>>,
     name: Option<OsString>,
 }
 
@@ -204,8 +205,15 @@ struct DirectoryRead {
 #[cfg(unix)]
 #[derive(Default)]
 struct FilesystemWorkerRegistry {
-    workers: Mutex<Vec<JoinHandle<()>>>,
+    state: Mutex<FilesystemWorkerState>,
     available: Condvar,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct FilesystemWorkerState {
+    workers: Vec<JoinHandle<()>>,
+    running: usize,
 }
 
 #[cfg(unix)]
@@ -213,6 +221,36 @@ struct FilesystemWorkerRegistry {
 enum FilesystemTaskError {
     Deadline,
     Unavailable,
+}
+
+#[cfg(unix)]
+struct FilesystemWorkerCompletion {
+    registry: Arc<FilesystemWorkerRegistry>,
+}
+
+#[cfg(unix)]
+struct CountingReader<Source> {
+    source: Source,
+    observed: Arc<AtomicU64>,
+}
+
+#[cfg(unix)]
+impl<Source: Read> Read for CountingReader<Source> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.source.read(buffer)?;
+        self.observed.fetch_add(read as u64, Ordering::Relaxed);
+        Ok(read)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FilesystemWorkerCompletion {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.registry.state.lock() {
+            state.running = state.running.saturating_sub(1);
+            self.registry.available.notify_one();
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -301,16 +339,14 @@ fn walk_root(
         }
     };
     let mut pending = vec![PendingDirectory {
-        parent: Rc::new(PathBuf::new()),
+        parent: None,
         name: None,
     }];
     while let Some(pending_directory) = pending.pop() {
         let is_root = pending_directory.name.is_none();
-        let relative_directory = Rc::new(match pending_directory.name {
-            Some(name) => pending_directory.parent.join(name),
-            None => PathBuf::new(),
-        });
-        let directory = root_path.join(relative_directory.as_path());
+        let current_directory = Rc::new(pending_directory);
+        let relative_directory = pending_directory_path(&current_directory);
+        let directory = root_path.join(&relative_directory);
         if !check_elapsed(root.path(), findings, state) {
             return false;
         }
@@ -424,13 +460,27 @@ fn walk_root(
             }
             if classified_entry.file_type == rustix::fs::FileType::Directory {
                 pending.push(PendingDirectory {
-                    parent: Rc::clone(&relative_directory),
+                    parent: Some(Rc::clone(&current_directory)),
                     name: Some(classified_entry.name),
                 });
             }
         }
     }
     true
+}
+
+#[cfg(unix)]
+fn pending_directory_path(directory: &PendingDirectory) -> PathBuf {
+    let mut names = Vec::new();
+    let mut current = Some(directory);
+    while let Some(component) = current {
+        if let Some(name) = &component.name {
+            names.push(name);
+        }
+        current = component.parent.as_deref();
+    }
+    names.reverse();
+    names.into_iter().collect()
 }
 
 #[cfg(not(unix))]
@@ -682,21 +732,21 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
     worker_name: &'static str,
     task: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, FilesystemTaskError> {
-    let mut workers = registry
-        .workers
+    let mut state = registry
+        .state
         .lock()
         .map_err(|_| FilesystemTaskError::Unavailable)?;
     loop {
         let mut index = 0;
-        while index < workers.len() {
-            if workers[index].is_finished() {
-                let worker = workers.swap_remove(index);
+        while index < state.workers.len() {
+            if state.workers[index].is_finished() {
+                let worker = state.workers.swap_remove(index);
                 let _joined = worker.join();
             } else {
                 index += 1;
             }
         }
-        if workers.len() < max_workers {
+        if state.running < max_workers {
             break;
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -704,9 +754,9 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
         };
         let waited = registry
             .available
-            .wait_timeout(workers, remaining)
+            .wait_timeout(state, remaining)
             .map_err(|_| FilesystemTaskError::Unavailable)?;
-        workers = waited.0;
+        state = waited.0;
         if waited.1.timed_out() && Instant::now() >= deadline {
             return Err(FilesystemTaskError::Deadline);
         }
@@ -714,16 +764,22 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
 
     let (sender, receiver) = mpsc::sync_channel(1);
     let worker_registry = Arc::clone(&registry);
+    state.running += 1;
     let worker = std::thread::Builder::new()
         .name(String::from(worker_name))
         .spawn(move || {
+            let _completion = FilesystemWorkerCompletion {
+                registry: worker_registry,
+            };
             let result = task();
             let _sent = sender.send(result);
-            worker_registry.available.notify_one();
         })
-        .map_err(|_| FilesystemTaskError::Unavailable)?;
-    workers.push(worker);
-    drop(workers);
+        .map_err(|_| {
+            state.running = state.running.saturating_sub(1);
+            FilesystemTaskError::Unavailable
+        })?;
+    state.workers.push(worker);
+    drop(state);
 
     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
         return Err(FilesystemTaskError::Deadline);
@@ -772,6 +828,8 @@ fn read_candidate_before_deadline(
         .candidate_source_bytes
         .saturating_sub(state.candidate_source_bytes);
     let deadline = state.started + state.limits.elapsed;
+    let observed = Arc::new(AtomicU64::new(0));
+    let worker_observed = Arc::clone(&observed);
     let read_result = run_bounded_filesystem_task(
         Arc::clone(&FILESYSTEM_WORKERS),
         MAX_FILESYSTEM_WORKERS,
@@ -779,9 +837,12 @@ fn read_candidate_before_deadline(
         "signalbox-instruction-read",
         move || {
             let mut bytes = Vec::new();
-            let result = source_file
-                .take(remaining_bytes.saturating_add(1))
-                .read_to_end(&mut bytes);
+            let result = CountingReader {
+                source: source_file,
+                observed: worker_observed,
+            }
+            .take(remaining_bytes.saturating_add(1))
+            .read_to_end(&mut bytes);
             (bytes, result)
         },
     );
@@ -795,12 +856,15 @@ fn read_candidate_before_deadline(
             state,
             remaining_bytes,
         ),
-        Err(FilesystemTaskError::Deadline) => Err(reach_limit(
-            path_for_finding(source, fallback),
-            InstructionDiscoveryLimitKind::ElapsedTime,
-            findings,
-            state,
-        )),
+        Err(FilesystemTaskError::Deadline) => {
+            state.candidate_source_bytes += observed.load(Ordering::Relaxed).min(remaining_bytes);
+            Err(reach_limit(
+                path_for_finding(source, fallback),
+                InstructionDiscoveryLimitKind::ElapsedTime,
+                findings,
+                state,
+            ))
+        }
         Err(FilesystemTaskError::Unavailable) => Err(push_path_finding(
             source,
             fallback,
@@ -1065,7 +1129,7 @@ struct PortableSkillFrontmatter {
     #[serde(default)]
     compatibility: OptionalFrontmatterField<String>,
     #[serde(default)]
-    metadata: OptionalFrontmatterField<BTreeMap<String, String>>,
+    metadata: OptionalFrontmatterField<DiscardStringMap>,
     #[serde(default, rename = "allowed-tools")]
     allowed_tools: OptionalFrontmatterField<String>,
 }
@@ -1077,6 +1141,72 @@ enum OptionalFrontmatterField<T> {
     Present(T),
 }
 
+struct DiscardStringMap;
+
+impl<'de> Deserialize<'de> for DiscardStringMap {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(DiscardStringMapVisitor)
+    }
+}
+
+struct DiscardStringMapVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DiscardStringMapVisitor {
+    type Value = DiscardStringMap;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a string-to-string metadata mapping")
+    }
+
+    fn visit_map<Mapping>(self, mut mapping: Mapping) -> Result<Self::Value, Mapping::Error>
+    where
+        Mapping: serde::de::MapAccess<'de>,
+    {
+        while mapping.next_entry::<String, String>()?.is_some() {}
+        Ok(DiscardStringMap)
+    }
+}
+
+struct OptionalFrontmatterFieldVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T> serde::de::Visitor<'de> for OptionalFrontmatterFieldVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = OptionalFrontmatterField<T>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a non-null optional skill field")
+    }
+
+    fn visit_none<Error>(self) -> Result<Self::Value, Error>
+    where
+        Error: serde::de::Error,
+    {
+        Err(Error::custom("an optional skill field cannot be null"))
+    }
+
+    fn visit_unit<Error>(self) -> Result<Self::Value, Error>
+    where
+        Error: serde::de::Error,
+    {
+        self.visit_none()
+    }
+
+    fn visit_some<Deserializer>(
+        self,
+        deserializer: Deserializer,
+    ) -> Result<Self::Value, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(OptionalFrontmatterField::Present)
+    }
+}
+
 impl<'de, T> Deserialize<'de> for OptionalFrontmatterField<T>
 where
     T: Deserialize<'de>,
@@ -1085,15 +1215,7 @@ where
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
-        if matches!(value, serde_yaml_ng::Value::Null) {
-            return Err(serde::de::Error::custom(
-                "an optional skill field cannot be null",
-            ));
-        }
-        T::deserialize(value)
-            .map(Self::Present)
-            .map_err(serde::de::Error::custom)
+        deserializer.deserialize_option(OptionalFrontmatterFieldVisitor(std::marker::PhantomData))
     }
 }
 
@@ -1141,6 +1263,12 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct BytesThenBlock {
+        bytes: Option<Vec<u8>>,
+        blocker: std::os::unix::net::UnixStream,
+    }
+
+    #[cfg(unix)]
     impl Read for BytesThenError {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             let Some(bytes) = self.bytes.take() else {
@@ -1148,6 +1276,17 @@ mod tests {
             };
             buffer[..bytes.len()].copy_from_slice(&bytes);
             Ok(bytes.len())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Read for BytesThenBlock {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if let Some(bytes) = self.bytes.take() {
+                buffer[..bytes.len()].copy_from_slice(&bytes);
+                return Ok(bytes.len());
+            }
+            self.blocker.read(buffer)
         }
     }
 
@@ -1353,12 +1492,15 @@ mod tests {
         fs::write(temporary.path().join("AGENTS.md"), "too large")
             .expect("agent document is written");
         let root = workspace_root(&temporary);
+        let limits = test_limits(4, 4, 1, Duration::from_secs(1));
 
-        let snapshot =
-            discover_with_limits(vec![root], test_limits(4, 4, 1, Duration::from_secs(1)));
+        let snapshot = discover_with_limits(vec![root], limits);
 
         assert!(!snapshot.is_complete());
-        assert_eq!(snapshot.candidate_source_bytes(), 1);
+        assert_eq!(
+            snapshot.candidate_source_bytes(),
+            limits.candidate_source_bytes
+        );
         assert!(snapshot.bundles().is_empty());
         assert_eq!(
             snapshot.findings()[0].kind(),
@@ -1374,17 +1516,30 @@ mod tests {
         use std::os::unix::net::UnixStream;
 
         let (reader, writer) = UnixStream::pair().expect("fixture stream pair opens");
+        let partial = b"read before timeout".to_vec();
         let source = PathBuf::from("/workspace/AGENTS.md");
         let fallback = InstructionPath::try_new(String::from("/workspace"))
             .expect("fixture fallback is valid");
         let mut findings = Vec::new();
         let mut state = test_state(test_limits(4, 4, 64, Duration::from_millis(5)));
 
-        let result =
-            read_candidate_before_deadline(reader, &source, &fallback, &mut findings, &mut state);
+        let result = read_candidate_before_deadline(
+            BytesThenBlock {
+                bytes: Some(partial.clone()),
+                blocker: reader,
+            },
+            &source,
+            &fallback,
+            &mut findings,
+            &mut state,
+        );
 
         assert!(result.is_err());
         assert!(!state.complete);
+        assert_eq!(
+            state.candidate_source_bytes,
+            u64::try_from(partial.len()).expect("fixture byte length fits u64")
+        );
         assert_eq!(findings.len(), 1);
         assert_eq!(
             findings[0].kind(),
@@ -1414,7 +1569,12 @@ mod tests {
                 std::io::BufReader::new(first_reader).read_to_end(&mut bytes)
             },
         );
-        let first_worker_count = registry.workers.lock().expect("registry is readable").len();
+        let first_worker_count = registry
+            .state
+            .lock()
+            .expect("registry is readable")
+            .workers
+            .len();
         let second = run_bounded_filesystem_task(
             Arc::clone(&registry),
             1,
@@ -1425,7 +1585,12 @@ mod tests {
                 std::io::BufReader::new(second_reader).read_to_end(&mut bytes)
             },
         );
-        let second_worker_count = registry.workers.lock().expect("registry is readable").len();
+        let second_worker_count = registry
+            .state
+            .lock()
+            .expect("registry is readable")
+            .workers
+            .len();
 
         assert_eq!(first.err(), Some(FilesystemTaskError::Deadline));
         assert_eq!(first_worker_count, 1);
@@ -1452,17 +1617,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pending_siblings_share_their_parent_path() {
-        let parent = Rc::new(PathBuf::from("nested/parent"));
+        let parent = Rc::new(PendingDirectory {
+            parent: None,
+            name: Some(OsString::from("parent")),
+        });
         let left = PendingDirectory {
-            parent: Rc::clone(&parent),
+            parent: Some(Rc::clone(&parent)),
             name: Some(OsString::from("left")),
         };
         let right = PendingDirectory {
-            parent: Rc::clone(&parent),
+            parent: Some(Rc::clone(&parent)),
             name: Some(OsString::from("right")),
         };
 
-        assert!(Rc::ptr_eq(&left.parent, &right.parent));
+        assert!(Rc::ptr_eq(
+            left.parent.as_ref().expect("left shares its parent"),
+            right.parent.as_ref().expect("right shares its parent")
+        ));
+        assert_eq!(pending_directory_path(&left), PathBuf::from("parent/left"));
+        assert_eq!(
+            pending_directory_path(&right),
+            PathBuf::from("parent/right")
+        );
         assert_eq!(left.name.as_deref(), Some(OsStr::new("left")));
         assert_eq!(right.name.as_deref(), Some(OsStr::new("right")));
     }
@@ -1623,6 +1799,16 @@ mod tests {
         assert!(parse_skill(compatibility, "review-rust").is_none());
         assert!(parse_skill(metadata, "review-rust").is_none());
         assert!(parse_skill(allowed_tools, "review-rust").is_none());
+    }
+
+    #[test]
+    fn portable_skill_metadata_validates_without_becoming_retained_metadata() {
+        let source = "---\nname: review-rust\ndescription: Review.\nmetadata:\n  alpha: one\n  beta: two\n---\n";
+
+        let skill = parse_skill(source, "review-rust").expect("string metadata is portable");
+
+        assert_eq!(skill.name(), "review-rust");
+        assert_eq!(skill.description(), "Review.");
     }
 
     #[cfg(unix)]
