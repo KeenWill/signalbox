@@ -23,7 +23,7 @@ use signalbox_persistence::runner_protocol::{
     RunnerConnectionState, RunnerConnectionTransition, RunnerConnectionTransitionEffect,
     RunnerConnectionTransitionOutcome, RunnerEnrollmentAuthority, RunnerEnrollmentDisposition,
     RunnerEnrollmentRequestFailure, RunnerProtocolStore, RunnerProtocolStoreError,
-    RunnerRegistrationRevision,
+    RunnerRegistrationRevision, StoredRunnerWorkspaceRelease,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Directive, DirectiveAction,
@@ -33,7 +33,8 @@ use signalbox_runner_wire::{
     Registered, Rejected, RejectionCode, ReleaseCorrelation, ReleasePhase, ReplacementPending,
     ResultFrame, Resume, Resumed, SandboxProfile, Shutdown, ShutdownReason,
     WorkspaceFailureCorrelation, WorkspaceOperation, WorkspaceReady, WorkspaceRecorded,
-    WorkspaceReleaseRecorded, WorkspaceReleased, advertisement_digest, decode_line, encode_line,
+    WorkspaceRelease, WorkspaceReleaseRecorded, WorkspaceReleased, advertisement_digest,
+    decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -341,11 +342,12 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome>;
 }
 
-/// Durable resume receipt plus any canonical claimed lease to replay.
+/// Durable resume receipt plus any canonical claimed lease or release to replay.
 #[derive(Debug)]
 pub struct RunnerResumeAccepted {
     response: Resumed,
     claimed_lease: Option<RunnerLease>,
+    workspace_release: Option<ReleaseCorrelation>,
 }
 
 impl RunnerResumeAccepted {
@@ -354,7 +356,13 @@ impl RunnerResumeAccepted {
         Self {
             response,
             claimed_lease,
+            workspace_release: None,
         }
+    }
+
+    fn with_workspace_release(mut self, correlation: Option<ReleaseCorrelation>) -> Self {
+        self.workspace_release = correlation;
+        self
     }
 
     /// Returns the opened physical connection epoch.
@@ -367,9 +375,9 @@ impl RunnerResumeAccepted {
         self.response.registration_revision
     }
 
-    /// Separates the wire receipt from its optional claimed-lease replay.
-    pub fn into_parts(self) -> (Resumed, Option<RunnerLease>) {
-        (self.response, self.claimed_lease)
+    /// Separates the wire receipt from its optional lease and release replays.
+    pub fn into_parts(self) -> (Resumed, Option<RunnerLease>, Option<ReleaseCorrelation>) {
+        (self.response, self.claimed_lease, self.workspace_release)
     }
 }
 
@@ -661,7 +669,7 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
-        let (directives, claimed_correlation) = match resume_operation {
+        let (directives, claimed_correlation, pending_workspace_release) = match resume_operation {
             ResumeOperation::RetainedResult(result) => {
                 let result = RunnerDispatchWireAdapter::result_request(result).map_err(|_| {
                     RunnerRegistrationFailure::new(
@@ -701,6 +709,7 @@ impl PostgresRunnerRegistrationService {
                             code,
                         )
                     })?,
+                    None,
                     None,
                 )
             }
@@ -748,6 +757,7 @@ impl PostgresRunnerRegistrationService {
                         )
                     })?,
                     (action == DirectiveAction::Await).then_some(claimed),
+                    None,
                 )
             }
             ResumeOperation::ReadyWorkspace(workspace_correlation) => {
@@ -765,30 +775,36 @@ impl PostgresRunnerRegistrationService {
                         )
                     })?,
                     None,
+                    None,
                 )
             }
             ResumeOperation::WorkspaceRelease {
                 correlation: release_correlation,
                 phase,
             } => {
-                let action = self
+                let decision = self
                     .workspace_release_resume_action(&release_correlation, phase, identities)
                     .await
                     .map_err(|error| {
                         store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
                     })?;
                 (
-                    workspace_release_directives(&request.inventory, action).map_err(|code| {
-                        RunnerRegistrationFailure::new(
-                            RunnerInboundFrameKind::Resume,
-                            correlation.clone(),
-                            code,
-                        )
-                    })?,
+                    workspace_release_directives(&request.inventory, decision.action).map_err(
+                        |code| {
+                            RunnerRegistrationFailure::new(
+                                RunnerInboundFrameKind::Resume,
+                                correlation.clone(),
+                                code,
+                            )
+                        },
+                    )?,
                     None,
+                    decision
+                        .pending
+                        .map(|pending| (release_correlation, pending)),
                 )
             }
-            ResumeOperation::Empty => (ReconnectDirectives::default(), None),
+            ResumeOperation::Empty => (ReconnectDirectives::default(), None, None),
         };
         let previous_registration_revision = match self
             .store
@@ -870,7 +886,32 @@ impl PostgresRunnerRegistrationService {
             ),
             None => None,
         };
-        Ok(RunnerResumeAccepted::new(response, claimed_lease))
+        let workspace_release = match pending_workspace_release {
+            Some((correlation, pending)) => {
+                let current = self
+                    .store
+                    .load_workspace_release(pending.session(), pending.placement_revision())
+                    .await
+                    .map_err(|error| {
+                        store_failure(
+                            RunnerInboundFrameKind::Resume,
+                            AvailableCorrelation::Release(correlation.clone()),
+                            error,
+                        )
+                    })?;
+                if current != Some(pending) {
+                    return Err(RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        AvailableCorrelation::Release(correlation),
+                        RejectionCode::CorrelationMismatch,
+                    ));
+                }
+                Some(correlation)
+            }
+            None => None,
+        };
+        Ok(RunnerResumeAccepted::new(response, claimed_lease)
+            .with_workspace_release(workspace_release))
     }
 
     async fn workspace_release_resume_action(
@@ -878,7 +919,7 @@ impl PostgresRunnerRegistrationService {
         correlation: &ReleaseCorrelation,
         phase: ReleasePhase,
         identities: IssuedRunnerEnrollmentIdentities,
-    ) -> Result<DirectiveAction, RunnerProtocolStoreError> {
+    ) -> Result<WorkspaceReleaseResumeDecision, RunnerProtocolStoreError> {
         let session = SessionId::from_uuid(correlation.session_id.into_uuid());
         let placement_revision =
             RunnerGeneration::try_from_u64(correlation.placement_revision.get()).ok_or(
@@ -887,7 +928,10 @@ impl PostgresRunnerRegistrationService {
         let runner = RunnerId::from_uuid(correlation.runner_id.into_uuid());
         let manifest = WorkspaceManifestId::from_uuid(correlation.manifest_id.into_uuid());
         if runner != identities.runner() {
-            return Ok(DirectiveAction::FailStale);
+            return Ok(WorkspaceReleaseResumeDecision::new(
+                DirectiveAction::FailStale,
+                None,
+            ));
         }
         if let Some(release) = self
             .store
@@ -897,7 +941,9 @@ impl PostgresRunnerRegistrationService {
             let is_exact = release.runner() == runner
                 && release.manifest_id() == manifest
                 && release.enrollment() == identities.enrollment();
-            return Ok(workspace_release_pending_action(phase, is_exact));
+            let action = workspace_release_pending_action(phase, is_exact);
+            let pending = (action == DirectiveAction::Await).then_some(release);
+            return Ok(WorkspaceReleaseResumeDecision::new(action, pending));
         }
         let recorded = self
             .store
@@ -906,7 +952,10 @@ impl PostgresRunnerRegistrationService {
         let is_exact = recorded.is_some_and(|recorded| {
             recorded.runner() == runner && recorded.manifest_id() == manifest
         });
-        Ok(workspace_release_recorded_action(phase, is_exact))
+        Ok(WorkspaceReleaseResumeDecision::new(
+            workspace_release_recorded_action(phase, is_exact),
+            None,
+        ))
     }
 
     async fn advertise_durably(
@@ -1179,6 +1228,18 @@ enum ResumeOperation {
         correlation: ReleaseCorrelation,
         phase: ReleasePhase,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkspaceReleaseResumeDecision {
+    action: DirectiveAction,
+    pending: Option<StoredRunnerWorkspaceRelease>,
+}
+
+impl WorkspaceReleaseResumeDecision {
+    const fn new(action: DirectiveAction, pending: Option<StoredRunnerWorkspaceRelease>) -> Self {
+        Self { action, pending }
+    }
 }
 
 fn classify_resume_inventory(
@@ -2337,7 +2398,7 @@ where
                     let attachment = broker
                         .attach(connection_address(context)?)
                         .map_err(RunnerProtocolRuntimeError::Broker)?;
-                    let (response, claimed_lease) = accepted.into_parts();
+                    let (response, claimed_lease, workspace_release) = accepted.into_parts();
                     if let Err(error) =
                         write_message(&mut writer, Message::Resumed(Box::new(response))).await
                     {
@@ -2372,6 +2433,22 @@ where
                             return Ok(());
                         }
                         write_message(&mut writer, dispatch).await?;
+                    }
+                    if let Some(correlation) = workspace_release {
+                        if !transition_is_current(
+                            &service,
+                            context,
+                            RunnerConnectionTransition::Observe,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                        write_message(
+                            &mut writer,
+                            Message::WorkspaceRelease(WorkspaceRelease { correlation }),
+                        )
+                        .await?;
                     }
                     (context, attachment)
                 }
@@ -3779,6 +3856,28 @@ mod tests {
             }),
             ..ReconnectInventory::default()
         }
+    }
+
+    /// INV-024: accepted resume evidence retains the exact pending release
+    /// correlation selected for post-receipt redelivery.
+    #[test]
+    fn inv024_resume_receipt_retains_the_exact_pending_workspace_release() {
+        let response = Resumed {
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
+            connection_epoch: PositiveU64::try_new(2)
+                .expect("the fixture connection epoch is positive"),
+            directives: ReconnectDirectives::default(),
+        };
+        let correlation = workspace_released().correlation;
+
+        let accepted = RunnerResumeAccepted::new(response.clone(), None)
+            .with_workspace_release(Some(correlation.clone()));
+        let (observed_response, observed_lease, observed_release) = accepted.into_parts();
+
+        assert_eq!(observed_response, response);
+        assert_eq!(observed_lease, None);
+        assert_eq!(observed_release, Some(correlation));
     }
 
     #[test]
