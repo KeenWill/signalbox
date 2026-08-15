@@ -690,18 +690,18 @@ impl PostgresRepoWatchStore {
                 "SELECT EXISTS (
                     SELECT 1
                       FROM (
-                            SELECT base_branch, base_revision, mergeable_state,
+                            SELECT head_sha, base_branch, base_revision, mergeable_state,
                                    review_decision, unresolved_threads,
                                    gating_check_count, non_green_gating_checks,
                                    verdict_kind
                               FROM repo_watch_pull_request_convergence_assessment
                              WHERE repository = $1
                                AND pull_request_number = $2
-                               AND head_sha = $3
                              ORDER BY recorded_at DESC, assessment_id DESC
                              LIMIT 1
                            ) AS current
-                     WHERE current.base_revision = $4
+                     WHERE current.head_sha = $3
+                       AND current.base_revision = $4
                        AND current.base_branch = $5
                        AND current.mergeable_state = $6
                        AND current.review_decision = $7
@@ -857,6 +857,8 @@ impl PostgresRepoWatchStore {
             let stored = sqlx::query_as::<_, PlannedClearanceRow>(
                 "SELECT clearance.clearance_id,
                         clearance.dismissal_message,
+                        clearance.reviewer,
+                        clearance.reviewed_head_sha,
                         CASE WHEN result.clearance_id IS NULL
                              THEN 'pending' ELSE 'completed'
                         END AS completion_state
@@ -868,9 +870,7 @@ impl PostgresRepoWatchStore {
                     AND clearance.repository = $3
                     AND clearance.pull_request_number = $4
                     AND clearance.current_head_sha = $5
-                    AND clearance.base_revision = $6
-                    AND clearance.reviewer = $7
-                    AND clearance.reviewed_head_sha = $8",
+                    AND clearance.base_revision = $6",
             )
             .bind(assessment.assessment_id)
             .bind(candidate.review_node_id())
@@ -878,8 +878,6 @@ impl PostgresRepoWatchStore {
             .bind(Decimal::from(candidate.number().get()))
             .bind(candidate.current_head_sha().as_str())
             .bind(&assessment.base_revision)
-            .bind(candidate.reviewer().as_str())
-            .bind(candidate.reviewed_head_sha().as_str())
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(RepoWatchStoreError::StaleReviewClearanceMismatch)?;
@@ -912,8 +910,10 @@ impl PostgresRepoWatchStore {
                 base_revision: CommitSha::try_new(assessment.base_revision.clone())
                     .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?,
                 review_node_id: candidate.review_node_id().into(),
-                reviewer: candidate.reviewer().clone(),
-                reviewed_head_sha: candidate.reviewed_head_sha().clone(),
+                reviewer: RepoWatchAuthorLogin::try_new(stored.reviewer)
+                    .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?,
+                reviewed_head_sha: CommitSha::try_new(stored.reviewed_head_sha)
+                    .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?,
                 dismissal_message: stored.dismissal_message.into_boxed_str(),
             });
         }
@@ -1078,6 +1078,8 @@ struct CursorRow {
 struct PlannedClearanceRow {
     clearance_id: Uuid,
     dismissal_message: String,
+    reviewer: String,
+    reviewed_head_sha: String,
     completion_state: ClearanceCompletionState,
 }
 

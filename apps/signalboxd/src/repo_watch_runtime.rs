@@ -177,6 +177,7 @@ query RepositoryWatchReviewClearanceState($review: ID!, $after: String) {
       commit { oid }
       pullRequest {
         number
+        state
         headRefOid
         reviewDecision
         latestOpinionatedReviews(first: 100, after: $after) {
@@ -1568,7 +1569,12 @@ impl GitHubRepositoryPoller {
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
             let convergence_evidence = self
-                .fetch_convergence_evidence(previous.context(), previous.mergeable_state())
+                .fetch_convergence_evidence(
+                    previous.context().number(),
+                    previous.context().head_sha(),
+                    previous.context().base_branch(),
+                    previous.mergeable_state(),
+                )
                 .await?;
             let threads = self.fetch_threads(number).await?;
             let reactions = self
@@ -1719,7 +1725,12 @@ impl GitHubRepositoryPoller {
             )
             .await?;
         let convergence_evidence = self
-            .fetch_convergence_evidence(&context, mergeable_state)
+            .fetch_convergence_evidence(
+                context.number(),
+                context.head_sha(),
+                context.base_branch(),
+                mergeable_state,
+            )
             .await?;
         let threads = self.fetch_threads(number).await?;
         let reactions = self
@@ -1977,7 +1988,9 @@ impl GitHubRepositoryPoller {
 
     async fn fetch_convergence_evidence(
         &self,
-        context: &PullRequestEventContext,
+        number: PullRequestNumber,
+        head_sha: &CommitSha,
+        base_branch: &BranchName,
         mergeable_state: MergeableState,
     ) -> Result<FetchedConvergenceEvidence, RepositoryWatchAttemptError> {
         let (namespace, name) = self
@@ -1985,8 +1998,8 @@ impl GitHubRepositoryPoller {
             .as_str()
             .split_once('/')
             .ok_or(RepositoryWatchAttemptError::Normalization)?;
-        let number = i64::try_from(context.number().get())
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        let number =
+            i64::try_from(number.get()).map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         let mut after: Option<String> = None;
         let mut page = 1_u16;
         let mut gating_check_count = 0_u64;
@@ -2021,8 +2034,8 @@ impl GitHubRepositoryPoller {
                 .and_then(|repository| repository.pull_request)
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
             let provider_mergeable_state = normalize_graphql_mergeable(&pull_request.mergeable)?;
-            if pull_request.head_ref_oid != context.head_sha().as_str()
-                || pull_request.base_ref_name != context.base_branch().as_str()
+            if pull_request.head_ref_oid != head_sha.as_str()
+                || pull_request.base_ref_name != base_branch.as_str()
                 || provider_mergeable_state != mergeable_state
             {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
@@ -2227,8 +2240,9 @@ impl GitHubRepositoryPoller {
         if &head_sha != clearance.current_head_sha() {
             return Ok(false);
         }
-        let context = normalize_pull_request_context(&detail, head_sha, None)?;
-        if context.base_branch() != clearance.base_branch() {
+        let base_branch = BranchName::try_new(detail.base.reference.clone())
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        if &base_branch != clearance.base_branch() {
             return Ok(false);
         }
         let mergeable_state = match detail.mergeable {
@@ -2237,7 +2251,12 @@ impl GitHubRepositoryPoller {
             None => MergeableState::Unknown,
         };
         let evidence = self
-            .fetch_convergence_evidence(&context, mergeable_state)
+            .fetch_convergence_evidence(
+                clearance.number(),
+                clearance.current_head_sha(),
+                clearance.base_branch(),
+                mergeable_state,
+            )
             .await?;
         if &evidence.base_revision != clearance.base_revision()
             || evidence.review_decision != RepoWatchReviewDecision::ChangesRequested
@@ -2354,6 +2373,16 @@ impl GitHubRepositoryPoller {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
             }
             let provider_state = normalize_observed_review_state(&review.state)?;
+            match review.pull_request.state.as_str() {
+                "OPEN" => {}
+                "CLOSED" | "MERGED" => {
+                    return Ok(StaleReviewClearanceObservation::Terminal {
+                        outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                        provider_state,
+                    });
+                }
+                _ => return Err(RepositoryWatchAttemptError::InvalidResponse),
+            }
             if review.pull_request.head_ref_oid != clearance.current_head_sha().as_str() {
                 return Ok(StaleReviewClearanceObservation::Terminal {
                     outcome: RepoWatchStaleReviewClearanceOutcome::Superseded,
@@ -3774,6 +3803,7 @@ struct ReviewClearanceState {
 #[derive(Clone, Deserialize)]
 struct ReviewClearancePullRequest {
     number: u64,
+    state: String,
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
     #[serde(rename = "reviewDecision")]
