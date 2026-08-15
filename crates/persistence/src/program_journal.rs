@@ -227,20 +227,16 @@ impl ProgramJournalRepository {
         run: ProgramRunId,
         kind: DeliveryKind,
     ) -> Result<DeliveryFrame, ProgramJournalRepositoryError> {
-        let sequence = lock_sequence(transaction, run).await?;
-        let position = next_position(sequence.last_position)?;
-        let ordinal = next_delivery_ordinal(sequence.last_delivery)?;
-        let frame = DeliveryFrame::new(ordinal, kind);
-        insert_delivery(transaction, run, position, &frame).await?;
-        advance_sequence(
-            transaction,
-            run,
-            position.as_u64(),
-            sequence.last_request,
-            ordinal.as_u64(),
-        )
-        .await?;
-        Ok(frame)
+        if matches!(
+            kind,
+            DeliveryKind::Fault(ProgramFault::Nondeterminism { .. })
+        ) {
+            return Err(ProgramJournalCorruption::Inconsistent(
+                "nondeterminism fault without replay failure",
+            )
+            .into());
+        }
+        append_delivery_frame_in_transaction(transaction, run, kind).await
     }
 
     /// Persists the typed divergence produced by the replay seam as a fault.
@@ -249,8 +245,15 @@ impl ProgramJournalRepository {
         failure: NondeterminismError,
     ) -> Result<DeliveryFrame, ProgramJournalRepositoryError> {
         let run = failure.run();
-        self.append_delivery(run, DeliveryKind::Fault(failure.into_fault()))
-            .await
+        let mut transaction = self.pool.begin().await?;
+        let frame = append_delivery_frame_in_transaction(
+            &mut transaction,
+            run,
+            DeliveryKind::Fault(failure.into_fault()),
+        )
+        .await?;
+        commit(transaction).await?;
+        Ok(frame)
     }
 
     /// Loads and fail-closed reconstitutes a run's complete journal.
@@ -281,6 +284,27 @@ impl ProgramJournalRepository {
             .map(Some)
             .map_err(|error| ProgramJournalCorruption::Domain(error).into())
     }
+}
+
+async fn append_delivery_frame_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    run: ProgramRunId,
+    kind: DeliveryKind,
+) -> Result<DeliveryFrame, ProgramJournalRepositoryError> {
+    let sequence = lock_sequence(transaction, run).await?;
+    let position = next_position(sequence.last_position)?;
+    let ordinal = next_delivery_ordinal(sequence.last_delivery)?;
+    let frame = DeliveryFrame::new(ordinal, kind);
+    insert_delivery(transaction, run, position, &frame).await?;
+    advance_sequence(
+        transaction,
+        run,
+        position.as_u64(),
+        sequence.last_request,
+        ordinal.as_u64(),
+    )
+    .await?;
+    Ok(frame)
 }
 
 async fn commit(
