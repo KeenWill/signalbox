@@ -6782,11 +6782,13 @@ fn reconstitute_inner(
         session,
         active,
         input.active_acceptance_tail.as_ref(),
-        &records_by_turn,
-        &accepted_input_turns,
-        &consumed_inputs,
-        &preceding_non_accepted_terminal_turns,
-        &execution_position_by_turn,
+        ActiveAcceptanceTailReconstitutionEvidence {
+            records_by_turn: &records_by_turn,
+            accepted_input_turns: &accepted_input_turns,
+            consumed_inputs: &consumed_inputs,
+            preceding_non_accepted_terminals: &preceding_non_accepted_terminal_turns,
+            execution_position_by_turn: &execution_position_by_turn,
+        },
     )?;
 
     if let Some(call) = active_compaction_call
@@ -6857,16 +6859,27 @@ fn promote_external_interrupt_chains(
     promoted
 }
 
+struct ActiveAcceptanceTailReconstitutionEvidence<'a, 'record> {
+    records_by_turn: &'a BTreeMap<TurnId, &'record AcceptedInputTurnSchedulingRecord>,
+    accepted_input_turns: &'a BTreeMap<AcceptedInputId, TurnId>,
+    consumed_inputs: &'a BTreeSet<AcceptedInputId>,
+    preceding_non_accepted_terminals: &'a BTreeSet<TurnId>,
+    execution_position_by_turn: &'a BTreeMap<TurnId, usize>,
+}
+
 fn reconstitute_active_acceptance_tail(
     session: SessionId,
     active: Option<TurnId>,
     candidate: Option<&SessionAcceptanceTailReconstitutionInput>,
-    records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
-    accepted_input_turns: &BTreeMap<AcceptedInputId, TurnId>,
-    consumed_inputs: &BTreeSet<AcceptedInputId>,
-    preceding_non_accepted_terminals: &BTreeSet<TurnId>,
-    execution_position_by_turn: &BTreeMap<TurnId, usize>,
+    evidence: ActiveAcceptanceTailReconstitutionEvidence<'_, '_>,
 ) -> Result<Option<SessionAcceptanceTail>, AcceptedInputSchedulingReconstitutionFailure> {
+    let ActiveAcceptanceTailReconstitutionEvidence {
+        records_by_turn,
+        accepted_input_turns,
+        consumed_inputs,
+        preceding_non_accepted_terminals,
+        execution_position_by_turn,
+    } = evidence;
     let (active, candidate) = match (active, candidate) {
         (None, None) => return Ok(None),
         (None, Some(_)) => {
@@ -12860,14 +12873,16 @@ mod tests {
             session.id(),
             Some(active.turn()),
             Some(&tail_input),
-            &records,
-            &accepted_input_turns,
-            &BTreeSet::from([
-                predecessor_consumed.accepted_input(),
-                active_consumed.accepted_input(),
-            ]),
-            &BTreeSet::new(),
-            &execution_position_by_turn,
+            ActiveAcceptanceTailReconstitutionEvidence {
+                records_by_turn: &records,
+                accepted_input_turns: &accepted_input_turns,
+                consumed_inputs: &BTreeSet::from([
+                    predecessor_consumed.accepted_input(),
+                    active_consumed.accepted_input(),
+                ]),
+                preceding_non_accepted_terminals: &BTreeSet::new(),
+                execution_position_by_turn: &execution_position_by_turn,
+            },
         )
         .expect("the terminal predecessor's consumed steering remains valid history")
         .expect("an active turn retains its complete acceptance tail");
