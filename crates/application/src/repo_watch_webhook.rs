@@ -1071,10 +1071,10 @@ fn pull_request_numbers_for_repository(
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             };
-            let candidate = match repository_at(
+            let candidate = match github_repository_url_at(
                 pull_request,
-                &["base", "repo", "full_name"],
-                "check_run.pull_requests[].base.repo.full_name",
+                &["base", "repo", "url"],
+                "check_run.pull_requests[].base.repo.url",
             ) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
@@ -1092,6 +1092,21 @@ fn pull_request_numbers_for_repository(
             )
         })
         .collect()
+}
+
+fn github_repository_url_at(
+    root: &Map<String, Value>,
+    path: &[&str],
+    field: &'static str,
+) -> Result<RepositorySlug, RepoWatchWebhookMappingError> {
+    const GITHUB_REPOSITORY_API_PREFIX: &str = "https://api.github.com/repos/";
+
+    let url = string_at(root, path, field)?;
+    let slug = url
+        .strip_prefix(GITHUB_REPOSITORY_API_PREFIX)
+        .ok_or(RepoWatchWebhookMappingError::InvalidField(field))?;
+    RepositorySlug::try_new(slug.to_owned())
+        .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
 }
 
 fn object<'value>(
@@ -1595,7 +1610,7 @@ mod tests {
                     "conclusion":"success",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#
@@ -2005,7 +2020,7 @@ mod tests {
                     "conclusion":"failure",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#
