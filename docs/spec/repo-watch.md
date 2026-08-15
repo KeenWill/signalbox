@@ -520,11 +520,13 @@ a recorded reopen instead. Dispatch admission rechecks the latest durable
 lifecycle under the repository lock. A terminal cutoff settles every outstanding
 obligation for that pull request immediately, without waiting for singleton or
 cooldown readiness; the admission recheck is the race-closing backstop. Either
-path settles stale work as `target_closed` without creating a session.
-Corruption in one commissioned goal rolls back that goal's stop to a savepoint
-but does not roll back the cutoff: the terminal event remains durably
-dispositioned, healthy commissioned goals are stopped, and later cutoffs remain
-eligible for processing.
+path settles stale nonterminal work as `target_closed` without creating a
+session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
+event itself remains dispatch-eligible; the terminal event is the cutoff fact,
+not work made stale by that fact. Corruption in one commissioned goal rolls back
+that goal's stop to a savepoint but does not roll back the cutoff: the terminal
+event remains durably dispositioned, healthy commissioned goals are stopped, and
+later cutoffs remain eligible for processing.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,

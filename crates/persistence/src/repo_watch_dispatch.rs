@@ -14,8 +14,8 @@ use signalbox_application::{
 use signalbox_domain::{
     DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
     GoalUserCommand, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion,
-    RepositorySlug, SessionId,
+    RepoWatchEventId, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId,
+    RepoWatchRuleVersion, RepositorySlug, SessionId,
 };
 use sqlx::{Acquire, PgPool, Postgres, Row, Transaction, types::Uuid};
 
@@ -615,7 +615,12 @@ impl PostgresRepoWatchDispatchStore {
                     transaction.rollback().await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
                 }
-                if !event_target_is_open(&mut transaction, &event).await? {
+                let terminal_event = matches!(
+                    event.kind(),
+                    RepoWatchEventKindV1::PullRequestClosed
+                        | RepoWatchEventKindV1::PullRequestMerged
+                );
+                if !terminal_event && !event_target_is_open(&mut transaction, &event).await? {
                     match matched_admission {
                         MatchedAdmission::Fresh => {
                             insert_evaluation(

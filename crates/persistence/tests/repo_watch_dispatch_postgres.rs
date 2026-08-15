@@ -60,6 +60,8 @@ const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
 const FIRST_TERMINAL_IDENTITY_SEED: u128 = 0x10_000;
 const CORRUPT_GOAL_GENERATION: i64 = 2;
 const MERGED_GOAL_CUTOFF_EVENT_ID: u128 = 0x51_000;
+const TERMINAL_RULE_OPENED_EVENT_ID: u128 = 0x54_000;
+const TERMINAL_RULE_MERGED_EVENT_ID: u128 = 0x54_100;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -206,6 +208,21 @@ fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> 
         }],
         cooldown,
     )
+}
+
+fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    Ok(RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::PullRequestMerged],
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?)
 }
 
 struct TemplateResolver;
@@ -855,6 +872,62 @@ async fn matching_event_loaded_before_merge_records_target_closed() -> Result<()
         .fetch_one(&fixture.pool)
         .await?;
     assert_eq!(batches_after, batches_before);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn matching_merged_event_dispatches_after_lifecycle_becomes_terminal()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let rule = merged_event_rule()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool, credential_pin());
+    let initial = observation(context(INITIAL_HEAD)?)?;
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(initial),
+                    vec![opened_event(TERMINAL_RULE_OPENED_EVENT_ID, INITIAL_HEAD)?],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let merged =
+        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(merged.clone()),
+                vec![merged_event(TERMINAL_RULE_MERGED_EVENT_ID, SECOND_HEAD)?],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the terminal-event rule sees the merge event");
+    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+        .evaluate(
+            loaded,
+            &rule,
+            &merged,
+            &TemplateResolver,
+            dispatch_context(),
+        )
+        .await?;
+    let (_, sessions) = dispatched(outcome);
+
+    assert_eq!(sessions.len(), rule.actions().len());
     Ok(())
 }
 
