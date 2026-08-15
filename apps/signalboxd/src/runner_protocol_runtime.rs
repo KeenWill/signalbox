@@ -14,9 +14,9 @@ use signalbox_domain::{
     CanonicalCloneUrlDigest, CredentialProfileName, CredentialProfilePolicy,
     RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
     RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerLease,
-    RunnerSandboxProfile, SessionId, WorkspaceBranchName, WorkspaceManifestId,
-    WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
-    WorkspaceRepositoryKey, WorkspaceRevision,
+    RunnerSandboxProfile, RunnerWorkingDirectory, SessionId, WorkspaceBranchName,
+    WorkspaceManifestId, WorkspaceProvisioningAuthorizationId, WorkspaceRecovery,
+    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRevision,
 };
 use signalbox_persistence::runner_protocol::{
     AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
@@ -3334,7 +3334,7 @@ fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceRead
             name: WorkspaceBranchName::try_new(name.clone()).ok()?,
         },
     };
-    Some(RunnerWorkspaceReadyReceipt::new(
+    RunnerWorkspaceReadyReceipt::try_new(
         WorkspaceProvisioningAuthorizationId::from_uuid(
             ready.correlation.authorization_id.into_uuid(),
         ),
@@ -3351,8 +3351,11 @@ fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceRead
             SandboxProfile::WorkspaceRestricted => RunnerSandboxProfile::WorkspaceRestricted,
         },
         WorkspaceRelativePath::try_new(manifest.relative_path.clone()).ok()?,
+        RunnerWorkingDirectory::try_new(ready.ready.execution_directory.as_str().to_owned())
+            .ok()?,
         recovery,
-    ))
+    )
+    .ok()
 }
 
 async fn admit_lease_claim<O>(
@@ -4949,6 +4952,16 @@ mod tests {
         assert_eq!(receipt.recovery(), &expected);
     }
 
+    #[test]
+    fn workspace_ready_receipt_rejects_a_relative_execution_directory() {
+        let mut ready = repository_workspace_ready();
+        ready.ready.execution_directory =
+            signalbox_runner_wire::WorkingDirectory::try_new("sessions/provision/repo".to_owned())
+                .expect("the relative execution-directory fixture is exact text");
+
+        assert_eq!(workspace_ready_receipt(&ready), None);
+    }
+
     #[tokio::test]
     async fn s32_inv044_unavailable_workspace_ready_transaction_emits_no_acknowledgement() {
         let rejection = admit_workspace_ready(
@@ -5386,6 +5399,10 @@ mod tests {
             ready: signalbox_runner_wire::ReadyManifest {
                 manifest,
                 manifest_digest,
+                execution_directory: signalbox_runner_wire::WorkingDirectory::try_new(
+                    "/runner/sessions/provision/repo".to_owned(),
+                )
+                .expect("the fixture execution directory is absolute"),
             },
         }
     }
@@ -5451,7 +5468,7 @@ mod tests {
     fn repository_workspace_ready_receipt() -> RunnerWorkspaceReadyReceipt {
         let correlation = repository_workspace_provision_correlation();
         let ready = repository_workspace_ready();
-        RunnerWorkspaceReadyReceipt::new(
+        RunnerWorkspaceReadyReceipt::try_new(
             WorkspaceProvisioningAuthorizationId::from_uuid(
                 correlation.authorization_id.into_uuid(),
             ),
@@ -5478,11 +5495,14 @@ mod tests {
                 correlation.placement_revision.get()
             ))
             .expect("the fixture relative path is checked"),
+            RunnerWorkingDirectory::try_new(ready.ready.execution_directory.as_str().to_owned())
+                .expect("the fixture execution directory is checked"),
             WorkspaceRecovery::Commit {
                 revision: WorkspaceRevision::try_new(workspace_revision_text())
                     .expect("the fixture revision is canonical"),
             },
         )
+        .expect("the fixture execution directory is absolute")
     }
 
     fn private_tempdir() -> tempfile::TempDir {
@@ -5916,7 +5936,7 @@ mod tests {
                 encode_line(&frame).expect("the fixture enrollment frame encodes"),
             )
             .expect("the encoded fixture is UTF-8")
-            .replacen("\"version\":1", "\"version\":2", 1);
+            .replacen("\"version\":2", "\"version\":3", 1);
             writer
                 .write_all(encoded.as_bytes())
                 .await

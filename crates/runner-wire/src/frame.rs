@@ -1,4 +1,4 @@
-//! Closed version-one runner frame vocabulary and payload validation.
+//! Closed version-two runner frame vocabulary and payload validation.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// The only admitted runner protocol version.
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 
 /// One complete lease and physical-dispatch correlation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -739,16 +739,20 @@ pub struct ReadyManifest {
     pub manifest: WorkspaceManifest,
     /// Exact content digest of these lifecycle-specific facts.
     pub manifest_digest: Digest,
+    /// Absolute runner-authored directory selected for later execution.
+    pub execution_directory: WorkingDirectory,
 }
 
 impl ReadyManifest {
     fn validate(&self) -> Result<(), ValueError> {
         let expected = workspace_manifest_digest(&self.manifest)?;
-        if expected == self.manifest_digest {
-            Ok(())
-        } else {
-            Err(ValueError::Digest)
+        if expected != self.manifest_digest {
+            return Err(ValueError::Digest);
         }
+        if !self.execution_directory.as_str().starts_with('/') {
+            return Err(ValueError::WorkingDirectory);
+        }
+        Ok(())
     }
 }
 
@@ -920,7 +924,7 @@ payload!(Rejected {
     code: RejectionCode
 });
 
-/// Complete closed version-one message vocabulary.
+/// Complete closed version-two message vocabulary.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum Message {

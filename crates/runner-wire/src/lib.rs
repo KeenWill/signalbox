@@ -1,4 +1,4 @@
-//! Closed version-one JSON-lines runner wire.
+//! Closed version-two JSON-lines runner wire.
 //!
 //! This crate owns transport representations, frame validation, and canonical
 //! digest bytes. Domain, persistence, and orchestration representations remain
@@ -36,7 +36,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-/// A complete validated version-one runner frame.
+/// A complete validated version-two runner frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     /// Closed message and exact payload.
@@ -63,7 +63,7 @@ pub enum FrameError {
     },
     /// JSON shape, field, token, or UTF-8 decoding failed.
     MalformedJson(serde_json::Error),
-    /// The required version was not version one.
+    /// The required version was not version two.
     UnsupportedVersion(u64),
     /// A decoded or constructed payload violated a cross-member invariant.
     InvalidValue(ValueError),

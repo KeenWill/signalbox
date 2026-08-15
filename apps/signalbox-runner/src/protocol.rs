@@ -2034,6 +2034,10 @@ mod tests {
             ready: ReadyManifest {
                 manifest,
                 manifest_digest,
+                execution_directory: WorkingDirectory::try_new(
+                    "/runner/sessions/provision/repo".to_owned(),
+                )
+                .expect("the fixture execution directory is absolute"),
             },
         }
     }

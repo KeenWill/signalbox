@@ -8,6 +8,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -20,7 +21,7 @@ use rustix::{
 };
 use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{
-    CanonicalUuid, ManifestLifecycle, PositiveU64, ReadyManifest, SandboxProfile,
+    CanonicalUuid, ManifestLifecycle, PositiveU64, ReadyManifest, SandboxProfile, WorkingDirectory,
     WorkspaceManifest, workspace_manifest_digest,
 };
 use uuid::Uuid;
@@ -129,11 +130,15 @@ impl Error for RunnerWorkspaceError {
 #[derive(Debug)]
 pub struct RunnerWorkspaceStore {
     root: File,
+    canonical_root: PathBuf,
 }
 
 impl RunnerWorkspaceStore {
-    pub(crate) const fn from_root(root: File) -> Self {
-        Self { root }
+    pub(crate) const fn from_root(root: File, canonical_root: PathBuf) -> Self {
+        Self {
+            root,
+            canonical_root,
+        }
     }
 
     /// Creates and publishes one private root, or replays its exact ready manifest.
@@ -145,10 +150,11 @@ impl RunnerWorkspaceStore {
         let session_name = request.session().to_string();
         let session = open_or_create_directory(&sessions, &session_name)?;
         let placement_name = request.placement_revision().get().to_string();
+        let execution_path = self.canonical_root.join(request.relative_path());
         match open_directory(&session, &placement_name) {
-            Ok(placement) => read_ready_private_workspace(&placement, request),
+            Ok(placement) => read_ready_private_workspace(&placement, request, &execution_path),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                create_private_workspace(&session, &placement_name, request)
+                create_private_workspace(&session, &placement_name, request, &execution_path)
             }
             Err(error) => Err(RunnerWorkspaceError::Io(error)),
         }
@@ -192,6 +198,7 @@ fn create_private_workspace(
     session: &File,
     placement_name: &str,
     request: &PrivateWorkspaceRequest,
+    execution_path: &Path,
 ) -> Result<ReadyManifest, RunnerWorkspaceError> {
     let manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
     let staging_name = format!(".{placement_name}-{manifest_id}.staging");
@@ -229,7 +236,7 @@ fn create_private_workspace(
         .sync_all()
         .map_err(RunnerWorkspaceError::CommitAmbiguous)?;
     let placement = open_directory(session, placement_name).map_err(RunnerWorkspaceError::Io)?;
-    read_ready_private_workspace(&placement, request)
+    read_ready_private_workspace(&placement, request, execution_path)
 }
 
 fn private_manifest(
@@ -255,20 +262,41 @@ fn private_manifest(
 fn read_ready_private_workspace(
     placement: &File,
     request: &PrivateWorkspaceRequest,
+    execution_path: &Path,
 ) -> Result<ReadyManifest, RunnerWorkspaceError> {
     let manifest = read_manifest(placement)?;
     let expected = private_manifest(ManifestLifecycle::Ready, manifest.manifest_id, request);
     if manifest != expected {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
-    let _work = open_directory(placement, PRIVATE_WORKSPACE_DIRECTORY)
+    let work = open_directory(placement, PRIVATE_WORKSPACE_DIRECTORY)
         .map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
+    let execution_directory = checked_execution_directory(execution_path, &work)?;
     let manifest_digest =
         workspace_manifest_digest(&manifest).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
     Ok(ReadyManifest {
         manifest,
         manifest_digest,
+        execution_directory,
     })
+}
+
+fn checked_execution_directory(
+    path: &Path,
+    directory: &File,
+) -> Result<WorkingDirectory, RunnerWorkspaceError> {
+    let canonical = std::fs::canonicalize(path).map_err(RunnerWorkspaceError::Io)?;
+    let path_metadata = std::fs::metadata(&canonical).map_err(RunnerWorkspaceError::Io)?;
+    let descriptor_metadata = directory.metadata().map_err(RunnerWorkspaceError::Io)?;
+    if path_metadata.dev() != descriptor_metadata.dev()
+        || path_metadata.ino() != descriptor_metadata.ino()
+    {
+        return Err(RunnerWorkspaceError::ManifestConflict);
+    }
+    let text = canonical
+        .to_str()
+        .ok_or(RunnerWorkspaceError::CorruptManifest)?;
+    WorkingDirectory::try_new(text.to_owned()).map_err(|_| RunnerWorkspaceError::CorruptManifest)
 }
 
 fn open_private_placement(
@@ -732,11 +760,21 @@ mod tests {
             .permissions()
             .mode()
             & 0o7777;
+        let expected_execution_directory = placement
+            .join("work")
+            .canonicalize()
+            .expect("the published work directory has a canonical path");
 
         assert_eq!(prepared.manifest.session, expected.session());
         assert_eq!(prepared.manifest.runner, expected.runner());
         assert_eq!(prepared.manifest.lifecycle, ManifestLifecycle::Ready);
         assert_eq!(prepared.manifest.relative_path, EXPECTED_RELATIVE_PATH);
+        assert_eq!(
+            prepared.execution_directory.as_str(),
+            expected_execution_directory
+                .to_str()
+                .expect("the fixture path is UTF-8")
+        );
         assert_eq!(
             prepared.manifest_digest,
             workspace_manifest_digest(&prepared.manifest)

@@ -232,6 +232,7 @@ fn frame_round_trip_preserves_unborn_workspace_recovery() {
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest: ready_digest,
+            execution_directory: working_directory("/runner/sessions/unborn/repo"),
         },
     }));
     let encoded = encode_line(&expected)
@@ -277,7 +278,7 @@ fn decoder_rejects_one_byte_over_eight_mib_before_json() {
 
 #[test]
 fn decoder_rejects_missing_newline() {
-    assert!(decode_line(br#"{"version":1,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0}}"#).is_err());
+    assert!(decode_line(br#"{"version":2,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0}}"#).is_err());
 }
 
 #[test]
@@ -287,13 +288,13 @@ fn decoder_rejects_embedded_physical_newline() {
 
 #[test]
 fn decoder_rejects_unknown_top_level_member() {
-    assert!(decode_line(br#"{"version":1,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0},"extra":false}
+    assert!(decode_line(br#"{"version":2,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0},"extra":false}
 "#).is_err());
 }
 
 #[test]
 fn decoder_rejects_unknown_payload_member() {
-    assert!(decode_line(br#"{"version":1,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0,"extra":false}}
+    assert!(decode_line(br#"{"version":2,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0,"extra":false}}
 "#).is_err());
 }
 
@@ -301,7 +302,7 @@ fn decoder_rejects_unknown_payload_member() {
 fn decoder_rejects_unknown_message_kind() {
     assert!(
         decode_line(
-            br#"{"version":1,"kind":"future","payload":{}}
+            br#"{"version":2,"kind":"future","payload":{}}
 "#
         )
         .is_err()
@@ -310,31 +311,31 @@ fn decoder_rejects_unknown_message_kind() {
 
 #[test]
 fn decoder_rejects_unsupported_version() {
-    assert!(decode_line(br#"{"version":2,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0}}
+    assert!(decode_line(br#"{"version":3,"kind":"heartbeat","payload":{"sequence":1,"last_accepted_peer_sequence":0}}
 "#).is_err());
 }
 
 #[test]
 fn decoder_reports_unsupported_version_before_future_kind() {
     let Err(FrameError::UnsupportedVersion(actual)) = decode_line(
-        br#"{"version":2,"kind":"future","payload":{}}
+        br#"{"version":3,"kind":"future","payload":{}}
 "#,
     ) else {
-        panic!("version two must fail before closed-kind decoding");
+        panic!("version three must fail before closed-kind decoding");
     };
 
-    assert_eq!(actual, 2);
+    assert_eq!(actual, 3);
 }
 
 #[test]
 fn decoder_rejects_zero_positive_sequence() {
-    assert!(decode_line(br#"{"version":1,"kind":"heartbeat","payload":{"sequence":0,"last_accepted_peer_sequence":0}}
+    assert!(decode_line(br#"{"version":2,"kind":"heartbeat","payload":{"sequence":0,"last_accepted_peer_sequence":0}}
 "#).is_err());
 }
 
 #[test]
 fn decoder_rejects_noncanonical_uuid() {
-    assert!(decode_line(br#"{"version":1,"kind":"enroll","payload":{"request_id":"00000000-0000-4000-8000-00000000000A","digest_version":1,"advertisement":{"capability_classes":[],"tools":[],"workspace_capabilities":[],"sandbox_profiles":[],"credential_profiles":[],"repositories":[]}}}
+    assert!(decode_line(br#"{"version":2,"kind":"enroll","payload":{"request_id":"00000000-0000-4000-8000-00000000000A","digest_version":1,"advertisement":{"capability_classes":[],"tools":[],"workspace_capabilities":[],"sandbox_profiles":[],"credential_profiles":[],"repositories":[]}}}
 "#).is_err());
 }
 
@@ -355,7 +356,7 @@ fn unsupported_digest_version_passes_structural_validation() {
 
 #[test]
 fn decoder_rejects_json_null_for_absent_only_phase() {
-    assert!(decode_line(br#"{"version":1,"kind":"heartbeat_ack","payload":{"challenge_sequence":1,"runner_sequence":1,"lease_phase":null}}
+    assert!(decode_line(br#"{"version":2,"kind":"heartbeat_ack","payload":{"challenge_sequence":1,"runner_sequence":1,"lease_phase":null}}
 "#).is_err());
 }
 
@@ -397,7 +398,7 @@ fn decoder_rejects_omitted_page_one_prior_digest() {
 #[test]
 fn heartbeat_rejects_lease_offer_as_workspace_failure_correlation() {
     let mut encoded = serde_json::to_vec(&json!({
-        "version": 1,
+        "version": 2,
         "kind": "heartbeat_ack",
         "payload": {
             "challenge_sequence": 1,
@@ -421,7 +422,7 @@ fn heartbeat_rejects_lease_offer_as_workspace_failure_correlation() {
 fn decoder_rejects_available_correlation_member_from_another_arm() {
     assert!(
         decode_line(
-            br#"{"version":1,"kind":"rejected","payload":{"offending_kind":"future","available_correlation":{"kind":"none","extra":false},"code":"malformed_frame"}}
+            br#"{"version":2,"kind":"rejected","payload":{"offending_kind":"future","available_correlation":{"kind":"none","extra":false},"code":"malformed_frame"}}
 "#
         )
         .is_err()
@@ -432,7 +433,7 @@ fn decoder_rejects_available_correlation_member_from_another_arm() {
 fn decoder_rejects_unknown_rejection_code() {
     assert!(
         decode_line(
-            br#"{"version":1,"kind":"rejected","payload":{"offending_kind":"future","available_correlation":{"kind":"none"},"code":"future_code"}}
+            br#"{"version":2,"kind":"rejected","payload":{"offending_kind":"future","available_correlation":{"kind":"none"},"code":"future_code"}}
 "#
         )
         .is_err()
@@ -442,7 +443,7 @@ fn decoder_rejects_unknown_rejection_code() {
 #[test]
 fn decoder_rejects_terminal_union_member_from_another_arm() {
     let encoded = format!(
-        "{{\"version\":1,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"ambiguous\",\"text\":\"no\"}}}}}}\n",
+        "{{\"version\":2,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"ambiguous\",\"text\":\"no\"}}}}}}\n",
         serde_json::to_string(&lease_correlation())
             .unwrap_or_else(|error| panic!("lease correlation serializes: {error}"))
     );
@@ -453,7 +454,7 @@ fn decoder_rejects_terminal_union_member_from_another_arm() {
 #[test]
 fn decoder_rejects_duplicate_terminal_result_kind() {
     let encoded = format!(
-        "{{\"version\":1,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"success\",\"kind\":\"success\",\"text\":\"ok\"}}}}}}\n",
+        "{{\"version\":2,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"success\",\"kind\":\"success\",\"text\":\"ok\"}}}}}}\n",
         serde_json::to_string(&lease_correlation())
             .unwrap_or_else(|error| panic!("lease correlation serializes: {error}"))
     );
@@ -464,7 +465,7 @@ fn decoder_rejects_duplicate_terminal_result_kind() {
 #[test]
 fn decoder_rejects_duplicate_terminal_result_member() {
     let encoded = format!(
-        "{{\"version\":1,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"success\",\"text\":\"first\",\"text\":\"second\"}}}}}}\n",
+        "{{\"version\":2,\"kind\":\"result\",\"payload\":{{\"correlation\":{},\"result\":{{\"kind\":\"success\",\"text\":\"first\",\"text\":\"second\"}}}}}}\n",
         serde_json::to_string(&lease_correlation())
             .unwrap_or_else(|error| panic!("lease correlation serializes: {error}"))
     );
@@ -638,6 +639,7 @@ fn ready_frame_rejects_manifest_digest_disagreement() {
         ready: ReadyManifest {
             manifest: manifest(),
             manifest_digest: digest(EXPECTED_ADVERTISEMENT_DIGEST),
+            execution_directory: working_directory("/runner/sessions/ready/repo"),
         },
     });
 
@@ -656,6 +658,7 @@ fn ready_frame_rejects_nondeterministic_relative_path() {
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest,
+            execution_directory: working_directory("/runner/sessions/alternate/repo"),
         },
     });
 
@@ -758,6 +761,24 @@ fn ready_frame_rejects_manifest_correlation_disagreement() {
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest: digest,
+            execution_directory: working_directory("/runner/sessions/cross-wired/repo"),
+        },
+    });
+
+    assert!(Frame::try_new(invalid).is_err());
+}
+
+#[test]
+fn ready_frame_rejects_a_relative_execution_directory() {
+    let ready_manifest = manifest();
+    let manifest_digest = workspace_manifest_digest(&ready_manifest)
+        .unwrap_or_else(|error| panic!("ready manifest digests: {error}"));
+    let invalid = Message::WorkspaceReady(WorkspaceReady {
+        correlation: provision_correlation(),
+        ready: ReadyManifest {
+            manifest: ready_manifest,
+            manifest_digest,
+            execution_directory: working_directory("sessions/ready/repo"),
         },
     });
 

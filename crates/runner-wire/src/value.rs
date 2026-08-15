@@ -24,7 +24,7 @@ pub enum ValueError {
     WorkingDirectory,
     /// A sorted inventory was unordered, duplicated, or over its cap.
     Inventory,
-    /// A terminal result bound differed from version one's fixed contract.
+    /// A terminal result bound differed from version two's fixed contract.
     ResultBounds,
     /// A result member violated its domain bound or vocabulary.
     Result,
@@ -43,7 +43,7 @@ impl fmt::Display for ValueError {
             Self::PortableName => "portable name is invalid",
             Self::WorkingDirectory => "runner working directory is invalid",
             Self::Inventory => "inventory is not sorted, unique, and within its cap",
-            Self::ResultBounds => "result bounds differ from runner-wire version one",
+            Self::ResultBounds => "result bounds differ from runner-wire version two",
             Self::Result => "terminal result is outside its closed domain shape",
             Self::FailureDetail => "failure detail is outside its recursive bounds",
             Self::Correlation => "correlation union is invalid",
@@ -430,7 +430,7 @@ pub struct ResultBounds {
 }
 
 impl ResultBounds {
-    /// Returns the only admitted version-one pair.
+    /// Returns the only admitted version-two pair.
     pub const fn version_one() -> Self {
         Self {
             success_text_bytes: SUCCESS_TEXT_BYTES,
