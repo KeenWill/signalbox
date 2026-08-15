@@ -27,8 +27,9 @@ use signalbox_application::{
     RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
@@ -42,7 +43,8 @@ use signalbox_domain::{
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
-    RepoWatchCursorCandidate, RepoWatchCursorGeneration,
+    RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservedReviewState,
+    RepoWatchPlannedStaleReviewClearance, RepoWatchStaleReviewClearanceOutcome,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
@@ -127,6 +129,52 @@ query RepositoryWatchConvergence(
           }
         }
       }
+    }
+  }
+}
+"#;
+
+const BLOCKING_REVIEWS_QUERY: &str = r#"
+query RepositoryWatchBlockingReviews(
+  $namespace: String!, $name: String!, $number: Int!, $after: String
+) {
+  repository(owner: $namespace, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      reviewDecision
+      latestOpinionatedReviews(first: 100, after: $after) {
+        nodes {
+          id
+          state
+          author { login }
+          commit { oid }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"#;
+
+const DISMISS_REVIEW_MUTATION: &str = r#"
+mutation RepositoryWatchDismissReview($review: ID!, $message: String!) {
+  dismissPullRequestReview(
+    input: {pullRequestReviewId: $review, message: $message}
+  ) {
+    pullRequestReview { id state }
+  }
+}
+"#;
+
+const REVIEW_CLEARANCE_STATE_QUERY: &str = r#"
+query RepositoryWatchReviewClearanceState($review: ID!) {
+  node(id: $review) {
+    ... on PullRequestReview {
+      id
+      state
+      author { login }
+      commit { oid }
+      pullRequest { number headRefOid reviewDecision }
     }
   }
 }
@@ -589,6 +637,27 @@ impl RepositoryWatchTask {
                     )
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                self.reconcile_pending_stale_review_clearances().await?;
+                let planned_clearances = self
+                    .store
+                    .plan_stale_review_clearances(
+                        &self.repository,
+                        cursor.generation(),
+                        &polled.stale_review_clearances,
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                for clearance in &planned_clearances {
+                    self.poller.dismiss_stale_review(clearance).await?;
+                    self.store
+                        .record_stale_review_clearance_outcome(
+                            clearance.clearance_id(),
+                            RepoWatchStaleReviewClearanceOutcome::Dismissed,
+                            RepoWatchObservedReviewState::Dismissed,
+                        )
+                        .await
+                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                }
                 self.poller.publish_freshness(cursor.generation());
                 Ok(())
             }
@@ -596,6 +665,37 @@ impl RepositoryWatchTask {
                 Err(RepositoryWatchAttemptError::Persistence)
             }
         }
+    }
+
+    async fn reconcile_pending_stale_review_clearances(
+        &self,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let pending = self
+            .store
+            .load_pending_stale_review_clearances(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        for clearance in &pending {
+            let StaleReviewClearanceObservation::Terminal {
+                outcome,
+                provider_state,
+            } = self
+                .poller
+                .observe_stale_review_clearance(clearance)
+                .await?
+            else {
+                continue;
+            };
+            self.store
+                .record_stale_review_clearance_outcome(
+                    clearance.clearance_id(),
+                    outcome,
+                    provider_state,
+                )
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        }
+        Ok(())
     }
 }
 
@@ -1089,6 +1189,7 @@ struct FetchedPullRequest {
     state: RepoWatchPullRequestState,
     settlement: PullRequestSettlement,
     convergence: RepoWatchConvergenceAssessment,
+    stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
 struct FetchedConvergenceEvidence {
@@ -1124,12 +1225,14 @@ impl FetchedConvergenceEvidence {
 struct PolledRepository {
     observation: RepoWatchObservation,
     convergence: Vec<RepoWatchConvergenceAssessment>,
+    stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
 #[derive(Debug)]
 struct FetchedPullRequests {
     states: Vec<RepoWatchPullRequestState>,
     convergence: Vec<RepoWatchConvergenceAssessment>,
+    stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1272,6 +1375,7 @@ impl GitHubRepositoryPoller {
         Ok(PolledRepository {
             observation: RepoWatchObservation::new(self.signal_reviewers.clone(), state),
             convergence: pull_requests.convergence,
+            stale_review_clearances: pull_requests.stale_review_clearances,
         })
     }
 
@@ -1312,8 +1416,12 @@ impl GitHubRepositoryPoller {
                 .map(|pull_request| pull_request.state.clone())
                 .collect(),
             convergence: pull_requests
+                .iter()
+                .map(|pull_request| pull_request.convergence.clone())
+                .collect(),
+            stale_review_clearances: pull_requests
                 .into_iter()
-                .map(|pull_request| pull_request.convergence)
+                .flat_map(|pull_request| pull_request.stale_review_clearances)
                 .collect(),
         })
     }
@@ -1425,10 +1533,12 @@ impl GitHubRepositoryPoller {
             self.record_skipped_poll(number);
             let state = reuse_pull_request(previous, reviews, threads, reactions)?;
             let convergence = convergence_evidence.assess(&state)?;
+            let stale_review_clearances = self.fetch_stale_review_clearances(&convergence).await?;
             return Ok(FetchedPullRequest {
                 state,
                 settlement: PullRequestSettlement::Settled,
                 convergence,
+                stale_review_clearances,
             });
         }
         let fetched = self
@@ -1581,10 +1691,12 @@ impl GitHubRepositoryPoller {
         })
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         let convergence = convergence_evidence.assess(&state)?;
+        let stale_review_clearances = self.fetch_stale_review_clearances(&convergence).await?;
         Ok(FetchedPullRequest {
             state,
             settlement,
             convergence,
+            stale_review_clearances,
         })
     }
 
@@ -1911,6 +2023,213 @@ impl GitHubRepositoryPoller {
             gating_check_count,
             non_green_gating_checks,
         })
+    }
+
+    async fn fetch_stale_review_clearances(
+        &self,
+        assessment: &RepoWatchConvergenceAssessment,
+    ) -> Result<Vec<RepoWatchStaleReviewClearanceCandidate>, RepositoryWatchAttemptError> {
+        if assessment.review_decision() != RepoWatchReviewDecision::ChangesRequested
+            || !assessment.unresolved_threads().is_empty()
+            || !assessment.non_green_gating_checks().is_empty()
+            || assessment.mergeable_state() == MergeableState::Conflicting
+        {
+            return Ok(Vec::new());
+        }
+        let (namespace, name) = self
+            .repository
+            .as_str()
+            .split_once('/')
+            .ok_or(RepositoryWatchAttemptError::Normalization)?;
+        let number = i64::try_from(assessment.number().get())
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        let mut after: Option<String> = None;
+        let mut page = 1_u16;
+        let mut candidates = Vec::new();
+        loop {
+            let body = serde_json::to_vec(&GraphQlRequest {
+                query: BLOCKING_REVIEWS_QUERY,
+                variables: ThreadVariables {
+                    namespace,
+                    name,
+                    number,
+                    after: after.as_deref(),
+                },
+            })
+            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+            let response: GraphQlEnvelope<BlockingReviewData> = self
+                .conditional_json(
+                    "blocking-reviews",
+                    Method::POST,
+                    self.graphql_url.clone(),
+                    Some(body),
+                )
+                .await?;
+            if !response.errors.is_empty() {
+                return Err(RepositoryWatchAttemptError::Rejected);
+            }
+            let pull_request = response
+                .data
+                .and_then(|data| data.repository)
+                .and_then(|repository| repository.pull_request)
+                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+            if pull_request.head_ref_oid != assessment.head_sha().as_str()
+                || normalize_review_decision(pull_request.review_decision.as_deref())?
+                    != RepoWatchReviewDecision::ChangesRequested
+            {
+                return Ok(Vec::new());
+            }
+            for review in pull_request.latest_opinionated_reviews.nodes {
+                if review.state != "CHANGES_REQUESTED" {
+                    continue;
+                }
+                let reviewer = RepoWatchAuthorLogin::try_new(
+                    review
+                        .author
+                        .ok_or(RepositoryWatchAttemptError::InvalidResponse)?
+                        .login,
+                )
+                .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                let reviewed_head_sha = CommitSha::try_new(
+                    review
+                        .commit
+                        .ok_or(RepositoryWatchAttemptError::InvalidResponse)?
+                        .oid,
+                )
+                .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                if &reviewed_head_sha == assessment.head_sha() {
+                    return Ok(Vec::new());
+                }
+                candidates.push(
+                    RepoWatchStaleReviewClearanceCandidate::try_new(
+                        assessment,
+                        review.id,
+                        reviewer,
+                        reviewed_head_sha,
+                    )
+                    .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?,
+                );
+            }
+            if !pull_request
+                .latest_opinionated_reviews
+                .page_info
+                .has_next_page
+            {
+                candidates.sort_by(|left, right| left.review_node_id().cmp(right.review_node_id()));
+                return Ok(candidates);
+            }
+            after = pull_request.latest_opinionated_reviews.page_info.end_cursor;
+            if after.is_none() {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            page = next_page(page)?;
+        }
+    }
+
+    async fn dismiss_stale_review(
+        &self,
+        clearance: &RepoWatchPlannedStaleReviewClearance,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        self.dismiss_review_node(clearance.review_node_id(), clearance.dismissal_message())
+            .await
+    }
+
+    async fn dismiss_review_node(
+        &self,
+        review_node_id: &str,
+        dismissal_message: &str,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let body = serde_json::to_vec(&GraphQlRequest {
+            query: DISMISS_REVIEW_MUTATION,
+            variables: DismissReviewVariables {
+                review: review_node_id,
+                message: dismissal_message,
+            },
+        })
+        .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+        let response: GraphQlEnvelope<DismissReviewData> = self
+            .conditional_json(
+                "dismiss-review",
+                Method::POST,
+                self.graphql_url.clone(),
+                Some(body),
+            )
+            .await?;
+        if !response.errors.is_empty() {
+            return Err(RepositoryWatchAttemptError::Rejected);
+        }
+        let review = response
+            .data
+            .and_then(|data| data.dismiss_pull_request_review)
+            .and_then(|payload| payload.pull_request_review)
+            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+        if review.id != review_node_id || review.state != "DISMISSED" {
+            return Err(RepositoryWatchAttemptError::InvalidResponse);
+        }
+        Ok(())
+    }
+
+    async fn observe_stale_review_clearance(
+        &self,
+        clearance: &RepoWatchPlannedStaleReviewClearance,
+    ) -> Result<StaleReviewClearanceObservation, RepositoryWatchAttemptError> {
+        let body = serde_json::to_vec(&GraphQlRequest {
+            query: REVIEW_CLEARANCE_STATE_QUERY,
+            variables: ReviewNodeVariables {
+                review: clearance.review_node_id(),
+            },
+        })
+        .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+        let response: GraphQlEnvelope<ReviewClearanceStateData> = self
+            .conditional_json(
+                "review-clearance-state",
+                Method::POST,
+                self.graphql_url.clone(),
+                Some(body),
+            )
+            .await?;
+        if !response.errors.is_empty() {
+            return Err(RepositoryWatchAttemptError::Rejected);
+        }
+        let review = response
+            .data
+            .and_then(|data| data.node)
+            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+        let reviewer = review
+            .author
+            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+        let commit = review
+            .commit
+            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+        if review.id != clearance.review_node_id()
+            || review.pull_request.number != clearance.number().get()
+            || reviewer.login != clearance.reviewer().as_str()
+            || commit.oid != clearance.reviewed_head_sha().as_str()
+        {
+            return Err(RepositoryWatchAttemptError::InvalidResponse);
+        }
+        if review.pull_request.head_ref_oid != clearance.current_head_sha().as_str() {
+            return Ok(StaleReviewClearanceObservation::Terminal {
+                outcome: RepoWatchStaleReviewClearanceOutcome::Superseded,
+                provider_state: normalize_observed_review_state(&review.state)?,
+            });
+        }
+        let provider_state = normalize_observed_review_state(&review.state)?;
+        if provider_state == RepoWatchObservedReviewState::Dismissed {
+            return Ok(StaleReviewClearanceObservation::Terminal {
+                outcome: RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                provider_state,
+            });
+        }
+        if normalize_review_decision(review.pull_request.review_decision.as_deref())?
+            != RepoWatchReviewDecision::ChangesRequested
+        {
+            return Ok(StaleReviewClearanceObservation::Terminal {
+                outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                provider_state,
+            });
+        }
+        Ok(StaleReviewClearanceObservation::StillBlocking)
     }
 
     async fn fetch_reactions(
@@ -2897,6 +3216,19 @@ fn normalize_review_state(state: &str) -> Result<ProviderReviewState, Repository
     }
 }
 
+fn normalize_observed_review_state(
+    state: &str,
+) -> Result<RepoWatchObservedReviewState, RepositoryWatchAttemptError> {
+    match state {
+        "APPROVED" => Ok(RepoWatchObservedReviewState::Approved),
+        "CHANGES_REQUESTED" => Ok(RepoWatchObservedReviewState::ChangesRequested),
+        "COMMENTED" => Ok(RepoWatchObservedReviewState::Commented),
+        "DISMISSED" => Ok(RepoWatchObservedReviewState::Dismissed),
+        "PENDING" => Ok(RepoWatchObservedReviewState::Pending),
+        _ => Err(RepositoryWatchAttemptError::InvalidResponse),
+    }
+}
+
 #[derive(Clone, Deserialize)]
 struct PullNumberResponse {
     number: u64,
@@ -3073,6 +3405,17 @@ struct ThreadVariables<'a> {
     after: Option<&'a str>,
 }
 
+#[derive(Serialize)]
+struct DismissReviewVariables<'a> {
+    review: &'a str,
+    message: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReviewNodeVariables<'a> {
+    review: &'a str,
+}
+
 #[derive(Clone, Deserialize)]
 struct GraphQlEnvelope<T> {
     data: Option<T>,
@@ -3164,6 +3507,102 @@ struct ConvergenceCheckConnection {
     nodes: Vec<ConvergenceCheck>,
     #[serde(rename = "pageInfo")]
     page_info: PageInfo,
+}
+
+#[derive(Clone, Deserialize)]
+struct BlockingReviewData {
+    repository: Option<BlockingReviewRepository>,
+}
+
+#[derive(Clone, Deserialize)]
+struct BlockingReviewRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<BlockingReviewPullRequest>,
+}
+
+#[derive(Clone, Deserialize)]
+struct BlockingReviewPullRequest {
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+    #[serde(rename = "latestOpinionatedReviews")]
+    latest_opinionated_reviews: BlockingReviewConnection,
+}
+
+#[derive(Clone, Deserialize)]
+struct BlockingReviewConnection {
+    nodes: Vec<BlockingReviewNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Clone, Deserialize)]
+struct BlockingReviewNode {
+    id: String,
+    state: String,
+    author: Option<BlockingReviewAuthor>,
+    commit: Option<BlockingReviewCommit>,
+}
+
+#[derive(Clone, Deserialize)]
+struct BlockingReviewAuthor {
+    login: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct BlockingReviewCommit {
+    oid: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct DismissReviewData {
+    #[serde(rename = "dismissPullRequestReview")]
+    dismiss_pull_request_review: Option<DismissReviewPayload>,
+}
+
+#[derive(Clone, Deserialize)]
+struct DismissReviewPayload {
+    #[serde(rename = "pullRequestReview")]
+    pull_request_review: Option<DismissedReview>,
+}
+
+#[derive(Clone, Deserialize)]
+struct DismissedReview {
+    id: String,
+    state: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct ReviewClearanceStateData {
+    node: Option<ReviewClearanceState>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ReviewClearanceState {
+    id: String,
+    state: String,
+    author: Option<BlockingReviewAuthor>,
+    commit: Option<BlockingReviewCommit>,
+    #[serde(rename = "pullRequest")]
+    pull_request: ReviewClearancePullRequest,
+}
+
+#[derive(Clone, Deserialize)]
+struct ReviewClearancePullRequest {
+    number: u64,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+}
+
+enum StaleReviewClearanceObservation {
+    StillBlocking,
+    Terminal {
+        outcome: RepoWatchStaleReviewClearanceOutcome,
+        provider_state: RepoWatchObservedReviewState,
+    },
 }
 
 #[derive(Clone, Deserialize)]
@@ -3268,15 +3707,16 @@ mod tests {
         ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
         PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
-        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
-        dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
-        owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
-        supervise_repository_tasks,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
+        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
+        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, ResourceKey,
+        ReviewState, Url, UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse,
+        derive_repo_watch_events, dispatch_context_json, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, owed_dispatch_context_json_parts,
+        remaining_interval, rule_activation_error, supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -3385,6 +3825,9 @@ mod tests {
     const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
     const REVIEWER: &str = "signal-reviewer";
+    const STALE_REVIEW_NODE_ID: &str = "PRR_fixture_stale";
+    const STALE_REVIEW_HEAD_SHA: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const DISMISSAL_MESSAGE: &str = "Every finding is resolved on the current head.";
     const REVIEW_THREAD: &str = "PRRT_fixture_open";
     const RESOLVED_REVIEW_THREAD: &str = "PRRT_fixture_resolved";
     const PULL_NUMBERS: [u64; 1] = [PULL_NUMBER];
@@ -3754,6 +4197,50 @@ mod tests {
                                 }
                             }]
                         }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn blocking_reviews(reviewed_head_sha: &str) -> String {
+        blocking_reviews_by(REVIEWER, reviewed_head_sha)
+    }
+
+    fn blocking_reviews_by(reviewer: &str, reviewed_head_sha: &str) -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": HEAD_SHA,
+                        "reviewDecision": "CHANGES_REQUESTED",
+                        "latestOpinionatedReviews": {
+                            "nodes": [{
+                                "id": STALE_REVIEW_NODE_ID,
+                                "state": "CHANGES_REQUESTED",
+                                "author": { "login": reviewer },
+                                "commit": { "oid": reviewed_head_sha }
+                            }],
+                            "pageInfo": {
+                                "hasNextPage": false,
+                                "endCursor": null
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn dismissed_review() -> String {
+        serde_json::json!({
+            "data": {
+                "dismissPullRequestReview": {
+                    "pullRequestReview": {
+                        "id": STALE_REVIEW_NODE_ID,
+                        "state": "DISMISSED"
                     }
                 }
             }
@@ -4895,6 +5382,24 @@ mod tests {
         observation
     }
 
+    fn review_only_blocked_assessment() -> RepoWatchConvergenceAssessment {
+        RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(String::from(HEAD_SHA))
+                .expect("fixture head is canonical"),
+            base_branch: BranchName::try_new(String::from(BASE_BRANCH))
+                .expect("fixture base branch is canonical"),
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })
+        .expect("review decision is the fixture's only convergence blocker")
+    }
+
     #[tokio::test]
     async fn convergence_matches_the_exact_head_gate() {
         let server = ScriptedServer::start(complete_typed_observation_responses()).await;
@@ -4918,6 +5423,69 @@ mod tests {
             assessment.verdict(),
             signalbox_application::RepoWatchConvergenceVerdict::NotConverged
         );
+    }
+
+    #[tokio::test]
+    async fn older_head_review_becomes_a_clearance_candidate() {
+        let response = ScriptedResponse::post(
+            RequestTarget(String::from(THREADS_TARGET)),
+            ResponseBody(blocking_reviews(STALE_REVIEW_HEAD_SHA)),
+        )
+        .matching_request_body(String::from("RepositoryWatchBlockingReviews"));
+        let server = ScriptedServer::start(vec![response]).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let candidates = fixture
+            .poller
+            .fetch_stale_review_clearances(&review_only_blocked_assessment())
+            .await
+            .expect("blocking review evidence is valid");
+        server.finish().await;
+
+        assert_eq!(candidates[0].review_node_id(), STALE_REVIEW_NODE_ID);
+        assert_eq!(candidates[0].reviewer().as_str(), REVIEWER);
+        assert_eq!(
+            candidates[0].reviewed_head_sha().as_str(),
+            STALE_REVIEW_HEAD_SHA
+        );
+    }
+
+    #[tokio::test]
+    async fn current_head_review_is_not_a_clearance_candidate() {
+        let response = ScriptedResponse::post(
+            RequestTarget(String::from(THREADS_TARGET)),
+            ResponseBody(blocking_reviews(HEAD_SHA)),
+        )
+        .matching_request_body(String::from("RepositoryWatchBlockingReviews"));
+        let server = ScriptedServer::start(vec![response]).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let candidates = fixture
+            .poller
+            .fetch_stale_review_clearances(&review_only_blocked_assessment())
+            .await
+            .expect("current-head blocker fails closed without an error");
+        server.finish().await;
+
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dismissal_mutation_requires_the_expected_review_identity() {
+        let response = ScriptedResponse::post(
+            RequestTarget(String::from(THREADS_TARGET)),
+            ResponseBody(dismissed_review()),
+        )
+        .matching_request_body(String::from("RepositoryWatchDismissReview"));
+        let server = ScriptedServer::start(vec![response]).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        fixture
+            .poller
+            .dismiss_review_node(STALE_REVIEW_NODE_ID, DISMISSAL_MESSAGE)
+            .await
+            .expect("GitHub confirms the exact review dismissal");
+        server.finish().await;
     }
 
     #[tokio::test]

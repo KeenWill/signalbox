@@ -11,7 +11,8 @@ use signalbox_application::{
     RepoWatchDispatchTransaction, RepoWatchObservation, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchTemplateResolver,
     UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
@@ -32,7 +33,8 @@ use signalbox_persistence::{
     local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
-        RepoWatchCursorCandidate, RepoWatchCursorGeneration,
+        RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservedReviewState,
+        RepoWatchStaleReviewClearanceOutcome,
     },
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
     repo_watch_dispatch_obligation::RepoWatchDispatchObligation,
@@ -55,6 +57,8 @@ const INITIAL_HEAD: &str = "0000000000000000000000000000000000000000";
 const FIRST_HEAD: &str = "1111111111111111111111111111111111111111";
 const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const THIRD_HEAD: &str = "3333333333333333333333333333333333333333";
+const STALE_REVIEW_NODE_ID: &str = "PRR_stale_review_fixture";
+const STALE_REVIEWER: &str = "review-bot[bot]";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
 const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
@@ -1402,6 +1406,99 @@ async fn equal_current_convergence_evidence_is_idempotent() -> Result<(), Box<dy
             .await?;
 
     assert_eq!(assessment_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_review_clearance_records_intent_before_terminal_audit() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let observation = pull_request_observation(
+        context(FIRST_HEAD)?,
+        RepoWatchPullRequestLifecycle::Open,
+        MergeableState::Mergeable,
+    )?;
+    let committed = store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                None,
+                RepoWatchCursorCandidate::new(observation),
+                vec![opened_event(0x54_510, FIRST_HEAD)?],
+            ),
+        )
+        .await?;
+    let RepoWatchCommitOutcome::Committed(cursor) = committed else {
+        panic!("fixture's first cursor write commits");
+    };
+    let assessment =
+        assessment_with_review_decision(FIRST_HEAD, RepoWatchReviewDecision::ChangesRequested)?;
+    store
+        .record_convergence_assessments(
+            &repository,
+            cursor.generation(),
+            std::slice::from_ref(&assessment),
+        )
+        .await?;
+    let candidate = RepoWatchStaleReviewClearanceCandidate::try_new(
+        &assessment,
+        STALE_REVIEW_NODE_ID.to_owned(),
+        RepoWatchAuthorLogin::try_new(STALE_REVIEWER.to_owned())?,
+        CommitSha::try_new(INITIAL_HEAD.to_owned())?,
+    )?;
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            cursor.generation(),
+            std::slice::from_ref(&candidate),
+        )
+        .await?;
+    let replayed = store
+        .plan_stale_review_clearances(
+            &repository,
+            cursor.generation(),
+            std::slice::from_ref(&candidate),
+        )
+        .await?;
+    let pending = store
+        .load_pending_stale_review_clearances(&repository)
+        .await?;
+    store
+        .record_stale_review_clearance_outcome(
+            planned[0].clearance_id(),
+            RepoWatchStaleReviewClearanceOutcome::Dismissed,
+            RepoWatchObservedReviewState::Dismissed,
+        )
+        .await?;
+    let settled = store
+        .load_pending_stale_review_clearances(&repository)
+        .await?;
+    let audit: (String, String, String) = sqlx::query_as(
+        "SELECT clearance.reason_kind, result.outcome_kind,
+                result.provider_review_state
+           FROM repo_watch_stale_review_clearance AS clearance
+           JOIN repo_watch_stale_review_clearance_result AS result
+             ON result.clearance_id = clearance.clearance_id",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(planned[0].clearance_id(), replayed[0].clearance_id());
+    assert_eq!(pending[0].review_node_id(), STALE_REVIEW_NODE_ID);
+    assert_eq!(pending[0].reviewer().as_str(), STALE_REVIEWER);
+    assert!(settled.is_empty());
+    assert_eq!(
+        audit,
+        (
+            "only_stale_review_blocks".to_owned(),
+            "dismissed".to_owned(),
+            "dismissed".to_owned(),
+        )
+    );
     Ok(())
 }
 
