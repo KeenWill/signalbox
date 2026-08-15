@@ -59,6 +59,7 @@ const RULE: &str = "merge-forward-on-conflict";
 const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
 const FIRST_TERMINAL_IDENTITY_SEED: u128 = 0x10_000;
 const CORRUPT_GOAL_GENERATION: i64 = 2;
+const MERGED_GOAL_CUTOFF_EVENT_ID: u128 = 0x51_000;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -756,7 +757,7 @@ async fn held_slot_projection_names_each_failed_release_clause() -> Result<(), B
 async fn merged_pull_request_ends_the_commissioned_goal() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let session = fixture.session(0);
-    commit_merge(&fixture, 0x51_000).await?;
+    commit_merge(&fixture, MERGED_GOAL_CUTOFF_EVENT_ID).await?;
 
     let processed = fixture
         .store
