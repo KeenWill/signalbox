@@ -492,14 +492,19 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF NEW.resolves_request_ordinal IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM program_run_journal_entry
-         WHERE run_id = NEW.run_id
-           AND request_ordinal = NEW.resolves_request_ordinal
-           AND journal_position < NEW.journal_position
-           AND frame_kind <> 'scope'
+        SELECT 1 FROM program_run_journal_entry AS request
+         WHERE request.run_id = NEW.run_id
+           AND request.request_ordinal = NEW.resolves_request_ordinal
+           AND request.journal_position < NEW.journal_position
+           AND request.frame_kind <> 'scope'
+           AND (
+               NEW.frame_kind <> 'reject'
+               OR NEW.reject_reason <> 'outstanding_requests'
+               OR request.frame_kind = 'terminal'
+           )
     ) THEN
         RAISE EXCEPTION
-            'delivery must resolve one earlier answerable request'
+            'delivery must resolve one earlier compatible request'
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;

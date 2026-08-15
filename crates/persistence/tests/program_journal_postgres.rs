@@ -9,8 +9,9 @@
 use std::error::Error;
 
 use signalbox_domain::{
-    DeliveryKind, InlineFramePayload, JournalFrame, ProgramFault, ProgramRunId, ReplayCursor,
-    ReplayInstruction, ReplayedRequest, RequestFrame, RequestKind,
+    DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability, ProgramFault,
+    ProgramRunId, ReplayCursor, ReplayInstruction, ReplayedRequest, RequestFrame, RequestKind,
+    ScopeOperation, ScopeOrdinal, ScopeRequest,
 };
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -149,18 +150,34 @@ async fn inv065_nondeterminism_fault_round_trips_both_frames() -> Result<(), Box
     let repository = ProgramJournalRepository::new(pool.clone());
     let run = run_id();
     repository.create_stream(run).await?;
+    let recorded_scope = ScopeOrdinal::try_from_u64(7).expect("fixture ordinal is positive");
     let recorded = repository
-        .append_request(run, None, RequestKind::Sleep(payload(b"recorded")))
+        .append_request(
+            run,
+            Some(recorded_scope),
+            RequestKind::Effect(EffectRequest::new(
+                ProgramCapability::Judge,
+                "score".to_owned(),
+                payload(b"recorded"),
+            )),
+        )
         .await?;
     let loaded = repository
         .load(run)
         .await?
         .expect("the created journal stream exists");
     let mut replay = ReplayCursor::new(loaded);
-    let observed = signalbox_domain::RequestFrame::new(
+    let observed_scope = ScopeOrdinal::try_from_u64(11).expect("fixture ordinal is positive");
+    let declared_scope = ScopeOrdinal::try_from_u64(13).expect("fixture ordinal is positive");
+    let parent_scope = ScopeOrdinal::try_from_u64(17).expect("fixture ordinal is positive");
+    let observed = RequestFrame::new(
         recorded.ordinal(),
-        recorded.scope(),
-        RequestKind::Sleep(payload(b"different")),
+        Some(observed_scope),
+        RequestKind::Scope(ScopeRequest::new(
+            ScopeOperation::Close,
+            declared_scope,
+            Some(parent_scope),
+        )),
     );
     let divergence = replay
         .submit_request(observed.clone())
@@ -186,6 +203,38 @@ async fn inv065_nondeterminism_fault_round_trips_both_frames() -> Result<(), Box
     assert_eq!(
         restarted_replay.next_instruction(),
         ReplayInstruction::Deliver(fault)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn outstanding_requests_reject_requires_terminal_request() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let request = repository
+        .append_request(run, None, RequestKind::Now(payload(b"nonterminal")))
+        .await?;
+
+    let insert = sqlx::query(
+        "INSERT INTO program_run_journal_entry (
+             run_id, journal_position, frame_direction, frame_kind, delivery_ordinal,
+             resolves_request_ordinal, reject_reason, payload_inline
+         ) VALUES ($1, 2, 'delivery', 'reject', 1, $2, 'outstanding_requests', '')",
+    )
+    .bind(run.into_uuid())
+    .bind(rust_decimal::Decimal::from(request.ordinal().as_u64()))
+    .execute(&pool)
+    .await;
+
+    assert_trigger_error(
+        insert.expect_err("outstanding-requests rejection requires a terminal request"),
+        "delivery must resolve one earlier compatible request",
     );
 
     pool.close().await;

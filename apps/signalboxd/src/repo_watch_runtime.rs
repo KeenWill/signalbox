@@ -31,12 +31,12 @@ use signalbox_application::{
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
-    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
-    MergeableState, ModelAlias, PullRequestBody, PullRequestEventContext,
-    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
-    ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventKindV1,
-    RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
-    ReviewThreadId, UserContent, WorkflowName,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
+    GitHubObjectId, LabelName, MergeableState, ModelAlias, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, UserContent, WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
@@ -77,7 +77,7 @@ const MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS: usize = 4;
 // One polling attempt may transfer this many response bytes. The dogfooded
 // repository exceeds 64 MiB in a single attempt, and the bound fails the
 // attempt rather than shedding, so it has to clear real event volume.
-const MAX_POLL_WIRE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // What one poller may retain between attempts, which is per watched repository
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
@@ -302,6 +302,7 @@ impl RepositoryWatchTask {
             let mut attempt_cancelled = false;
             select! {
                 result = self.run_attempt() => {
+                    let metrics = self.poller.attempt_metrics();
                     match result {
                         Ok(()) => tracing::debug!(
                             repository = %self.repository.as_str(),
@@ -310,6 +311,10 @@ impl RepositoryWatchTask {
                         Err(error) => tracing::warn!(
                             repository = %self.repository.as_str(),
                             cause_code = error.cause_code(),
+                            request_count = metrics.requests,
+                            poll_wire_bytes = metrics.poll_wire_bytes,
+                            cached_resource_count = metrics.cached_resources,
+                            cached_wire_bytes = metrics.cached_wire_bytes,
                             "repository-watch polling attempt failed closed"
                         ),
                     }
@@ -346,13 +351,16 @@ impl RepositoryWatchTask {
     }
 
     async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        self.poller.begin_attempt();
         let result = async {
             if !self.rules_activated {
                 self.activate_rules().await?;
                 self.rules_activated = true;
             }
+            self.process_cutoffs().await?;
             self.process_dispatches().await?;
             self.poll_and_commit().await?;
+            self.process_cutoffs().await?;
             self.process_dispatches().await
         }
         .await;
@@ -362,6 +370,33 @@ impl RepositoryWatchTask {
             self.poller.invalidate_freshness();
         }
         result
+    }
+
+    async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
+        loop {
+            match self
+                .dispatch_store
+                .process_next_lifecycle_cutoff(&self.repository, || {
+                    DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
+                )) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_cutoff_corruption",
+                        error = %error,
+                        "repository-watch lifecycle cutoff quarantined a corrupt goal; dispatch processing continues"
+                    );
+                    continue;
+                }
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
+        }
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -459,6 +494,7 @@ impl RepositoryWatchTask {
             }
             RepoWatchRuleEvaluationOutcome::NotMatched
             | RepoWatchRuleEvaluationOutcome::Inactive
+            | RepoWatchRuleEvaluationOutcome::TargetClosed
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
@@ -1065,6 +1101,20 @@ impl GitHubRepositoryPoller {
 
     fn cache(&self) -> MutexGuard<'_, PollCache> {
         self.cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn attempt_metrics(&self) -> PollAttemptMetrics {
+        let cache = self.cache();
+        PollAttemptMetrics {
+            requests: cache.requests,
+            poll_wire_bytes: cache.poll_wire_bytes,
+            cached_resources: cache.resources.len(),
+            cached_wire_bytes: cache.cached_wire_bytes,
+        }
+    }
+
+    fn begin_attempt(&self) {
+        self.cache().begin_attempt();
     }
 
     #[cfg(test)]
@@ -1993,6 +2043,7 @@ impl GitHubRepositoryPoller {
     // fail an attempt whose true total fits.
     async fn read_bounded(
         &self,
+        resource_kind: &'static str,
         mut response: Response,
     ) -> Result<Vec<u8>, RepositoryWatchAttemptError> {
         let mut body = Vec::new();
@@ -2008,7 +2059,8 @@ impl GitHubRepositoryPoller {
             if next > MAX_RESPONSE_BYTES {
                 return Err(RepositoryWatchAttemptError::ResponseTooLarge);
             }
-            self.cache().record_poll_wire_bytes(chunk.len())?;
+            self.cache()
+                .record_poll_wire_bytes(resource_kind, chunk.len())?;
             body.extend_from_slice(&chunk);
         }
         Ok(body)
@@ -2118,7 +2170,7 @@ impl GitHubRepositoryPoller {
         // invalidates it.
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
         let has_next_page = has_next_link(&response)?;
-        let bytes = self.read_bounded(response).await?;
+        let bytes = self.read_bounded(resource_kind, response).await?;
         let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
             self.cache().remove(&key);
             return Err(RepositoryWatchAttemptError::InvalidResponse);
@@ -2249,11 +2301,23 @@ struct PollCache {
     cached_wire_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+struct PollAttemptMetrics {
+    requests: usize,
+    poll_wire_bytes: usize,
+    cached_resources: usize,
+    cached_wire_bytes: usize,
+}
+
 impl PollCache {
-    fn begin_poll(&mut self) {
-        self.touched.clear();
+    fn begin_attempt(&mut self) {
         self.requests = 0;
         self.poll_wire_bytes = 0;
+    }
+
+    fn begin_poll(&mut self) {
+        self.touched.clear();
+        self.begin_attempt();
     }
 
     fn touch(&mut self, key: ResourceKey) -> Result<(), RepositoryWatchAttemptError> {
@@ -2287,6 +2351,7 @@ impl PollCache {
 
     fn record_poll_wire_bytes(
         &mut self,
+        resource_kind: &'static str,
         wire_bytes: usize,
     ) -> Result<(), RepositoryWatchAttemptError> {
         let projected = self
@@ -2294,6 +2359,13 @@ impl PollCache {
             .checked_add(wire_bytes)
             .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
         if projected > MAX_POLL_WIRE_BYTES {
+            tracing::warn!(
+                resource_kind,
+                accepted_poll_wire_bytes = self.poll_wire_bytes,
+                next_chunk_bytes = wire_bytes,
+                projected_poll_wire_bytes = projected,
+                "repository-watch poll wire budget exceeded"
+            );
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
         self.poll_wire_bytes = projected;
@@ -2918,6 +2990,7 @@ mod tests {
     // and the fetch set on the same pull request.
     const CANCELLED_FETCH_PULL_NUMBER: u64 = 7;
     const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
+    const CHANGED_PULL_UPDATED_AT: &str = "2026-08-03T12:30:01Z";
     const POLL_INTERVAL: Duration = Duration::from_secs(300);
     const SHORT_CYCLE: Duration = Duration::from_secs(75);
     const SHORT_CYCLE_REMAINDER: Duration = Duration::from_secs(225);
@@ -2980,9 +3053,9 @@ mod tests {
     const IN_PROGRESS_CHECK_RUN_NAME: &str = "lint";
     const RETAINED_REVIEW_IDS: [u64; 2] = [31, 32];
     const PENDING_REVIEW_ID: u64 = 33;
-    // Public provider identities from the deferred-refresh reproduction. The
-    // surrounding actors and content stay synthetic test data.
-    const DEFERRED_REVIEW_IDS: [u64; 3] = [4_922_903_072, 4_922_910_037, 4_922_938_791];
+    // Distinct ordered identities preserve the provider order of the deferred
+    // review fixtures.
+    const DEFERRED_REVIEW_IDS: [u64; 3] = [34, 35, 36];
     const DEFERRED_USER_REVIEWER: &str = "watch-user";
     const DEFERRED_APPROVING_REVIEWER: &str = "review-agent-one[bot]";
     const DEFERRED_COMMENTING_REVIEWER: &str = "review-agent-two[bot]";
@@ -4997,38 +5070,38 @@ mod tests {
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .expect("the deferred review wave forms events");
+        let deferred_reviews =
+            &current.state().pull_requests()[0].reviews()[RETAINED_REVIEW_IDS.len()..];
 
-        assert_eq!(events.len(), DEFERRED_REVIEW_IDS.len());
+        assert_eq!(events.len(), deferred_reviews.len());
         assert_eq!(
             events[0].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_USER_REVIEWER))
-                    .expect("fixture reviewer is valid"),
-                state: ReviewState::Commented,
-                commit: CommitSha::try_new(String::from(HEAD_SHA))
-                    .expect("fixture review commit is valid"),
+                reviewer: deferred_reviews[0].reviewer().clone(),
+                state: deferred_reviews[0]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[0].commit().clone(),
             }
         );
         assert_eq!(
             events[1].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: RepoWatchAuthorLogin::try_new(String::from(DEFERRED_APPROVING_REVIEWER,))
-                    .expect("fixture reviewer is valid"),
-                state: ReviewState::Approved,
-                commit: CommitSha::try_new(String::from(HEAD_SHA))
-                    .expect("fixture review commit is valid"),
+                reviewer: deferred_reviews[1].reviewer().clone(),
+                state: deferred_reviews[1]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[1].commit().clone(),
             }
         );
         assert_eq!(
             events[2].kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
-                reviewer: RepoWatchAuthorLogin::try_new(
-                    String::from(DEFERRED_COMMENTING_REVIEWER,)
-                )
-                .expect("fixture reviewer is valid"),
-                state: ReviewState::Commented,
-                commit: CommitSha::try_new(String::from(HEAD_SHA))
-                    .expect("fixture review commit is valid"),
+                reviewer: deferred_reviews[2].reviewer().clone(),
+                state: deferred_reviews[2]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[2].commit().clone(),
             }
         );
     }
@@ -5268,7 +5341,7 @@ mod tests {
         let observation = complete_typed_observation().await;
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
-        let number = 7_u64;
+        let number = previous.context().number().get();
         fixture
             .poller
             .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
@@ -5303,14 +5376,14 @@ mod tests {
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        let number = 7_u64;
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        let number = previous.context().number().get();
         let published_generation = RepoWatchCursorGeneration::INITIAL;
         let loaded_generation = published_generation
             .next()
             .expect("fixture cursor generation has a successor");
-        let observation = complete_typed_observation().await;
-        let previous = &observation.state().pull_requests()[0];
-        let listed = listed_pull_request(HEAD_SHA);
         fixture
             .poller
             .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
@@ -5333,10 +5406,14 @@ mod tests {
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        let number = 7_u64;
         let observation = complete_typed_observation().await;
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
+        let changed_listing = ListedPullRequest {
+            updated_at: String::from(CHANGED_PULL_UPDATED_AT),
+            head_sha: listed.head_sha.clone(),
+        };
+        let number = previous.context().number().get();
         fixture
             .poller
             .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
@@ -5346,11 +5423,7 @@ mod tests {
 
         assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
-            &ListedPullRequest {
-                updated_at: "2026-08-03T12:30:01Z".to_owned(),
-                head_sha:
-                    CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture listed head is valid"),
-            },
+            &changed_listing,
             previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
@@ -5362,10 +5435,10 @@ mod tests {
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        let number = 7_u64;
         let observation = complete_typed_observation().await;
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
+        let number = previous.context().number().get();
         fixture
             .poller
             .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
@@ -5928,15 +6001,40 @@ mod tests {
     }
 
     #[test]
+    fn a_new_attempt_clears_prior_poll_metrics_without_discarding_the_cache() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        let entity_tag = EntityTag(ENTITY_TAG.to_owned());
+        cache.insert(
+            key.clone(),
+            entity_tag.clone(),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+        cache.begin_poll();
+        cache.touch(key.clone()).expect("cached fixture is touched");
+        cache
+            .record_poll_wire_bytes(CACHE_KEY_KIND, CACHE_WIRE_BYTES)
+            .expect("fixture wire bytes are admitted");
+
+        cache.begin_attempt();
+
+        assert_eq!(cache.requests, 0);
+        assert_eq!(cache.poll_wire_bytes, 0);
+        assert_eq!(cache.cached_wire_bytes, CACHE_WIRE_BYTES);
+        assert_eq!(cache.entity_tag(&key), Some(&entity_tag));
+    }
+
+    #[test]
     fn one_poll_rejects_response_bytes_beyond_its_aggregate_wire_bound() {
         let mut cache = PollCache::default();
         cache.begin_poll();
         cache
-            .record_poll_wire_bytes(MAX_POLL_WIRE_BYTES)
+            .record_poll_wire_bytes(CACHE_KEY_KIND, MAX_POLL_WIRE_BYTES)
             .expect("exact aggregate wire bound is accepted");
 
         assert_eq!(
-            cache.record_poll_wire_bytes(1),
+            cache.record_poll_wire_bytes(CACHE_KEY_KIND, 1),
             Err(RepositoryWatchAttemptError::ResourceLimit)
         );
     }
