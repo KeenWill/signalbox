@@ -211,6 +211,8 @@ impl PostgresRepoWatchDispatchStore {
                 &mut transaction,
                 repository,
                 pull_request_number,
+                cursor_generation,
+                event_ordinal,
             )
             .await?;
             let sessions = sqlx::query_scalar::<_, Uuid>(

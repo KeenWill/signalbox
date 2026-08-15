@@ -225,6 +225,24 @@ fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     )?)
 }
 
+fn conflict_and_merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    Ok(RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![
+                RepoWatchEventKindNameV1::MergeableStateChanged,
+                RepoWatchEventKindNameV1::PullRequestMerged,
+            ],
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?)
+}
+
 struct TemplateResolver;
 
 impl RepoWatchTemplateResolver for TemplateResolver {
@@ -1154,6 +1172,59 @@ async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<
 
     assert!(pending_obligation.is_none());
     assert_eq!(settlement, "target_closed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_cutoff_preserves_an_obligation_for_its_own_event() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(conflict_and_merged_event_rule()?).await?;
+    commit_merge(&fixture, 0x53_200).await?;
+    let merged =
+        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?;
+    let loaded = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the terminal event remains unevaluated");
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &merged,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    let cutoff_processed = fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x53_210))
+        })
+        .await?;
+    let obligation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let settled_kind: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation",
+    )
+    .fetch_optional(&fixture.pool)
+    .await?
+    .flatten();
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert!(cutoff_processed);
+    assert_eq!(obligation_count, 1);
+    assert_eq!(settled_kind, None);
     Ok(())
 }
 
