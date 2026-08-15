@@ -694,6 +694,7 @@ pub fn map_repo_watch_webhook_delivery_v1(
 
     match delivery.event() {
         "pull_request" => map_pull_request(root, delivery.action()),
+        "issue_comment" => map_issue_comment(root, delivery.action()),
         "pull_request_review" => map_review(root, delivery.action()),
         "pull_request_review_thread" => map_thread(root, delivery.action()),
         "check_run" => map_check_run(root, delivery.action(), delivery.repository()),
@@ -707,6 +708,32 @@ pub fn map_repo_watch_webhook_delivery_v1(
             RepoWatchWebhookIgnoredReasonV1::UnmappedEvent,
         )),
     }
+}
+
+fn map_issue_comment(
+    root: &Map<String, Value>,
+    action: Option<&str>,
+) -> Result<RepoWatchWebhookMappingV1, RepoWatchWebhookMappingError> {
+    if !matches!(action, Some("created" | "edited" | "deleted")) {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::UnmappedAction,
+        ));
+    }
+    let issue = object_at(root, &["issue"], "issue")?;
+    let Some(pull_request) = issue.get("pull_request") else {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::UnmappedEvent,
+        ));
+    };
+    object(pull_request, "issue.pull_request")?;
+    let pull_request =
+        positive_at(issue, &["number"], "issue.number").map(PullRequestNumber::new)?;
+    Ok(RepoWatchWebhookMappingV1::Patch(
+        RepoWatchObservationPatchV1::new(
+            Vec::new(),
+            vec![RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }],
+        ),
+    ))
 }
 
 fn verify_repository(
@@ -1071,10 +1098,10 @@ fn pull_request_numbers_for_repository(
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             };
-            let candidate = match repository_at(
+            let candidate = match github_repository_url_at(
                 pull_request,
-                &["base", "repo", "full_name"],
-                "check_run.pull_requests[].base.repo.full_name",
+                &["base", "repo", "url"],
+                "check_run.pull_requests[].base.repo.url",
             ) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
@@ -1092,6 +1119,21 @@ fn pull_request_numbers_for_repository(
             )
         })
         .collect()
+}
+
+fn github_repository_url_at(
+    root: &Map<String, Value>,
+    path: &[&str],
+    field: &'static str,
+) -> Result<RepositorySlug, RepoWatchWebhookMappingError> {
+    const GITHUB_REPOSITORY_API_PREFIX: &str = "https://api.github.com/repos/";
+
+    let url = string_at(root, path, field)?;
+    let slug = url
+        .strip_prefix(GITHUB_REPOSITORY_API_PREFIX)
+        .ok_or(RepoWatchWebhookMappingError::InvalidField(field))?;
+    RepositorySlug::try_new(slug.to_owned())
+        .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
 }
 
 fn object<'value>(
@@ -1303,6 +1345,9 @@ mod tests {
     const MAPPED_WORKFLOW_RUN: u64 = 601;
     const MAPPED_WORKFLOW: u64 = 602;
     const MAPPED_WORKFLOW_ATTEMPT: u64 = 2;
+    const MAPPED_ISSUE_COMMENT: u64 = 721;
+    const ORDINARY_ISSUE: u64 = 19;
+    const ORDINARY_ISSUE_COMMENT: u64 = 722;
     const RETAINED_THREAD: &str = "PRRT_retained";
     const MAPPED_THREAD: &str = "PRRT_fixture";
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
@@ -1367,6 +1412,12 @@ mod tests {
 
     fn object_id(value: u64) -> GitHubObjectId {
         GitHubObjectId::new(NonZeroU64::new(value).expect("fixture object identity is positive"))
+    }
+
+    fn pull_request_number() -> PullRequestNumber {
+        PullRequestNumber::new(
+            NonZeroU64::new(PULL_REQUEST).expect("fixture pull-request number is positive"),
+        )
     }
 
     fn canonical_observation(head: &str) -> RepoWatchObservation {
@@ -1518,6 +1569,52 @@ mod tests {
     }
 
     #[test]
+    fn created_pr_issue_comment_requests_poll_equivalent_projection() {
+        let payload = format!(
+            r#"{{
+                "action":"created",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "issue":{{
+                    "number":{PULL_REQUEST},
+                    "pull_request":{{"url":"https://api.github.com/repos/{REPOSITORY}/pulls/{PULL_REQUEST}"}}
+                }},
+                "comment":{{"id":{MAPPED_ISSUE_COMMENT}}}
+            }}"#
+        );
+        let patch = mapped_patch("issue_comment", Some("created"), &payload);
+
+        assert!(patch.changes().is_empty());
+        assert_eq!(
+            patch.targeted_refreshes(),
+            [RepoWatchTargetedRefreshV1::PullRequestHydration {
+                pull_request: pull_request_number()
+            }]
+        );
+    }
+
+    #[test]
+    fn ordinary_issue_comment_is_cheap_ignored_success() {
+        let payload = format!(
+            r#"{{
+                "action":"created",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "issue":{{"number":{ORDINARY_ISSUE}}},
+                "comment":{{"id":{ORDINARY_ISSUE_COMMENT}}}
+            }}"#
+        );
+        let mapping = map_repo_watch_webhook_delivery_v1(
+            &delivery("issue_comment", Some("created")),
+            payload.as_bytes(),
+        )
+        .expect("ordinary issue comment is not an error");
+
+        assert_eq!(
+            mapping,
+            RepoWatchWebhookMappingV1::Ignored(RepoWatchWebhookIgnoredReasonV1::UnmappedEvent)
+        );
+    }
+
+    #[test]
     fn submitted_review_unions_provider_review_identity() {
         let payload = format!(
             r#"{{
@@ -1595,7 +1692,7 @@ mod tests {
                     "conclusion":"success",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#
@@ -2005,7 +2102,7 @@ mod tests {
                     "conclusion":"failure",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#

@@ -30,7 +30,9 @@ completion generations are verified against PR #541
 its durable frontier, and the one-time storage migration are verified against
 this PR (`agent/repo-watch-content-identity`). The authenticated webhook intake,
 shadow projection, parity view, and targeted refresh behavior are verified
-against this PR (`agent/repo-watch-webhook-receiver`).
+against this PR (`agent/repo-watch-webhook-receiver`). The projection coverage
+enumeration and pull-request issue-comment behavior below are verified against
+this PR (`agent/webhook-event-mapping`).
 
 ## Configuration and credential boundary
 
@@ -717,16 +719,30 @@ Terminal exact payload bytes remain for seven days, after which maintenance may
 delete only the payload; delivery tombstones, digests, projections, and
 dispositions remain append-only.
 
-**Implemented behavior.** The mapped set is pull-request open, reopen, close,
-synchronize, label, unlabel, edit, draft conversion, and ready-for-review;
-submitted pull-request review; resolved or unresolved review thread; completed
-check run; completed check suite; completed workflow run; branch push, create,
-advance, and delete as represented by GitHub's `push` payload; and ping. Review
-dismissal and ping are mapped no-change. Tag pushes, the separate `create` and
-`delete` event families, foreign-repository workflow heads, and every other
-signature-valid event or action are ignored successfully. Guards make stale
-head, lifecycle, branch, workflow-attempt, and immutable-provider facts
-superseded or duplicate rather than allowing regression.
+**Implemented behavior.** Projection coverage is closed by delivery family and
+action:
+
+| GitHub delivery                                                                          | Shadow projection                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pull_request: opened`, `reopened`                                                       | Guarded complete context plus pull-request hydration; may derive `PullRequestOpened`                                                                                                                     |
+| `pull_request: closed`                                                                   | Guarded lifecycle context; may derive `PullRequestClosed` or `PullRequestMerged`                                                                                                                         |
+| `pull_request: synchronize`                                                              | Guarded context plus mergeability and check-rollup queries; may derive `HeadChanged` and poll-derived rollup facts                                                                                       |
+| `pull_request: labeled`, `unlabeled`, `edited`, `converted_to_draft`, `ready_for_review` | Guarded complete context; label actions may derive `Labeled` or `Unlabeled`                                                                                                                              |
+| `issue_comment: created`, `edited`, `deleted` on a pull request                          | Pull-request hydration through the polling normalizer; may derive only facts polling observes, including reaction changes                                                                                |
+| `pull_request_review: submitted`                                                         | Guarded provider-review union; may derive `ReviewSubmitted`                                                                                                                                              |
+| `pull_request_review: dismissed`                                                         | Mapped no-change because version one has no dismissal fact                                                                                                                                               |
+| `pull_request_review_thread: resolved`, `unresolved`                                     | Guarded thread state; may derive `ThreadResolved` or `ThreadOpened`                                                                                                                                      |
+| `check_run: completed`                                                                   | An unambiguous watched pull request gets a guarded provider-run union and check-rollup query; otherwise only a head-SHA check-rollup query; may derive `CheckRunCompleted` and poll-derived rollup facts |
+| `check_suite: completed`                                                                 | Head-SHA check-rollup query; only its poll-normalized result may derive `ChecksCompleted`                                                                                                                |
+| `workflow_run: completed` for the watched repository                                     | Guarded workflow/run/attempt state; may derive `BranchWorkflowRunCompleted`                                                                                                                              |
+| `push` on `refs/heads/*`                                                                 | Guarded branch create, advance, or delete; an advance may derive `BaseAdvanced` for affected open pull requests                                                                                          |
+| `ping`                                                                                   | Mapped endpoint-health no-change                                                                                                                                                                         |
+
+Ordinary issue comments, other actions in those families, tag pushes, the
+separate `create` and `delete` event families, foreign-repository workflow
+heads, and every other signature-valid event are ignored successfully. Guards
+make stale head, lifecycle, branch, workflow-attempt, and immutable-provider
+facts superseded or duplicate rather than allowing regression.
 
 **Implemented behavior.** Payloads do not authoritatively supply GitHub's
 computed mergeability or complete check rollups. A mapped delivery that needs a
