@@ -3,7 +3,6 @@
 use std::{
     collections::BTreeSet,
     path::PathBuf,
-    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -191,7 +190,7 @@ struct ClassifiedDirectoryEntry {
 
 #[cfg(unix)]
 struct PendingDirectory {
-    parent: Option<Rc<PendingDirectory>>,
+    parent: Option<usize>,
     name: Option<OsString>,
 }
 
@@ -345,14 +344,14 @@ fn walk_root(
                 );
             }
         };
-    let mut pending = vec![PendingDirectory {
+    let mut directories = vec![PendingDirectory {
         parent: None,
         name: None,
     }];
-    while let Some(pending_directory) = pending.pop() {
-        let is_root = pending_directory.name.is_none();
-        let current_directory = Rc::new(pending_directory);
-        let relative_directory = pending_directory_path(&current_directory);
+    let mut pending = vec![0_usize];
+    while let Some(current_directory) = pending.pop() {
+        let is_root = directories[current_directory].name.is_none();
+        let relative_directory = pending_directory_path(current_directory, &directories);
         let directory = root_path.join(&relative_directory);
         if !check_elapsed(root.path(), findings, state) {
             return false;
@@ -419,9 +418,10 @@ fn walk_root(
                 );
             }
         };
+        state.classified_entries += classified.load(Ordering::Relaxed).min(remaining_entries);
         let mut entries = Vec::new();
         for entry in directory_read.entries {
-            if !consume_entry(root.path(), findings, state) {
+            if !check_elapsed(root.path(), findings, state) {
                 return false;
             }
             match entry {
@@ -440,7 +440,7 @@ fn walk_root(
             }
         }
         for _read_error in 0..directory_read.read_errors {
-            if !consume_entry(root.path(), findings, state)
+            if !check_elapsed(root.path(), findings, state)
                 || !push_path_finding(
                     &directory,
                     root.path(),
@@ -479,10 +479,12 @@ fn walk_root(
                 return false;
             }
             if classified_entry.file_type == rustix::fs::FileType::Directory {
-                pending.push(PendingDirectory {
-                    parent: Some(Rc::clone(&current_directory)),
+                let child = directories.len();
+                directories.push(PendingDirectory {
+                    parent: Some(current_directory),
                     name: Some(classified_entry.name),
                 });
+                pending.push(child);
             }
         }
     }
@@ -490,14 +492,15 @@ fn walk_root(
 }
 
 #[cfg(unix)]
-fn pending_directory_path(directory: &PendingDirectory) -> PathBuf {
+fn pending_directory_path(directory: usize, directories: &[PendingDirectory]) -> PathBuf {
     let mut names = Vec::new();
     let mut current = Some(directory);
-    while let Some(component) = current {
+    while let Some(index) = current {
+        let component = &directories[index];
         if let Some(name) = &component.name {
             names.push(name);
         }
-        current = component.parent.as_deref();
+        current = component.parent;
     }
     names.reverse();
     names.into_iter().collect()
@@ -724,6 +727,14 @@ fn read_directory(
                 classified.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+    if entry_limit_exceeded {
+        classified.store(0, Ordering::Relaxed);
+        return Ok(DirectoryRead {
+            entries: Vec::new(),
+            read_errors: 0,
+            entry_limit_exceeded,
+        });
     }
     let entries = classify_sorted_names(
         names,
@@ -1147,26 +1158,6 @@ fn open_candidate_at_no_follow(directory: &OwnedFd, name: &OsStr) -> io::Result<
         ));
     }
     Ok(file)
-}
-
-fn consume_entry(
-    fallback: &InstructionPath,
-    findings: &mut Vec<InstructionDiscoveryFinding>,
-    state: &mut DiscoveryState,
-) -> bool {
-    if !check_elapsed(fallback, findings, state) {
-        return false;
-    }
-    if state.classified_entries >= state.limits.classified_entries {
-        return reach_limit(
-            fallback.clone(),
-            InstructionDiscoveryLimitKind::ClassifiedEntries,
-            findings,
-            state,
-        );
-    }
-    state.classified_entries += 1;
-    true
 }
 
 fn check_elapsed(
@@ -1607,6 +1598,27 @@ mod tests {
     }
 
     #[test]
+    fn entry_limit_discards_the_nondeterministic_partial_directory_batch() {
+        let temporary = tempfile::tempdir().expect("temporary root exists");
+        fs::write(temporary.path().join("AGENTS.md"), "not admitted").expect("candidate exists");
+        fs::write(temporary.path().join("another"), "also observed").expect("second entry exists");
+        let root = workspace_root(&temporary);
+
+        let snapshot =
+            discover_with_limits(vec![root], test_limits(1, 4, 64, Duration::from_secs(1)));
+
+        assert!(!snapshot.is_complete());
+        assert_eq!(snapshot.classified_entries(), 0);
+        assert!(snapshot.bundles().is_empty());
+        assert_eq!(
+            snapshot.findings()[0].kind(),
+            InstructionDiscoveryFindingKind::LimitReached(
+                InstructionDiscoveryLimitKind::ClassifiedEntries
+            )
+        );
+    }
+
+    #[test]
     fn candidate_byte_limit_bounds_the_source_read() {
         let temporary = tempfile::tempdir().expect("temporary root exists");
         fs::write(temporary.path().join("AGENTS.md"), "too large")
@@ -1756,31 +1768,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn pending_siblings_share_their_parent_path() {
-        let parent = Rc::new(PendingDirectory {
-            parent: None,
-            name: Some(OsString::from("parent")),
-        });
-        let left = PendingDirectory {
-            parent: Some(Rc::clone(&parent)),
-            name: Some(OsString::from("left")),
-        };
-        let right = PendingDirectory {
-            parent: Some(Rc::clone(&parent)),
-            name: Some(OsString::from("right")),
-        };
+    fn pending_siblings_share_their_parent_index() {
+        let directories = vec![
+            PendingDirectory {
+                parent: None,
+                name: Some(OsString::from("parent")),
+            },
+            PendingDirectory {
+                parent: Some(0),
+                name: Some(OsString::from("left")),
+            },
+            PendingDirectory {
+                parent: Some(0),
+                name: Some(OsString::from("right")),
+            },
+        ];
 
-        assert!(Rc::ptr_eq(
-            left.parent.as_ref().expect("left shares its parent"),
-            right.parent.as_ref().expect("right shares its parent")
-        ));
-        assert_eq!(pending_directory_path(&left), PathBuf::from("parent/left"));
+        assert_eq!(directories[1].parent, directories[2].parent);
         assert_eq!(
-            pending_directory_path(&right),
+            pending_directory_path(1, &directories),
+            PathBuf::from("parent/left")
+        );
+        assert_eq!(
+            pending_directory_path(2, &directories),
             PathBuf::from("parent/right")
         );
-        assert_eq!(left.name.as_deref(), Some(OsStr::new("left")));
-        assert_eq!(right.name.as_deref(), Some(OsStr::new("right")));
+        assert_eq!(directories[1].name.as_deref(), Some(OsStr::new("left")));
+        assert_eq!(directories[2].name.as_deref(), Some(OsStr::new("right")));
     }
 
     #[test]
