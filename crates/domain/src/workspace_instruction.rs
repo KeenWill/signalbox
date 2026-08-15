@@ -66,6 +66,15 @@ pub struct InstructionSourcePathInterner {
     edges: BTreeMap<(InstructionPath, Option<usize>, String), Arc<RelativePathNode>>,
 }
 
+/// One reusable interned directory prefix beneath an instruction root.
+#[derive(Clone, Debug)]
+pub struct InstructionSourcePathPrefix {
+    root_path: InstructionPath,
+    relative_leaf: Option<Arc<RelativePathNode>>,
+    relative_bytes: usize,
+    absolute_hash_state: Sha256,
+}
+
 impl InstructionSourcePathInterner {
     /// Creates an empty source-path interner.
     pub const fn new() -> Self {
@@ -74,29 +83,70 @@ impl InstructionSourcePathInterner {
         }
     }
 
-    fn intern(
-        &mut self,
-        root_path: &InstructionPath,
-        relative_path: &str,
-    ) -> Option<Arc<RelativePathNode>> {
-        let mut parent: Option<Arc<RelativePathNode>> = None;
-        for component in relative_path.split('/') {
-            let parent_identity = parent.as_ref().map(|node| Arc::as_ptr(node) as usize);
-            let key = (root_path.clone(), parent_identity, component.to_owned());
-            let node = match self.edges.get(&key).cloned() {
-                Some(node) => node,
-                None => {
-                    let node = Arc::new(RelativePathNode {
-                        parent: parent.clone(),
-                        component: component.into(),
-                    });
-                    self.edges.insert(key, Arc::clone(&node));
-                    node
-                }
-            };
-            parent = Some(node);
+    /// Starts an empty root-relative prefix without copying the root spelling.
+    pub fn root_prefix(root_path: InstructionPath) -> InstructionSourcePathPrefix {
+        let mut absolute_hash_state = Sha256::new();
+        absolute_hash_state.update(root_path.as_str().as_bytes());
+        InstructionSourcePathPrefix {
+            root_path,
+            relative_leaf: None,
+            relative_bytes: 0,
+            absolute_hash_state,
         }
-        parent
+    }
+
+    /// Appends one validated component while reusing the prefix's ancestry.
+    pub fn append_prefix(
+        &mut self,
+        prefix: &InstructionSourcePathPrefix,
+        component: &str,
+    ) -> Result<InstructionSourcePathPrefix, InstructionPathError> {
+        if component.is_empty() {
+            return Err(InstructionPathError::Empty);
+        }
+        if component.contains('\0') {
+            return Err(InstructionPathError::ContainsNull);
+        }
+        if component.contains('/') || matches!(component, "." | "..") {
+            return Err(InstructionPathError::NotCanonical);
+        }
+        let separator_bytes = usize::from(prefix.relative_leaf.is_some());
+        let relative_bytes = prefix
+            .relative_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(component.len());
+        if relative_bytes > MAX_INSTRUCTION_PATH_BYTES {
+            return Err(InstructionPathError::TooLong);
+        }
+        let parent_identity = prefix
+            .relative_leaf
+            .as_ref()
+            .map(|node| Arc::as_ptr(node) as usize);
+        let key = (
+            prefix.root_path.clone(),
+            parent_identity,
+            component.to_owned(),
+        );
+        let relative_leaf = match self.edges.get(&key).cloned() {
+            Some(node) => node,
+            None => {
+                let node = Arc::new(RelativePathNode {
+                    parent: prefix.relative_leaf.clone(),
+                    component: component.into(),
+                });
+                self.edges.insert(key, Arc::clone(&node));
+                node
+            }
+        };
+        let mut absolute_hash_state = prefix.absolute_hash_state.clone();
+        absolute_hash_state.update(b"/");
+        absolute_hash_state.update(component.as_bytes());
+        Ok(InstructionSourcePathPrefix {
+            root_path: prefix.root_path.clone(),
+            relative_leaf: Some(relative_leaf),
+            relative_bytes,
+            absolute_hash_state,
+        })
     }
 }
 
@@ -189,12 +239,29 @@ impl InstructionSourcePath {
         if relative_path.len() > MAX_INSTRUCTION_PATH_BYTES {
             return Err(InstructionPathError::TooLong);
         }
-        let Some(relative_leaf) = interner.intern(&root_path, relative_path) else {
+        let mut prefix = InstructionSourcePathInterner::root_prefix(root_path);
+        for component in relative_path.split('/') {
+            prefix = interner.append_prefix(&prefix, component)?;
+        }
+        Self::from_prefix(prefix)
+    }
+
+    /// Appends one source name to an already interned directory prefix.
+    pub fn try_new_under(
+        interner: &mut InstructionSourcePathInterner,
+        directory: &InstructionSourcePathPrefix,
+        source_name: &str,
+    ) -> Result<Self, InstructionPathError> {
+        Self::from_prefix(interner.append_prefix(directory, source_name)?)
+    }
+
+    fn from_prefix(prefix: InstructionSourcePathPrefix) -> Result<Self, InstructionPathError> {
+        let Some(relative_leaf) = prefix.relative_leaf else {
             return Err(InstructionPathError::NotCanonical);
         };
-        let identity_hash = InstructionDigest::sha256(value.as_bytes());
+        let identity_hash = InstructionDigest(prefix.absolute_hash_state.finalize().into());
         Ok(Self {
-            root_path,
+            root_path: prefix.root_path,
             relative_leaf,
             identity_hash,
         })
@@ -701,19 +768,39 @@ mod tests {
     fn sibling_source_paths_share_their_root_relative_ancestry() {
         let root =
             InstructionPath::try_new(String::from("/workspace")).expect("fixture root is valid");
+        let long_name = "long";
+        let common_name = "common";
+        let prefix_name = "prefix";
+        let first_name = "first";
+        let second_name = "second";
+        let source_name = "AGENTS.md";
+        let first_relative =
+            format!("{long_name}/{common_name}/{prefix_name}/{first_name}/{source_name}");
+        let second_relative =
+            format!("{long_name}/{common_name}/{prefix_name}/{second_name}/{source_name}");
         let mut interner = InstructionSourcePathInterner::new();
-        let first = InstructionSourcePath::try_new_in(
-            &mut interner,
-            root.clone(),
-            String::from("/workspace/long/common/prefix/first/AGENTS.md"),
-        )
-        .expect("first sibling source is valid");
-        let second = InstructionSourcePath::try_new_in(
-            &mut interner,
-            root.clone(),
-            String::from("/workspace/long/common/prefix/second/AGENTS.md"),
-        )
-        .expect("second sibling source is valid");
+        let root_prefix = InstructionSourcePathInterner::root_prefix(root);
+        let long = interner
+            .append_prefix(&root_prefix, long_name)
+            .expect("first common component is valid");
+        let common = interner
+            .append_prefix(&long, common_name)
+            .expect("second common component is valid");
+        let common_prefix = interner
+            .append_prefix(&common, prefix_name)
+            .expect("third common component is valid");
+        let first_directory = interner
+            .append_prefix(&common_prefix, first_name)
+            .expect("first sibling directory is valid");
+        let second_directory = interner
+            .append_prefix(&common_prefix, second_name)
+            .expect("second sibling directory is valid");
+        let first =
+            InstructionSourcePath::try_new_under(&mut interner, &first_directory, source_name)
+                .expect("first sibling source is valid");
+        let second =
+            InstructionSourcePath::try_new_under(&mut interner, &second_directory, source_name)
+                .expect("second sibling source is valid");
         let first_parent = first
             .relative_leaf
             .parent
@@ -733,11 +820,8 @@ mod tests {
             .as_ref()
             .expect("the second sibling has a common prefix");
 
-        assert_eq!(first.relative_path(), "long/common/prefix/first/AGENTS.md");
-        assert_eq!(
-            second.relative_path(),
-            "long/common/prefix/second/AGENTS.md"
-        );
+        assert_eq!(first.relative_path(), first_relative);
+        assert_eq!(second.relative_path(), second_relative);
         assert!(Arc::ptr_eq(first_common_prefix, second_common_prefix));
     }
 

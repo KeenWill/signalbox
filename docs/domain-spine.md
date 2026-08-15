@@ -5547,12 +5547,24 @@ impl InstructionPath {
 pub struct InstructionSourcePathInterner { /* private */ }
 impl InstructionSourcePathInterner {
     pub const fn new() -> Self;
+    pub fn root_prefix(root_path: InstructionPath) -> InstructionSourcePathPrefix;
+    pub fn append_prefix(
+        &mut self,
+        prefix: &InstructionSourcePathPrefix,
+        component: &str,
+    ) -> Result<InstructionSourcePathPrefix, InstructionPathError>;
 }
+pub struct InstructionSourcePathPrefix { /* private */ }
 pub struct InstructionSourcePath { /* private */ }
 impl InstructionSourcePath {
     pub fn try_new(
         root_path: InstructionPath,
         value: String,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn try_new_under(
+        interner: &mut InstructionSourcePathInterner,
+        directory: &InstructionSourcePathPrefix,
+        source_name: &str,
     ) -> Result<Self, InstructionPathError>;
     pub fn try_new_in(
         interner: &mut InstructionSourcePathInterner,
@@ -10464,8 +10476,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| domain: workspace_instruction                      | 17                    |
-| **signalbox-domain total**                         | **791 (+12 free fn)** |
+| domain: workspace_instruction                      | 18                    |
+| **signalbox-domain total**                         | **792 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
