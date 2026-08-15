@@ -21,8 +21,8 @@ this PR (`agent/delegation-process-wire-v2`).
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
-The repository-watch operator-status process and terminal surface was verified
-against PR #861 (`agent/operator-status-command`).
+The repository-watch operator-status process and terminal surface was
+re-verified through PR #854 (`agent/daemon-ops-overnight`).
 
 The descendant-termination command scope was re-verified through this PR
 (`agent/delegation-command-scope`).
@@ -1279,11 +1279,13 @@ view's ready decision. An infinite eligibility timestamp is represented as a
 never-eligible cooldown rather than a numeric duration. A convergence row
 carries repository and pull request, head and base revisions, base branch,
 mergeable state, review decision, unresolved-thread and gating-check counts,
-sorted non-green check names, verdict, optional matching durable seal, and
-whole-second assessment age. A pending-clearance row carries repository and pull
-request, current and reviewed heads, review identity, reviewer, and whole-second
-pending duration. Every duration is clamped nonnegative and sampled against the
-database transaction timestamp, not a client clock.
+sorted non-green check names, verdict, optional exact-identity durable seal, and
+whole-second assessment age. The seal remains present when later evidence on the
+same head and base regresses, even though the current verdict is not converged.
+A pending-clearance row carries repository and pull request, current and
+reviewed heads, review identity, reviewer, and whole-second pending duration.
+Every duration is clamped nonnegative and sampled against the database
+transaction timestamp, not a client clock.
 
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
 indices, counts, and outbox cursors are canonical decimal strings, preserving

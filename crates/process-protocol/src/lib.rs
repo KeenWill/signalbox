@@ -3120,7 +3120,7 @@ pub enum OperatorStatusConvergenceVerdict {
     MergeReady,
 }
 
-/// Durable convergence seal attached to the latest assessment, when any.
+/// Durable convergence seal for the assessment's exact head and base identity, when any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperatorStatusConvergenceSeal {
@@ -7993,18 +7993,6 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                     .non_green_gating_checks
                     .windows(2)
                     .all(|pair| pair[0] <= pair[1])
-                && item.seal.is_none_or(|seal| {
-                    matches!(
-                        (item.verdict, seal),
-                        (
-                            OperatorStatusConvergenceVerdict::InternallyConverged,
-                            OperatorStatusConvergenceSeal::InternallyConverged
-                        ) | (
-                            OperatorStatusConvergenceVerdict::MergeReady,
-                            OperatorStatusConvergenceSeal::MergeReady
-                        )
-                    )
-                })
         }
         OperatorStatusMessage::PendingStaleReviewClearance(item) => {
             operator_status_text_is_valid(&item.repository, 201)
@@ -9552,6 +9540,33 @@ mod tests {
             invalid_ready,
             Err(FrameValidationError::OperatorStatusShape)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn operator_status_accepts_exact_identity_seal_after_evidence_regresses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: String::from("example/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    head_sha: String::from("1111111111111111111111111111111111111111"),
+                    base_branch: String::from("main"),
+                    base_revision: String::from("2222222222222222222222222222222222222222"),
+                    mergeable_state: OperatorStatusMergeableState::Mergeable,
+                    review_decision: OperatorStatusReviewDecision::Approved,
+                    unresolved_thread_count: CanonicalU64::new(1),
+                    gating_check_count: CanonicalU64::new(2),
+                    non_green_gating_checks: Vec::new(),
+                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                    assessed_seconds_ago: CanonicalU64::new(12),
+                }),
+            ))),
+            r#"{"type":"operator_status","kind":"pull_request_convergence","repository":"example/repo","pull_request_number":"41","head_sha":"1111111111111111111111111111111111111111","base_branch":"main","base_revision":"2222222222222222222222222222222222222222","mergeable_state":"mergeable","review_decision":"approved","unresolved_thread_count":"1","gating_check_count":"2","non_green_gating_checks":[],"verdict":"not_converged","seal":"merge_ready","assessed_seconds_ago":"12"}"#,
+        )?;
         Ok(())
     }
 
