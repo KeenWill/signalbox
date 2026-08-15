@@ -66,7 +66,9 @@ length-framed, domain-separated `RepoWatchEventOccurrenceV1`:
 
 1. the literal domain `signalbox/repo-watch/event-content-identity/v1`;
 2. repository and event version;
-3. the canonical target and complete event payload stored by `repo_watch_event`;
+3. the event kind and only its stable occurrence payload members, excluding
+   incidental current-context fields such as title, body, labels unrelated to
+   the transition, draft state, and author;
 4. the event kind's source-independent stream key; and
 5. that stream's next positive occurrence sequence from the canonical cursor.
 
@@ -83,10 +85,15 @@ collapsing. It is closed by event kind:
 - branch advances use branch; and
 - mergeability and reactions use PR plus their subject identity.
 
-The cursor retains the last occurrence sequence for each bounded stream that can
-recur. Both producers reading the same stream frontier derive the same next
-sequence; committing the event advances it atomically. A later equal transition
-therefore has a different identity, while a racing webhook and poll do not.
+The occurrence frame retains the complete target and payload on the admitted
+event row, but those incidental snapshot fields do not enter content identity.
+Both producers allocate `last_sequence + ordinal_within_stream` while deriving a
+batch, so two results for one stream in one batch cannot receive the same
+sequence. The resulting per-stream frontiers advance atomically with the cursor
+and event batch. Both producers reading the same stream frontier derive the same
+next sequences; a later equal transition therefore has a different identity,
+while a racing webhook and poll do not. Same-stream multi-event fixtures are a
+required prerequisite.
 Provider keys distinguish independent immutable facts. Both transports must
 possess the same occurrence members or request a targeted refresh rather than
 invent them.
@@ -98,6 +105,10 @@ UUID, deduplicates producers. The poller and webhook worker both call the same
 identity function; neither has a transport-specific fallback. This prerequisite
 is a behavior and schema change for the implementation stack, not a claim about
 the current tree.
+`PostgresRepoWatchStore::exact_replay` and event-batch equality likewise compare
+content identity version, content identity, ordering position, and the other
+stable event fields; candidate `RepoWatchEventId` values are excluded because a
+replay allocates new candidates.
 
 ## Existing pipeline seam
 
@@ -128,8 +139,10 @@ a process-protocol message.
 1. `GitHubWebhookHttpV1`: method, configured path, selected GitHub headers, and
    exact bounded body bytes. HTTP admission and signature verification own it.
 2. `RepoWatchWebhookDeliveryV1`: repository, hook ID, delivery GUID, event,
-   action, receipt sequence, body digest, and exact body reference. It contains
-   no session or credential.
+   optional action, receipt sequence, body digest, and exact body reference.
+   Action is required only for event families whose GitHub payload contract
+   defines it; `push` and `ping` are actionless. It contains no session or
+   credential.
 3. `RepoWatchObservationPatchV1`: closed monotonic additions, guarded
    replacements, and targeted-refresh hints decoded from one delivery.
 4. `RepoWatchEventOccurrenceV1`: source-independent members needed to identify
@@ -190,12 +203,21 @@ per watched repository. The polling token and webhook secret are distinct
 references and cannot alias. Credential files follow the existing bounded-read,
 rotation, redaction, absolute-path, and per-repository rules.
 
+The listener first performs a bounded `X-GitHub-Hook-ID` lookup that must select
+exactly one configured watched repository and its webhook secret. HMAC
+verification uses only that selected secret; after verification, the bounded
+envelope parser requires the body repository `full_name` to match that selected
+repository. This is the repository-specific credential boundary owned by
+[`docs/spec/repo-watch.md`](../spec/repo-watch.md#designed-for-version-two-webhook-transport).
+
 The listener accepts `POST` only. It rejects unsupported transfer/content
 encodings, duplicated singleton headers, malformed or over-limit declared
 lengths, and any streamed body crossing the reviewed hard ceiling. It reads the
 exact bytes once while computing HMAC-SHA-256, requires one canonical
 `X-Hub-Signature-256: sha256=<64 lowercase hex>` header, and compares the
-decoded 32-byte MAC in constant time before JSON parsing.
+decoded 32-byte MAC in constant time before JSON parsing. These exact-body and
+bounded-input rules are owned by
+[`docs/spec/repo-watch.md`](../spec/repo-watch.md#designed-for-version-two-webhook-transport).
 
 After signature success, admission requires:
 
@@ -204,7 +226,12 @@ After signature success, admission requires:
 - a bounded ASCII `X-GitHub-Event`;
 - `application/json` content type;
 - a body repository `full_name` equal to the selected configured repository; and
-- a known subscribed event/action, with `ping` used only for health proof.
+- a subscribed event name, with `ping` used only for health proof; and
+- an action only when that event family's payload contract defines one.
+
+An authenticated, repository-bound delivery with an unknown event or action is
+admitted to durable intake and later receives the `ignored` disposition. It is
+not rejected before that disposition can be recorded.
 
 The listener never trusts source IP, `Forwarded`, or `X-Forwarded-*` for
 authentication. A deployment may allowlist GitHub's published hook addresses as
@@ -212,17 +239,21 @@ defense in depth, but HMAC remains mandatory. Logs contain identifiers, sizes,
 status, and bounded codes only—never secrets, signatures, bodies, PR text, or
 rendered JSON.
 
-The endpoint responds `202` only after durable local intake. Parsing,
-observation patching, GitHub queries, cursor commits, and dispatch happen
-asynchronously, outside GitHub's ten-second response window.
+The endpoint responds `202` only after durable local intake. Before that
+response, it parses only a bounded authenticated envelope sufficient to obtain
+the body repository and optional action and to perform replay-conflict checks.
+Full payload mapping, observation patching, GitHub queries, cursor commits, and
+dispatch happen asynchronously, outside GitHub's ten-second response window.
 
 ## Replay protection and local intake
 
-`(repository, hook_id, delivery_id)` is the delivery replay key. GitHub retains
-the GUID on explicit redelivery. An equal duplicate returns `202` without a
-second queue item. The same key with different repository, event, action, or
-body digest retains the first record, rejects the request, and raises a
-metadata-only security signal.
+`(hook_id, delivery_id)` is the delivery replay key. The selected repository is
+stored as conflict-checked data rather than as part of that key, so reuse across
+repositories remains detectable. GitHub retains the GUID on explicit
+redelivery. An equal duplicate returns `202` without a second queue item. The
+same key with different repository, event, optional action, or body digest
+retains the first record, rejects the request, and raises a metadata-only
+security signal. Fixtures cover each conflicting field.
 
 Delivery GUID tombstones and body digests remain permanent. Exact bodies remain
 until terminal processing and for seven days, then an operational sweep may
@@ -297,7 +328,8 @@ events/actions are durably ignored, not guessed.
 | `check_run: completed`                               | Union provider run completion -> `CheckRunCompleted`; schedule aggregate rollup query                               |
 | `check_suite: completed`                             | Schedule aggregate rollup query; no direct aggregate event                                                          |
 | `workflow_run: completed`                            | Guard workflow/run/attempt -> `BranchWorkflowRunCompleted`                                                          |
-| `push` on `refs/heads/*`                             | Guard branch head -> `BaseAdvanced` for affected open PRs                                                           |
+| non-deletion `push` on `refs/heads/*`                | Guard branch head -> `BaseAdvanced` for affected open PRs                                                           |
+| deletion `push` on `refs/heads/*`                    | Remove that branch-head projection; never store the all-zero `after` sentinel or synthesize `BaseAdvanced`          |
 | `ping`                                               | Record endpoint health only                                                                                         |
 
 A PR patch preserves prior checks, reviews, threads, and reactions because a PR
@@ -323,11 +355,15 @@ Reaction state remains full-poll-only because GitHub exposes no matching
 webhook. Complete reviews, threads, branch heads, checks, workflows, lifecycle,
 and context remain in the slow sweep as verification and missed-state recovery.
 
-Targeted queries use the existing per-repository polling credential and
-conditional requests. Their failures delay only dependent facts and do not stop
-webhook intake. The complete poll retains its current cadence throughout shadow
-mode, then moves to one hourly sweep after the parity gate. That interval is the
-simplest rollout default and remains configurable.
+Targeted queries use the existing per-repository polling credential, conditional
+requests, and bounded request deadlines, including the existing 30-second client
+timeout. Network requests execute outside the repository lock. A response is
+applied under the lock only after its captured repository generation still
+matches; otherwise it is discarded or re-derived. Their failures delay only
+dependent facts and do not stop webhook intake. The complete poll retains its
+current cadence throughout shadow mode, then moves to one hourly sweep after the
+parity gate. That interval is the simplest rollout default and remains
+configurable.
 
 ## Ordering and cross-producer deduplication
 
