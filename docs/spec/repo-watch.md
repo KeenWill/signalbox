@@ -24,8 +24,9 @@ current-state delivery are verified against PR #812
 (`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
 against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, and terminal-target cutoff are also verified against this
-PR. The provider members the poller adopts as check-suite and check-run
-completion generations are verified against PR #541
+PR. Exact-head convergence assessment and cutoff are verified against
+`agent/dispatch-autonomy-convergence`. The provider members the poller adopts as
+check-suite and check-run completion generations are verified against PR #541
 (`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
@@ -527,6 +528,49 @@ not work made stale by that fact. Corruption in one commissioned goal rolls back
 that goal's stop to a savepoint but does not roll back the cutoff: the terminal
 event remains durably dispositioned, healthy commissioned goals are stopped, and
 later cutoffs remain eligible for processing.
+
+**Implemented behavior.** Every completed poll also reconciles durable
+convergence evidence for each exact pull-request head in its committed cursor.
+Evidence identical to that head's latest assessment is an idempotent replay;
+changed evidence appends a new assessment. The assessment follows the
+repository's operational status rule: every review thread must be resolved,
+without filtering by author or outdated state; every gating check on the exact
+current commit must be green; mergeability must not be `conflicting`; and the
+aggregate review decision must not be `changes_requested`. Check runs are green
+only when completed with `success`, `skipped`, or `neutral`, and status contexts
+are green only at `success`. Pending, incomplete, missing-conclusion, and other
+terminal results are not green. Check names containing `report only` or
+`CodeRabbit`, compared case-insensitively, are non-gating. The GraphQL
+check-rollup and review-thread connections are read through every bounded page.
+The head, check, and aggregate-review evidence is read before the thread
+inventory, matching the operational reference's ordering so a review thread
+opened between those reads cannot be hidden by an earlier thread snapshot. The
+rollup's commit, head, base, and mergeability evidence must agree with the REST
+pull-request projection and the cursor generation or the poll fails without
+recording an assessment.
+
+**Implemented behavior.** A passing assessment for a pull request based on
+`main` is `merge_ready`. A passing assessment based on another branch is
+`internally_converged`, not merge-ready; both classifications end autonomous
+work on that exact head. Every assessment is append-only evidence, and
+`repo_watch_current_pull_request_convergence` exposes the latest evidence,
+derived verdict, and any exact-head seal. The first passing assessment also
+creates one monotonic seal for the repository, pull request, and exact head SHA.
+Later checks or reviews on the same sealed head remain visible as newer
+assessment evidence but cannot reopen dispatch, so a session does not revisit
+threads it already resolved on that unchanged head. A different head SHA has no
+inherited seal and is assessed and dispatched afresh; convergence therefore
+terminates unchanged-head review cycles without treating a new revision as
+already finished.
+
+**Implemented behavior.** Repository watch records one convergence cutoff for
+each seal. When the sealed head remains the latest assessed head, the cutoff
+applies the ordinary parent-only stop to every generation-one goal repository
+watch commissioned for the pull request, with the same provenance limits as a
+lifecycle cutoff. Dispatch admission rechecks the seal under the repository
+lock: a stale match or collapsed obligation for the sealed exact head settles as
+`target_converged` without creating a session. A seal for an older head is
+recorded but cannot stop work on the newer head.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,

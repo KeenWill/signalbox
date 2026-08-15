@@ -341,6 +341,104 @@ impl PostgresRepoWatchDispatchStore {
         }
     }
 
+    /// Processes the oldest unhandled convergence seal and withdraws every
+    /// still-active generation-one goal commissioned for its pull request.
+    pub async fn process_next_convergence_cutoff<NextCommandId>(
+        &self,
+        repository: &RepositorySlug,
+        mut next_command_id: NextCommandId,
+    ) -> Result<bool, RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, repository.as_str()).await?;
+        let candidate = sqlx::query(
+            "SELECT convergence.assessment_id,
+                    convergence.pull_request_number,
+                    convergence.head_sha
+               FROM repo_watch_pull_request_convergence AS convergence
+              WHERE convergence.repository = $1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_convergence_cutoff AS cutoff
+                     WHERE cutoff.assessment_id = convergence.assessment_id
+                )
+              ORDER BY convergence.converged_at, convergence.assessment_id
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(candidate) = candidate else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let assessment_id: Uuid = candidate.try_get("assessment_id")?;
+        let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
+        let converged_head: String = candidate.try_get("head_sha")?;
+        sqlx::query(
+            "INSERT INTO repo_watch_convergence_cutoff (assessment_id)
+             VALUES ($1)",
+        )
+        .bind(assessment_id)
+        .execute(&mut *transaction)
+        .await?;
+        let current_head: Option<String> = sqlx::query_scalar(
+            "SELECT assessment.head_sha
+               FROM repo_watch_pull_request_convergence_assessment AS assessment
+              WHERE assessment.repository = $1
+                AND assessment.pull_request_number = $2
+              ORDER BY assessment.recorded_at DESC, assessment.assessment_id DESC
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .bind(pull_request_number)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if current_head.as_deref() == Some(converged_head.as_str()) {
+            let sessions = sqlx::query_scalar::<_, Uuid>(
+                "SELECT DISTINCT action.session_id
+                   FROM repo_watch_dispatch_action AS action
+                   JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
+                  WHERE origin.repository = $1
+                    AND origin.pull_request_number = $2
+                  ORDER BY action.session_id",
+            )
+            .bind(repository.as_str())
+            .bind(pull_request_number)
+            .fetch_all(&mut *transaction)
+            .await?;
+            for session_id in sessions {
+                let session = SessionId::from_uuid(session_id);
+                let command = GoalUserCommand::new(
+                    next_command_id(),
+                    session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                );
+                if crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+                    .await
+                    .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?
+                {
+                    sqlx::query(
+                        "INSERT INTO repo_watch_convergence_cutoff_goal
+                            (assessment_id, session_id, goal_command_id)
+                         VALUES ($1, $2, $3)",
+                    )
+                    .bind(assessment_id)
+                    .bind(session_id)
+                    .bind(command.command_id().as_uuid())
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+            }
+        }
+        commit(transaction).await?;
+        Ok(true)
+    }
+
     /// Deactivates rules belonging to repositories absent from configuration.
     pub async fn deactivate_unconfigured_repositories(
         &self,
@@ -725,6 +823,31 @@ impl PostgresRepoWatchDispatchStore {
                     }
                     commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::TargetClosed);
+                }
+                if event_target_is_converged(&mut transaction, &event).await? {
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                RepoWatchEvaluationOutcomeStorageKind::TargetConverged,
+                                None,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::settle_target_converged_obligation(
+                                &mut transaction,
+                                obligation_id,
+                                event.id(),
+                            )
+                            .await?;
+                        }
+                    }
+                    commit(transaction).await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::TargetConverged);
                 }
                 if matched_admission == MatchedAdmission::Fresh
                     && crate::repo_watch_dispatch_obligation::active_obligation_exists(
@@ -1232,6 +1355,9 @@ async fn load_recorded_evaluation(
         Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed) => {
             Ok(Some(RepoWatchRuleEvaluationOutcome::TargetClosed))
         }
+        Some(RepoWatchEvaluationOutcomeStorageKind::TargetConverged) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::TargetConverged))
+        }
         Some(
             RepoWatchEvaluationOutcomeStorageKind::Occupied
             | RepoWatchEvaluationOutcomeStorageKind::Coalesced,
@@ -1361,6 +1487,29 @@ async fn terminal_event_has_later_terminal_cutoff(
         }
     }
     Ok(false)
+}
+
+async fn event_target_is_converged(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    let RepoWatchEventTarget::PullRequest(context) = event.target() else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_pull_request_convergence AS convergence
+             WHERE convergence.repository = $1
+               AND convergence.pull_request_number = $2
+               AND convergence.head_sha = $3
+        )",
+    )
+    .bind(event.repository().as_str())
+    .bind(Decimal::from(context.number().get()))
+    .bind(context.head_sha().as_str())
+    .fetch_one(&mut **transaction)
+    .await?)
 }
 
 async fn singleton_is_cooling_down(
