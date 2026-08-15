@@ -611,25 +611,25 @@ later cutoffs remain eligible for processing.
 **Implemented behavior.** Every completed poll atomically commits its cursor,
 events, and durable convergence evidence for each pull request at the exact head
 and base revision in that cursor. Evidence identical to that identity's latest
-assessment is an idempotent replay;
-changed evidence appends a new assessment. The assessment follows the
-repository's operational status rule: every review thread must be resolved,
-without filtering by author or outdated state; every gating check on the exact
-current commit must be green; mergeability must not be `conflicting`; and the
-aggregate review decision must not be `changes_requested`. Check runs are green
-only when completed with `success`, `skipped`, or `neutral`, and status contexts
-are green only at `success`. Pending, incomplete, missing-conclusion, and other
-terminal results are not green. Check names containing `report only` or
-`CodeRabbit`, compared case-insensitively, are non-gating. The GraphQL
-check-rollup and review-thread connections are read through every bounded page.
-The head, check, and aggregate-review evidence is read before the thread
-inventory, matching the operational reference's ordering so a review thread
-opened between those reads cannot be hidden by an earlier thread snapshot. The
-rollup's commit, head, and base evidence must agree with the pull-request
-projection and cursor generation or the poll fails without recording an
-assessment. The exact-head GraphQL mergeability member supplies both the
-pull-request projection and assessment, preventing a separately timed REST
-mergeability calculation from invalidating otherwise coherent evidence.
+assessment is an idempotent replay; changed evidence appends a new assessment.
+The assessment follows the repository's operational status rule: every review
+thread must be resolved, without filtering by author or outdated state; every
+gating check on the exact current commit must be green; mergeability must not be
+`conflicting`; and the aggregate review decision must not be
+`changes_requested`. Check runs are green only when completed with `success`,
+`skipped`, or `neutral`, and status contexts are green only at `success`.
+Pending, incomplete, missing-conclusion, and other terminal results are not
+green. Check names containing `report only` or `CodeRabbit`, compared
+case-insensitively, are non-gating. The GraphQL check-rollup and review-thread
+connections are read through every bounded page. The head, check, and
+aggregate-review evidence is read before the thread inventory, matching the
+operational reference's ordering so a review thread opened between those reads
+cannot be hidden by an earlier thread snapshot. The rollup's commit, head, and
+base evidence must agree with the pull-request projection and cursor generation
+or the poll fails without recording an assessment. The exact-head GraphQL
+mergeability member supplies both the pull-request projection and assessment,
+preventing a separately timed REST mergeability calculation from invalidating
+otherwise coherent evidence.
 
 **Implemented behavior.** A passing assessment for a pull request based on
 `main` is `merge_ready`. A passing assessment based on another branch is
@@ -639,23 +639,22 @@ work on that exact head. Every assessment is append-only evidence, and
 derived verdict, and any exact-head seal. The first passing assessment also
 creates one monotonic seal for the repository, pull request, exact head SHA, and
 exact base revision. Later checks or reviews on the same sealed identity remain
-visible as newer
-assessment evidence but cannot reopen dispatch, so a session does not revisit
-threads it already resolved on that unchanged identity. A different head SHA or
-base revision has no inherited seal and is assessed and dispatched afresh;
-convergence therefore
-terminates unchanged-head review cycles without treating a new revision as
-already finished.
+visible as newer assessment evidence but cannot reopen dispatch, so a session
+does not revisit threads it already resolved on that unchanged identity. A
+different head SHA or base revision has no inherited seal and is assessed and
+dispatched afresh; convergence therefore terminates unchanged-head review cycles
+without treating a new revision as already finished.
 
 **Implemented behavior.** Repository watch records one convergence cutoff only
 when a seal's head and base revision are the latest assessed identity. Stale
 seals remain pending and become eligible if their identity becomes current
-again. The cutoff applies the ordinary parent-only stop to every generation-one goal repository
-watch commissioned for the pull request, with the same provenance limits as a
-lifecycle cutoff. Dispatch admission rechecks the seal under the repository
-lock: a stale match or collapsed obligation settles as `target_converged` only
-when its head is the latest assessed identity and that identity's head and base
-revision are sealed. An older identity cannot stop current work.
+again. The cutoff applies the ordinary parent-only stop to every generation-one
+goal repository watch commissioned for the pull request, with the same
+provenance limits as a lifecycle cutoff. Dispatch admission rechecks the seal
+under the repository lock: a stale match or collapsed obligation settles as
+`target_converged` only when its head is the latest assessed identity and that
+identity's head and base revision are sealed. An older identity cannot stop
+current work.
 
 **Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
 repository watch continues delivering matching findings while that aggregate
