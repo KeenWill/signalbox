@@ -1,6 +1,7 @@
 //! Enrollment, registration, and liveness runtime for `signalbox-runner`.
 
 mod configuration;
+mod credential;
 mod dispatch_https;
 mod https_broker;
 mod protocol;
@@ -10,6 +11,10 @@ mod workspace;
 pub use configuration::{
     AllowedNetworkHost, ArgumentError, RunnerConfiguration, RunnerConfigurationError,
     RunnerConfigurationPath, RunnerCredentialConfiguration, RunnerRepositoryConfiguration,
+};
+pub use credential::{
+    ResolvedRunnerCredential, RunnerCredentialResolutionError, RunnerCredentialResolutionFailure,
+    resolve_runner_credential,
 };
 pub use dispatch_https::{DispatchHttpsEndpoint, DispatchHttpsError};
 pub use https_broker::{

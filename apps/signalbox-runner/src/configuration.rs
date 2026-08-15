@@ -164,7 +164,7 @@ impl RunnerConfiguration {
         Ok(configuration)
     }
 
-    fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
+    pub(crate) fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
         let raw: RawConfiguration =
             toml::from_str(content).map_err(|_| RunnerConfigurationError::InvalidDocument)?;
         if raw.version != CONFIGURATION_VERSION {
@@ -443,7 +443,8 @@ fn validate_credentials(
 }
 
 fn reserved_environment_name(value: &str) -> bool {
-    value.starts_with("SIGNALBOX_")
+    matches!(value, "HOME" | "HTTPS_PROXY" | "LANG" | "LC_ALL" | "PATH")
+        || value.starts_with("SIGNALBOX_")
         || value.starts_with("ANTHROPIC_")
         || value.starts_with("OPENAI_")
         || value.starts_with("LD_")
@@ -884,6 +885,57 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
 
         assert_eq!(
             error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_fixed_sandbox_credential_environments() {
+        let home = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "HOME");
+        let https_proxy = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "HTTPS_PROXY");
+        let lang = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "LANG");
+        let locale = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "LC_ALL");
+        let path = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "PATH");
+
+        let home_error =
+            RunnerConfiguration::parse(&home).expect_err("HOME is owned by the sandbox runtime");
+        let proxy_error = RunnerConfiguration::parse(&https_proxy)
+            .expect_err("HTTPS_PROXY is owned by the sandbox runtime");
+        let lang_error =
+            RunnerConfiguration::parse(&lang).expect_err("LANG is owned by the sandbox runtime");
+        let locale_error = RunnerConfiguration::parse(&locale)
+            .expect_err("LC_ALL is owned by the sandbox runtime");
+        let path_error =
+            RunnerConfiguration::parse(&path).expect_err("PATH is owned by the sandbox runtime");
+
+        assert_eq!(
+            home_error.to_string(),
+            "runner credential configuration is invalid"
+        );
+        assert_eq!(
+            proxy_error.to_string(),
+            "runner credential configuration is invalid"
+        );
+        assert_eq!(
+            lang_error.to_string(),
+            "runner credential configuration is invalid"
+        );
+        assert_eq!(
+            locale_error.to_string(),
+            "runner credential configuration is invalid"
+        );
+        assert_eq!(
+            path_error.to_string(),
             "runner credential configuration is invalid"
         );
     }
