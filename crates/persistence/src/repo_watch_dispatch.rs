@@ -282,6 +282,42 @@ impl PostgresRepoWatchDispatchStore {
         Ok(true)
     }
 
+    /// Drains durable lifecycle cutoffs before repository-specific tasks start.
+    pub async fn process_pending_lifecycle_cutoffs<NextCommandId>(
+        &self,
+        mut next_command_id: NextCommandId,
+    ) -> Result<(), RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        loop {
+            let repository: Option<String> = sqlx::query_scalar(
+                "SELECT event.repository
+                   FROM repo_watch_event AS event
+                  WHERE event.event_kind IN ('pull_request_closed', 'pull_request_merged')
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_lifecycle_cutoff AS cutoff
+                         WHERE cutoff.event_id = event.event_id
+                    )
+                  ORDER BY event.repository, event.cursor_generation, event.event_ordinal
+                  LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(repository) = repository else {
+                return Ok(());
+            };
+            let repository = RepositorySlug::try_new(repository).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "pending lifecycle cutoff has an invalid repository",
+                )
+            })?;
+            self.process_next_lifecycle_cutoff(&repository, &mut next_command_id)
+                .await?;
+        }
+    }
+
     /// Deactivates rules belonging to repositories absent from configuration.
     pub async fn deactivate_unconfigured_repositories(
         &self,

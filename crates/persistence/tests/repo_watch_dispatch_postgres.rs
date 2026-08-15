@@ -1511,6 +1511,32 @@ async fn removed_repository_deactivates_its_rule_identities() -> Result<(), Box<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_drain_processes_cutoff_after_repository_removal() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    commit_merge(&fixture, 0x57_100).await?;
+    fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await?;
+
+    fixture
+        .store
+        .process_pending_lifecycle_cutoffs(|| {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x57_110))
+        })
+        .await?;
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the removed repository goal remains readable");
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn active_rule_identity_rejects_in_place_content_changes() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
     let changed_rule = cooldown_rule()?;
