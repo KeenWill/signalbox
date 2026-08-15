@@ -1031,6 +1031,102 @@ async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let rule = merged_event_rule()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool, credential_pin());
+    let initial = observation(context(INITIAL_HEAD)?)?;
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(initial),
+                    vec![opened_event(0x54_300, INITIAL_HEAD)?],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let first_merged =
+        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?;
+    let second_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    Some(first_generation),
+                    RepoWatchCursorCandidate::new(first_merged),
+                    vec![merged_event(0x54_310, SECOND_HEAD)?],
+                ),
+            )
+            .await?,
+    );
+    let reopened =
+        lifecycle_observation(context(THIRD_HEAD)?, RepoWatchPullRequestLifecycle::Open)?;
+    let third_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    Some(second_generation),
+                    RepoWatchCursorCandidate::new(reopened),
+                    vec![opened_event(0x54_320, THIRD_HEAD)?],
+                ),
+            )
+            .await?,
+    );
+    let second_merged =
+        lifecycle_observation(context(THIRD_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(third_generation),
+                RepoWatchCursorCandidate::new(second_merged.clone()),
+                vec![merged_event(0x54_330, THIRD_HEAD)?],
+            ),
+        )
+        .await?;
+    let first_cutoff = dispatch_store
+        .process_next_lifecycle_cutoff(&repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_340))
+        })
+        .await?;
+    let second_cutoff = dispatch_store
+        .process_next_lifecycle_cutoff(&repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_350))
+        })
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the older merge remains unevaluated");
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &second_merged,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+
+    assert!(first_cutoff);
+    assert!(second_cutoff);
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::TargetClosed);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(cooldown_rule()?).await?;
     let _occupied = evaluate_second_conflict(&fixture).await?;

@@ -636,7 +636,11 @@ impl PostgresRepoWatchDispatchStore {
                     RepoWatchEventKindV1::PullRequestClosed
                         | RepoWatchEventKindV1::PullRequestMerged
                 );
-                if !terminal_event && !event_target_is_open(&mut transaction, &event).await? {
+                let terminal_event_is_superseded = terminal_event
+                    && terminal_event_has_later_terminal_cutoff(&mut transaction, &event).await?;
+                if (!terminal_event || terminal_event_is_superseded)
+                    && !event_target_is_open(&mut transaction, &event).await?
+                {
                     match matched_admission {
                         MatchedAdmission::Fresh => {
                             insert_evaluation(
@@ -1257,6 +1261,32 @@ async fn event_target_is_open(
         "pull-request event has no durable lifecycle",
     ))?;
     Ok(lifecycle == "pull_request_opened")
+}
+
+async fn terminal_event_has_later_terminal_cutoff(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_event AS origin
+              JOIN repo_watch_event AS boundary
+                ON boundary.repository = origin.repository
+               AND boundary.pull_request_number = origin.pull_request_number
+               AND (boundary.cursor_generation, boundary.event_ordinal) >
+                   (origin.cursor_generation, origin.event_ordinal)
+              JOIN repo_watch_lifecycle_cutoff AS cutoff
+                ON cutoff.event_id = boundary.event_id
+               AND cutoff.disposition_kind = 'terminal'
+             WHERE origin.event_id = $1
+               AND origin.repository = $2
+        )",
+    )
+    .bind(event.id().as_uuid())
+    .bind(event.repository().as_str())
+    .fetch_one(&mut **transaction)
+    .await?)
 }
 
 async fn singleton_is_cooling_down(
