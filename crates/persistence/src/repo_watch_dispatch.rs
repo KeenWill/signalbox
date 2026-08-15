@@ -217,6 +217,7 @@ impl PostgresRepoWatchDispatchStore {
                    JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
                   WHERE origin.repository = $1
                     AND origin.pull_request_number = $2
+                    AND (origin.cursor_generation, origin.event_ordinal) < ($3, $4)
                     AND EXISTS (
                         SELECT 1
                           FROM goal_event AS commissioned_goal
@@ -226,6 +227,8 @@ impl PostgresRepoWatchDispatchStore {
             )
             .bind(repository.as_str())
             .bind(pull_request_number)
+            .bind(cursor_generation)
+            .bind(event_ordinal)
             .fetch_all(&mut *transaction)
             .await?;
             for session_id in sessions {

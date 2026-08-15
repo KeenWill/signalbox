@@ -953,13 +953,13 @@ async fn matching_event_loaded_before_merge_records_target_closed() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn matching_merged_event_dispatches_after_lifecycle_becomes_terminal()
--> Result<(), Box<dyn Error>> {
+async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let rule = merged_event_rule()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
-    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool, credential_pin());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
     let initial = observation(context(INITIAL_HEAD)?)?;
     let first_generation = generation(
         event_store
@@ -992,18 +992,40 @@ async fn matching_merged_event_dispatches_after_lifecycle_becomes_terminal()
         .load_next_event(&repository, rule.id(), rule.version())
         .await?
         .expect("the terminal-event rule sees the merge event");
-    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
-        .evaluate(
-            loaded,
-            &rule,
-            &merged,
-            &TemplateResolver,
-            dispatch_context(),
-        )
-        .await?;
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &merged,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
     let (_, sessions) = dispatched(outcome);
+    let session = sessions[0];
+    let cutoff_processed = dispatch_store
+        .process_next_lifecycle_cutoff(&repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_200))
+        })
+        .await?;
+    let goal = GoalRepository::new(pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the terminal-event dispatch goal remains readable");
+    let cutoff_goal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_lifecycle_cutoff_goal
+          WHERE session_id = $1",
+    )
+    .bind(session.as_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(sessions.len(), rule.actions().len());
+    assert!(cutoff_processed);
+    assert_eq!(goal.current().state(), &GoalState::Pursuing);
+    assert_eq!(cutoff_goal_count, 0);
     Ok(())
 }
 
