@@ -464,17 +464,19 @@ impl InstructionBundleRegistration {
     pub const fn source_path(&self) -> &InstructionSourcePath {
         &self.source_path
     }
-    /// Borrows the source path relative to its authorizing root.
-    pub fn relative_source_path(&self) -> &str {
+    /// Renders the source path relative to its authorizing root.
+    pub fn relative_source_path(&self) -> String {
         self.source_path.relative_path()
     }
-    /// Borrows an agent document's root-relative directory scope.
-    pub fn agent_document_scope(&self) -> Option<&str> {
+    /// Renders an agent document's root-relative directory scope.
+    pub fn agent_document_scope(&self) -> Option<String> {
         (self.kind == InstructionBundleKind::AgentDocument).then(|| {
-            self.relative_source_path()
+            let relative_path = self.relative_source_path();
+            relative_path
                 .strip_suffix("AGENTS.md")
                 .and_then(|prefix| prefix.strip_suffix('/'))
                 .unwrap_or_default()
+                .to_owned()
         })
     }
     /// Returns the exact source byte length.
