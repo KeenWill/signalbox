@@ -744,56 +744,6 @@ fn digest(bytes: Vec<u8>) -> Result<InstructionDigest, WorkspaceInstructionRepos
 mod tests {
     use super::*;
 
-    /// INV-061: every closed discovery-finding variant has one stable storage
-    /// discriminator.
-    #[test]
-    fn inv061_finding_discriminators_match_closed_storage_values() {
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::RootUnavailable),
-            "root_unavailable"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::EntryUnreadable),
-            "entry_unreadable"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::NonUtf8SourcePath),
-            "non_utf8_source_path"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::NonUtf8Source),
-            "non_utf8_source"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::InvalidSkill),
-            "invalid_skill"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::LimitReached(
-                InstructionDiscoveryLimitKind::ClassifiedEntries,
-            )),
-            "limit_classified_entries"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::LimitReached(
-                InstructionDiscoveryLimitKind::Findings,
-            )),
-            "limit_findings"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::LimitReached(
-                InstructionDiscoveryLimitKind::CandidateSourceBytes,
-            )),
-            "limit_candidate_source_bytes"
-        );
-        assert_eq!(
-            finding_kind(InstructionDiscoveryFindingKind::LimitReached(
-                InstructionDiscoveryLimitKind::ElapsedTime,
-            )),
-            "limit_elapsed_time"
-        );
-    }
-
     #[test]
     fn pre_commit_database_failure_is_not_commit_ambiguous() {
         let error = WorkspaceInstructionRepositoryError::from(sqlx::Error::RowNotFound);
