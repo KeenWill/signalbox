@@ -15,13 +15,15 @@ use signalbox_process_protocol::{
     GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
     ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
     ModelCallCostLabel, ModelCallDisposition, ModelCallState, OperatorStatusConvergenceSeal,
-    OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker, OperatorStatusMergeableState,
-    OperatorStatusReviewDecision, OperatorStatusSingletonScope, ReviewDiffSide,
-    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
-    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
-    ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth, RunnerProjection,
-    RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+    OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage,
+    OperatorStatusMergeableState, OperatorStatusMessage,
+    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusQueuedObligationMessage, OperatorStatusReviewDecision,
+    OperatorStatusSingletonScope, ReviewDiffSide, ReviewFindingSnapshot, ReviewFindingStatus,
+    ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
+    ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity,
+    ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth,
+    RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
     RunnerStateTransitionState, ServerMessage, SessionEvent, ToolApprovalEventDecider,
     ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
     TurnState, UsageProvenance,
@@ -1124,21 +1126,27 @@ impl<'a> Output<'a> {
         &mut self,
         message: &ServerMessage,
     ) -> Result<(), ClientError> {
-        match message {
-            ServerMessage::OperatorStatusHeldSlot {
-                dispatch_id,
-                repository,
-                pull_request_number,
-                rule_id,
-                rule_version,
-                singleton_scope,
-                singleton_repository,
-                singleton_pull_request_number,
-                singleton_stack_root_pull_request_number,
-                held_for_seconds,
-                session_ids,
-                blockers,
-            } => {
+        let ServerMessage::OperatorStatus(message) = message else {
+            return Err(ClientError::Protocol(
+                "operator-status spool contained an unexpected frame",
+            ));
+        };
+        match message.as_ref() {
+            OperatorStatusMessage::HeldSlot(item) => {
+                let OperatorStatusHeldSlotMessage {
+                    dispatch_id,
+                    repository,
+                    pull_request_number,
+                    rule_id,
+                    rule_version,
+                    singleton_scope,
+                    singleton_repository,
+                    singleton_pull_request_number,
+                    singleton_stack_root_pull_request_number,
+                    held_for_seconds,
+                    session_ids,
+                    blockers,
+                } = item.as_ref();
                 let repository = self.render_field(repository, TextField::DelimitedOnLine);
                 let rule_id = self.render_field(rule_id, TextField::DelimitedOnLine);
                 let singleton = operator_status_singleton_label(
@@ -1175,25 +1183,26 @@ impl<'a> Output<'a> {
                 )?;
                 Ok(())
             }
-            ServerMessage::OperatorStatusQueuedObligation {
-                obligation_id,
-                repository,
-                rule_id,
-                rule_version,
-                singleton_scope,
-                singleton_repository,
-                singleton_pull_request_number,
-                singleton_stack_root_pull_request_number,
-                first_event_id,
-                latest_event_id,
-                matched_event_count,
-                waiting_for_seconds,
-                occupying_dispatch_id,
-                occupying_session_ids,
-                cooldown_remaining_seconds,
-                cooldown_never_eligible,
-                ready,
-            } => {
+            OperatorStatusMessage::QueuedObligation(item) => {
+                let OperatorStatusQueuedObligationMessage {
+                    obligation_id,
+                    repository,
+                    rule_id,
+                    rule_version,
+                    singleton_scope,
+                    singleton_repository,
+                    singleton_pull_request_number,
+                    singleton_stack_root_pull_request_number,
+                    first_event_id,
+                    latest_event_id,
+                    matched_event_count,
+                    waiting_for_seconds,
+                    occupying_dispatch_id,
+                    occupying_session_ids,
+                    cooldown_remaining_seconds,
+                    cooldown_never_eligible,
+                    ready,
+                } = item.as_ref();
                 let repository = self.render_field(repository, TextField::DelimitedOnLine);
                 let rule_id = self.render_field(rule_id, TextField::DelimitedOnLine);
                 let singleton = operator_status_singleton_label(
@@ -1234,21 +1243,22 @@ impl<'a> Output<'a> {
                 )?;
                 Ok(())
             }
-            ServerMessage::OperatorStatusPullRequestConvergence {
-                repository,
-                pull_request_number,
-                head_sha,
-                base_branch,
-                base_revision,
-                mergeable_state,
-                review_decision,
-                unresolved_thread_count,
-                gating_check_count,
-                non_green_gating_checks,
-                verdict,
-                seal,
-                assessed_seconds_ago,
-            } => {
+            OperatorStatusMessage::PullRequestConvergence(item) => {
+                let OperatorStatusPullRequestConvergenceMessage {
+                    repository,
+                    pull_request_number,
+                    head_sha,
+                    base_branch,
+                    base_revision,
+                    mergeable_state,
+                    review_decision,
+                    unresolved_thread_count,
+                    gating_check_count,
+                    non_green_gating_checks,
+                    verdict,
+                    seal,
+                    assessed_seconds_ago,
+                } = item.as_ref();
                 let repository = self.render_field(repository, TextField::DelimitedOnLine);
                 let base_branch = self.render_field(base_branch, TextField::DelimitedOnLine);
                 let checks = non_green_gating_checks
@@ -1275,15 +1285,16 @@ impl<'a> Output<'a> {
                 )?;
                 Ok(())
             }
-            ServerMessage::OperatorStatusPendingStaleReviewClearance {
-                repository,
-                pull_request_number,
-                current_head_sha,
-                review_node_id,
-                reviewer,
-                reviewed_head_sha,
-                pending_for_seconds,
-            } => {
+            OperatorStatusMessage::PendingStaleReviewClearance(item) => {
+                let OperatorStatusPendingStaleReviewClearanceMessage {
+                    repository,
+                    pull_request_number,
+                    current_head_sha,
+                    review_node_id,
+                    reviewer,
+                    reviewed_head_sha,
+                    pending_for_seconds,
+                } = item.as_ref();
                 let repository = self.render_field(repository, TextField::DelimitedOnLine);
                 let review_node_id = self.render_field(review_node_id, TextField::DelimitedOnLine);
                 let reviewer = self.render_field(reviewer, TextField::DelimitedOnLine);
@@ -1298,9 +1309,9 @@ impl<'a> Output<'a> {
                 )?;
                 Ok(())
             }
-            _ => Err(ClientError::Protocol(
-                "operator-status spool contained an unexpected frame",
-            )),
+            OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => Err(
+                ClientError::Protocol("operator-status spool contained an unexpected frame"),
+            ),
         }
     }
 
@@ -3496,14 +3507,17 @@ mod tests {
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, OperatorStatusConvergenceSeal,
         OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker,
-        OperatorStatusMergeableState, OperatorStatusReviewDecision, OperatorStatusSingletonScope,
-        ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass,
-        RunnerConnectionHealth, RunnerCredentialProfileName, RunnerPlacementRevision,
-        RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey,
-        RunnerSandboxProfile, RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage,
-        SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry,
-        TranscriptTextEntry, TurnState, UsageProvenance,
+        OperatorStatusHeldSlotMessage, OperatorStatusMergeableState, OperatorStatusMessage,
+        OperatorStatusPendingStaleReviewClearanceMessage,
+        OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
+        OperatorStatusReviewDecision, OperatorStatusSingletonScope, ReviewDiffSide,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
+        ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass, RunnerConnectionHealth,
+        RunnerCredentialProfileName, RunnerPlacementRevision, RunnerProjection,
+        RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
+        RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage, SessionEvent,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
+        TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -3528,7 +3542,7 @@ mod tests {
         expect![[r#"
             target=00000000-0000-0000-0000-000000000001 subject=commit parent=-
             provider=example-host
-            repository=owner/repository
+            repository=example/repository
             head_revision=head
             base_revision_present=false
         "#]]
@@ -3548,7 +3562,7 @@ mod tests {
         expect![[r#"
             target=00000000-0000-0000-0000-000000000001 subject=commit parent=-
             provider=example-host
-            repository=owner/repository
+            repository=example/repository
             head_revision=head
             base_revision_present=true
             base_revision=-
@@ -3643,69 +3657,87 @@ mod tests {
                 .operator_status_counts(1, 1, 1, 1)
                 .expect("in-memory output cannot fail");
             output
-                .operator_status_item(&ServerMessage::OperatorStatusHeldSlot {
-                    dispatch_id: wire_uuid(1),
-                    repository: String::from("owner/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    rule_id: String::from("review"),
-                    rule_version: CanonicalU64::new(1),
-                    singleton_scope: OperatorStatusSingletonScope::PullRequest,
-                    singleton_repository: Some(String::from("owner/repo")),
-                    singleton_pull_request_number: Some(CanonicalU64::new(41)),
-                    singleton_stack_root_pull_request_number: None,
-                    held_for_seconds: CanonicalU64::new(3_661),
-                    session_ids: vec![wire_uuid(2)],
-                    blockers: vec![OperatorStatusHeldSlotBlocker::PursuingGoal],
-                })
+                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
+                    OperatorStatusMessage::HeldSlot(Box::new(OperatorStatusHeldSlotMessage {
+                        dispatch_id: wire_uuid(1),
+                        repository: String::from("example/repo"),
+                        pull_request_number: CanonicalU64::new(41),
+                        rule_id: String::from("review"),
+                        rule_version: CanonicalU64::new(1),
+                        singleton_scope: OperatorStatusSingletonScope::PullRequest,
+                        singleton_repository: Some(String::from("example/repo")),
+                        singleton_pull_request_number: Some(CanonicalU64::new(41)),
+                        singleton_stack_root_pull_request_number: None,
+                        held_for_seconds: CanonicalU64::new(3_661),
+                        session_ids: vec![wire_uuid(2)],
+                        blockers: vec![OperatorStatusHeldSlotBlocker::PursuingGoal],
+                    })),
+                )))
                 .expect("in-memory output cannot fail");
             output
-                .operator_status_item(&ServerMessage::OperatorStatusQueuedObligation {
-                    obligation_id: wire_uuid(3),
-                    repository: String::from("owner/repo"),
-                    rule_id: String::from("review"),
-                    rule_version: CanonicalU64::new(1),
-                    singleton_scope: OperatorStatusSingletonScope::Rule,
-                    singleton_repository: None,
-                    singleton_pull_request_number: None,
-                    singleton_stack_root_pull_request_number: None,
-                    first_event_id: wire_uuid(4),
-                    latest_event_id: wire_uuid(5),
-                    matched_event_count: CanonicalU64::new(3),
-                    waiting_for_seconds: CanonicalU64::new(65),
-                    occupying_dispatch_id: None,
-                    occupying_session_ids: Vec::new(),
-                    cooldown_remaining_seconds: Some(CanonicalU64::new(5)),
-                    cooldown_never_eligible: false,
-                    ready: false,
-                })
+                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
+                    OperatorStatusMessage::QueuedObligation(Box::new(
+                        OperatorStatusQueuedObligationMessage {
+                            obligation_id: wire_uuid(3),
+                            repository: String::from("example/repo"),
+                            rule_id: String::from("review"),
+                            rule_version: CanonicalU64::new(1),
+                            singleton_scope: OperatorStatusSingletonScope::Rule,
+                            singleton_repository: None,
+                            singleton_pull_request_number: None,
+                            singleton_stack_root_pull_request_number: None,
+                            first_event_id: wire_uuid(4),
+                            latest_event_id: wire_uuid(5),
+                            matched_event_count: CanonicalU64::new(3),
+                            waiting_for_seconds: CanonicalU64::new(65),
+                            occupying_dispatch_id: None,
+                            occupying_session_ids: Vec::new(),
+                            cooldown_remaining_seconds: Some(CanonicalU64::new(5)),
+                            cooldown_never_eligible: false,
+                            ready: false,
+                        },
+                    )),
+                )))
                 .expect("in-memory output cannot fail");
             output
-                .operator_status_item(&ServerMessage::OperatorStatusPullRequestConvergence {
-                    repository: String::from("owner/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    head_sha: String::from("1111111111111111111111111111111111111111"),
-                    base_branch: String::from("main"),
-                    base_revision: String::from("2222222222222222222222222222222222222222"),
-                    mergeable_state: OperatorStatusMergeableState::Mergeable,
-                    review_decision: OperatorStatusReviewDecision::Approved,
-                    unresolved_thread_count: CanonicalU64::new(0),
-                    gating_check_count: CanonicalU64::new(2),
-                    non_green_gating_checks: Vec::new(),
-                    verdict: OperatorStatusConvergenceVerdict::MergeReady,
-                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-                    assessed_seconds_ago: CanonicalU64::new(9),
-                })
+                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
+                    OperatorStatusMessage::PullRequestConvergence(Box::new(
+                        OperatorStatusPullRequestConvergenceMessage {
+                            repository: String::from("example/repo"),
+                            pull_request_number: CanonicalU64::new(41),
+                            head_sha: String::from("1111111111111111111111111111111111111111"),
+                            base_branch: String::from("main"),
+                            base_revision: String::from("2222222222222222222222222222222222222222"),
+                            mergeable_state: OperatorStatusMergeableState::Mergeable,
+                            review_decision: OperatorStatusReviewDecision::Approved,
+                            unresolved_thread_count: CanonicalU64::new(0),
+                            gating_check_count: CanonicalU64::new(2),
+                            non_green_gating_checks: Vec::new(),
+                            verdict: OperatorStatusConvergenceVerdict::MergeReady,
+                            seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                            assessed_seconds_ago: CanonicalU64::new(9),
+                        },
+                    )),
+                )))
                 .expect("in-memory output cannot fail");
             output
-                .operator_status_item(&ServerMessage::OperatorStatusPendingStaleReviewClearance {
-                    repository: String::from("owner/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    current_head_sha: String::from("1111111111111111111111111111111111111111"),
-                    review_node_id: String::from("PRR_node"),
-                    reviewer: String::from("reviewer"),
-                    reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
-                    pending_for_seconds: CanonicalU64::new(8),
-                })
+                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
+                    OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                        OperatorStatusPendingStaleReviewClearanceMessage {
+                            repository: String::from("example/repo"),
+                            pull_request_number: CanonicalU64::new(41),
+                            current_head_sha: String::from(
+                                "1111111111111111111111111111111111111111",
+                            ),
+                            review_node_id: String::from("PRR_node"),
+                            reviewer: String::from("reviewer"),
+                            reviewed_head_sha: String::from(
+                                "3333333333333333333333333333333333333333",
+                            ),
+                            pending_for_seconds: CanonicalU64::new(8),
+                        },
+                    )),
+                )))
                 .expect("in-memory output cannot fail");
             output
                 .operator_status_model_usage_omitted()
@@ -3715,10 +3747,10 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
             status held_slots=1 queued_obligations=1 pull_request_convergences=1 pending_stale_review_clearances=1
-            held repository=owner/repo pr=41 rule=review@1 singleton=pull_request:owner/repo#41 held=1h1m1s blockers=pursuing_goal sessions=00000000-0000-0000-0000-000000000002 dispatch=00000000-0000-0000-0000-000000000001
-            queued repository=owner/repo rule=review@1 singleton=rule waiting=1m5s matches=3 ready=false occupying=none cooldown=5s first_event=00000000-0000-0000-0000-000000000004 latest_event=00000000-0000-0000-0000-000000000005 obligation=00000000-0000-0000-0000-000000000003
-            convergence repository=owner/repo pr=41 verdict=merge_ready seal=merge_ready unresolved_threads=0 gating_checks=2 non_green=none mergeable=mergeable review=approved assessed_ago=9s head=1111111111111111111111111111111111111111 base=main@2222222222222222222222222222222222222222
-            stale_review_clearance repository=owner/repo pr=41 reviewer=reviewer pending=8s review=PRR_node reviewed_head=3333333333333333333333333333333333333333 current_head=1111111111111111111111111111111111111111
+            held repository=example/repo pr=41 rule=review@1 singleton=pull_request:example/repo#41 held=1h1m1s blockers=pursuing_goal sessions=00000000-0000-0000-0000-000000000002 dispatch=00000000-0000-0000-0000-000000000001
+            queued repository=example/repo rule=review@1 singleton=rule waiting=1m5s matches=3 ready=false occupying=none cooldown=5s first_event=00000000-0000-0000-0000-000000000004 latest_event=00000000-0000-0000-0000-000000000005 obligation=00000000-0000-0000-0000-000000000003
+            convergence repository=example/repo pr=41 verdict=merge_ready seal=merge_ready unresolved_threads=0 gating_checks=2 non_green=none mergeable=mergeable review=approved assessed_ago=9s head=1111111111111111111111111111111111111111 base=main@2222222222222222222222222222222222222222
+            stale_review_clearance repository=example/repo pr=41 reviewer=reviewer pending=8s review=PRR_node reviewed_head=3333333333333333333333333333333333333333 current_head=1111111111111111111111111111111111111111
             model_usage=omitted reason=no_cheap_status_aggregate
         "#]]
         .assert_eq(&rendered);
@@ -5378,7 +5410,7 @@ mod tests {
         ReviewTargetSnapshot {
             target_id: wire_uuid(1),
             provider: String::from("example-host"),
-            repository: String::from("owner/repository"),
+            repository: String::from("example/repository"),
             subject: ReviewTargetSubject::Commit {},
             head_revision: String::from("head"),
             base_revision,

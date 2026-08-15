@@ -36,11 +36,11 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
     MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
     MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ModelSelection, ModelSettingsOverlay, OperatorStatusMessage, ProtocolVersion, RejectionDetail,
+    RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection, RunnerProjectionState,
     RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
@@ -464,12 +464,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
-        | ServerMessage::OperatorStatusStart {}
-        | ServerMessage::OperatorStatusHeldSlot { .. }
-        | ServerMessage::OperatorStatusQueuedObligation { .. }
-        | ServerMessage::OperatorStatusPullRequestConvergence { .. }
-        | ServerMessage::OperatorStatusPendingStaleReviewClearance { .. }
-        | ServerMessage::OperatorStatusEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -575,12 +570,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
-        | ServerMessage::OperatorStatusStart {}
-        | ServerMessage::OperatorStatusHeldSlot { .. }
-        | ServerMessage::OperatorStatusQueuedObligation { .. }
-        | ServerMessage::OperatorStatusPullRequestConvergence { .. }
-        | ServerMessage::OperatorStatusPendingStaleReviewClearance { .. }
-        | ServerMessage::OperatorStatusEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -694,12 +684,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
-        | ServerMessage::OperatorStatusStart {}
-        | ServerMessage::OperatorStatusHeldSlot { .. }
-        | ServerMessage::OperatorStatusQueuedObligation { .. }
-        | ServerMessage::OperatorStatusPullRequestConvergence { .. }
-        | ServerMessage::OperatorStatusPendingStaleReviewClearance { .. }
-        | ServerMessage::OperatorStatusEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -4800,7 +4785,8 @@ struct OperatorStatusCounts {
 async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
     let mut connection = client.request(ClientRequest::ReadOperatorStatus {}).await?;
     match connection.message().await? {
-        ServerMessage::OperatorStatusStart {} => {}
+        ServerMessage::OperatorStatus(message)
+            if matches!(message.as_ref(), OperatorStatusMessage::Start {}) => {}
         ServerMessage::Error {
             code,
             message,
@@ -4818,39 +4804,44 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
     loop {
         let frame = connection.frame().await?;
         let item_phase = match frame.message() {
-            ServerMessage::OperatorStatusHeldSlot { .. } => {
-                counts.held_slots = status_increment(counts.held_slots)?;
-                Some(OperatorStatusPhase::HeldSlots)
-            }
-            ServerMessage::OperatorStatusQueuedObligation { .. } => {
-                counts.queued_obligations = status_increment(counts.queued_obligations)?;
-                Some(OperatorStatusPhase::QueuedObligations)
-            }
-            ServerMessage::OperatorStatusPullRequestConvergence { .. } => {
-                counts.pull_request_convergences =
-                    status_increment(counts.pull_request_convergences)?;
-                Some(OperatorStatusPhase::PullRequestConvergences)
-            }
-            ServerMessage::OperatorStatusPendingStaleReviewClearance { .. } => {
-                counts.pending_stale_review_clearances =
-                    status_increment(counts.pending_stale_review_clearances)?;
-                Some(OperatorStatusPhase::PendingStaleReviewClearances)
-            }
-            ServerMessage::OperatorStatusEnd {
-                held_slot_count,
-                queued_obligation_count,
-                pull_request_convergence_count,
-                pending_stale_review_clearance_count,
-            } if counts
-                == (OperatorStatusCounts {
-                    held_slots: held_slot_count.value(),
-                    queued_obligations: queued_obligation_count.value(),
-                    pull_request_convergences: pull_request_convergence_count.value(),
-                    pending_stale_review_clearances: pending_stale_review_clearance_count.value(),
-                }) =>
-            {
-                break;
-            }
+            ServerMessage::OperatorStatus(message) => match message.as_ref() {
+                OperatorStatusMessage::HeldSlot(_) => {
+                    counts.held_slots = status_increment(counts.held_slots)?;
+                    Some(OperatorStatusPhase::HeldSlots)
+                }
+                OperatorStatusMessage::QueuedObligation(_) => {
+                    counts.queued_obligations = status_increment(counts.queued_obligations)?;
+                    Some(OperatorStatusPhase::QueuedObligations)
+                }
+                OperatorStatusMessage::PullRequestConvergence(_) => {
+                    counts.pull_request_convergences =
+                        status_increment(counts.pull_request_convergences)?;
+                    Some(OperatorStatusPhase::PullRequestConvergences)
+                }
+                OperatorStatusMessage::PendingStaleReviewClearance(_) => {
+                    counts.pending_stale_review_clearances =
+                        status_increment(counts.pending_stale_review_clearances)?;
+                    Some(OperatorStatusPhase::PendingStaleReviewClearances)
+                }
+                OperatorStatusMessage::End(item)
+                    if counts
+                        == (OperatorStatusCounts {
+                            held_slots: item.held_slot_count.value(),
+                            queued_obligations: item.queued_obligation_count.value(),
+                            pull_request_convergences: item.pull_request_convergence_count.value(),
+                            pending_stale_review_clearances: item
+                                .pending_stale_review_clearance_count
+                                .value(),
+                        }) =>
+                {
+                    break;
+                }
+                OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => {
+                    return Err(ClientError::Protocol(
+                        "operator status sequence or count was invalid",
+                    ));
+                }
+            },
             ServerMessage::Error {
                 code,
                 message,
