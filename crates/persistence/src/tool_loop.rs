@@ -700,6 +700,25 @@ impl PostgresToolLoopRepository {
                         .bind(armed.judge_call().into_uuid())
                         .execute(&mut *transaction)
                         .await?;
+                        sqlx::query(
+                            "INSERT INTO model_call_user_override
+                                (model_call_id, denied_request_id)
+                             SELECT call.model_call_id, $2
+                               FROM turn_lifecycle AS lifecycle
+                               JOIN model_call AS call
+                                 ON call.turn_attempt_id = lifecycle.current_attempt_id
+                                AND call.turn_id = lifecycle.turn_id
+                                AND call.session_id = lifecycle.session_id
+                                AND call.state_kind = 'prepared'
+                              WHERE lifecycle.session_id = $1
+                                AND lifecycle.state_kind = 'active'
+                                AND lifecycle.active_phase_kind = 'running'
+                             ON CONFLICT DO NOTHING",
+                        )
+                        .bind(session_id_to_uuid(armed.session()))
+                        .bind(tool_request_id_to_uuid(armed.denied_request()))
+                        .execute(&mut *transaction)
+                        .await?;
                     }
                     prepared
                 }

@@ -4797,8 +4797,10 @@ async fn freeze_armed_user_overrides(
     Ok(())
 }
 
-/// Reloads exactly the override inventory frozen when this call was
-/// checkpointed, irrespective of overrides armed or consumed afterward.
+/// Reloads exactly the override inventory frozen before this call is sent.
+/// Checkpointing records overrides already armed, while the arming transaction
+/// may add a newly terminal denial's override to the current unsent prepared
+/// call. Consumption after authorization cannot change this inventory.
 async fn load_call_user_overrides(
     connection: &mut PgConnection,
     session: SessionId,

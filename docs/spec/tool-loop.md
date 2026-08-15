@@ -276,9 +276,12 @@ is a session-scoped standing fact consumed by a later proposal. An applied
 command durably links the denied request, its denying judge call, and the arming
 command.
 
-Armed overrides are frozen into each prepared model call in the same transaction
-as the dangerous blanket posture, so consumption has blanket-frozen semantics
-with no mid-call races: an override armed during a call takes effect at the next
+Armed overrides are frozen into each model call before send, alongside the
+dangerous blanket posture, so consumption has blanket-frozen semantics with no
+mid-call races. Checkpointing freezes overrides already armed; when a denial
+becomes terminal by checkpointing its continuation immediately before the user
+can arm the override, the arming transaction adds it to that current unsent
+prepared call. An override armed after a call is sent takes effect at the next
 prepared call. When the completing call proposes a command whose initial
 selection would park for the judge (`Delegated`) and an unconsumed armed
 override matches the exact denied command — equal tool name and equal normalized
