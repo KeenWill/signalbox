@@ -148,7 +148,8 @@ impl PostgresRepoWatchDispatchStore {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, repository.as_str()).await?;
         let candidate = sqlx::query(
-            "SELECT event.event_id, event.pull_request_number
+            "SELECT event.event_id, event.pull_request_number,
+                    event.cursor_generation, event.event_ordinal
                FROM repo_watch_event AS event
               WHERE event.repository = $1
                 AND event.event_kind IN ('pull_request_closed', 'pull_request_merged')
@@ -169,7 +170,9 @@ impl PostgresRepoWatchDispatchStore {
         };
         let event_id: Uuid = candidate.try_get("event_id")?;
         let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
-        let latest_lifecycle: String = sqlx::query_scalar(
+        let cursor_generation: i64 = candidate.try_get("cursor_generation")?;
+        let event_ordinal: i32 = candidate.try_get("event_ordinal")?;
+        let next_lifecycle: Option<String> = sqlx::query_scalar(
             "SELECT event_kind
                FROM repo_watch_event
               WHERE repository = $1
@@ -177,14 +180,17 @@ impl PostgresRepoWatchDispatchStore {
                 AND event_kind IN (
                     'pull_request_opened', 'pull_request_closed', 'pull_request_merged'
                 )
-              ORDER BY cursor_generation DESC, event_ordinal DESC
+                AND (cursor_generation, event_ordinal) > ($3, $4)
+              ORDER BY cursor_generation, event_ordinal
               LIMIT 1",
         )
         .bind(repository.as_str())
         .bind(pull_request_number)
-        .fetch_one(&mut *transaction)
+        .bind(cursor_generation)
+        .bind(event_ordinal)
+        .fetch_optional(&mut *transaction)
         .await?;
-        let disposition = if latest_lifecycle == "pull_request_opened" {
+        let disposition = if next_lifecycle.as_deref() == Some("pull_request_opened") {
             "reopened"
         } else {
             "terminal"

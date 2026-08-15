@@ -664,25 +664,57 @@ async fn load_conflict(
     Ok((loaded, observation))
 }
 
-async fn commit_merge(fixture: &DispatchFixture, event_id: u128) -> Result<(), Box<dyn Error>> {
+async fn commit_lifecycle(
+    fixture: &DispatchFixture,
+    observation: RepoWatchObservation,
+    event: RepoWatchEvent,
+) -> Result<(), Box<dyn Error>> {
     let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
     let cursor = event_store
         .load_cursor(&fixture.repository)
         .await?
         .expect("fixture cursor exists");
-    let merged =
-        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?;
     event_store
         .commit(
             &fixture.repository,
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
-                RepoWatchCursorCandidate::new(merged),
-                vec![merged_event(event_id, SECOND_HEAD)?],
+                RepoWatchCursorCandidate::new(observation),
+                vec![event],
             ),
         )
         .await?;
     Ok(())
+}
+
+async fn commit_merge(fixture: &DispatchFixture, event_id: u128) -> Result<(), Box<dyn Error>> {
+    commit_lifecycle(
+        fixture,
+        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?,
+        merged_event(event_id, SECOND_HEAD)?,
+    )
+    .await
+}
+
+async fn commit_reopen(fixture: &DispatchFixture, event_id: u128) -> Result<(), Box<dyn Error>> {
+    commit_lifecycle(
+        fixture,
+        lifecycle_observation(context(THIRD_HEAD)?, RepoWatchPullRequestLifecycle::Open)?,
+        opened_event(event_id, THIRD_HEAD)?,
+    )
+    .await
+}
+
+async fn commit_second_merge(
+    fixture: &DispatchFixture,
+    event_id: u128,
+) -> Result<(), Box<dyn Error>> {
+    commit_lifecycle(
+        fixture,
+        lifecycle_observation(context(THIRD_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?,
+        merged_event(event_id, THIRD_HEAD)?,
+    )
+    .await
 }
 
 async fn corrupt_goal_generation(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
@@ -806,6 +838,50 @@ async fn merged_pull_request_ends_the_commissioned_goal() -> Result<(), Box<dyn 
     assert_eq!(goal.current().state(), &GoalState::UserStopped);
     assert_eq!(cutoff_goal_count, 1);
     assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn close_reopen_close_classifies_each_cutoff_against_its_following_lifecycle()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let first_merge_id = 0x51_110;
+    let reopened_id = 0x51_120;
+    let second_merge_id = 0x51_130;
+    commit_merge(&fixture, first_merge_id).await?;
+    commit_reopen(&fixture, reopened_id).await?;
+    commit_second_merge(&fixture, second_merge_id).await?;
+
+    let first_processed = fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x51_140))
+        })
+        .await?;
+    let second_processed = fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x51_150))
+        })
+        .await?;
+    let cutoffs: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT event_id, disposition_kind
+           FROM repo_watch_lifecycle_cutoff
+          ORDER BY event_id",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert!(first_processed);
+    assert!(second_processed);
+    assert_eq!(
+        cutoffs,
+        vec![
+            (Uuid::from_u128(first_merge_id), String::from("reopened")),
+            (Uuid::from_u128(second_merge_id), String::from("terminal")),
+        ]
+    );
     Ok(())
 }
 
