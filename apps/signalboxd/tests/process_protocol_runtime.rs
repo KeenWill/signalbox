@@ -4868,7 +4868,7 @@ async fn authorize_issued_model_call(
 ) -> Result<
     (
         PostgresModelCallRepository,
-        signalbox_domain::AuthorizedModelCall,
+        Box<signalbox_domain::AuthorizedModelCall>,
         ModelCallId,
     ),
     Box<dyn Error>,
@@ -4907,7 +4907,7 @@ async fn authorize_issued_model_call(
     else {
         return Err(io::Error::other("the fixture call must authorize send").into());
     };
-    Ok((calls, *authorized, call))
+    Ok((calls, authorized, call))
 }
 
 /// Commits a confirm-classified tool round over the issued fixture call, so
