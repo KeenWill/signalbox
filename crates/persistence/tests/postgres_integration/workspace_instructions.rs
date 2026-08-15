@@ -26,6 +26,14 @@ struct PersistedCandidate {
     source_hash: Vec<u8>,
 }
 
+struct PersistedCandidateExpectation<'a> {
+    ordinal: i64,
+    identity: signalbox_domain::InstructionBundleId,
+    root_kind: &'static str,
+    bundle_kind: &'static str,
+    registration: &'a signalbox_domain::InstructionBundleRegistration,
+}
+
 #[derive(sqlx::FromRow)]
 struct PersistedManifestHashes {
     eligibility_hash: Vec<u8>,
@@ -67,40 +75,44 @@ struct PersistedRollbackCounts {
 #[track_caller]
 fn assert_persisted_candidate(
     persisted: &PersistedCandidate,
-    ordinal: i64,
-    identity: signalbox_domain::InstructionBundleId,
-    root_kind: &str,
-    bundle_kind: &str,
-    expected: &signalbox_domain::InstructionBundleRegistration,
+    expected: PersistedCandidateExpectation<'_>,
 ) {
-    assert_eq!(persisted.candidate_ordinal, ordinal);
-    assert_eq!(persisted.instruction_bundle_id, identity.into_uuid());
-    assert_eq!(persisted.root_kind, root_kind);
-    assert_eq!(persisted.root_path, expected.root_path().as_str());
+    assert_eq!(persisted.candidate_ordinal, expected.ordinal);
+    assert_eq!(
+        persisted.instruction_bundle_id,
+        expected.identity.into_uuid()
+    );
+    assert_eq!(persisted.root_kind, expected.root_kind);
+    assert_eq!(
+        persisted.root_path,
+        expected.registration.root_path().as_str()
+    );
     assert_eq!(
         persisted.source_path,
-        expected.source_path().absolute_path()
+        expected.registration.source_path().absolute_path()
     );
-    assert_eq!(persisted.bundle_kind, bundle_kind);
+    assert_eq!(persisted.bundle_kind, expected.bundle_kind);
     assert_eq!(
         persisted.skill_name.as_deref(),
         expected
+            .registration
             .skill()
             .map(signalbox_domain::InstructionSkillMetadata::name)
     );
     assert_eq!(
         persisted.skill_description.as_deref(),
         expected
+            .registration
             .skill()
             .map(signalbox_domain::InstructionSkillMetadata::description)
     );
     assert_eq!(
         persisted.source_byte_length,
-        Decimal::from(expected.source_bytes())
+        Decimal::from(expected.registration.source_bytes())
     );
     assert_eq!(
         persisted.source_hash,
-        expected.source_hash().as_bytes().as_slice()
+        expected.registration.source_hash().as_bytes().as_slice()
     );
 }
 
@@ -397,40 +409,46 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
         persisted_candidates
             .first()
             .expect("the agent document candidate is persisted"),
-        1,
-        agent_document_id,
-        "workspace",
-        "agent_document",
-        snapshot
-            .bundles()
-            .first()
-            .expect("the discovery contains the agent document"),
+        PersistedCandidateExpectation {
+            ordinal: 1,
+            identity: agent_document_id,
+            root_kind: "workspace",
+            bundle_kind: "agent_document",
+            registration: snapshot
+                .bundles()
+                .first()
+                .expect("the discovery contains the agent document"),
+        },
     );
     assert_persisted_candidate(
         persisted_candidates
             .get(1)
             .expect("the skill candidate is persisted"),
-        2,
-        agent_skill_id,
-        "workspace",
-        "agent_skill",
-        snapshot
-            .bundles()
-            .get(1)
-            .expect("the discovery contains the skill"),
+        PersistedCandidateExpectation {
+            ordinal: 2,
+            identity: agent_skill_id,
+            root_kind: "workspace",
+            bundle_kind: "agent_skill",
+            registration: snapshot
+                .bundles()
+                .get(1)
+                .expect("the discovery contains the skill"),
+        },
     );
     assert_persisted_candidate(
         persisted_candidates
             .get(2)
             .expect("the configured agent document candidate is persisted"),
-        3,
-        configured_document_id,
-        "configured",
-        "agent_document",
-        snapshot
-            .bundles()
-            .get(2)
-            .expect("the discovery contains the configured agent document"),
+        PersistedCandidateExpectation {
+            ordinal: 3,
+            identity: configured_document_id,
+            root_kind: "configured",
+            bundle_kind: "agent_document",
+            registration: snapshot
+                .bundles()
+                .get(2)
+                .expect("the discovery contains the configured agent document"),
+        },
     );
     let persisted_findings = sqlx::query_as::<_, PersistedDiscoveryFinding>(
         "SELECT finding_ordinal, source_path, finding_kind
