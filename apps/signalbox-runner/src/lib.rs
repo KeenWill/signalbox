@@ -5,6 +5,7 @@ mod dispatch_https;
 mod https_broker;
 mod protocol;
 mod state;
+mod workspace;
 
 pub use configuration::{
     AllowedNetworkHost, ArgumentError, RunnerConfiguration, RunnerConfigurationError,
@@ -24,3 +25,4 @@ pub use state::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
     StateOperation, StateResource,
 };
+pub use workspace::{PrivateWorkspaceRequest, RunnerWorkspaceError, RunnerWorkspaceStore};
