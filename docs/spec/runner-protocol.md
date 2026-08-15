@@ -81,8 +81,11 @@ observed connection are verified against this PR
 (`agent/runner-workspace-release-redelivery`). Durable connection-loss
 retirement of an exact pending release is verified against this PR
 (`agent/runner-workspace-release-loss-retirement`). Established-connection
-routing of those inbound claim and result frames through the durable
-transactions before acknowledgement is re-verified through this PR
+routing of one release-scoped `workspace_cleanup_failed` frame through durable
+admission, followed by exact `operation_failure_recorded` projection, is
+verified against this PR (`agent/daemon-runner-cleanup-failure-routing`).
+Established-connection routing of those inbound claim and result frames through
+the durable transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -858,9 +861,14 @@ correlation names that connection's runner. The daemon observes the exact
 current connection, commits or exactly replays the durable release-completion
 transaction, and sends `workspace_release_recorded` from the committed facts. It
 sends no acknowledgement when durable admission fails and terminalizes the
-connection with the classified rejection. No present production path inserts a
-pending release or initiates one on an ordinary enrolled connection; the only
-initiating send is the authenticated resume redelivery above.
+connection with the classified rejection. The same physical-runner and current-
+connection checks precede a release-scoped `workspace_cleanup_failed` frame; the
+daemon commits or exactly replays its durable refusal before sending
+`operation_failure_recorded` reconstructed from the committed correlation.
+Unsupported provisioning and lease-failure correlations fail closed without an
+acknowledgement. No present production path inserts a pending release or
+initiates one on an ordinary enrolled connection; the only initiating send is
+the authenticated resume redelivery above.
 
 **Committed unimplemented functionality.** No present repository-backed
 filesystem producer creates ready evidence or begins or advances a release, and
