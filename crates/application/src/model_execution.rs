@@ -1525,7 +1525,7 @@ where
                     request,
                     credential_reference,
                     dangerous_tool_auto_approval,
-                    armed_user_overrides,
+                    armed_user_overrides: _,
                     system_prompt,
                     tool_entries,
                 }) => {
@@ -1533,7 +1533,6 @@ where
                         request,
                         credential_reference,
                         dangerous_tool_auto_approval,
-                        armed_user_overrides,
                         system_prompt,
                         tool_entries,
                     );
@@ -1560,7 +1559,6 @@ where
             prepared,
             credential_reference,
             dangerous_tool_auto_approval,
-            armed_user_overrides,
             system_prompt,
             tool_entries,
         ) = prepared;
