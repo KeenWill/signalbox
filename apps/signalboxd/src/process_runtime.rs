@@ -213,7 +213,7 @@ use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutco
 use crate::{
     BlobStoreRegistry, FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener,
     LocalSocketError, SessionTemplateConfiguration,
-    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_metadata},
+    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_entry, read_blob_metadata},
     blob_upload_runtime::{
         BeginBlobUploadOutcome, BlobUploadError, PendingBlobUpload, begin_blob_upload,
     },
@@ -5741,17 +5741,17 @@ where
             .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed)?,
     };
     let repository = BlobCatalogRepository::new(services.pool.clone());
-    let metadata = tokio::select! {
+    let entry = tokio::select! {
         biased;
         () = wait_for_shutdown(&mut shutdown) => return Ok(()),
         () = wait_for_connection_loss(reader) => return Ok(()),
         outcome = tokio::time::timeout_at(
             deadline,
-            read_blob_metadata(&repository, digest.into_digest()),
+            read_blob_entry(&repository, digest.into_digest()),
         ) => outcome.unwrap_or(Err(BlobReadError::Unavailable)),
     };
-    let metadata = match metadata {
-        Ok(metadata) => metadata,
+    let entry = match entry {
+        Ok(entry) => entry,
         Err(error) => {
             drop(snapshot_permit);
             return write_blob_read_error(
@@ -5767,7 +5767,7 @@ where
     if offset_bytes
         .value()
         .checked_add(length.get())
-        .is_none_or(|end| end > metadata.byte_length)
+        .is_none_or(|end| end > entry.expected().byte_length())
     {
         drop(snapshot_permit);
         return write_blob_read_error(
@@ -5776,13 +5776,13 @@ where
             request_id,
             Some((offset_bytes, length_bytes)),
             BlobReadError::RangeOutOfBounds {
-                blob_length: metadata.byte_length,
+                blob_length: entry.expected().byte_length(),
             },
         )
         .await;
     }
+    drop(snapshot_permit);
     let Some(permit) = try_acquire_blob_read_permit(Arc::clone(&services.blob_read_budget)) else {
-        drop(snapshot_permit);
         return write_error(
             writer,
             version,
@@ -5793,13 +5793,7 @@ where
     };
     let traversal = tokio::time::timeout_at(
         deadline,
-        read_blob_chunk(
-            registry,
-            &repository,
-            digest.into_digest(),
-            offset_bytes.value(),
-            length,
-        ),
+        read_blob_chunk(registry, &entry, offset_bytes.value(), length),
     );
     let outcome = tokio::select! {
         biased;
@@ -5824,7 +5818,6 @@ where
                 ) => spool,
             };
             drop(permit);
-            drop(snapshot_permit);
             let mut spool = match spool {
                 Ok(spool) => spool,
                 Err(error) => {
@@ -5839,7 +5832,6 @@ where
         }
         Err(error) => {
             drop(permit);
-            drop(snapshot_permit);
             write_blob_read_error(
                 writer,
                 version,
