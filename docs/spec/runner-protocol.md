@@ -104,8 +104,10 @@ runner-owned HTTPS broker core's bounded CONNECT admission, configured hostname
 gate, public-address pinning, TLS ClientHello SNI check, and tunnel relay are
 verified against this PR (`agent/runner-https-broker`). The namespace-local
 loopback proxy and pinned per-dispatch broker-socket sandbox shape are verified
-against this PR (`agent/runner-https-namespace-shim`). The proof-only runner
-catalog configuration is re-verified through this PR
+against this PR (`agent/runner-https-namespace-shim`). Dispatch-scoped creation
+and serving of that exact broker socket under the exec deadline are verified
+against this PR (`agent/runner-https-dispatch-composition`). The proof-only
+runner catalog configuration is re-verified through this PR
 (`agent/runner-execution-proof-catalog`). The profileless lease admission
 guard's exact `WorkspaceRestricted` policy-auto handling is re-verified through
 this PR (`agent/runner-profileless-lease-approval`). The placement loss-source,
@@ -1745,13 +1747,20 @@ ports, DNS rebinding, and missing or mismatched SNI fail closed. The broker
 proves a TLS tunnel to the checked host; it does not claim visibility into the
 encrypted application protocol.
 
-**Committed unimplemented functionality.** No present surface creates the
-per-dispatch Unix socket or serves it through the runner-owned broker core. The
-restricted sandbox can pin an exact socket identity, bind only that endpoint at
-its fixed runtime path, set the fixed loopback HTTPS proxy, and start the
-supervisor's bounded namespace-local TCP-to-Unix relay. Until the runner creates
-and serves the socket under the dispatch deadline, a restricted runner dispatch
-has no network path.
+For every generic exec-family restricted dispatch, the runner creates one
+owner-private Unix socket below its locked state root, pins that exact socket in
+the sandbox request, and serves accepted namespace-local proxy connections
+through the runner-owned broker under the exec timeout. The host endpoint and
+its directory are removed when execution finishes, broker serving fails, or the
+deadline expires. Both the namespace shim and the host listener admit at most
+eight simultaneous tunnels, and finishing the dispatch aborts every remaining
+tunnel before the endpoint is removed. An empty configured host inventory keeps
+the composed path present but rejects every CONNECT destination.
+
+**Committed unimplemented functionality.** Repository provisioning does not yet
+create or serve its separately authorized per-provisioning broker socket. The
+generic exec-family dispatch path does not supply that missing provisioning
+composition.
 
 For `Ambient`, the runner still uses one labeled bubblewrap supervisor but binds
 the invoking user filesystem and shares host networking. It therefore provides

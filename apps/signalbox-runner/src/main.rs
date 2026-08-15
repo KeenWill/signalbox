@@ -6,9 +6,10 @@
 use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
 
 use signalbox_runner::{
-    ArgumentError, ConnectionEnd, EnrollmentOutcome, ProtocolViolation, RunnerConfiguration,
-    RunnerConfigurationError, RunnerConfigurationPath, RunnerConnection, RunnerConnectionError,
-    RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
+    ArgumentError, ConnectionEnd, DispatchHttpsEndpoint, EnrollmentOutcome, HttpsBroker,
+    ProtocolViolation, RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath,
+    RunnerConnection, RunnerConnectionError, RunnerStateError, RunnerStateRoot, ServeOutcome,
+    SocketConnectError, connect_verified,
 };
 use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
 use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
@@ -111,6 +112,8 @@ async fn run(
                     let execution = execute_dispatch(
                         execution_programs.clone(),
                         configuration.read_only_paths().to_vec(),
+                        configuration.runner_root().to_owned(),
+                        configuration.allowed_network_hosts().to_vec(),
                         dispatch.correlation().clone(),
                         dispatch.normalized_arguments().clone(),
                     );
@@ -159,6 +162,8 @@ async fn run(
 async fn execute_dispatch(
     process_runner: TokioProcessRunner,
     read_only_paths: Vec<std::path::PathBuf>,
+    runner_root: std::path::PathBuf,
+    allowed_network_hosts: Vec<signalbox_runner::AllowedNetworkHost>,
     correlation: signalbox_runner_wire::LeaseCorrelation,
     normalized_arguments: serde_json::Value,
 ) -> TerminalResult {
@@ -177,10 +182,20 @@ async fn execute_dispatch(
             };
         }
     };
-    let mut runner = match SandboxedCommandRunner::try_new_runner_restricted(
+    let endpoint = match DispatchHttpsEndpoint::bind(&runner_root, correlation.lease_id) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            return TerminalResult::KnownFailure {
+                error_kind: ExecutionErrorKind::ExecutionFailed,
+                detail: None,
+            };
+        }
+    };
+    let mut runner = match SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
         process_runner,
         correlation.working_directory.as_str(),
         &read_only_paths,
+        endpoint.socket_path(),
     ) {
         Ok(runner) => runner,
         Err(_) => {
@@ -190,7 +205,29 @@ async fn execute_dispatch(
             };
         }
     };
-    let result = match runner.try_run(arguments).await {
+    let Some(deadline) =
+        tokio::time::Instant::now().checked_add(Duration::from_secs(arguments.timeout_seconds))
+    else {
+        return TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::InvalidArguments,
+            detail: None,
+        };
+    };
+    let (broker_stop, stop_broker) = tokio::sync::oneshot::channel();
+    let broker = tokio::spawn(endpoint.serve(
+        HttpsBroker::production(&allowed_network_hosts),
+        deadline,
+        stop_broker,
+    ));
+    let result = runner.try_run(arguments).await;
+    let _ = broker_stop.send(());
+    if !matches!(broker.await, Ok(Ok(()))) {
+        return TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ExecutionFailed,
+            detail: None,
+        };
+    }
+    let result = match result {
         Ok(result) => result,
         Err(_) => {
             return TerminalResult::KnownFailure {
