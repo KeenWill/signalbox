@@ -2251,9 +2251,105 @@ async fn cooldown_uses_the_terminal_transition_time_not_the_next_evaluation_time
     .fetch_one(&fixture.pool)
     .await?;
     let outcome = evaluate_second_conflict(&fixture).await?;
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the elapsed cooldown makes retained work ready");
+    let retained =
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?;
 
     assert!(release_age_seconds >= 7_199.0);
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert!(outcome_is_dispatched(&retained));
+    Ok(())
+}
+
+/// A terminal session cannot leave an open, unconverged pull request with no
+/// durable path to another delivery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn released_unconverged_dispatch_retains_a_follow_up_obligation() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    sqlx::query("INSERT INTO repo_watch_dispatch_release (dispatch_id) VALUES ($1)")
+        .bind(fixture.dispatch_id.as_uuid())
+        .execute(&fixture.pool)
+        .await?;
+    let visible: (Uuid, Uuid, i64, bool) = sqlx::query_as(
+        "SELECT obligation_id, latest_event_id, matched_event_count, ready
+           FROM repo_watch_outstanding_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("released unconverged work is owed again");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let outcome =
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?;
+
+    assert_eq!(visible.0, *fixture.dispatch_id.as_uuid());
+    assert_eq!(visible.1, *fixture.event.id().as_uuid());
+    assert_eq!(visible.2, 1);
+    assert!(visible.3);
     assert!(outcome_is_dispatched(&outcome));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn released_dispatch_follow_up_settles_after_its_target_closes() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    sqlx::query("INSERT INTO repo_watch_dispatch_release (dispatch_id) VALUES ($1)")
+        .bind(fixture.dispatch_id.as_uuid())
+        .execute(&fixture.pool)
+        .await?;
+    commit_merge(&fixture, 0x20_100).await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("closed-target work remains available for settlement");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let outcome =
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?;
+    let settlement: String = sqlx::query_scalar(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation
+          WHERE obligation_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::TargetClosed);
+    assert_eq!(settlement, "target_closed");
     Ok(())
 }
 
@@ -2422,10 +2518,22 @@ async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<
 async fn cooldown_clock_is_sampled_after_singleton_lock_wait() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_release
+         DISABLE TRIGGER repo_watch_dispatch_release_retains_obligation",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
         "INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
          VALUES ($1, clock_timestamp() + interval '2 seconds')",
     )
     .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_release
+         ENABLE TRIGGER repo_watch_dispatch_release_retains_obligation",
+    )
     .execute(&fixture.pool)
     .await?;
     let (loaded, observation) = load_second_conflict(&fixture).await?;

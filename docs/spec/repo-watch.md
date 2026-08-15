@@ -23,10 +23,11 @@ to that goal's generation, and the occupied-refusal obligation and collapsed
 current-state delivery are verified against PR #812
 (`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
 against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
-held-slot diagnostics, terminal-target cutoff, and the exact-head mergeability
-projection are also verified against this PR. Exact-head convergence assessment
-and cutoff are verified against `agent/dispatch-autonomy-convergence`.
-Conservative stale blocking-review dismissal is verified against this PR
+held-slot diagnostics, terminal-target cutoff, continuous unconverged-target
+delivery, and the exact-head mergeability projection are also verified against
+this PR. Exact-head convergence assessment and cutoff are verified against
+`agent/dispatch-autonomy-convergence`. Conservative stale blocking-review
+dismissal is verified against this PR
 (`agent/dispatch-autonomy-review-clearance`). The provider members the poller
 adopts as check-suite and check-run completion generations are verified against
 PR #541 (`fix/check-run-updated-at`). The source-independent event occurrence
@@ -705,6 +706,15 @@ sessions, cooldown eligibility, and present readiness. Rule deactivation settles
 an obligation without dispatch rather than leaving permanently owed work for
 semantics that are no longer configured; terminal-target settlement likewise
 records why the obligation no longer remains owed.
+
+**Implemented behavior.** Releasing a dispatch for a pull-request event retains
+one follow-up obligation for the same rule and singleton. Further matching
+events collapse into that obligation. Once the singleton cooldown expires,
+admission dispatches the obligation again while the target remains open and
+unconverged, or settles it without a session when the target has closed, its
+exact head is convergence-sealed, or the rule has been deactivated. A stopped
+stale session therefore cannot make an unconverged pull request permanently
+quiet merely because no later repository event occurs.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes
