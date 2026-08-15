@@ -377,7 +377,7 @@ pub(crate) async fn load_current(
 }
 
 /// Loads and authenticates the complete current placement histories for one
-/// bounded session-summary page in one query.
+/// bounded session-summary page in bounded event pages.
 pub(crate) async fn load_current_batch(
     connection: &mut PgConnection,
     sessions: &[SessionId],
@@ -390,8 +390,15 @@ pub(crate) async fn load_current_batch(
         .iter()
         .map(|session| session_id_to_uuid(*session))
         .collect::<Vec<_>>();
-    let rows = sqlx::query(
-        "SELECT session_row.session_id AS batch_session_id,
+    let mut after_session = None;
+    let mut after_version = Decimal::ZERO;
+    let mut placements = BTreeMap::new();
+    let mut current_session = None;
+    let mut current_head = None;
+    let mut authenticated = None;
+    loop {
+        let rows = sqlx::query(
+            "SELECT session_row.session_id AS batch_session_id,
                 head.current_version AS head_current_version,
                 event.session_id AS event_session_id,
                 session_row.ancestry_kind,
@@ -450,52 +457,63 @@ pub(crate) async fn load_current_batch(
             AND placement_update_registry.command_kind = placement_update.command_kind
             AND placement_update_registry.storage_version = placement_update.storage_version
           WHERE session_row.session_id = ANY($1::uuid[])
-          ORDER BY session_row.session_id, event.version",
-    )
-    .bind(&session_ids)
-    .fetch_all(&mut *connection)
-    .await?;
-
-    let mut placements = BTreeMap::new();
-    let mut current_session = None;
-    let mut current_head = None;
-    let mut authenticated = None;
-    for row in rows {
-        let session: sqlx::types::Uuid = row.try_get("batch_session_id")?;
-        let head: Option<Decimal> = row.try_get("head_current_version")?;
-        if current_session != Some(session) {
-            finish_batched_current(
-                &mut placements,
-                current_session,
-                current_head,
-                authenticated.take(),
-            )?;
-            current_session = Some(session);
-            current_head = head;
-        } else if current_head != head {
-            return Err(SessionPlacementRepositoryError::Corruption(
-                "session placement head changed within snapshot",
-            ));
+            AND (
+                    $2::uuid IS NULL
+                    OR session_row.session_id > $2
+                    OR (session_row.session_id = $2 AND event.version > $3)
+                )
+          ORDER BY session_row.session_id, event.version
+          LIMIT $4",
+        )
+        .bind(&session_ids)
+        .bind(after_session)
+        .bind(after_version)
+        .bind(AUTHENTICATION_PAGE_SIZE)
+        .fetch_all(&mut *connection)
+        .await?;
+        if rows.is_empty() {
+            break;
         }
-        if row
-            .try_get::<Option<sqlx::types::Uuid>, _>("event_session_id")?
-            .is_none()
-        {
-            return Err(SessionPlacementRepositoryError::Corruption(
-                "session placement event missing",
-            ));
+        for row in rows {
+            let session: sqlx::types::Uuid = row.try_get("batch_session_id")?;
+            let head: Option<Decimal> = row.try_get("head_current_version")?;
+            if current_session != Some(session) {
+                finish_batched_current(
+                    &mut placements,
+                    current_session,
+                    current_head,
+                    authenticated.take(),
+                )?;
+                current_session = Some(session);
+                current_head = head;
+            } else if current_head != head {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement head changed within snapshot",
+                ));
+            }
+            if row
+                .try_get::<Option<sqlx::types::Uuid>, _>("event_session_id")?
+                .is_none()
+            {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement event missing",
+                ));
+            }
+            let stored_version: Decimal = row.try_get("version")?;
+            after_session = Some(session);
+            after_version = stored_version;
+            let placement = decode_authenticated_placement(row)?;
+            let expected_version = authenticated.as_ref().map_or(
+                Some(SessionPlacementVersion::INITIAL),
+                |predecessor: &VersionedSessionPlacement| predecessor.version().next(),
+            );
+            if expected_version != Some(placement.version()) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement predecessor chain",
+                ));
+            }
+            authenticated = Some(placement);
         }
-        let placement = decode_authenticated_placement(row)?;
-        let expected_version = authenticated.as_ref().map_or(
-            Some(SessionPlacementVersion::INITIAL),
-            |predecessor: &VersionedSessionPlacement| predecessor.version().next(),
-        );
-        if expected_version != Some(placement.version()) {
-            return Err(SessionPlacementRepositoryError::Corruption(
-                "session placement predecessor chain",
-            ));
-        }
-        authenticated = Some(placement);
     }
     finish_batched_current(
         &mut placements,

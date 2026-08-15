@@ -2926,7 +2926,8 @@ async fn inherited_stdout_cannot_extend_process_cleanup_past_deadline() {
             .await
     });
 
-    wait_for_recorded_process_group_leader_exit(process_group_path.clone()).await;
+    tokio::task::yield_now().await;
+    wait_for_recorded_process_group_leader_exit(&process_group_path);
     tokio::time::advance(exchange_timeout).await;
     let report = execution
         .await
@@ -4422,27 +4423,38 @@ fn process_group_exists(process_group: rustix::process::Pid) -> bool {
         target_os = "wasi"
     ))
 ))]
-async fn wait_for_recorded_process_group_leader_exit(path: std::path::PathBuf) {
-    wait_for_record(path.clone()).await;
-    let process_group = recorded_process_group(&path);
-    tokio::time::timeout(OFFLINE_HARNESS_TIMEOUT, async {
-        loop {
-            let exited = rustix::process::waitid(
-                rustix::process::WaitId::Pid(process_group),
-                rustix::process::WaitIdOptions::EXITED
-                    | rustix::process::WaitIdOptions::NOWAIT
-                    | rustix::process::WaitIdOptions::NOHANG,
-            )
-            .expect("the fake CLI leader remains waitable")
-            .is_some();
-            if exited {
-                break;
-            }
-            tokio::task::yield_now().await;
+fn wait_for_recorded_process_group_leader_exit(path: &Path) {
+    let deadline = std::time::Instant::now() + OFFLINE_HARNESS_TIMEOUT;
+    while std::fs::read_to_string(path)
+        .map(|content| content.lines().count())
+        .unwrap_or_default()
+        == 0
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake CLI records its process group before the wall-clock bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let process_group = recorded_process_group(path);
+    loop {
+        let exited = rustix::process::waitid(
+            rustix::process::WaitId::Pid(process_group),
+            rustix::process::WaitIdOptions::EXITED
+                | rustix::process::WaitIdOptions::NOWAIT
+                | rustix::process::WaitIdOptions::NOHANG,
+        )
+        .expect("the fake CLI leader remains waitable")
+        .is_some();
+        if exited {
+            break;
         }
-    })
-    .await
-    .expect("the fake CLI leader exits before the harness bound");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake CLI leader exits before the wall-clock bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// A host whose PID 1 does not promptly reap orphans can hold a fully killed
