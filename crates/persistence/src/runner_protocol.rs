@@ -26,7 +26,8 @@ use signalbox_application::{
     RunnerLeaseResultRequest, RunnerLeaseResultTransaction, RunnerReadyManifestDigest,
     RunnerReplacementProvisioningOutcome, RunnerReplacementProvisioningStage,
     RunnerReplacementProvisioningTransaction, RunnerWorkspaceReadyReceipt,
-    RunnerWorkspaceReadyTransaction, ToolCatalog, ToolDefinition, ToolInputSchema,
+    RunnerWorkspaceReadyTransaction, RunnerWorkspaceReleaseAcknowledgement,
+    RunnerWorkspaceReleaseTransaction, ToolCatalog, ToolDefinition, ToolInputSchema,
 };
 #[cfg(feature = "postgres-integration")]
 use signalbox_domain::RunnerWorkspaceReleaseCandidate;
@@ -3575,6 +3576,8 @@ impl RunnerProtocolStore {
                     release.successor_placement_event_ordinal,
                     release.enrollment_id, release.connection_epoch,
                     release.connection_event_ordinal, release.state_kind,
+                    acknowledgement.runner_id AS acknowledgement_runner_id,
+                    acknowledgement.manifest_id AS acknowledgement_manifest_id,
                     retired.event_kind AS retired_event_kind,
                     retired.state_kind AS retired_state_kind,
                     retired.loss_source_kind AS retired_loss_source_kind,
@@ -3593,6 +3596,9 @@ impl RunnerProtocolStore {
                     enrollment.runner_id AS enrollment_runner_id,
                     connection.state_kind AS connection_state_kind
                FROM runner_workspace_release AS release
+               LEFT JOIN runner_workspace_release_acknowledgement AS acknowledgement
+                 ON acknowledgement.session_id = release.session_id
+                AND acknowledgement.placement_revision = release.placement_revision
                JOIN runner_session_placement_record AS retired
                  ON retired.session_id = release.session_id
                 AND retired.event_ordinal =
@@ -3621,6 +3627,18 @@ impl RunnerProtocolStore {
         };
         let runner = runner_id(row.decode_column("runner_id")?);
         let manifest = WorkspaceManifestId::from_uuid(row.decode_column("manifest_id")?);
+        let acknowledgement_runner: Option<Uuid> =
+            row.decode_column("acknowledgement_runner_id")?;
+        let acknowledgement_manifest: Option<Uuid> =
+            row.decode_column("acknowledgement_manifest_id")?;
+        if acknowledgement_runner.is_some() || acknowledgement_manifest.is_some() {
+            if acknowledgement_runner != Some(runner.into_uuid())
+                || acknowledgement_manifest != Some(manifest.into_uuid())
+            {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+            return Ok(None);
+        }
         let retired_placement_event_ordinal =
             decode_u64(row.decode_column("retired_placement_event_ordinal")?)?;
         let successor_placement_event_ordinal =
@@ -3674,6 +3692,148 @@ impl RunnerProtocolStore {
             connection_epoch,
             connection_event_ordinal,
         }))
+    }
+
+    /// Loads one immutable completed-release acknowledgement.
+    pub async fn load_workspace_release_acknowledgement(
+        &self,
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+    ) -> Result<Option<RunnerWorkspaceReleaseAcknowledgement>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT acknowledgement.runner_id, acknowledgement.manifest_id,
+                    release.session_id AS release_session_id,
+                    release.state_kind
+               FROM runner_workspace_release_acknowledgement AS acknowledgement
+               LEFT JOIN runner_workspace_release AS release
+                 ON release.session_id = acknowledgement.session_id
+                AND release.placement_revision = acknowledgement.placement_revision
+                AND release.runner_id = acknowledgement.runner_id
+                AND release.manifest_id = acknowledgement.manifest_id
+              WHERE acknowledgement.session_id = $1
+                AND acknowledgement.placement_revision = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(Decimal::from(placement_revision.get()))
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.decode_column::<Option<Uuid>>("release_session_id")? != Some(session.into_uuid())
+            || row
+                .decode_column::<Option<String>>("state_kind")?
+                .as_deref()
+                != Some("pending")
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        Ok(Some(RunnerWorkspaceReleaseAcknowledgement::new(
+            session,
+            placement_revision,
+            runner_id(row.decode_column("runner_id")?),
+            WorkspaceManifestId::from_uuid(row.decode_column("manifest_id")?),
+        )))
+    }
+
+    /// Atomically admits or exactly replays one completed workspace release.
+    pub async fn record_workspace_release_acknowledgement(
+        &self,
+        acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
+    ) -> Result<RunnerWorkspaceReleaseAcknowledgement, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_runner_session_scheduler(&mut transaction, acknowledgement.session()).await?;
+        sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(acknowledgement.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let release = sqlx::query(
+            "SELECT runner_id, manifest_id, enrollment_id, connection_epoch
+               FROM runner_workspace_release
+              WHERE session_id = $1 AND placement_revision = $2
+              FOR UPDATE",
+        )
+        .bind(acknowledgement.session().into_uuid())
+        .bind(Decimal::from(acknowledgement.placement_revision().get()))
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ))?;
+        let stored_runner = runner_id(release.decode_column("runner_id")?);
+        let stored_manifest = WorkspaceManifestId::from_uuid(release.decode_column("manifest_id")?);
+        if stored_runner != acknowledgement.runner()
+            || stored_manifest != acknowledgement.manifest_id()
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        let recorded = sqlx::query(
+            "SELECT runner_id, manifest_id
+               FROM runner_workspace_release_acknowledgement
+              WHERE session_id = $1 AND placement_revision = $2",
+        )
+        .bind(acknowledgement.session().into_uuid())
+        .bind(Decimal::from(acknowledgement.placement_revision().get()))
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(recorded) = recorded {
+            let replay = RunnerWorkspaceReleaseAcknowledgement::new(
+                acknowledgement.session(),
+                acknowledgement.placement_revision(),
+                runner_id(recorded.decode_column("runner_id")?),
+                WorkspaceManifestId::from_uuid(recorded.decode_column("manifest_id")?),
+            );
+            transaction.rollback().await?;
+            return exact_workspace_release_acknowledgement_replay(acknowledgement, replay);
+        }
+        let source_was_lost: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM runner_connection_loss_epoch
+                  WHERE enrollment_id = $1 AND connection_epoch = $2
+             )",
+        )
+        .bind(release.decode_column::<Uuid>("enrollment_id")?)
+        .bind(release.decode_column::<Decimal>("connection_epoch")?)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if source_was_lost {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO runner_workspace_release_acknowledgement
+                (session_id, placement_revision, runner_id, manifest_id)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(acknowledgement.session().into_uuid())
+        .bind(Decimal::from(acknowledgement.placement_revision().get()))
+        .bind(acknowledgement.runner().into_uuid())
+        .bind(acknowledgement.manifest_id().into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        match commit_mutation(transaction).await {
+            Ok(()) => Ok(acknowledgement),
+            Err(error @ RunnerProtocolStoreError::CommitAmbiguous(_)) => {
+                match self
+                    .load_workspace_release_acknowledgement(
+                        acknowledgement.session(),
+                        acknowledgement.placement_revision(),
+                    )
+                    .await?
+                {
+                    Some(recorded) => {
+                        exact_workspace_release_acknowledgement_replay(acknowledgement, recorded)
+                    }
+                    None => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Stores a checked pending release projection for PostgreSQL integration tests.
@@ -7691,6 +7851,18 @@ impl RunnerWorkspaceReadyTransaction for RunnerProtocolStore {
     }
 }
 
+impl RunnerWorkspaceReleaseTransaction for RunnerProtocolStore {
+    type Error = RunnerProtocolStoreError;
+
+    async fn record_release(
+        &mut self,
+        acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
+    ) -> Result<RunnerWorkspaceReleaseAcknowledgement, Self::Error> {
+        self.record_workspace_release_acknowledgement(acknowledgement)
+            .await
+    }
+}
+
 impl PinnedRunnerReplacementTransaction for RunnerProtocolStore {
     type Error = RunnerProtocolStoreError;
 
@@ -7793,6 +7965,18 @@ fn exact_workspace_ready_replay(
         stored.relative_path,
         stored.recovery,
     );
+    if supplied != recorded {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ));
+    }
+    Ok(recorded)
+}
+
+fn exact_workspace_release_acknowledgement_replay(
+    supplied: RunnerWorkspaceReleaseAcknowledgement,
+    recorded: RunnerWorkspaceReleaseAcknowledgement,
+) -> Result<RunnerWorkspaceReleaseAcknowledgement, RunnerProtocolStoreError> {
     if supplied != recorded {
         return Err(RunnerProtocolStoreError::Domain(
             RunnerDomainError::CorrelationMismatch,
