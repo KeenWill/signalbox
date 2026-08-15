@@ -67,7 +67,9 @@ Version-two `workspace_ready` execution-directory authority, runner-side path
 authentication, and exact daemon receipt retention are verified against this PR
 (`agent/runner-workspace-ready-execution-directory`). Repository-ready receipt
 consumption into atomic pinned-replacement terminalization is verified against
-this PR (`agent/runner-repository-replacement-terminalization`).
+this PR (`agent/runner-repository-replacement-terminalization`). Reconstruction
+and exact-connection delivery of a durable repository provisioning authorization
+is verified against this PR (`agent/runner-workspace-provision-delivery`).
 Journal-authorized private-root trash publication, deletion, and exact replay
 are verified against this PR (`agent/runner-private-workspace-release`).
 Accepted-release protocol handoff, heartbeat-serving cleanup, and success and
@@ -1972,13 +1974,18 @@ versioned protected manifest through `staging` to `ready`, and returns the exact
 canonical ready-manifest digest. Reopening the store authenticates and replays
 that same ready manifest instead of creating another root.
 
-**Committed unimplemented functionality.** The top-level runner process does not
-invoke the private-root producer, and no path places a produced ready manifest
-into the retained ready frame. No present runner provisions or deletes a
-repository workspace, no present daemon producer constructs a workspace
-provisioning operation, and startup staging/leak reconciliation remains absent.
-The typed `RecoveryUnavailable` seam therefore remains on live workspace
-provisioning.
+The daemon workspace-provision adapter reloads one exact durable authorization,
+constructs its complete closed `workspace_provision` correlation, and routes it
+only to the authorization's enrollment, runner, and physical connection epoch.
+The broker queue remains process-local and creates no authority; a missing
+authorization, invalid wire projection, absent exact connection, or full queue
+fails without changing the durable stage. **Committed unimplemented
+functionality.** No present request or startup scanner invokes that producer.
+The top-level runner process does not invoke the private-root producer, and no
+path places a produced ready manifest into the retained ready frame. No present
+runner provisions or deletes a repository workspace, and startup staging/leak
+reconciliation remains absent. The typed `RecoveryUnavailable` seam therefore
+remains on live workspace provisioning.
 
 The application receipt boundary accepts complete already-validated
 repository-workspace manifest facts and the runner-authored absolute execution
@@ -2009,8 +2016,8 @@ authorization, a recorded terminal refusal, conflicting command reuse, and a
 placement for which repository provisioning is not applicable. The production
 persistence transaction implements that staging port.
 
-**Committed unimplemented functionality.** Dispatch of the provisioning
-authorization and a production repository-workspace filesystem producer for the
+**Committed unimplemented functionality.** Invocation of the provisioning
+producer and a production repository-workspace filesystem producer for the
 initial ready frame remain absent.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected

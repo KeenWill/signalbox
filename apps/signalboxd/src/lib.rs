@@ -54,6 +54,7 @@ pub mod runner_dispatch;
 pub mod runner_dispatch_wire;
 pub mod runner_protocol_runtime;
 mod runner_tool_offer;
+mod runner_workspace_provision;
 mod session_delegation;
 mod session_template_configuration;
 mod single_hub;
@@ -90,6 +91,10 @@ pub use runner_connection_broker::{
     RunnerConnectionAddress, RunnerConnectionBroker, RunnerConnectionBrokerError,
 };
 pub use runner_tool_offer::PostgresRunnerToolOffer;
+pub use runner_workspace_provision::{
+    PostgresRunnerWorkspaceProvisionError, PostgresRunnerWorkspaceProvisioner,
+    RunnerWorkspaceProvisionDispatch,
+};
 pub use session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError};
 pub use session_template_configuration::{
     ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,
