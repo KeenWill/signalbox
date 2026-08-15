@@ -510,7 +510,7 @@ impl WorkspaceInstructionRepository {
             .bind(candidate.into_uuid())
             .bind(root_kind(bundle.root_kind()))
             .bind(bundle.root_path().as_str())
-            .bind(bundle.source_path().as_str())
+            .bind(bundle.source_path().absolute_path())
             .bind(bundle_kind(bundle.kind()))
             .bind(skill.map(signalbox_domain::InstructionSkillMetadata::name))
             .bind(skill.map(signalbox_domain::InstructionSkillMetadata::description))
@@ -529,7 +529,7 @@ impl WorkspaceInstructionRepository {
                     )
                     .bind(root_kind(bundle.root_kind()))
                     .bind(bundle.root_path().as_str())
-                    .bind(bundle.source_path().as_str())
+                    .bind(bundle.source_path().absolute_path())
                     .bind(bundle.source_hash().as_bytes().as_slice())
                     .fetch_one(&mut *connection)
                     .await?
