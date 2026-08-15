@@ -121,7 +121,8 @@ pub(crate) const OUTPUT_SCHEMA: &str = r#"{
       "enum": ["completed", "refused"]
     },
     "text": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "tool_calls": {
       "type": "array",
@@ -147,3 +148,19 @@ pub(crate) const OUTPUT_SCHEMA: &str = r#"{
   "required": ["outcome", "text", "tool_calls"],
   "additionalProperties": false
 }"#;
+
+#[cfg(test)]
+mod tests {
+    use super::OUTPUT_SCHEMA;
+
+    #[test]
+    fn response_schema_requires_completion_text() {
+        let schema: serde_json::Value =
+            serde_json::from_str(OUTPUT_SCHEMA).expect("response schema is valid JSON");
+
+        assert_eq!(
+            schema["properties"]["text"]["minLength"],
+            serde_json::json!(1)
+        );
+    }
+}

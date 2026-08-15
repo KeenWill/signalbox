@@ -201,7 +201,7 @@ pub(crate) fn translate<C>(
          ordered context is in the JSON below. Return exactly the response envelope \
          required by the supplied output schema. `outcome` is `refused` only for a \
          safety refusal; declared-tool availability is never grounds for refusal. \
-         For ordinary completion put response text in `text`. Propose declared tools \
+         Every response must put nonempty response text in `text`. Propose declared tools \
          only in `tool_calls`; each `arguments` value is a string carrying exactly \
          the tool's JSON argument object. If `structured_output` is present, return \
          exactly one tool call bearing its name and the contracted value \
