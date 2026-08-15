@@ -269,6 +269,8 @@ DECLARE
     candidate_max_ordinal bigint;
     actual_finding_count bigint;
     finding_max_ordinal bigint;
+    limit_finding_count bigint;
+    limit_finding_max_ordinal bigint;
 BEGIN
     SELECT count(*), coalesce(max(root_ordinal), 0)
       INTO root_count, root_max_ordinal
@@ -318,6 +320,24 @@ BEGIN
         RAISE EXCEPTION 'instruction discovery finding count disagrees with inventory'
             USING ERRCODE = '23514',
                   CONSTRAINT = 'instruction_discovery_finding_inventory_exact';
+    END IF;
+    SELECT count(*), coalesce(max(finding_ordinal), 0)
+      INTO limit_finding_count, limit_finding_max_ordinal
+      FROM instruction_discovery_finding
+     WHERE instruction_discovery_id = NEW.instruction_discovery_id
+       AND finding_kind LIKE 'limit_%';
+    IF (NEW.scan_complete AND limit_finding_count <> 0)
+        OR (
+            NOT NEW.scan_complete
+            AND (
+                limit_finding_count <> 1
+                OR limit_finding_max_ordinal <> NEW.finding_count
+            )
+        )
+    THEN
+        RAISE EXCEPTION 'instruction discovery completeness disagrees with terminal finding'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'instruction_discovery_completeness_exact';
     END IF;
     RETURN NEW;
 END;
@@ -438,8 +458,23 @@ SELECT
 ALTER TABLE model_call
     ADD COLUMN turn_instruction_manifest_id uuid;
 
+-- This one-time write populates only the newly added correlation column. The
+-- existing guards reject terminal-row updates and schedule final-state checks
+-- for every update. Suspend only those three named guards for the bounded
+-- correlation backfill and restore them before adding the immutable manifest
+-- guard. No existing authorization or lifecycle fact changes here.
+ALTER TABLE model_call
+    DISABLE TRIGGER model_call_changes_are_guarded,
+    DISABLE TRIGGER model_call_requires_complete_final_state,
+    DISABLE TRIGGER model_call_requires_failed_terminal_execution;
+
 UPDATE model_call
    SET turn_instruction_manifest_id = turn_id;
+
+ALTER TABLE model_call
+    ENABLE TRIGGER model_call_changes_are_guarded,
+    ENABLE TRIGGER model_call_requires_complete_final_state,
+    ENABLE TRIGGER model_call_requires_failed_terminal_execution;
 
 ALTER TABLE model_call
     ALTER COLUMN turn_instruction_manifest_id SET NOT NULL,
