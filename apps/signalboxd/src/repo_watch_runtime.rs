@@ -70,7 +70,7 @@ use tokio::{
 use crate::SessionTemplateConfiguration;
 use crate::configuration::{
     FileCredentialAccess, HubModelConfiguration, RepositoryWatchConfiguration,
-    WatchedRepositoryConfiguration,
+    RepositoryWatchWebhookMode, WatchedRepositoryConfiguration,
 };
 use crate::repo_watch_webhook_runtime::{RepoWatchWebhookRuntime, RepoWatchWebhookRuntimeError};
 
@@ -395,6 +395,7 @@ struct RepositoryWatchTask {
     eligibility_nudge: InProcessEligibilityNudge,
     webhook_store: PostgresRepoWatchWebhookStore,
     webhook_work: Option<mpsc::Receiver<()>>,
+    webhook_primary: bool,
     rules_activated: bool,
 }
 
@@ -448,6 +449,9 @@ impl RepositoryWatchTask {
             models,
             eligibility_nudge,
             webhook_work,
+            webhook_primary: configuration
+                .webhook()
+                .is_some_and(|webhook| webhook.mode() == RepositoryWatchWebhookMode::Primary),
             rules_activated: false,
         })
     }
@@ -484,7 +488,8 @@ impl RepositoryWatchTask {
                 return;
             }
         }
-        let mut next_poll = Instant::now();
+        let mut next_poll =
+            Instant::now() + initial_poll_delay(self.webhook_primary, self.interval);
         loop {
             if *shutdown.borrow() {
                 return;
@@ -737,13 +742,24 @@ impl RepositoryWatchTask {
                     RepoWatchObservationApplyV1::Applied(observation) => {
                         let projections =
                             shadow_event_projections(&self.repository, &cursor, &observation)?;
-                        self.record_webhook_terminal(
-                            pending,
-                            projections,
-                            RepoWatchWebhookDisposition::Projected,
-                            None,
-                        )
-                        .await
+                        if self.webhook_primary {
+                            self.commit_primary_webhook_delivery(
+                                pending,
+                                cursor,
+                                observation,
+                                projections,
+                                &[],
+                            )
+                            .await
+                        } else {
+                            self.record_webhook_terminal(
+                                pending,
+                                projections,
+                                RepoWatchWebhookDisposition::Projected,
+                                None,
+                            )
+                            .await
+                        }
                     }
                     RepoWatchObservationApplyV1::NeedsTargetedRefresh {
                         observation,
@@ -757,19 +773,97 @@ impl RepositoryWatchTask {
                                 .map(targeted_query_projection)
                                 .collect::<Result<Vec<_>, _>>()?,
                         );
-                        self.targeted_refresh_and_commit(&refreshes).await?;
-                        self.process_dispatches().await?;
-                        self.record_webhook_terminal(
-                            pending,
-                            projections,
-                            RepoWatchWebhookDisposition::Projected,
-                            None,
-                        )
-                        .await
+                        if self.webhook_primary {
+                            self.commit_primary_webhook_delivery(
+                                pending,
+                                cursor,
+                                observation,
+                                projections,
+                                &refreshes,
+                            )
+                            .await
+                        } else {
+                            self.targeted_refresh_and_commit(&refreshes).await?;
+                            self.process_dispatches().await?;
+                            self.record_webhook_terminal(
+                                pending,
+                                projections,
+                                RepoWatchWebhookDisposition::Projected,
+                                None,
+                            )
+                            .await
+                        }
                     }
                 }
             }
         }
+    }
+
+    async fn commit_primary_webhook_delivery(
+        &mut self,
+        pending: &PendingRepoWatchWebhookDelivery,
+        cursor: RepoWatchCursor,
+        mut observation: RepoWatchObservation,
+        projections: Vec<RepoWatchWebhookProjection>,
+        refreshes: &[RepoWatchTargetedRefreshV1],
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        self.poller.invalidate_freshness();
+        if !refreshes.is_empty() {
+            observation = self
+                .resolve_targeted_webhook_observation(observation, refreshes)
+                .await?;
+        }
+        let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
+        let events = derive_repo_watch_events(
+            &self.repository,
+            Some(cursor.candidate().observation()),
+            &observation,
+            &mut event_identity_frontier,
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+        let outcome = self
+            .store
+            .commit_webhook(
+                &self.repository,
+                RepoWatchCommitRequest::from_webhook(
+                    cursor.generation(),
+                    RepoWatchCursorCandidate::with_event_identity_frontier(
+                        observation,
+                        event_identity_frontier,
+                    ),
+                    events,
+                ),
+                pending.key(),
+                projections,
+            )
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        match outcome {
+            RepoWatchCommitOutcome::Committed(cursor)
+            | RepoWatchCommitOutcome::Replayed(cursor)
+            | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                self.poller.publish_freshness(cursor.generation());
+                self.process_dispatches().await
+            }
+            RepoWatchCommitOutcome::Conflict { current: _ } => {
+                Err(RepositoryWatchAttemptError::Persistence)
+            }
+        }
+    }
+
+    async fn resolve_targeted_webhook_observation(
+        &self,
+        observation: RepoWatchObservation,
+        refreshes: &[RepoWatchTargetedRefreshV1],
+    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+        let targets = targeted_pull_requests(&observation, refreshes)?;
+        if targets.is_empty() {
+            return Ok(observation);
+        }
+        self.poller
+            .poll_targeted_pull_requests_against_cursor(&observation, &targets)
+            .await
     }
 
     async fn record_webhook_terminal(
@@ -3745,6 +3839,14 @@ impl PollCache {
     }
 }
 
+const fn initial_poll_delay(webhook_primary: bool, interval: Duration) -> Duration {
+    if webhook_primary {
+        interval
+    } else {
+        Duration::ZERO
+    }
+}
+
 #[cfg(test)]
 struct PollCycleTiming {
     interval: Duration,
@@ -4454,7 +4556,7 @@ mod tests {
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, ResourceKey,
         ReviewState, StaleReviewClearanceProviderResult, TargetedPullRequest, Url,
         UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
-        dispatch_context_json, isolate_stale_review_clearance_provider_result,
+        dispatch_context_json, initial_poll_delay, isolate_stale_review_clearance_provider_result,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         owed_dispatch_context_json_parts, reject_graphql_errors, remaining_interval,
         rule_activation_error, supervise_repository_tasks, targeted_pull_requests,
@@ -6901,6 +7003,16 @@ mod tests {
             }),
             SHORT_CYCLE_REMAINDER
         );
+    }
+
+    #[test]
+    fn webhook_primary_defers_the_complete_startup_sweep() {
+        assert_eq!(initial_poll_delay(true, POLL_INTERVAL), POLL_INTERVAL);
+    }
+
+    #[test]
+    fn shadow_mode_retains_the_immediate_startup_poll() {
+        assert_eq!(initial_poll_delay(false, POLL_INTERVAL), Duration::ZERO);
     }
 
     #[test]

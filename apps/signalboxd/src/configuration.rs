@@ -473,6 +473,7 @@ impl RepositoryWatchWebhookConfiguration {
 pub struct WatchedRepositoryWebhookConfiguration {
     hook_id: NonZeroU64,
     secret_file: PathBuf,
+    mode: RepositoryWatchWebhookMode,
 }
 
 impl WatchedRepositoryWebhookConfiguration {
@@ -485,6 +486,11 @@ impl WatchedRepositoryWebhookConfiguration {
     pub fn secret_file(&self) -> &Path {
         &self.secret_file
     }
+
+    /// Returns whether authenticated deliveries only project or write events.
+    pub const fn mode(&self) -> RepositoryWatchWebhookMode {
+        self.mode
+    }
 }
 
 impl fmt::Debug for WatchedRepositoryWebhookConfiguration {
@@ -493,8 +499,16 @@ impl fmt::Debug for WatchedRepositoryWebhookConfiguration {
             .debug_struct("WatchedRepositoryWebhookConfiguration")
             .field("hook_id", &self.hook_id)
             .field("secret_file", &"[REDACTED REFERENCE]")
+            .field("mode", &self.mode)
             .finish()
     }
+}
+
+/// Per-repository rollout mode for authenticated webhook deliveries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryWatchWebhookMode {
+    Shadow,
+    Primary,
 }
 
 /// One repository-specific version-one polling and credential configuration.
@@ -1742,6 +1756,7 @@ fn parse_repository_watch_configuration(
                 "credential_file",
                 "webhook_hook_id",
                 "webhook_secret_file",
+                "webhook_mode",
             ],
         )
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
@@ -1783,9 +1798,10 @@ fn parse_repository_watch_configuration(
         let repository_webhook = match (
             repository.get("webhook_hook_id"),
             repository.get("webhook_secret_file"),
+            repository.get("webhook_mode"),
         ) {
-            (None, None) => None,
-            (Some(hook_id), Some(secret_file)) => {
+            (None, None, None) => None,
+            (Some(hook_id), Some(secret_file), mode) => {
                 let hook_id = hook_id
                     .as_integer()
                     .and_then(|value| u64::try_from(value).ok())
@@ -1812,13 +1828,23 @@ fn parse_repository_watch_configuration(
                     return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
                 }
                 credential_file_references.push(resolved_secret_file);
+                let mode = match mode.and_then(Item::as_str).unwrap_or("shadow") {
+                    "shadow" => RepositoryWatchWebhookMode::Shadow,
+                    "primary" => RepositoryWatchWebhookMode::Primary,
+                    _ => {
+                        return Err(
+                            HubModelConfigurationError::InvalidRepositoryWatchConfiguration,
+                        );
+                    }
+                };
                 webhook_repository_count += 1;
                 Some(WatchedRepositoryWebhookConfiguration {
                     hook_id,
                     secret_file,
+                    mode,
                 })
             }
-            (Some(_), None) | (None, Some(_)) => {
+            (Some(_), None, _) | (None, Some(_), _) | (None, None, Some(_)) => {
                 return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
             }
         };
@@ -3668,9 +3694,9 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
-        absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
-        validate_alias_count, validate_model_count,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage,
+        RepositoryWatchWebhookMode, UnknownSessionModel, absolute_search_entries, credential_bytes,
+        resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -4391,12 +4417,50 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 
         assert_eq!(webhook.hook_id(), WATCH_WEBHOOK_HOOK_ID);
         assert_eq!(webhook.secret_file(), Path::new(WATCH_WEBHOOK_SECRET_FILE));
+        assert_eq!(webhook.mode(), RepositoryWatchWebhookMode::Shadow);
         assert_eq!(
             watched
                 .webhook_secret_reference()
                 .expect("the webhook repository has a secret reference")
                 .as_str(),
             WATCH_WEBHOOK_SECRET_REFERENCE
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_accepts_primary_mode() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""),
+            &format!(
+                "webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\nwebhook_mode = \"primary\""
+            ),
+        );
+        let parsed = HubModelConfiguration::parse(&configured)
+            .expect("the primary webhook rollout mode is valid");
+        let webhook = parsed
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0]
+            .webhook()
+            .expect("the first repository configures webhook intake");
+
+        assert_eq!(webhook.mode(), RepositoryWatchWebhookMode::Primary);
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_mode_without_credentials() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+            &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\"\nwebhook_mode = \"primary\""),
+        );
+
+        let Err(error) = HubModelConfiguration::parse(&configured) else {
+            panic!("webhook mode without credentials must be rejected")
+        };
+
+        assert_eq!(
+            error,
+            HubModelConfigurationError::InvalidRepositoryWatchConfiguration
         );
     }
 

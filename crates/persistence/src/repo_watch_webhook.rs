@@ -1,4 +1,4 @@
-//! Durable GitHub webhook intake and repository-watch shadow projections.
+//! Durable GitHub webhook intake, projections, and terminal dispositions.
 //!
 //! Signature verification and payload interpretation remain outside this
 //! storage adapter. This module admits only already-authenticated exact bytes.
@@ -253,7 +253,7 @@ pub enum RepoWatchWebhookTargetedQuery {
     CheckRollup(CommitSha),
 }
 
-/// One shadow projection derived from an admitted delivery.
+/// One audit projection derived from an admitted delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookProjection {
     Event {
@@ -292,7 +292,7 @@ pub enum RepoWatchWebhookDisposition {
     Quarantined,
 }
 
-/// One atomic shadow-projection and terminal-disposition request.
+/// One atomic projection and terminal-disposition request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookTerminalRequest {
     projections: Box<[RepoWatchWebhookProjection]>,
@@ -413,7 +413,7 @@ impl From<RepoWatchWebhookStorageCorruption> for RepoWatchWebhookStoreError {
     }
 }
 
-/// PostgreSQL adapter for replay-safe webhook intake and shadow projection.
+/// PostgreSQL adapter for replay-safe webhook intake and projection.
 #[derive(Clone, Debug)]
 pub struct PostgresRepoWatchWebhookStore {
     pool: PgPool,
@@ -516,47 +516,13 @@ impl PostgresRepoWatchWebhookStore {
         request: &RepoWatchWebhookTerminalRequest,
     ) -> Result<RepoWatchWebhookTerminalOutcome, RepoWatchWebhookStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let present =
-            sqlx::query_scalar::<_, i64>(crate::lock_inventory::REPO_WATCH_WEBHOOK_DELIVERY)
-                .bind(Decimal::from(key.hook_id.get()))
-                .bind(key.delivery_id)
-                .fetch_optional(&mut *transaction)
-                .await?;
-        if present.is_none() {
+        let outcome = record_terminal_in_transaction(&mut transaction, key, request).await?;
+        if outcome == RepoWatchWebhookTerminalOutcome::AlreadyTerminal {
             transaction.rollback().await?;
-            return Err(RepoWatchWebhookStoreError::MissingDelivery);
+            return Ok(outcome);
         }
-        let already_terminal = sqlx::query_scalar::<_, String>(
-            "SELECT disposition
-               FROM repo_watch_webhook_disposition
-              WHERE hook_id = $1 AND delivery_id = $2",
-        )
-        .bind(Decimal::from(key.hook_id.get()))
-        .bind(key.delivery_id)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .is_some();
-        if already_terminal {
-            transaction.rollback().await?;
-            return Ok(RepoWatchWebhookTerminalOutcome::AlreadyTerminal);
-        }
-        insert_projections(&mut transaction, key, request.projections()).await?;
-        let (disposition, generation) = encode_disposition(request.disposition());
-        sqlx::query(
-            "INSERT INTO repo_watch_webhook_disposition (
-                hook_id, delivery_id, disposition, outcome_code,
-                resulting_cursor_generation
-             ) VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(Decimal::from(key.hook_id.get()))
-        .bind(key.delivery_id)
-        .bind(disposition)
-        .bind(request.outcome_code())
-        .bind(generation)
-        .execute(&mut *transaction)
-        .await?;
         commit(transaction).await?;
-        Ok(RepoWatchWebhookTerminalOutcome::Recorded)
+        Ok(outcome)
     }
 
     /// Deletes exact bodies whose deliveries have been terminal for at least seven days.
@@ -577,6 +543,50 @@ impl PostgresRepoWatchWebhookStore {
         .await?;
         Ok(result.rows_affected())
     }
+}
+
+pub(crate) async fn record_terminal_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: RepoWatchWebhookDeliveryKey,
+    request: &RepoWatchWebhookTerminalRequest,
+) -> Result<RepoWatchWebhookTerminalOutcome, RepoWatchWebhookStoreError> {
+    let present = sqlx::query_scalar::<_, i64>(crate::lock_inventory::REPO_WATCH_WEBHOOK_DELIVERY)
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if present.is_none() {
+        return Err(RepoWatchWebhookStoreError::MissingDelivery);
+    }
+    let already_terminal = sqlx::query_scalar::<_, String>(
+        "SELECT disposition
+           FROM repo_watch_webhook_disposition
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id.get()))
+    .bind(key.delivery_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .is_some();
+    if already_terminal {
+        return Ok(RepoWatchWebhookTerminalOutcome::AlreadyTerminal);
+    }
+    insert_projections(transaction, key, request.projections()).await?;
+    let (disposition, generation) = encode_disposition(request.disposition());
+    sqlx::query(
+        "INSERT INTO repo_watch_webhook_disposition (
+            hook_id, delivery_id, disposition, outcome_code,
+            resulting_cursor_generation
+         ) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Decimal::from(key.hook_id.get()))
+    .bind(key.delivery_id)
+    .bind(disposition)
+    .bind(request.outcome_code())
+    .bind(generation)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(RepoWatchWebhookTerminalOutcome::Recorded)
 }
 
 #[derive(sqlx::FromRow)]

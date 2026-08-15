@@ -33,7 +33,9 @@ PR #541 (`fix/check-run-updated-at`). The source-independent event occurrence
 identity, its durable frontier, and the one-time storage migration are verified
 this PR (`agent/repo-watch-content-identity`). The authenticated webhook intake,
 shadow projection, parity view, and targeted refresh behavior are verified
-against this PR (`agent/repo-watch-webhook-receiver`).
+against this PR (`agent/repo-watch-webhook-receiver`). Webhook-primary commits,
+including their atomic delivery disposition and slow complete reconciliation,
+are verified against PR #854 (`agent/daemon-ops-overnight`).
 
 ## Configuration and credential boundary
 
@@ -84,16 +86,19 @@ one plain local HTTP listener for the watch subsystem. Its bind address is fully
 configurable and defaults to `127.0.0.1:3333`; its absolute local request path
 is required and configurable. Each webhook-enabled repository supplies one
 positive GitHub hook ID and one absolute secret-file path, either both or
-neither. Hook IDs are unique, and webhook secret paths cannot alias any polling,
-session-tool, or other webhook credential path under the same lexical, symlink,
-and Unix file-identity checks. A listener without an enabled repository, or an
-enabled repository without a listener, fails configuration. The daemon binds the
-configured address and verifies requests but knows nothing about tunnels or
-exposure providers. The reference deployment exposes public path
-`/github/webhooks` through Tailscale Funnel `--set-path`, which strips that
-prefix; its configured local path is therefore `/`. The reference secret file is
-`/home/wkg/.config/signalbox/github-webhook-secret`. Public reachability and its
-availability belong to deployment, not to the daemon.
+neither. Such an entry may also select `webhook_mode = "shadow"` or
+`webhook_mode = "primary"`; omission selects shadow. Supplying a mode without
+the hook ID and secret is invalid. Hook IDs are unique, and webhook secret paths
+cannot alias any polling, session-tool, or other webhook credential path under
+the same lexical, symlink, and Unix file-identity checks. A listener without an
+enabled repository, or an enabled repository without a listener, fails
+configuration. The daemon binds the configured address and verifies requests but
+knows nothing about tunnels or exposure providers. The reference deployment
+exposes public path `/github/webhooks` through Tailscale Funnel `--set-path`,
+which strips that prefix; its configured local path is therefore `/`. The
+reference secret file is `/home/wkg/.config/signalbox/github-webhook-secret`.
+Public reachability and its availability belong to deployment, not to the
+daemon.
 
 ## Poll transport and differ
 
@@ -759,9 +764,11 @@ contribution and the identities needed for nested fetches after restart. It does
 not persist raw provider JSON, credentials, or reactions from actors outside the
 configured signal-reviewer set. These snapshots remain transport state: rules
 and durable events cannot inspect them. Until this upgrade is built, every
-daemon restart deliberately pays one bounded complete repository poll.
+repository task deliberately pays one bounded complete poll after startup.
+Shadow mode starts it immediately; primary mode starts it after the configured
+polling interval so retained webhook work can drain first.
 
-## Webhook transport and shadow reconciliation
+## Webhook transport and reconciliation
 
 **Implemented behavior.** The listener accepts only `POST` on its configured
 path as plain HTTP. It requires canonical singleton GitHub hook, delivery,
@@ -809,6 +816,17 @@ Terminal exact payload bytes remain for seven days, after which maintenance may
 delete only the payload; delivery tombstones, digests, projections, and
 dispositions remain append-only.
 
+**Implemented behavior.** Primary mode applies the same guarded patch and
+targeted-query decisions, but the authenticated delivery may advance the durable
+cursor and insert ordinary `repo_watch_event` rows with producer `webhook`.
+Targeted provider reads complete before the transaction begins. The resulting
+cursor, content-identity frontier, events, parity projections, and terminal
+`committed` disposition then commit in one database transaction; a provider or
+database failure leaves the delivery pending for replay. The repository task
+evaluates committed webhook events through the same dispatch path as poll
+events. An exact replay may attach the terminal disposition to state won by a
+concurrent equivalent commit, but cannot duplicate its events.
+
 **Implemented behavior.** The mapped set is pull-request open, reopen, close,
 synchronize, label, unlabel, edit, draft conversion, and ready-for-review;
 submitted pull-request review; resolved or unresolved review thread; completed
@@ -826,11 +844,13 @@ missing pull-request baseline, current mergeability, or a check rollup records a
 targeted-query projection and immediately reuses the repository poller's
 credential, client, conditional cache, normalization, and request bounds to
 fetch only the affected pull requests. Those observations commit through the
-ordinary poll producer and dispatch path. Full polling continues unchanged as
-the slow complete reconciliation sweep and remains authoritative for missed
-deliveries, reactions, and every provider fact outside the mapped set. Poll
-frequency does not drop in shadow mode; any later write mode or slower cadence
-requires a separately reviewed ruling after parity over a real workday.
+ordinary poll producer and dispatch path in shadow mode, or join the webhook
+transaction in primary mode. Full polling remains the slow complete
+reconciliation sweep and authoritative fallback for missed deliveries,
+reactions, and every provider fact outside the mapped set. Poll frequency does
+not drop in shadow mode. Primary mode defers its first complete sweep until the
+configured interval, while durable webhook work drains on startup and every
+wake.
 
 ## Open edges
 

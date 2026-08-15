@@ -50,6 +50,11 @@ use crate::{
         repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_to_str,
         repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
     },
+    repo_watch_webhook::{
+        RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition, RepoWatchWebhookProjection,
+        RepoWatchWebhookStoreError, RepoWatchWebhookTerminalOutcome,
+        RepoWatchWebhookTerminalRequest, record_terminal_in_transaction,
+    },
 };
 
 const CURSOR_STORAGE_VERSION: u64 = 2;
@@ -149,6 +154,7 @@ pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Box<[RepoWatchEventOccurrenceV1]>,
+    producer: RepoWatchEventProducer,
 }
 
 impl RepoWatchCommitRequest {
@@ -161,6 +167,21 @@ impl RepoWatchCommitRequest {
             expected_generation,
             candidate,
             events: events.into_boxed_slice(),
+            producer: RepoWatchEventProducer::Poll,
+        }
+    }
+
+    /// Constructs a commit whose facts were produced from an authenticated webhook.
+    pub fn from_webhook(
+        expected_generation: RepoWatchCursorGeneration,
+        candidate: RepoWatchCursorCandidate,
+        events: Vec<RepoWatchEventOccurrenceV1>,
+    ) -> Self {
+        Self {
+            expected_generation: Some(expected_generation),
+            candidate,
+            events: events.into_boxed_slice(),
+            producer: RepoWatchEventProducer::Webhook,
         }
     }
 
@@ -174,6 +195,26 @@ impl RepoWatchCommitRequest {
 
     pub fn events(&self) -> &[RepoWatchEventOccurrenceV1] {
         &self.events
+    }
+
+    pub const fn producer(&self) -> RepoWatchEventProducer {
+        self.producer
+    }
+}
+
+/// Auditable producer that won one repository-watch event commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchEventProducer {
+    Poll,
+    Webhook,
+}
+
+impl RepoWatchEventProducer {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Webhook => "webhook",
+        }
     }
 }
 
@@ -344,6 +385,8 @@ pub enum RepoWatchStoreError {
     ConvergenceEvidenceTooLarge,
     ConvergenceEvidenceMismatch,
     StaleReviewClearanceMismatch,
+    WebhookTerminal(RepoWatchWebhookStoreError),
+    InvalidWebhookCommit,
 }
 
 impl fmt::Display for RepoWatchStoreError {
@@ -395,6 +438,14 @@ impl fmt::Display for RepoWatchStoreError {
             Self::StaleReviewClearanceMismatch => formatter.write_str(
                 "repository-watch stale review clearance names ineligible or changed evidence",
             ),
+            Self::WebhookTerminal(error) => {
+                write!(
+                    formatter,
+                    "repository-watch webhook terminal commit failed: {error}"
+                )
+            }
+            Self::InvalidWebhookCommit => formatter
+                .write_str("repository-watch webhook commit has invalid producer or projections"),
         }
     }
 }
@@ -405,6 +456,7 @@ impl Error for RepoWatchStoreError {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::CursorEncoding(error) => Some(error),
             Self::Corruption(error) => Some(error),
+            Self::WebhookTerminal(error) => Some(error),
             Self::EventRepositoryMismatch
             | Self::DuplicateEventIdentity(_)
             | Self::DuplicateEventContentIdentity(_)
@@ -413,8 +465,15 @@ impl Error for RepoWatchStoreError {
             | Self::EventBatchTooLarge
             | Self::ConvergenceEvidenceTooLarge
             | Self::ConvergenceEvidenceMismatch
-            | Self::StaleReviewClearanceMismatch => None,
+            | Self::StaleReviewClearanceMismatch
+            | Self::InvalidWebhookCommit => None,
         }
+    }
+}
+
+impl From<RepoWatchWebhookStoreError> for RepoWatchStoreError {
+    fn from(error: RepoWatchWebhookStoreError) -> Self {
+        Self::WebhookTerminal(error)
     }
 }
 
@@ -531,6 +590,30 @@ impl PostgresRepoWatchStore {
         repository: &RepositorySlug,
         request: RepoWatchCommitRequest,
     ) -> Result<RepoWatchCommitOutcome, RepoWatchStoreError> {
+        self.commit_internal(repository, request, None).await
+    }
+
+    /// Commits webhook-derived state and its terminal delivery record atomically.
+    pub async fn commit_webhook(
+        &self,
+        repository: &RepositorySlug,
+        request: RepoWatchCommitRequest,
+        delivery: RepoWatchWebhookDeliveryKey,
+        projections: Vec<RepoWatchWebhookProjection>,
+    ) -> Result<RepoWatchCommitOutcome, RepoWatchStoreError> {
+        if request.producer() != RepoWatchEventProducer::Webhook {
+            return Err(RepoWatchStoreError::InvalidWebhookCommit);
+        }
+        self.commit_internal(repository, request, Some((delivery, projections)))
+            .await
+    }
+
+    async fn commit_internal(
+        &self,
+        repository: &RepositorySlug,
+        request: RepoWatchCommitRequest,
+        webhook: Option<(RepoWatchWebhookDeliveryKey, Vec<RepoWatchWebhookProjection>)>,
+    ) -> Result<RepoWatchCommitOutcome, RepoWatchStoreError> {
         validate_event_batch(repository, request.events())?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -541,20 +624,47 @@ impl PostgresRepoWatchStore {
         let current_generation = current.as_ref().map(RepoWatchCursor::generation);
         if current_generation != request.expected_generation() {
             let replayed = exact_replay(&mut transaction, repository, &request).await?;
-            transaction.rollback().await?;
-            return Ok(match replayed {
-                Some(cursor) => RepoWatchCommitOutcome::Replayed(cursor),
-                None => RepoWatchCommitOutcome::Conflict {
-                    current: current_generation,
-                },
-            });
+            return match replayed {
+                Some(cursor) => {
+                    if let Some((delivery, projections)) = webhook {
+                        record_committed_webhook_terminal(
+                            &mut transaction,
+                            delivery,
+                            projections,
+                            cursor.generation(),
+                        )
+                        .await?;
+                        commit_repo_watch_transaction(transaction).await?;
+                    } else {
+                        transaction.rollback().await?;
+                    }
+                    Ok(RepoWatchCommitOutcome::Replayed(cursor))
+                }
+                None => {
+                    transaction.rollback().await?;
+                    Ok(RepoWatchCommitOutcome::Conflict {
+                        current: current_generation,
+                    })
+                }
+            };
         }
         if let Some(current) = current.as_ref()
             && current.candidate() == request.candidate()
         {
             if request.events().is_empty() {
                 let cursor = current.clone();
-                transaction.rollback().await?;
+                if let Some((delivery, projections)) = webhook {
+                    record_committed_webhook_terminal(
+                        &mut transaction,
+                        delivery,
+                        projections,
+                        cursor.generation(),
+                    )
+                    .await?;
+                    commit_repo_watch_transaction(transaction).await?;
+                } else {
+                    transaction.rollback().await?;
+                }
                 return Ok(RepoWatchCommitOutcome::Unchanged(cursor));
             }
             transaction.rollback().await?;
@@ -578,14 +688,19 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
-        insert_events(&mut transaction, repository, generation, request.events()).await?;
-        transaction.commit().await.map_err(|error| {
-            if commit_failure_is_ambiguous(&error) {
-                RepoWatchStoreError::CommitAmbiguous(error)
-            } else {
-                RepoWatchStoreError::Database(error)
-            }
-        })?;
+        insert_events(
+            &mut transaction,
+            repository,
+            generation,
+            request.producer(),
+            request.events(),
+        )
+        .await?;
+        if let Some((delivery, projections)) = webhook {
+            record_committed_webhook_terminal(&mut transaction, delivery, projections, generation)
+                .await?;
+        }
+        commit_repo_watch_transaction(transaction).await?;
         Ok(RepoWatchCommitOutcome::Committed(RepoWatchCursor {
             repository: repository.clone(),
             generation,
@@ -1870,6 +1985,7 @@ async fn insert_events(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
+    producer: RepoWatchEventProducer,
     events: &[RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
     for (index, occurrence) in events.iter().enumerate() {
@@ -1905,7 +2021,7 @@ async fn insert_events(
         .bind(encoded.event_version)
         .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
         .bind(occurrence.content_identity().as_bytes().as_slice())
-        .bind("poll")
+        .bind(producer.as_str())
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -1941,6 +2057,38 @@ async fn insert_events(
         .await?;
     }
     Ok(())
+}
+
+async fn record_committed_webhook_terminal(
+    transaction: &mut Transaction<'_, Postgres>,
+    delivery: RepoWatchWebhookDeliveryKey,
+    projections: Vec<RepoWatchWebhookProjection>,
+    generation: RepoWatchCursorGeneration,
+) -> Result<(), RepoWatchStoreError> {
+    let request = RepoWatchWebhookTerminalRequest::try_new(
+        projections,
+        RepoWatchWebhookDisposition::Committed(generation),
+        None,
+    )
+    .map_err(|_| RepoWatchStoreError::InvalidWebhookCommit)?;
+    if record_terminal_in_transaction(transaction, delivery, &request).await?
+        != RepoWatchWebhookTerminalOutcome::Recorded
+    {
+        return Err(RepoWatchStoreError::InvalidWebhookCommit);
+    }
+    Ok(())
+}
+
+async fn commit_repo_watch_transaction(
+    transaction: Transaction<'_, Postgres>,
+) -> Result<(), RepoWatchStoreError> {
+    transaction.commit().await.map_err(|error| {
+        if commit_failure_is_ambiguous(&error) {
+            RepoWatchStoreError::CommitAmbiguous(error)
+        } else {
+            RepoWatchStoreError::Database(error)
+        }
+    })
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2113,7 +2261,7 @@ fn decode_positioned_event(
     if row.content_identity.len() != 32 {
         return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
     }
-    if row.producer != "poll" {
+    if !matches!(row.producer.as_str(), "poll" | "webhook") {
         return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into());
     }
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(

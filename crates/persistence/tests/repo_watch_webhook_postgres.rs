@@ -11,15 +11,25 @@ use std::{
 };
 
 use rust_decimal::Decimal;
-use signalbox_application::RepoWatchEventContentIdentityV1;
-use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
+use signalbox_application::{
+    RepoWatchBranchHead, RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1,
+    RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+};
+use signalbox_domain::{
+    BranchName, CheckConclusion, CommitSha, PullRequestNumber, RepoWatchEvent, RepoWatchEventId,
+    RepoWatchEventKindNameV1, RepositorySlug, WorkflowName,
+};
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
+    repo_watch::{
+        PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
+        RepoWatchCursorCandidate, RepoWatchStoreError,
+    },
     repo_watch_webhook::{
         PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission, RepoWatchWebhookAdmissionOutcome,
         RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition, RepoWatchWebhookPendingPageSize,
-        RepoWatchWebhookProjection, RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalOutcome,
-        RepoWatchWebhookTerminalRequest,
+        RepoWatchWebhookProjection, RepoWatchWebhookStoreError, RepoWatchWebhookTargetedQuery,
+        RepoWatchWebhookTerminalOutcome, RepoWatchWebhookTerminalRequest,
     },
 };
 use sqlx::{
@@ -473,6 +483,168 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
             .await?;
     assert_eq!(projection_count, 1);
     assert_eq!(disposition_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn primary_commit_atomically_records_webhook_event_and_terminal_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let key = delivery_key(0x303);
+    admit_fixture(&webhook_store, key).await?;
+    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::default(),
+    ));
+    let RepoWatchCommitOutcome::Committed(cursor) = event_store
+        .commit(
+            &repository()?,
+            RepoWatchCommitRequest::new(None, baseline, Vec::new()),
+        )
+        .await?
+    else {
+        panic!("fixture baseline must commit")
+    };
+    let branch = BranchName::try_new("main".to_owned())?;
+    let head = CommitSha::try_new(HEAD_SHA.to_owned())?;
+    let observation = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(branch.clone(), head)],
+        })?,
+    );
+    let event = RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(0x303)),
+        repository()?,
+        branch,
+        WorkflowName::try_new("checks".to_owned())?,
+        CheckConclusion::Success,
+    );
+    let occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        event,
+        RepoWatchEventContentIdentityV1::from_bytes(WEBHOOK_ONLY_IDENTITY),
+    );
+    let outcome = event_store
+        .commit_webhook(
+            &repository()?,
+            RepoWatchCommitRequest::from_webhook(
+                cursor.generation(),
+                RepoWatchCursorCandidate::new(observation),
+                vec![occurrence],
+            ),
+            key,
+            vec![event_projection(WEBHOOK_ONLY_IDENTITY)?],
+        )
+        .await?;
+    let RepoWatchCommitOutcome::Committed(committed) = outcome else {
+        panic!("webhook state and event must commit")
+    };
+
+    let producer: String =
+        sqlx::query_scalar("SELECT producer FROM repo_watch_event WHERE event_id = $1")
+            .bind(Uuid::from_u128(0x303))
+            .fetch_one(&pool)
+            .await?;
+    let disposition = sqlx::query_as::<_, (String, i64)>(
+        "SELECT disposition, resulting_cursor_generation
+           FROM repo_watch_webhook_disposition
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .fetch_one(&pool)
+    .await?;
+    let pending = webhook_store
+        .load_pending(&repository()?, pending_page_size())
+        .await?;
+
+    assert_eq!(producer, "webhook");
+    assert_eq!(
+        disposition,
+        ("committed".to_owned(), committed.generation().get() as i64)
+    );
+    assert!(pending.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn primary_commit_rolls_back_cursor_and_event_when_terminal_delivery_is_missing()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::default(),
+    ));
+    let RepoWatchCommitOutcome::Committed(cursor) = event_store
+        .commit(
+            &repository()?,
+            RepoWatchCommitRequest::new(None, baseline, Vec::new()),
+        )
+        .await?
+    else {
+        panic!("fixture baseline must commit")
+    };
+    let branch = BranchName::try_new("main".to_owned())?;
+    let observation = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                branch.clone(),
+                CommitSha::try_new(HEAD_SHA.to_owned())?,
+            )],
+        })?,
+    );
+    let event_id = RepoWatchEventId::from_uuid(Uuid::from_u128(0x304));
+    let event = RepoWatchEvent::branch_workflow(
+        event_id,
+        repository()?,
+        branch,
+        WorkflowName::try_new("checks".to_owned())?,
+        CheckConclusion::Success,
+    );
+    let occurrence = RepoWatchEventOccurrenceV1::from_parts(
+        event,
+        RepoWatchEventContentIdentityV1::from_bytes(POLL_ONLY_IDENTITY),
+    );
+    let result = event_store
+        .commit_webhook(
+            &repository()?,
+            RepoWatchCommitRequest::from_webhook(
+                cursor.generation(),
+                RepoWatchCursorCandidate::new(observation),
+                vec![occurrence],
+            ),
+            delivery_key(0x304),
+            vec![event_projection(POLL_ONLY_IDENTITY)?],
+        )
+        .await;
+    let Err(RepoWatchStoreError::WebhookTerminal(RepoWatchWebhookStoreError::MissingDelivery)) =
+        result
+    else {
+        panic!("a missing delivery must reject the atomic primary commit")
+    };
+
+    let stored_cursor = event_store
+        .load_cursor(&repository()?)
+        .await?
+        .expect("the baseline cursor remains");
+    let event_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_event WHERE event_id = $1")
+            .bind(Uuid::from_u128(0x304))
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(stored_cursor, cursor);
+    assert_eq!(event_count, 0);
     Ok(())
 }
 
