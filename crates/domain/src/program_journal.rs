@@ -571,8 +571,8 @@ impl ReplayCursor {
             return Ok(ReplayedRequest::DeliveryPending);
         };
         if expected != &observed {
-            if let Some(JournalFrame::Delivery(delivery)) =
-                self.entries.get(self.next + 1).map(JournalEntry::frame)
+            if let Some((fault_index, entry)) = self.entries.iter().enumerate().next_back()
+                && let JournalFrame::Delivery(delivery) = entry.frame()
                 && let DeliveryKind::Fault(ProgramFault::Nondeterminism {
                     expected: persisted_expected,
                     observed: persisted_observed,
@@ -580,7 +580,7 @@ impl ReplayCursor {
                 && persisted_expected == expected
                 && persisted_observed == &observed
             {
-                self.next += 1;
+                self.next = fault_index;
                 return Ok(ReplayedRequest::Matched);
             }
             return Err(NondeterminismError {
@@ -727,6 +727,35 @@ mod tests {
         let mut replay = ReplayCursor::new(journal(vec![
             entry(1, JournalFrame::Request(expected)),
             entry(2, JournalFrame::Delivery(fault.clone())),
+        ]));
+
+        assert_eq!(replay.next_instruction(), ReplayInstruction::AwaitRequest);
+        assert_eq!(
+            replay.submit_request(observed),
+            Ok(ReplayedRequest::Matched)
+        );
+        assert_eq!(replay.next_instruction(), ReplayInstruction::Deliver(fault));
+        assert_eq!(replay.next_instruction(), ReplayInstruction::Live);
+    }
+
+    #[test]
+    fn tail_appended_nondeterminism_fault_replays_after_recorded_suffix() {
+        let expected = request(1, b"recorded");
+        let observed = request(1, b"different");
+        let suffix_request = request(2, b"suffix");
+        let suffix_delivery = delivery(1, 2, b"suffix-answer");
+        let fault = DeliveryFrame::new(
+            DeliveryOrdinal::try_from_u64(2).expect("fixture ordinal is positive"),
+            DeliveryKind::Fault(ProgramFault::Nondeterminism {
+                expected: expected.clone(),
+                observed: observed.clone(),
+            }),
+        );
+        let mut replay = ReplayCursor::new(journal(vec![
+            entry(1, JournalFrame::Request(expected)),
+            entry(2, JournalFrame::Request(suffix_request)),
+            entry(3, JournalFrame::Delivery(suffix_delivery)),
+            entry(4, JournalFrame::Delivery(fault.clone())),
         ]));
 
         assert_eq!(replay.next_instruction(), ReplayInstruction::AwaitRequest);
