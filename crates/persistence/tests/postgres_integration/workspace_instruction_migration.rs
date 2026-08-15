@@ -16,20 +16,93 @@ async fn queued_turn(
         ))
         .await?;
     let turn = TurnId::from_uuid(Uuid::from_u128(identity_base + 4));
-    SubmitInputRepository::new(pool.clone())
-        .handle(
-            start_input(
-                identity_base + 5,
-                identity_base + 1,
-                "pre-migration unstarted turn",
-                1,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(identity_base + 6)),
-            Some(turn),
-        )
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = 'replica'")
+        .execute(&mut *transaction)
         .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id,
+             acceptance_position, state_kind)
+         VALUES ($1, $2, $3, 1, 'queued')",
+    )
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(Uuid::from_u128(identity_base + 6))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO queued_input_origin
+            (turn_id, accepted_input_id, session_id, acceptance_position,
+             priority_kind, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id,
+             model_parameters, known_provider_failure_retry, model_fallback,
+             dangerous_tool_auto_approval)
+         VALUES
+            ($1, $2, $3, 1, 'ordinary', 1,
+             'direct', $4, 'direct', $4,
+             'provider_defaults', 'disabled', 'disabled', 'disabled')",
+    )
+    .bind(turn.into_uuid())
+    .bind(Uuid::from_u128(identity_base + 6))
+    .bind(session.into_uuid())
+    .bind(selection.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok((session, turn))
+}
+
+async fn seed_pre_migration_active_turn(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    identity_base: u128,
+) -> Result<(Uuid, Uuid), Box<dyn Error>> {
+    let attempt = Uuid::from_u128(identity_base + 1);
+    let frontier = Uuid::from_u128(identity_base + 2);
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = 'replica'")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET attempt_history_present = true,
+                state_kind = 'active',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                active_phase_kind = 'running',
+                current_attempt_id = $2
+          WHERE session_id = $3 AND turn_id = $4",
+    )
+    .bind(frontier)
+    .bind(attempt)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, state_kind)
+         VALUES ($1, $2, $3, 'prepared')",
+    )
+    .bind(attempt)
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok((attempt, frontier))
 }
 
 async fn assert_no_instruction_evidence(
@@ -83,28 +156,110 @@ async fn inv061_workspace_instruction_migration_leaves_callless_active_turn_unbo
     let (container, pool, _database_url) =
         postgres_before_workspace_instruction_migration().await?;
     let (session, turn) = queued_turn(&pool, 0x6820).await?;
-    let activation = StartEligibleTurnRepository::new(pool.clone());
-    let preview = activation
-        .preview(
-            session,
-            AcceptedInputTurnActivationIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x6830)),
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x6831)),
-                ContextFrontierId::from_uuid(Uuid::from_u128(0x6832)),
-                TurnAttemptId::from_uuid(Uuid::from_u128(0x6833)),
-            ),
-        )
-        .await?
-        .expect("the queued fixture has one activation preview");
-    let activated = activation.commit_preview(preview).await?;
-    let CommitActivationPreviewOutcome::Activated(activated) = activated else {
-        panic!("the callless fixture turn activates");
-    };
-    assert_eq!(activated.turn(), turn);
+    seed_pre_migration_active_turn(&pool, session, turn, 0x6830).await?;
 
     apply_workspace_instruction_migration(&pool).await?;
 
     assert_no_instruction_evidence(&pool, session, turn).await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: the one-time migration backfills the manifest correlation on a
+/// terminal model call without weakening its post-migration immutability.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_migration_backfills_a_terminal_model_call()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) =
+        postgres_before_workspace_instruction_migration().await?;
+    let identity_base = 0x6840;
+    let (session, turn) = queued_turn(&pool, identity_base).await?;
+    let active = seed_pre_migration_active_turn(&pool, session, turn, 0x6850).await?;
+    let provider = Uuid::from_u128(0x6854);
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL session_replication_role = 'replica'")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET pinned_provider_model_identity_id = $1
+          WHERE session_id = $2 AND turn_id = $3",
+    )
+    .bind(provider)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let call = Uuid::from_u128(0x6855);
+    sqlx::query(
+        "INSERT INTO model_call
+            (model_call_id, turn_id, session_id, turn_attempt_id,
+             selection_kind, direct_model_selection_id,
+             resolved_provider_model_identity_id, context_frontier_id,
+             credential_reference, state_kind)
+         VALUES ($1, $2, $3, $4, 'direct', $5, $6, $7, $8, 'prepared')",
+    )
+    .bind(call)
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(active.0)
+    .bind(Uuid::from_u128(identity_base + 2))
+    .bind(provider)
+    .bind(active.1)
+    .bind(model_credential_reference().as_str())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'terminal', terminal_disposition_kind = 'refused'
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'turn_refused'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(active.0)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                terminal_frontier_id = $1,
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_attempt_id = $2,
+                terminal_model_call_id = $3,
+                terminal_disposition_kind = 'refused'
+          WHERE session_id = $4 AND turn_id = $5",
+    )
+    .bind(active.1)
+    .bind(active.0)
+    .bind(call)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    apply_workspace_instruction_migration(&pool).await?;
+
+    let manifest: Uuid = sqlx::query_scalar(
+        "SELECT turn_instruction_manifest_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(manifest, turn.into_uuid());
     pool.close().await;
     drop(container);
     Ok(())
@@ -302,6 +457,83 @@ async fn inv061_workspace_instruction_discovery_seal_rejects_a_finding_ordinal_g
         Some("instruction_discovery_finding_inventory_exact")
     );
     transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: a complete discovery cannot retain resource-limit evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_complete_discovery_rejects_a_limit_finding()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68b0).await?;
+    let discovery = Uuid::from_u128(0x68b7);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO instruction_discovery_finding
+            (instruction_discovery_id, finding_ordinal, source_path, finding_kind)
+         VALUES ($1, 1, '/workspace', 'limit_elapsed_time')",
+    )
+    .bind(discovery)
+    .execute(&mut *transaction)
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 0, 1, 0, 1, true)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("limit evidence prevents a complete discovery seal");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("instruction_discovery_completeness_exact")
+    );
+    transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: an incomplete discovery must end in exactly one terminal resource
+/// limit finding.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_incomplete_discovery_requires_a_terminal_limit()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68c0).await?;
+    let discovery = Uuid::from_u128(0x68c7);
+    let error = sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 0, 0, 0, 1, false)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an incomplete discovery without a terminal limit cannot seal");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("instruction_discovery_completeness_exact")
+    );
     pool.close().await;
     drop(container);
     Ok(())
