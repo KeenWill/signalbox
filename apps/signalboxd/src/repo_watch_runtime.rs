@@ -2711,6 +2711,23 @@ impl GitHubRepositoryPoller {
             return Ok(accepted);
         }
         if response.status() != StatusCode::OK {
+            tracing::warn!(
+                resource_kind,
+                http_status = response.status().as_u16(),
+                rate_limit_resource = response
+                    .headers()
+                    .get("x-ratelimit-resource")
+                    .and_then(|value| value.to_str().ok()),
+                rate_limit_remaining = response
+                    .headers()
+                    .get("x-ratelimit-remaining")
+                    .and_then(|value| value.to_str().ok()),
+                retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok()),
+                "repository-watch GitHub request rejected"
+            );
             return Err(RepositoryWatchAttemptError::Rejected);
         }
         // The cached pair stays in place while this body is read and parsed.
