@@ -6864,6 +6864,7 @@ pub struct RepoWatchConvergenceAssessmentInput {
     pub number: PullRequestNumber,
     pub head_sha: CommitSha,
     pub base_branch: BranchName,
+    pub base_revision: CommitSha,
     pub mergeable_state: MergeableState,
     pub review_decision: RepoWatchReviewDecision,
     pub unresolved_threads: Vec<ReviewThreadId>,
@@ -6876,7 +6877,7 @@ impl RepoWatchConvergenceAssessment {
     pub fn try_new(
         input: RepoWatchConvergenceAssessmentInput,
     ) -> Result<Self, RepoWatchConvergenceAssessmentError>;
-    // accessors: number(), head_sha(), base_branch(), mergeable_state(),
+    // accessors: number(), head_sha(), base_branch(), base_revision(), mergeable_state(),
     // review_decision(), unresolved_threads(), gating_check_count(),
     // non_green_gating_checks(), verdict()
 }

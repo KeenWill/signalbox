@@ -608,9 +608,10 @@ that goal's stop to a savepoint but does not roll back the cutoff: the terminal
 event remains durably dispositioned, healthy commissioned goals are stopped, and
 later cutoffs remain eligible for processing.
 
-**Implemented behavior.** Every completed poll also reconciles durable
-convergence evidence for each exact pull-request head in its committed cursor.
-Evidence identical to that head's latest assessment is an idempotent replay;
+**Implemented behavior.** Every completed poll atomically commits its cursor,
+events, and durable convergence evidence for each pull request at the exact head
+and base revision in that cursor. Evidence identical to that identity's latest
+assessment is an idempotent replay;
 changed evidence appends a new assessment. The assessment follows the
 repository's operational status rule: every review thread must be resolved,
 without filtering by author or outdated state; every gating check on the exact
@@ -636,22 +637,25 @@ mergeability calculation from invalidating otherwise coherent evidence.
 work on that exact head. Every assessment is append-only evidence, and
 `repo_watch_current_pull_request_convergence` exposes the latest evidence,
 derived verdict, and any exact-head seal. The first passing assessment also
-creates one monotonic seal for the repository, pull request, and exact head SHA.
-Later checks or reviews on the same sealed head remain visible as newer
+creates one monotonic seal for the repository, pull request, exact head SHA, and
+exact base revision. Later checks or reviews on the same sealed identity remain
+visible as newer
 assessment evidence but cannot reopen dispatch, so a session does not revisit
-threads it already resolved on that unchanged head. A different head SHA has no
-inherited seal and is assessed and dispatched afresh; convergence therefore
+threads it already resolved on that unchanged identity. A different head SHA or
+base revision has no inherited seal and is assessed and dispatched afresh;
+convergence therefore
 terminates unchanged-head review cycles without treating a new revision as
 already finished.
 
-**Implemented behavior.** Repository watch records one convergence cutoff for
-each seal. When the sealed head remains the latest assessed head, the cutoff
-applies the ordinary parent-only stop to every generation-one goal repository
+**Implemented behavior.** Repository watch records one convergence cutoff only
+when a seal's head and base revision are the latest assessed identity. Stale
+seals remain pending and become eligible if their identity becomes current
+again. The cutoff applies the ordinary parent-only stop to every generation-one goal repository
 watch commissioned for the pull request, with the same provenance limits as a
 lifecycle cutoff. Dispatch admission rechecks the seal under the repository
-lock: a stale match or collapsed obligation for the sealed exact head settles as
-`target_converged` without creating a session. A seal for an older head is
-recorded but cannot stop work on the newer head.
+lock: a stale match or collapsed obligation settles as `target_converged` only
+when its head is the latest assessed identity and that identity's head and base
+revision are sealed. An older identity cannot stop current work.
 
 **Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
 repository watch continues delivering matching findings while that aggregate

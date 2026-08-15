@@ -355,14 +355,28 @@ impl PostgresRepoWatchDispatchStore {
         lock_text(&mut transaction, repository.as_str()).await?;
         let candidate = sqlx::query(
             "SELECT convergence.assessment_id,
-                    convergence.pull_request_number,
-                    convergence.head_sha
+                    convergence.pull_request_number
                FROM repo_watch_pull_request_convergence AS convergence
               WHERE convergence.repository = $1
                 AND NOT EXISTS (
                     SELECT 1
                       FROM repo_watch_convergence_cutoff AS cutoff
                      WHERE cutoff.assessment_id = convergence.assessment_id
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM (
+                            SELECT assessment.head_sha, assessment.base_revision
+                              FROM repo_watch_pull_request_convergence_assessment AS assessment
+                             WHERE assessment.repository = convergence.repository
+                               AND assessment.pull_request_number =
+                                   convergence.pull_request_number
+                             ORDER BY assessment.recorded_at DESC,
+                                      assessment.assessment_id DESC
+                             LIMIT 1
+                           ) AS current
+                     WHERE current.head_sha = convergence.head_sha
+                       AND current.base_revision = convergence.base_revision
                 )
               ORDER BY convergence.converged_at, convergence.assessment_id
               LIMIT 1",
@@ -376,7 +390,6 @@ impl PostgresRepoWatchDispatchStore {
         };
         let assessment_id: Uuid = candidate.try_get("assessment_id")?;
         let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
-        let converged_head: String = candidate.try_get("head_sha")?;
         sqlx::query(
             "INSERT INTO repo_watch_convergence_cutoff (assessment_id)
              VALUES ($1)",
@@ -384,55 +397,41 @@ impl PostgresRepoWatchDispatchStore {
         .bind(assessment_id)
         .execute(&mut *transaction)
         .await?;
-        let current_head: Option<String> = sqlx::query_scalar(
-            "SELECT assessment.head_sha
-               FROM repo_watch_pull_request_convergence_assessment AS assessment
-              WHERE assessment.repository = $1
-                AND assessment.pull_request_number = $2
-              ORDER BY assessment.recorded_at DESC, assessment.assessment_id DESC
-              LIMIT 1",
+        let sessions = sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT action.session_id
+               FROM repo_watch_dispatch_action AS action
+               JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
+              WHERE origin.repository = $1
+                AND origin.pull_request_number = $2
+              ORDER BY action.session_id",
         )
         .bind(repository.as_str())
         .bind(pull_request_number)
-        .fetch_optional(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await?;
-        if current_head.as_deref() == Some(converged_head.as_str()) {
-            let sessions = sqlx::query_scalar::<_, Uuid>(
-                "SELECT DISTINCT action.session_id
-                   FROM repo_watch_dispatch_action AS action
-                   JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
-                  WHERE origin.repository = $1
-                    AND origin.pull_request_number = $2
-                  ORDER BY action.session_id",
-            )
-            .bind(repository.as_str())
-            .bind(pull_request_number)
-            .fetch_all(&mut *transaction)
-            .await?;
-            for session_id in sessions {
-                let session = SessionId::from_uuid(session_id);
-                let command = GoalUserCommand::new(
-                    next_command_id(),
-                    session,
-                    GoalUserAction::Stop {
-                        descendant_scope: DescendantTerminationScope::ParentAlone,
-                    },
-                );
-                if crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
-                    .await
-                    .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?
-                {
-                    sqlx::query(
-                        "INSERT INTO repo_watch_convergence_cutoff_goal
-                            (assessment_id, session_id, goal_command_id)
-                         VALUES ($1, $2, $3)",
-                    )
-                    .bind(assessment_id)
-                    .bind(session_id)
-                    .bind(command.command_id().as_uuid())
-                    .execute(&mut *transaction)
-                    .await?;
-                }
+        for session_id in sessions {
+            let session = SessionId::from_uuid(session_id);
+            let command = GoalUserCommand::new(
+                next_command_id(),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            );
+            if crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+                .await
+                .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?
+            {
+                sqlx::query(
+                    "INSERT INTO repo_watch_convergence_cutoff_goal
+                        (assessment_id, session_id, goal_command_id)
+                     VALUES ($1, $2, $3)",
+                )
+                .bind(assessment_id)
+                .bind(session_id)
+                .bind(command.command_id().as_uuid())
+                .execute(&mut *transaction)
+                .await?;
             }
         }
         commit(transaction).await?;
@@ -1499,10 +1498,20 @@ async fn event_target_is_converged(
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1
-              FROM repo_watch_pull_request_convergence AS convergence
-             WHERE convergence.repository = $1
+              FROM (
+                    SELECT assessment.head_sha, assessment.base_revision
+                      FROM repo_watch_pull_request_convergence_assessment AS assessment
+                     WHERE assessment.repository = $1
+                       AND assessment.pull_request_number = $2
+                     ORDER BY assessment.recorded_at DESC, assessment.assessment_id DESC
+                     LIMIT 1
+                   ) AS current
+              JOIN repo_watch_pull_request_convergence AS convergence
+                ON convergence.repository = $1
                AND convergence.pull_request_number = $2
-               AND convergence.head_sha = $3
+               AND convergence.head_sha = current.head_sha
+               AND convergence.base_revision = current.base_revision
+             WHERE current.head_sha = $3
         )",
     )
     .bind(event.repository().as_str())
