@@ -535,7 +535,7 @@ async fn declare_status_cursors(
                          (eligible_at - transaction_timestamp())))::numeric
                      ELSE NULL
                 END AS cooldown_remaining_seconds,
-                eligible_at = 'infinity'::timestamptz
+                COALESCE(eligible_at = 'infinity'::timestamptz, false)
                     AS cooldown_never_eligible,
                 ready
            FROM repo_watch_outstanding_dispatch_obligation

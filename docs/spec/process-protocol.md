@@ -1258,17 +1258,17 @@ disk rather than the complete session catalog in request heap or an open
 database transaction. The sequence becomes authoritative only after the end
 message and count validate. This avoids an aggregate frame-size limit.
 
-A successful `read_operator_status` response is `operator_status_start`, zero or
-more rows from each section in this fixed order, then `operator_status_end` with
-one count per section. The sections are `operator_status_held_slot`,
-`operator_status_queued_obligation`, `operator_status_pull_request_convergence`,
-and `operator_status_pending_stale_review_clearance`. The daemon reads the four
-repository-watch views bearing those respective concepts in one read-only
-repeatable-read transaction. It streams their rows through server-side cursors
-into a temporary-file spool before writing the first response frame, so a
-database or encoding failure produces no partial successful snapshot and the
-request retains neither an unbounded row inventory nor a database transaction
-while the client reads.
+A successful `read_operator_status` response consists of `operator_status`
+messages: `kind=start`, zero or more rows from each section in this fixed order,
+then `kind=end` with one count per section. The row kinds are `held_slot`,
+`queued_obligation`, `pull_request_convergence`, and
+`pending_stale_review_clearance`. The daemon reads the four repository-watch
+views bearing those respective concepts in one read-only repeatable-read
+transaction. It streams their rows through server-side cursors into a
+temporary-file spool before writing the first response frame, so a database or
+encoding failure produces no partial successful snapshot and the request retains
+neither an unbounded row inventory nor a database transaction while the client
+reads.
 
 A held-slot row carries dispatch, repository, pull request, rule, singleton,
 ordered session, whole-second held duration, and the independently failing
