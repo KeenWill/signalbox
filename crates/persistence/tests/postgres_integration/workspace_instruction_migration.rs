@@ -637,6 +637,56 @@ async fn inv061_workspace_instruction_manifest_requires_a_complete_discovery()
     Ok(())
 }
 
+/// INV-061: an append-only empty manifest accepts only the canonical hashes
+/// derived from its exact session, turn, and boundary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_manifest_requires_canonical_hashes()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = queued_turn(&pool, 0x68f0).await?;
+    let discovery = Uuid::from_u128(0x68f7);
+    sqlx::query(
+        "INSERT INTO instruction_discovery
+            (instruction_discovery_id, session_id, turn_id, limit_set_version,
+             classified_entry_count, finding_count,
+             candidate_source_byte_count, elapsed_millis, scan_complete)
+         VALUES ($1, $2, $3, 1, 0, 0, 0, 0, true)",
+    )
+    .bind(discovery)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO turn_instruction_manifest
+            (turn_instruction_manifest_id, session_id, turn_id,
+             instruction_discovery_id, boundary_kind,
+             eligibility_hash_algorithm, eligibility_hash,
+             manifest_hash_algorithm, manifest_hash)
+         VALUES ($1, $2, $3, $4, 'turn_start',
+                 'sha256_v1', $5, 'sha256_v1', $5)",
+    )
+    .bind(Uuid::from_u128(0x68f8))
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(discovery)
+    .bind(vec![0_u8; 32])
+    .execute(&pool)
+    .await
+    .expect_err("an empty manifest rejects noncanonical hashes");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("turn_instruction_manifest_hash_shape")
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-061: candidate inventory cannot exceed the scan's classified entries.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

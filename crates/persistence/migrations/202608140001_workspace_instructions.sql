@@ -215,8 +215,18 @@ CREATE TABLE turn_instruction_manifest (
         CHECK (
             eligibility_hash_algorithm = 'sha256_v1'
             AND octet_length(eligibility_hash) = 32
+            AND eligibility_hash = sha256(
+                convert_to('signalbox-instruction-eligibility-v1', 'UTF8')
+            )
             AND manifest_hash_algorithm = 'sha256_v1'
             AND octet_length(manifest_hash) = 32
+            AND manifest_hash = sha256(
+                convert_to('signalbox-turn-instruction-manifest-v1', 'UTF8')
+                || uuid_send(session_id)
+                || uuid_send(turn_id)
+                || eligibility_hash
+                || convert_to(boundary_kind, 'UTF8')
+            )
         ),
     CONSTRAINT turn_instruction_manifest_turn_fk
         FOREIGN KEY (turn_id, session_id)
