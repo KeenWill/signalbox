@@ -5807,6 +5807,15 @@ where
                 biased;
                 () = wait_for_shutdown(&mut shutdown) => return Ok(()),
                 () = wait_for_connection_loss(reader) => return Ok(()),
+                () = sleep_until(deadline) => {
+                    drop(permit);
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        ProtocolError::without_detail(ErrorCode::Unavailable),
+                    ).await;
+                }
                 spool = spool_single_message(
                     version,
                     request_id,
