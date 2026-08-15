@@ -12,7 +12,10 @@ same runner-recovery turn boundary and is verified against this PR
 latest runner-placement frontier is verified against this PR
 (`agent/runner-placement-semantic-persistence`). Model-observation ordering for
 a staged exact-directory pinned replacement is verified against this PR
-(`agent/runner-pinned-replacement-observation-finalizer`).
+(`agent/runner-pinned-replacement-observation-finalizer`). The same observation
+boundary now consumes an exact retained repository-ready replacement and is
+verified against this PR
+(`agent/runner-repository-replacement-terminalization`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).

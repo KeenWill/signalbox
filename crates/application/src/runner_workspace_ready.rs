@@ -3,11 +3,13 @@
 use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
-    CanonicalCloneUrlDigest, CredentialProfileName, RunnerGeneration, RunnerId,
-    RunnerSandboxProfile, RunnerWorkingDirectory, SessionId, WorkspaceManifestId,
-    WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
-    WorkspaceRepositoryKey,
+    CanonicalCloneUrlDigest, ContextFrontierId, CredentialProfileName, RunnerGeneration, RunnerId,
+    RunnerSandboxProfile, RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionId,
+    WorkspaceManifestId, WorkspaceProvisioningAuthorizationId, WorkspaceRecovery,
+    WorkspaceRelativePath, WorkspaceRepositoryKey,
 };
+
+use crate::PinnedRunnerReplacementIdentities;
 
 /// One canonical lowercase SHA-256 digest of a ready workspace manifest.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -190,32 +192,55 @@ pub trait RunnerWorkspaceReadyTransaction {
     fn record(
         &mut self,
         receipt: RunnerWorkspaceReadyReceipt,
+        identities: PinnedRunnerReplacementIdentities,
     ) -> impl Future<Output = Result<RunnerWorkspaceReadyReceipt, Self::Error>> + Send;
+}
+
+/// Supplies fresh identities for the repository replacement transcript boundary.
+pub trait RunnerWorkspaceReadyIdGenerator {
+    /// Returns the next semantic-entry and frontier pair.
+    fn next_identities(&mut self) -> PinnedRunnerReplacementIdentities;
+}
+
+/// Production UUIDv7 generator for repository replacement boundary identities.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UuidV7RunnerWorkspaceReadyIdGenerator;
+
+impl RunnerWorkspaceReadyIdGenerator for UuidV7RunnerWorkspaceReadyIdGenerator {
+    fn next_identities(&mut self) -> PinnedRunnerReplacementIdentities {
+        PinnedRunnerReplacementIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+            ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        )
+    }
 }
 
 /// Coordinates one exact replacement workspace-ready admission.
 #[derive(Debug)]
-pub struct RunnerWorkspaceReadyService<Transaction> {
+pub struct RunnerWorkspaceReadyService<Transaction, Ids> {
     transaction: Transaction,
+    ids: Ids,
 }
 
-impl<Transaction> RunnerWorkspaceReadyService<Transaction> {
+impl<Transaction, Ids> RunnerWorkspaceReadyService<Transaction, Ids> {
     /// Uses the supplied durable receipt boundary.
-    pub const fn new(transaction: Transaction) -> Self {
-        Self { transaction }
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self {
+        Self { transaction, ids }
     }
 }
 
-impl<Transaction> RunnerWorkspaceReadyService<Transaction>
+impl<Transaction, Ids> RunnerWorkspaceReadyService<Transaction, Ids>
 where
     Transaction: RunnerWorkspaceReadyTransaction,
+    Ids: RunnerWorkspaceReadyIdGenerator,
 {
     /// Commits the exact receipt before any acknowledgement is emitted.
     pub async fn execute(
         &mut self,
         receipt: RunnerWorkspaceReadyReceipt,
     ) -> Result<RunnerWorkspaceReadyReceipt, Transaction::Error> {
-        self.transaction.record(receipt).await
+        let identities = self.ids.next_identities();
+        self.transaction.record(receipt, identities).await
     }
 }
 
@@ -224,23 +249,27 @@ mod tests {
     use std::future::ready;
 
     use signalbox_domain::{
-        CanonicalCloneUrlDigest, CredentialProfileName, RunnerGeneration, RunnerId,
-        RunnerSandboxProfile, RunnerWorkingDirectory, SessionId, WorkspaceManifestId,
-        WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
-        WorkspaceRepositoryKey, WorkspaceRevision,
+        CanonicalCloneUrlDigest, ContextFrontierId, CredentialProfileName, RunnerGeneration,
+        RunnerId, RunnerSandboxProfile, RunnerWorkingDirectory, SemanticTranscriptEntryId,
+        SessionId, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId, WorkspaceRecovery,
+        WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRevision,
     };
-    use uuid::Uuid;
+    use uuid::{Uuid, Version};
 
     use super::{
         InvalidRunnerReadyManifestDigest, InvalidRunnerWorkspaceExecutionDirectory,
-        RunnerReadyManifestDigest, RunnerWorkspaceReadyReceipt, RunnerWorkspaceReadyService,
-        RunnerWorkspaceReadyTransaction,
+        RunnerReadyManifestDigest, RunnerWorkspaceReadyIdGenerator, RunnerWorkspaceReadyReceipt,
+        RunnerWorkspaceReadyService, RunnerWorkspaceReadyTransaction,
+        UuidV7RunnerWorkspaceReadyIdGenerator,
     };
+    use crate::PinnedRunnerReplacementIdentities;
 
     const AUTHORIZATION: u128 = 1;
     const SESSION: u128 = 2;
     const RUNNER: u128 = 3;
     const MANIFEST: u128 = 4;
+    const BOUNDARY_ENTRY: u128 = 5;
+    const BOUNDARY_FRONTIER: u128 = 6;
 
     struct ReceiptFixture {
         receipt: RunnerWorkspaceReadyReceipt,
@@ -324,6 +353,7 @@ mod tests {
     #[derive(Debug)]
     struct RecordingTransaction {
         expected: RunnerWorkspaceReadyReceipt,
+        expected_identities: PinnedRunnerReplacementIdentities,
     }
 
     impl RunnerWorkspaceReadyTransaction for RecordingTransaction {
@@ -332,9 +362,20 @@ mod tests {
         fn record(
             &mut self,
             receipt: RunnerWorkspaceReadyReceipt,
+            identities: PinnedRunnerReplacementIdentities,
         ) -> impl Future<Output = Result<RunnerWorkspaceReadyReceipt, Self::Error>> + Send {
             assert_eq!(receipt, self.expected);
+            assert_eq!(identities, self.expected_identities);
             ready(Ok(receipt))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedIds(PinnedRunnerReplacementIdentities);
+
+    impl RunnerWorkspaceReadyIdGenerator for ScriptedIds {
+        fn next_identities(&mut self) -> PinnedRunnerReplacementIdentities {
+            self.0
         }
     }
 
@@ -406,10 +447,15 @@ mod tests {
     #[tokio::test]
     async fn service_passes_the_exact_receipt_to_one_transaction() {
         let expected = receipt_fixture().receipt;
+        let identities = PinnedRunnerReplacementIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(BOUNDARY_ENTRY)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(BOUNDARY_FRONTIER)),
+        );
         let transaction = RecordingTransaction {
             expected: expected.clone(),
+            expected_identities: identities,
         };
-        let mut service = RunnerWorkspaceReadyService::new(transaction);
+        let mut service = RunnerWorkspaceReadyService::new(transaction, ScriptedIds(identities));
 
         assert_eq!(
             service
@@ -417,6 +463,31 @@ mod tests {
                 .await
                 .expect("the recording transaction accepts the receipt"),
             expected
+        );
+    }
+
+    #[test]
+    fn production_generator_supplies_fresh_uuid_v7_boundary_identities() {
+        let mut generator = UuidV7RunnerWorkspaceReadyIdGenerator;
+        let first = generator.next_identities();
+        let second = generator.next_identities();
+
+        assert_ne!(first, second);
+        assert_eq!(
+            first.semantic_entry().as_uuid().get_version(),
+            Some(Version::SortRand)
+        );
+        assert_eq!(
+            first.context_frontier().as_uuid().get_version(),
+            Some(Version::SortRand)
+        );
+        assert_eq!(
+            second.semantic_entry().as_uuid().get_version(),
+            Some(Version::SortRand)
+        );
+        assert_eq!(
+            second.context_frontier().as_uuid().get_version(),
+            Some(Version::SortRand)
         );
     }
 }

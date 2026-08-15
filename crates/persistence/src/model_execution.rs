@@ -858,7 +858,7 @@ impl PostgresModelCallRepository {
             if let Some(finalizer) = &self.runner_observation_finalizer {
                 let boundary = model_observation_boundary(&outcome)?;
                 finalizer
-                    .finalize_workspace_free_replacements_after_model_observation(
+                    .finalize_pinned_replacements_after_model_observation(
                         &mut transaction,
                         boundary.session,
                         boundary.frontier,

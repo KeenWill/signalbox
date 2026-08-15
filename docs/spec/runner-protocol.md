@@ -65,11 +65,13 @@ Descriptor-relative private-root publication and exact ready-manifest replay are
 verified against this PR (`agent/runner-workspace-filesystem-producer`).
 Version-two `workspace_ready` execution-directory authority, runner-side path
 authentication, and exact daemon receipt retention are verified against this PR
-(`agent/runner-workspace-ready-execution-directory`). Journal-authorized
-private-root trash publication, deletion, and exact replay are verified against
-this PR (`agent/runner-private-workspace-release`). Accepted-release protocol
-handoff, heartbeat-serving cleanup, and success and failure journaling before
-projection are verified against this PR
+(`agent/runner-workspace-ready-execution-directory`). Repository-ready receipt
+consumption into atomic pinned-replacement terminalization is verified against
+this PR (`agent/runner-repository-replacement-terminalization`).
+Journal-authorized private-root trash publication, deletion, and exact replay
+are verified against this PR (`agent/runner-private-workspace-release`).
+Accepted-release protocol handoff, heartbeat-serving cleanup, and success and
+failure journaling before projection are verified against this PR
 (`agent/runner-live-workspace-release-handoff`). Top-level private-root cleanup
 composition is verified against this PR
 (`agent/runner-private-release-composition`). Established-connection routing of
@@ -180,21 +182,24 @@ same-runner completion of a workspace-free stage is verified against this PR
 activation inside that workspace-free terminal transaction is verified against
 this PR (`agent/runner-pending-workspace-free-replacement-finalization`).
 
-The persistence adapter consumes the checked same-runner transition while
-staging a pinned repository workspace and while completing the narrower
-workspace-free, credential-free, exact-directory replacement. The latter admits
-a direct distinct active runner, the exact connected pending enrollment for the
-lost predecessor, or the registration-loss-only same-runner target. A pending
-target is activated and its predecessor revoked in the same commit as the
-replacement result. Completion occurs at an empty frontier root, or after an
-in-flight model call commits the exact observation frontier that the relocation
-extends. The workspace-free stage retains the generated placement-entry and
-frontier identities, so retry or restart cannot choose a different transcript
-boundary before terminal completion. **Committed unimplemented functionality.**
-No current adapter completes the repository-backed or earlier-prefix-without-an-
-in-flight-observation cases, and no adapter handles the replacement process
-request. Future adapters must preserve the closed constraints below for those
-slices.
+The persistence adapter consumes the checked transition while staging a pinned
+repository workspace and while completing workspace-free or repository-backed
+replacement for a direct distinct active runner, the exact connected pending
+enrollment for the lost predecessor, or the registration-loss-only same-runner
+target. A pending target is activated and its predecessor revoked in the same
+commit as the replacement result. Repository completion consumes the exact ready
+receipt's runner-authored directory, manifest, recovery, and immutable
+placement-boundary identities; advances the selected credential grant; and
+enqueues the retired managed workspace only for the reachable same-runner case.
+For this slice the lost placement carries no interrupted physical attempt.
+Completion occurs at an empty frontier root, or after an in-flight model call
+commits the exact observation frontier that the relocation extends. Retry or
+restart cannot choose a different transcript boundary before terminal
+completion. **Committed unimplemented functionality.** No current adapter
+completes the interrupted-attempt, active runner-recovery turn without an
+in-flight model observation, or earlier-prefix-without-an-in-flight-observation
+cases or handles the replacement process request. Future adapters must preserve
+the closed constraints below for those slices.
 
 Pending enrollment admission was verified against the parent slice
 (`agent/runner-pending-successor-promotion`); its deployment-scoped activation
@@ -954,20 +959,19 @@ replay returns its original identities, registration, advertisement, and
 authority while opening a fresh connection epoch.
 
 A pending enrollment can be consumed by the implemented pre-pin replacement
-transaction: the exact selected request must still own the provisioning-only
-candidate, that candidate must be connected and advertise every retained
-placement axis, and the same commit activates it, revokes its predecessor,
-installs the unpinned successor placement, and records the terminal command
-result. It performs no workspace operation. **Committed unimplemented
-functionality.** No present pending enrollment can perform the future
-user-command-bound workspace operation required by a repository-backed pinned
-replacement. Pinned replacement staging is implemented at the application and
-persistence boundary for a distinct active runner, an exact pending enrollment,
-or the registration-loss-only same-runner exception. No present daemon or runner
-command surface invokes it. The workspace-free direct-distinct, exact-pending,
-and checked same-runner subsets complete in persistence at the committed
-frontier root or model-observation boundary; repository-backed terminal
-replacement remains absent.
+transaction or by pinned replacement terminalization: the exact selected request
+must still own the provisioning-only candidate, that candidate must be connected
+and advertise every retained placement axis, and the terminal commit activates
+it and revokes its predecessor while installing the successor placement and
+command result. Pre-pin replacement performs no workspace operation. Pinned
+replacement staging is implemented at the application and persistence boundary
+for a distinct active runner, an exact pending enrollment, or the
+registration-loss-only same-runner exception. No present daemon or runner
+producer dispatches the authorization, and no process request invokes the
+replacement command. The workspace-free and repository-backed direct-distinct,
+exact-pending, and checked same-runner subsets complete in persistence at the
+committed frontier root or model-observation boundary once their durable stage
+exists.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the
@@ -994,11 +998,11 @@ registration satisfies the complete successor request. The ordinary replacement
 transition still refuses the same runner, so a reconstituted registration-loss
 label alone is not recovery authority. The pinned repository-workspace staging
 transaction supplies those checked registrations and accepts the same runner
-only through the explicit reenrollment target. The workspace-free terminal
-transaction now consumes that proof and installs the pinned successor. No daemon
-process adapter yet invokes the user replacement command. **Committed
-unimplemented functionality.** The repository-backed same-runner terminal
-transaction remains absent.
+only through the explicit reenrollment target. Both workspace-free and
+repository-backed terminal transactions consume that proof and install the
+pinned successor. Repository completion also enqueues the old runner-managed
+manifest for release under the still-live reenrollment authority. No daemon
+process adapter yet invokes the user replacement command.
 
 A pending successor may also be promoted with no lost session placement
 involved. The implemented `promote_pending_runner` transaction is the
@@ -1039,25 +1043,28 @@ workspace-free placement returns `NotApplicable` without claiming the command,
 so its workspace-free terminal transaction remains the exclusive command locus.
 For a credential-free exact-directory request targeting a direct distinct active
 runner, or targeting the exact connected pending enrollment admitted for the
-lost predecessor, that terminal transaction claims the command stage and
-completes it only when there is no active turn and no earlier nonempty semantic
-frontier; it otherwise retains the stage. The pending arm rechecks its immutable
-loss relation, activates the candidate, and revokes the predecessor in the same
-commit as the successor placement and terminal result. The runner provisions and
-spools `workspace_ready` under the repository-backed limited authority. Only a
-later repository-backed transaction can activate a pending enrollment for that
-case: it rechecks the lost predecessor and connected candidate, consumes the
-exact workspace receipt, revokes the predecessor, constructs the active
-enrollment and validated registration from the exact pending facts, and installs
-the successor placement, grant, semantic boundary, and terminal command result
-atomically. Pre-pin replacement likewise needs no workspace and performs that
-promotion in its single terminal transaction. A provisioning rejection or
-candidate loss records the typed terminal command rejection, retires only that
-command staging workspace through the normal release/trash path, and leaves the
-candidate pending for an explicit later command. Process exit after command
-claim is recoverable: startup resumes the one nonterminal replacement command
-from its durable provisioning authorization and receipt rather than inventing a
-second claim. No database transaction remains open across runner I/O.
+lost predecessor, the workspace-free terminal transaction claims the command
+stage and completes it only when there is no active turn and no earlier nonempty
+semantic frontier; it otherwise retains the stage. The repository-backed
+terminal transaction begins from the already claimed provisioning authorization
+and exact ready receipt. At a frontier root, or inside the model-observation
+transaction that establishes its prefix, it rechecks the lost predecessor and
+connected target, consumes the exact runner-authored workspace, installs the
+successor placement, advances any selected credential grant, appends the
+semantic boundary and terminal command result, and emits the runner state event
+atomically. This implemented terminal subset requires no interrupted physical
+attempt on the lost placement. Its pending arm activates the candidate and
+revokes the predecessor in that same commit. Its checked same-runner arm also
+enqueues the retired predecessor manifest for release; unreachable distinct
+predecessors enqueue nothing. Pre-pin replacement likewise needs no workspace
+and performs pending promotion in its single terminal transaction. A
+provisioning rejection or candidate loss records the typed terminal command
+rejection, retires only that command staging workspace through the normal
+release/trash path, and leaves the candidate pending for an explicit later
+command. Process exit after command claim is recoverable: startup resumes the
+one nonterminal replacement command from its durable provisioning authorization
+and receipt rather than inventing a second claim. No database transaction
+remains open across runner I/O.
 
 Later connections send `resume` with the request identity, all three issued
 identities, prior registration revision, complete advertisement, and reconnect
@@ -2003,9 +2010,8 @@ placement for which repository provisioning is not applicable. The production
 persistence transaction implements that staging port.
 
 **Committed unimplemented functionality.** Dispatch of the provisioning
-authorization, receipt consumption into replacement terminalization, and a
-repository-workspace filesystem producer for the initial ready frame remain
-absent.
+authorization and a production repository-workspace filesystem producer for the
+initial ready frame remain absent.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and

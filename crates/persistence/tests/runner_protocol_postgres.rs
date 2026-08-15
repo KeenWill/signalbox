@@ -23282,7 +23282,14 @@ async fn s32_inv044_replacement_workspace_receipt_round_trips() -> Result<(), Bo
         .recovery
         .as_ref()
         .expect("the receipt fixture names its recovery facts");
-
+    let stored_boundary: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT boundary_entry_id, boundary_frontier_id
+           FROM runner_replacement_workspace_receipt
+          WHERE authorization_id = $1",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(loaded.authorization(), fixture.authorization);
     assert_eq!(loaded.session(), fixture.workspace.session);
     assert_eq!(
@@ -23302,6 +23309,14 @@ async fn s32_inv044_replacement_workspace_receipt_round_trips() -> Result<(), Bo
         &fixture.workspace.working_directory
     );
     assert_eq!(loaded.recovery(), expected_recovery);
+    assert_eq!(
+        loaded.boundary().semantic_entry().into_uuid(),
+        stored_boundary.0
+    );
+    assert_eq!(
+        loaded.boundary().context_frontier().into_uuid(),
+        stored_boundary.1
+    );
     drop(pool);
     Ok(())
 }
@@ -23387,8 +23402,8 @@ async fn s32_inv044_unborn_workspace_receipt_rejects_a_revision() -> Result<(), 
     Ok(())
 }
 
-/// S32 / INV-012 / INV-044: the production admission boundary commits the
-/// authenticated receipt once and returns the same canonical receipt on replay.
+/// S32 / INV-012 / INV-044: repository receipt consumption atomically installs
+/// the exact successor workspace, placement boundary, outbox event, and result.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv012_inv044_workspace_ready_admission_replays_the_exact_receipt()
@@ -23412,10 +23427,212 @@ async fn s32_inv012_inv044_workspace_ready_admission_replays_the_exact_receipt()
     .bind(fixture.authorization.into_uuid())
     .fetch_one(&pool)
     .await?;
+    let placement: (Decimal, Uuid, String, Uuid, String) = sqlx::query_as(
+        "SELECT placement.placement_revision, placement.pinned_runner_id,
+                placement.pinned_working_directory,
+                placement.workspace_manifest_id,
+                placement.workspace_working_directory
+           FROM runner_current_session_placement AS current
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current.session_id
+            AND placement.event_ordinal = current.event_ordinal
+          WHERE current.session_id = $1
+            AND placement.event_kind = 'runner_replaced'
+            AND placement.state_kind = 'pinned'",
+    )
+    .bind(receipt.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let terminal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM replace_lost_runner_result
+          WHERE command_id = $1 AND result_kind = 'applied'
+            AND repository_authorization_id = $2",
+    )
+    .bind(uuid(WORKSPACE_REPLACEMENT_COMMAND))
+    .bind(fixture.authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let boundary: (Uuid, Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT receipt.boundary_entry_id, receipt.boundary_frontier_id,
+                pointer.semantic_entry_id, pointer.context_frontier_id
+           FROM runner_replacement_workspace_receipt AS receipt
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = receipt.session_id
+            AND pointer.placement_revision = receipt.placement_revision
+          WHERE receipt.authorization_id = $1",
+    )
+    .bind(fixture.authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let replaced_outbox_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM runner_state_transition_outbox_event
+          WHERE session_id = $1 AND placement_revision = $2
+            AND state_kind = 'replaced'",
+    )
+    .bind(receipt.session().into_uuid())
+    .bind(Decimal::from(receipt.placement_revision().get()))
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(applied, receipt);
     assert_eq!(replayed, receipt);
     assert_eq!(receipt_count, 1);
+    assert_eq!(
+        placement.0,
+        Decimal::from(receipt.placement_revision().get())
+    );
+    assert_eq!(placement.1, receipt.runner().into_uuid());
+    assert_eq!(placement.2, receipt.execution_directory().as_str());
+    assert_eq!(placement.3, receipt.manifest_id().into_uuid());
+    assert_eq!(placement.4, receipt.execution_directory().as_str());
+    assert_eq!(terminal_count, 1);
+    assert_eq!(replaced_outbox_count, 1);
+    assert_eq!(boundary.0, boundary.2);
+    assert_eq!(boundary.1, boundary.3);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-009 / INV-012 / INV-044: the deferred terminal authority rejects
+/// a repository result whose execution directory differs from its exact receipt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv012_inv044_repository_result_rejects_a_changed_execution_directory()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .record_workspace_ready_receipt(workspace_ready_receipt(&fixture))
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE replace_lost_runner_result
+         DISABLE TRIGGER replace_lost_runner_result_is_append_only",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "CREATE TEMPORARY TABLE invalid_repository_result ON COMMIT DROP AS
+         SELECT * FROM replace_lost_runner_result WHERE command_id = $1",
+    )
+    .bind(uuid(WORKSPACE_REPLACEMENT_COMMAND))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE invalid_repository_result
+            SET working_directory = '/workspace/not-the-ready-directory'",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("DELETE FROM replace_lost_runner_result WHERE command_id = $1")
+        .bind(uuid(WORKSPACE_REPLACEMENT_COMMAND))
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE replace_lost_runner_result
+         ENABLE TRIGGER replace_lost_runner_result_is_append_only",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("INSERT INTO replace_lost_runner_result SELECT * FROM invalid_repository_result")
+        .execute(&mut *transaction)
+        .await?;
+    let rejected =
+        sqlx::query("SET CONSTRAINTS repository_pinned_replacement_result_is_authorized IMMEDIATE")
+            .execute(&mut *transaction)
+            .await
+            .expect_err("the terminal result must consume the exact ready directory");
+    transaction.rollback().await?;
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-009 / INV-012 / INV-044: receipt admission rejects a boundary
+/// frontier identity that already names durable session state.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv012_inv044_repository_receipt_rejects_a_used_boundary_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_receipt_projection_fixture(&pool).await?;
+    let collision = ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER));
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(fixture.workspace.session.into_uuid())
+    .bind(collision.into_uuid())
+    .execute(&pool)
+    .await?;
+    let rejected = fixture
+        .store
+        .record_workspace_ready_receipt_with_identities(
+            workspace_ready_receipt(&fixture),
+            PinnedRunnerReplacementIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+                collision,
+            ),
+        )
+        .await
+        .expect_err("a retained boundary cannot reuse a durable frontier identity");
+    let database = rejected
+        .source()
+        .expect("the storage error retains its PostgreSQL source")
+        .downcast_ref::<sqlx::Error>()
+        .expect("the retained source is a PostgreSQL error")
+        .as_database_error()
+        .expect("PostgreSQL reports the boundary identity collision");
+
+    assert_eq!(database.code().as_deref(), Some("23505"));
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044 / INV-045: repository terminalization advances the selected
+/// credential grant under the successor registration in the same commit.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_inv045_repository_replacement_advances_credential_grant()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let selected_profile = profile();
+    let authorization =
+        workspace_provisioning_authorization_fixture(&pool, Some(selected_profile.clone())).await?;
+    let successor = authorization.runner;
+    let fixture = workspace_receipt_projection_from_authorization(
+        authorization,
+        RunnerReplacementTarget::Runner(successor),
+    )
+    .await?;
+    let receipt = workspace_ready_receipt(&fixture);
+    fixture
+        .store
+        .record_workspace_ready_receipt(receipt.clone())
+        .await?;
+    let grant: (Uuid, String) = sqlx::query_as(
+        "SELECT credential_grant.runner_id,
+                credential_grant.credential_profile_name
+           FROM runner_current_session_placement AS current
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current.session_id
+            AND placement.event_ordinal = current.event_ordinal
+           JOIN runner_credential_grant AS credential_grant
+             ON credential_grant.session_id = placement.session_id
+            AND credential_grant.runner_id = placement.credential_grant_runner_id
+            AND credential_grant.grant_revision = placement.credential_grant_revision
+          WHERE current.session_id = $1
+            AND placement.event_kind = 'runner_replaced'",
+    )
+    .bind(receipt.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(grant.0, successor.into_uuid());
+    assert_eq!(grant.1, selected_profile.as_str());
     drop(pool);
     Ok(())
 }
@@ -23536,8 +23753,8 @@ async fn s32_inv044_replacement_workspace_branch_receipt_round_trips() -> Result
     Ok(())
 }
 
-/// S32 / INV-044: the registration-loss-only same-runner target can retain its
-/// exact ready receipt under the newer satisfying registration.
+/// S32 / INV-044: same-runner repository terminalization atomically enqueues
+/// the old manifest for release on the still-live physical runner.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_same_runner_replacement_workspace_receipt_round_trips()
@@ -23549,8 +23766,39 @@ async fn s32_inv044_same_runner_replacement_workspace_receipt_round_trips()
         .store
         .record_workspace_ready_receipt(receipt.clone())
         .await?;
+    let release = fixture
+        .store
+        .load_workspace_release(fixture.workspace.session, RunnerGeneration::one())
+        .await?
+        .expect("the same-runner predecessor release reads back");
+    let result_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM replace_lost_runner_result
+          WHERE command_id = $1 AND result_kind = 'applied'
+            AND repository_authorization_id = $2",
+    )
+    .bind(uuid(WORKSPACE_REPLACEMENT_COMMAND))
+    .bind(fixture.authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let outbox: (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE state_kind = 'working_directory_changed'),
+                count(*) FILTER (WHERE state_kind = 'replaced'),
+                max(working_directory)
+           FROM runner_state_transition_outbox_event
+          WHERE session_id = $1 AND placement_revision = $2",
+    )
+    .bind(fixture.workspace.session.into_uuid())
+    .bind(Decimal::from(fixture.workspace.placement_revision.get()))
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(loaded, receipt);
+    assert_eq!(release.session(), fixture.workspace.session);
+    assert_eq!(release.placement_revision(), RunnerGeneration::one());
+    assert_eq!(release.runner(), fixture.workspace.runner);
+    assert_ne!(release.manifest_id(), receipt.manifest_id());
+    assert_eq!(result_count, 1);
+    assert_eq!(outbox, (0, 1, None));
     drop(pool);
     Ok(())
 }
@@ -24815,11 +25063,12 @@ async fn s32_inv012_equal_replacement_provisioning_claims_serialize_with_a_timeo
     Ok(())
 }
 
-/// S32 / INV-042 / INV-044: an exact connected pending successor remains
-/// provisioning-only while receiving its command-bound workspace stage.
+/// S32 / INV-001 / INV-002 / INV-012 / INV-042 / INV-044: an exact connected
+/// pending successor atomically activates with its command-bound repository
+/// workspace when the ready receipt arrives.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provisioning()
+async fn s32_inv001_inv002_inv012_inv042_inv044_pending_repository_replacement_terminalizes()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -24982,8 +25231,50 @@ async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provision
         .expect("the pending successor ready receipt records");
     let loaded_pending = store
         .load_pending_enrollment(pending.receipt().request())
+        .await?;
+    let predecessor = store
+        .load_enrollment(active_enrollment.enrollment())
         .await?
-        .expect("the ready candidate remains pending");
+        .expect("the repository predecessor reads back revoked");
+    let candidate = store
+        .load_enrollment(pending_enrollment.enrollment())
+        .await?
+        .expect("the repository candidate reads back active");
+    let placement: (Decimal, Uuid, Uuid, String) = sqlx::query_as(
+        "SELECT placement.placement_revision, placement.pinned_runner_id,
+                placement.workspace_manifest_id,
+                placement.workspace_working_directory
+           FROM runner_current_session_placement AS current
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current.session_id
+            AND placement.event_ordinal = current.event_ordinal
+          WHERE current.session_id = $1
+            AND placement.event_kind = 'runner_replaced'
+            AND placement.state_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let result: (Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT prior_runner_id, new_runner_id, repository_authorization_id
+           FROM replace_lost_runner_result
+          WHERE command_id = $1 AND result_kind = 'applied'",
+    )
+    .bind(command_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let boundary: (Uuid, Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT receipt.boundary_entry_id, receipt.boundary_frontier_id,
+                pointer.semantic_entry_id, pointer.context_frontier_id
+           FROM runner_replacement_workspace_receipt AS receipt
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = receipt.session_id
+            AND pointer.placement_revision = receipt.placement_revision
+          WHERE receipt.authorization_id = $1",
+    )
+    .bind(authorization.into_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(
         staged,
@@ -25002,7 +25293,24 @@ async fn s32_inv042_inv044_pending_successor_stages_pinned_replacement_provision
             )
         )
     );
-    assert_eq!(loaded_pending.receipt(), pending.receipt());
+    assert_eq!(loaded_pending, None);
+    assert_eq!(
+        predecessor.state(),
+        signalbox_domain::RunnerEnrollmentState::Revoked
+    );
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    assert_eq!(placement.0, Decimal::from(successor_revision.get()));
+    assert_eq!(placement.1, pending_enrollment.runner().into_uuid());
+    assert_eq!(placement.2, ready.manifest_id().into_uuid());
+    assert_eq!(placement.3, ready.execution_directory().as_str());
+    assert_eq!(result.0, active_enrollment.runner().into_uuid());
+    assert_eq!(result.1, pending_enrollment.runner().into_uuid());
+    assert_eq!(result.2, authorization.into_uuid());
+    assert_eq!(boundary.0, boundary.2);
+    assert_eq!(boundary.1, boundary.3);
     assert_eq!(loaded_authorization.command(), command_id);
     assert_eq!(loaded_authorization.runner(), pending_enrollment.runner());
     assert_eq!(loaded_authorization.repository(), &repository);

@@ -9,6 +9,7 @@ use signalbox_application::{
     RunnerWorkspaceCleanupFailure, RunnerWorkspaceCleanupFailureService,
     RunnerWorkspaceReadyReceipt, RunnerWorkspaceReadyService,
     RunnerWorkspaceReleaseAcknowledgement, RunnerWorkspaceReleaseService,
+    UuidV7RunnerWorkspaceReadyIdGenerator,
 };
 use signalbox_domain::{
     CanonicalCloneUrlDigest, CredentialProfileName, CredentialProfilePolicy,
@@ -1638,7 +1639,7 @@ impl RunnerWorkspaceReadyOperationService for RunnerProtocolStore {
     ) -> RunnerWorkspaceReadyOperationFuture<'_, RunnerWorkspaceReadyReceipt> {
         let store = self.clone();
         Box::pin(async move {
-            RunnerWorkspaceReadyService::new(store)
+            RunnerWorkspaceReadyService::new(store, UuidV7RunnerWorkspaceReadyIdGenerator)
                 .execute(receipt)
                 .await
                 .map_err(runner_workspace_ready_operation_failure)
