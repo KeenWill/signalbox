@@ -6763,6 +6763,44 @@ pub trait RepoWatchEventIdGenerator {
 
 pub struct UuidV7RepoWatchEventIdGenerator;
 
+pub struct RepoWatchEventContentIdentityV1(/* private */);
+impl RepoWatchEventContentIdentityV1 {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    // accessors: as_bytes()
+}
+
+pub struct RepoWatchEventIdentityFrontierEntryV1 { /* private */ }
+impl RepoWatchEventIdentityFrontierEntryV1 {
+    pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self;
+    // accessors: stream_identity(), sequence()
+}
+
+pub struct RepoWatchEventIdentityFrontierV1 { /* private */ }
+impl RepoWatchEventIdentityFrontierV1 {
+    pub fn try_from_entries(
+        entries: Vec<RepoWatchEventIdentityFrontierEntryV1>,
+    ) -> Result<Self, RepoWatchEventIdentityFrontierError>;
+    pub fn entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_;
+}
+
+pub enum RepoWatchEventIdentityFrontierError {
+    DuplicateStream,
+    StreamLimit,
+    SequenceExhausted,
+}
+
+pub struct RepoWatchEventOccurrenceV1 { /* private */ }
+impl RepoWatchEventOccurrenceV1 {
+    pub const fn from_parts(
+        event: RepoWatchEvent,
+        content_identity: RepoWatchEventContentIdentityV1,
+    ) -> Self;
+    // accessors: event(), content_identity()
+    pub fn into_event(self) -> RepoWatchEvent;
+}
+
 pub enum RepoWatchPullRequestLifecycle {
     Open,
     Closed,
@@ -6958,8 +6996,9 @@ pub fn derive_repo_watch_events(
     repository: &RepositorySlug,
     previous: Option<&RepoWatchObservation>,
     current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-) -> Result<Vec<RepoWatchEvent>, RepoWatchDifferError>;
+) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError>;
 
 pub struct RepoWatchResolvedTemplate { /* private */ }
 impl RepoWatchResolvedTemplate {
@@ -10399,7 +10438,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 40 (incl. 4 traits)   |
+| application: repo_watch                            | 45 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10410,4 +10449,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **257 (+1 free fn)**  |
+| **signalbox-application total**                    | **262 (+1 free fn)**  |

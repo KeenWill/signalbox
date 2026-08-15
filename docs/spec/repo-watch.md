@@ -29,7 +29,9 @@ and cutoff are verified against `agent/dispatch-autonomy-convergence`.
 Conservative stale blocking-review dismissal is verified against this PR
 (`agent/dispatch-autonomy-review-clearance`). The provider members the poller
 adopts as check-suite and check-run completion generations are verified against
-PR #541 (`fix/check-run-updated-at`).
+PR #541 (`fix/check-run-updated-at`). The source-independent event occurrence
+identity, its durable frontier, and the one-time storage migration are verified
+against this PR (`agent/repo-watch-content-identity`).
 
 ## Configuration and credential boundary
 
@@ -163,18 +165,48 @@ clean exit. Once shutdown is observable, the supervisor drains every watch task
 and reports a clean stop; a task that exits cleanly before shutdown remains a
 runtime lifecycle defect.
 
-**Implemented behavior.** The versioned durable cursor retains only the complete
-normalized repository state and exact signal-reviewer set needed for comparison.
-It does not retain resource keys, ETags, accepted transport responses, raw
-provider payloads, or credentials. A per-repository atomic commit accepts an
-expected generation, one complete cursor candidate, and its ordered event batch.
-It serializes competing commits, appends the cursor and every event together,
-rolls back the whole batch on failure, reports a stale generation as conflict,
-and recognizes only an exact candidate-and-event replay. An unchanged candidate
-with no events does not advance the cursor; an unchanged candidate carrying
-events is rejected. The relational event table admits an event row only in the
-database transaction that inserts its referenced cursor generation, preventing
-later maintenance or future writers from changing an already-committed batch.
+**Implemented behavior.** The versioned durable cursor retains the complete
+normalized repository state, exact signal-reviewer set, and the last positive
+occurrence sequence for each recurring source-independent event stream. The
+frontier is canonical by its 32-byte stream identities, rejects duplicates and
+zero sequences, and admits at most 1,000,000 streams. Sequence exhaustion fails
+the comparison rather than wrapping. Provider-keyed immutable facts use sequence
+one without occupying frontier space. The cursor does not retain resource keys,
+ETags, accepted transport responses, raw provider payloads, or credentials. A
+per-repository atomic commit accepts an expected generation, one complete cursor
+candidate, and its ordered event-occurrence batch. It serializes competing
+commits, appends the cursor and every event together, rolls back the whole batch
+on failure, reports a stale generation as conflict, and recognizes only an exact
+candidate-and-occurrence replay. An unchanged candidate with no events does not
+advance the cursor; an unchanged candidate carrying events is rejected. The
+relational event table admits an event row only in the database transaction that
+inserts its referenced cursor generation, preventing later maintenance or future
+writers from changing an already-committed batch.
+
+**Implemented behavior.** `RepoWatchEventContentIdentityV1` is the exact shared
+content identity for a normalized event occurrence. It is a 32-byte SHA-256
+digest whose length-framed input begins with
+`signalbox/repo-watch/event-content-identity/v1`, then includes the repository,
+event version, canonical target and complete event payload, a separately
+domain-separated source-independent stream identity, and the stream's positive
+occurrence sequence. The stream identity is closed by event kind. Recurring PR
+lifecycle, mergeability, head, label, thread, branch-advance, and reaction
+streams name the PR and their kind-specific label, thread, branch, or reaction
+members. Immutable check-suite and check-run facts name their provider identity
+and completion generation; reviews name their provider review identity; workflow
+facts name branch, workflow identity, run identity, and attempt. The normalized
+review observation has no submitted-time member, so version one assumes the
+provider review identity alone uniquely identifies that immutable submission.
+The random `RepoWatchEventId` is deliberately excluded from the digest.
+
+**Implemented behavior.** A later equal fact on a recurring stream advances its
+sequence and therefore has a different content identity. Equal normalized facts
+derived from an equal cursor frontier have the same content identity even when
+their candidate UUIDs differ. Persistence rejects duplicate UUID or content
+identity members within one batch, and the relational store uniquely constrains
+`(content_identity_version, content_identity)` across batches. Exact replay
+compares the cursor candidate, UUID-bearing event values, and content
+identities.
 
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It
@@ -183,6 +215,16 @@ the definition-identity sentinel, suppresses the same completed run attempt by
 branch, run ID, and attempt number, and writes the complete current shape on the
 next successful commit. A legacy cursor therefore cannot permanently block its
 repository.
+
+**Implemented behavior.** The content-identity migration rewrites every durable
+cursor to storage version two with an empty occurrence frontier, then all later
+poll commits carry and advance that frontier. Existing event rows cannot be
+reconstructed as version-one content occurrences because their durable shape
+lacks every provider identity used by the differ. The migration therefore marks
+them as content-identity version zero using a one-time domain-separated digest
+of their immutable UUID, while every post-migration event uses version one. Both
+versions remain readable event history; only version-one occurrences can
+participate in exact commit replay or cross-producer content deduplication.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
@@ -250,11 +292,13 @@ current or prior head-repository identity still fails closed.
 
 **Implemented behavior.** Accepted events append in observation order as durable
 facts and are never updated, deleted, or truncated. The relational storage row
-fixes the event version to one, closes both target and payload discriminators,
-retains complete PR context, and rejects incoherent payload columns. Reads
-decode every field into the closed domain event and fail closed when a durable
-cursor or event row is malformed or noncanonical. Bounded keyset pages expose
-repository event history in cursor-generation and event-ordinal order.
+fixes the event version to one, records the content-identity version and 32-byte
+digest, records `poll` as the only presently implemented producer, closes both
+target and payload discriminators, retains complete PR context, and rejects
+incoherent payload columns. Reads decode every field into the closed domain
+event and fail closed when a durable cursor or event row is malformed or
+noncanonical. Bounded keyset pages expose repository event history in
+cursor-generation and event-ordinal order.
 
 **Implemented behavior.** The closed version-one event payloads are:
 

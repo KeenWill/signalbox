@@ -13,9 +13,11 @@ use serde_json::Value;
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment, RepoWatchConvergenceVerdict,
-    RepoWatchObservation, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
     RepoWatchWorkflowRunObservation,
 };
 use signalbox_domain::{
@@ -50,8 +52,9 @@ use crate::{
     },
 };
 
-const CURSOR_STORAGE_VERSION: u64 = 1;
-const CURSOR_STORAGE_VERSION_DB: i16 = 1;
+const CURSOR_STORAGE_VERSION: u64 = 2;
+const CURSOR_STORAGE_VERSION_DB: i16 = 2;
+const EVENT_CONTENT_IDENTITY_VERSION_V1: i16 = 1;
 const EVENT_VERSION_V1: i16 = 1;
 const MAX_EVENT_PAGE_SIZE: u16 = 100;
 
@@ -88,15 +91,33 @@ impl RepoWatchCursorGeneration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCursorCandidate {
     observation: RepoWatchObservation,
+    event_identity_frontier: RepoWatchEventIdentityFrontierV1,
 }
 
 impl RepoWatchCursorCandidate {
-    pub const fn new(observation: RepoWatchObservation) -> Self {
-        Self { observation }
+    pub fn new(observation: RepoWatchObservation) -> Self {
+        Self {
+            observation,
+            event_identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+        }
+    }
+
+    pub const fn with_event_identity_frontier(
+        observation: RepoWatchObservation,
+        event_identity_frontier: RepoWatchEventIdentityFrontierV1,
+    ) -> Self {
+        Self {
+            observation,
+            event_identity_frontier,
+        }
     }
 
     pub const fn observation(&self) -> &RepoWatchObservation {
         &self.observation
+    }
+
+    pub const fn event_identity_frontier(&self) -> &RepoWatchEventIdentityFrontierV1 {
+        &self.event_identity_frontier
     }
 }
 
@@ -127,14 +148,14 @@ impl RepoWatchCursor {
 pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
-    events: Box<[RepoWatchEvent]>,
+    events: Box<[RepoWatchEventOccurrenceV1]>,
 }
 
 impl RepoWatchCommitRequest {
     pub fn new(
         expected_generation: Option<RepoWatchCursorGeneration>,
         candidate: RepoWatchCursorCandidate,
-        events: Vec<RepoWatchEvent>,
+        events: Vec<RepoWatchEventOccurrenceV1>,
     ) -> Self {
         Self {
             expected_generation,
@@ -151,7 +172,7 @@ impl RepoWatchCommitRequest {
         &self.candidate
     }
 
-    pub fn events(&self) -> &[RepoWatchEvent] {
+    pub fn events(&self) -> &[RepoWatchEventOccurrenceV1] {
         &self.events
     }
 }
@@ -266,6 +287,9 @@ pub enum RepoWatchPersistenceCorruption {
     NonCanonicalCursor,
     InvalidEventPosition,
     UnsupportedEventVersion,
+    UnsupportedEventContentIdentityVersion,
+    InvalidEventContentIdentity,
+    UnknownEventProducer,
     InvalidEventField(&'static str),
     UnknownEventDiscriminator(&'static str),
     InvalidStoredDomainValue,
@@ -285,6 +309,13 @@ impl fmt::Display for RepoWatchPersistenceCorruption {
             Self::NonCanonicalCursor => formatter.write_str("noncanonical cursor payload"),
             Self::InvalidEventPosition => formatter.write_str("invalid event position"),
             Self::UnsupportedEventVersion => formatter.write_str("unsupported event version"),
+            Self::UnsupportedEventContentIdentityVersion => {
+                formatter.write_str("unsupported event content identity version")
+            }
+            Self::InvalidEventContentIdentity => {
+                formatter.write_str("invalid event content identity")
+            }
+            Self::UnknownEventProducer => formatter.write_str("unknown event producer"),
             Self::InvalidEventField(field) => write!(formatter, "invalid event field {field}"),
             Self::UnknownEventDiscriminator(field) => {
                 write!(formatter, "unknown event discriminator {field}")
@@ -306,6 +337,7 @@ pub enum RepoWatchStoreError {
     Corruption(RepoWatchPersistenceCorruption),
     EventRepositoryMismatch,
     DuplicateEventIdentity(RepoWatchEventId),
+    DuplicateEventContentIdentity(RepoWatchEventContentIdentityV1),
     EventsWithoutStateChange,
     CursorGenerationExhausted,
     EventBatchTooLarge,
@@ -342,6 +374,11 @@ impl fmt::Display for RepoWatchStoreError {
                 formatter,
                 "repository-watch event batch repeats identity {id:?}"
             ),
+            Self::DuplicateEventContentIdentity(identity) => write!(
+                formatter,
+                "repository-watch event batch repeats content identity {:02x?}",
+                identity.as_bytes()
+            ),
             Self::EventsWithoutStateChange => {
                 formatter.write_str("repository-watch events accompany an unchanged cursor state")
             }
@@ -370,6 +407,7 @@ impl Error for RepoWatchStoreError {
             Self::Corruption(error) => Some(error),
             Self::EventRepositoryMismatch
             | Self::DuplicateEventIdentity(_)
+            | Self::DuplicateEventContentIdentity(_)
             | Self::EventsWithoutStateChange
             | Self::CursorGenerationExhausted
             | Self::EventBatchTooLarge
@@ -1050,7 +1088,15 @@ async fn exact_replay(
     let stored =
         load_generation_events_in_transaction(transaction, repository, expected_replay_generation)
             .await?;
-    if stored == request.events() {
+    let exact_events = stored.len() == request.events().len()
+        && stored
+            .iter()
+            .zip(request.events())
+            .all(|(stored, requested)| {
+                stored.event == *requested.event()
+                    && stored.content_identity == requested.content_identity()
+            });
+    if exact_events {
         Ok(Some(replayed))
     } else {
         Ok(None)
@@ -1059,18 +1105,25 @@ async fn exact_replay(
 
 fn validate_event_batch(
     repository: &RepositorySlug,
-    events: &[RepoWatchEvent],
+    events: &[RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
     if events.len() > i32::MAX as usize {
         return Err(RepoWatchStoreError::EventBatchTooLarge);
     }
     let mut identities = HashSet::with_capacity(events.len());
-    for event in events {
+    let mut content_identities = HashSet::with_capacity(events.len());
+    for occurrence in events {
+        let event = occurrence.event();
         if event.repository() != repository {
             return Err(RepoWatchStoreError::EventRepositoryMismatch);
         }
         if !identities.insert(event.id()) {
             return Err(RepoWatchStoreError::DuplicateEventIdentity(event.id()));
+        }
+        if !content_identities.insert(occurrence.content_identity()) {
+            return Err(RepoWatchStoreError::DuplicateEventContentIdentity(
+                occurrence.content_identity(),
+            ));
         }
     }
     Ok(())
@@ -1081,7 +1134,15 @@ fn validate_event_batch(
 struct CursorRecord {
     storage_version: u64,
     signal_reviewers: Vec<String>,
+    event_identity_frontier: Vec<EventIdentityFrontierRecord>,
     state: RepositoryStateRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventIdentityFrontierRecord {
+    stream_identity: [u8; 32],
+    sequence: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1222,6 +1283,14 @@ fn cursor_record(candidate: &RepoWatchCursorCandidate) -> CursorRecord {
             .iter()
             .map(|reviewer| reviewer.as_str().to_owned())
             .collect(),
+        event_identity_frontier: candidate
+            .event_identity_frontier()
+            .entries()
+            .map(|entry| EventIdentityFrontierRecord {
+                stream_identity: *entry.stream_identity(),
+                sequence: entry.sequence().get(),
+            })
+            .collect(),
         state: repository_state_record(candidate.observation().state()),
     }
 }
@@ -1361,9 +1430,27 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
         .into_iter()
         .map(RepoWatchAuthorLogin::try_new)
         .collect::<Result<Vec<_>, _>>()?;
+    let event_identity_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(
+        record
+            .event_identity_frontier
+            .into_iter()
+            .map(|entry| {
+                NonZeroU64::new(entry.sequence)
+                    .map(|sequence| {
+                        RepoWatchEventIdentityFrontierEntryV1::new(entry.stream_identity, sequence)
+                    })
+                    .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                        "event_identity_frontier.sequence",
+                    ))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+    .map_err(|_| RepoWatchPersistenceCorruption::InvalidCursorField("event_identity_frontier"))?;
     let state = decode_repository_state(record.state)?;
-    let candidate =
-        RepoWatchCursorCandidate::new(RepoWatchObservation::new(signal_reviewers, state));
+    let candidate = RepoWatchCursorCandidate::with_event_identity_frontier(
+        RepoWatchObservation::new(signal_reviewers, state),
+        event_identity_frontier,
+    );
     let canonical = if legacy_workflow_shape {
         encode_legacy_cursor_candidate(&candidate)?
     } else {
@@ -1783,15 +1870,17 @@ async fn insert_events(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-    events: &[RepoWatchEvent],
+    events: &[RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
-    for (index, event) in events.iter().enumerate() {
+    for (index, occurrence) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
+        let event = occurrence.event();
         let encoded = EncodedEvent::from_event(event);
         sqlx::query(
             "INSERT INTO repo_watch_event (
                 event_id, repository, cursor_generation, event_ordinal, event_version,
+                content_identity_version, content_identity, producer,
                 target_kind, event_kind,
                 pull_request_number, head_sha, head_repository, base_branch,
                 head_branch, title, body, labels, draft, author,
@@ -1805,7 +1894,8 @@ async fn insert_events(
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-                $28, $29, $30, $31, $32, $33, $34, $35, $36
+                $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
+                $38, $39
              )",
         )
         .bind(encoded.event_id)
@@ -1813,6 +1903,9 @@ async fn insert_events(
         .bind(generation_to_i64(generation))
         .bind(ordinal)
         .bind(encoded.event_version)
+        .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
+        .bind(occurrence.content_identity().as_bytes().as_slice())
+        .bind("poll")
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -1857,6 +1950,9 @@ struct EventRow {
     cursor_generation: i64,
     event_ordinal: i32,
     event_version: i16,
+    content_identity_version: i16,
+    content_identity: Vec<u8>,
+    producer: String,
     target_kind: String,
     event_kind: String,
     pull_request_number: Option<Decimal>,
@@ -1891,7 +1987,7 @@ struct EventRow {
 }
 
 const EVENT_PAGE_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
-        event_version,
+        event_version, content_identity_version, content_identity, producer,
         target_kind, event_kind,
         pull_request_number, head_sha, head_repository, base_branch,
         head_branch, title, body, labels, draft, author,
@@ -1912,7 +2008,7 @@ const EVENT_PAGE_SQL: &str = "SELECT event_id, repository, cursor_generation, ev
   LIMIT $4";
 
 const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
-        event_version,
+        event_version, content_identity_version, content_identity, producer,
         target_kind, event_kind,
         pull_request_number, head_sha, head_repository, base_branch,
         head_branch, title, body, labels, draft, author,
@@ -1927,7 +2023,7 @@ const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generati
   ORDER BY event_ordinal";
 
 const EVENT_BY_ID_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
-        event_version,
+        event_version, content_identity_version, content_identity, producer,
         target_kind, event_kind,
         pull_request_number, head_sha, head_repository, base_branch,
         head_branch, title, body, labels, draft, author,
@@ -1960,15 +2056,37 @@ async fn load_generation_events_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-) -> Result<Vec<RepoWatchEvent>, RepoWatchStoreError> {
+) -> Result<Vec<StoredEventOccurrence>, RepoWatchStoreError> {
     let rows = sqlx::query_as::<_, EventRow>(EVENT_GENERATION_SQL)
         .bind(repository.as_str())
         .bind(generation_to_i64(generation))
         .fetch_all(&mut **transaction)
         .await?;
     rows.into_iter()
-        .map(|row| decode_positioned_event(repository, row).map(|positioned| positioned.event))
+        .map(|row| {
+            if row.content_identity_version != EVENT_CONTENT_IDENTITY_VERSION_V1 {
+                return Err(
+                    RepoWatchPersistenceCorruption::UnsupportedEventContentIdentityVersion.into(),
+                );
+            }
+            let bytes: [u8; 32] = row.content_identity.as_slice().try_into().map_err(|_| {
+                RepoWatchStoreError::from(
+                    RepoWatchPersistenceCorruption::InvalidEventContentIdentity,
+                )
+            })?;
+            let content_identity = RepoWatchEventContentIdentityV1::from_bytes(bytes);
+            let positioned = decode_positioned_event(repository, row)?;
+            Ok(StoredEventOccurrence {
+                event: positioned.event,
+                content_identity,
+            })
+        })
         .collect()
+}
+
+struct StoredEventOccurrence {
+    event: RepoWatchEvent,
+    content_identity: RepoWatchEventContentIdentityV1,
 }
 
 fn decode_positioned_event(
@@ -1985,6 +2103,18 @@ fn decode_positioned_event(
         .ok_or(RepoWatchPersistenceCorruption::InvalidEventPosition)?;
     if row.event_version != EVENT_VERSION_V1 {
         return Err(RepoWatchPersistenceCorruption::UnsupportedEventVersion.into());
+    }
+    if !matches!(
+        row.content_identity_version,
+        0 | EVENT_CONTENT_IDENTITY_VERSION_V1
+    ) {
+        return Err(RepoWatchPersistenceCorruption::UnsupportedEventContentIdentityVersion.into());
+    }
+    if row.content_identity.len() != 32 {
+        return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
+    }
+    if row.producer != "poll" {
+        return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into());
     }
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(
         RepoWatchPersistenceCorruption::UnknownEventDiscriminator("target_kind"),
