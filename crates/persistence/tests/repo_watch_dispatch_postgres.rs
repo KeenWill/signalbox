@@ -15,15 +15,15 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, GoalCommandResult, GoalNeed, GoalSchedulerProvenance,
-    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, MergeableState,
-    ModelSelectionRequest, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug, SessionConfigurationDefaults,
-    SessionId, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, TurnId, UserContent,
+    DirectModelSelection, DurableCommandId, GoalCommandResult, GoalModelProvenance, GoalNeed,
+    GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
+    MergeableState, ModelSelectionRequest, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchActionV1,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
+    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
@@ -291,6 +291,14 @@ struct OutstandingCooldownVisibility {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct OutstandingTerminationVisibility {
+    obligation_id: Uuid,
+    latest_event_id: Uuid,
+    matched_event_count: i64,
+    ready: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct HeldSlotVisibility {
     every_action_delivered: bool,
     every_delivery_turn_releasable: bool,
@@ -433,6 +441,92 @@ async fn withdraw_dispatched_goal(
                 ),
                 None,
                 |_| None,
+            )
+            .await?,
+    );
+    Ok(())
+}
+
+/// Inserts the exact durable request and transcript shape authenticated by an
+/// achieved goal declaration for one dispatched turn.
+async fn insert_achievement_declaration_request(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    request: ToolRequestId,
+    report: &str,
+) -> Result<(), Box<dyn Error>> {
+    let producing_call = Uuid::from_u128(request.as_uuid().as_u128() + 0x1000);
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 0, 'goal_declare', 'json', $5)",
+    )
+    .bind(request.as_uuid())
+    .bind(session.as_uuid())
+    .bind(turn.as_uuid())
+    .bind(producing_call)
+    .bind(r#"{"transition":"achieved"}"#)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             assistant_text_value, producing_model_call_id,
+             assistant_response_part_ordinal, assistant_tool_request_id)
+         VALUES ($1, $2, 'assistant_text', $4, $3, 0, NULL),
+                ($1, $5, 'assistant_tool_use', NULL, $3, 1, $6)",
+    )
+    .bind(session.as_uuid())
+    .bind(Uuid::from_u128(request.as_uuid().as_u128() + 0x2000))
+    .bind(producing_call)
+    .bind(report)
+    .bind(Uuid::from_u128(request.as_uuid().as_u128() + 0x3000))
+    .bind(request.as_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn declare_dispatched_goal_achieved(
+    fixture: &DispatchFixture,
+    action_ordinal: usize,
+    request_seed: u128,
+) -> Result<(), Box<dyn Error>> {
+    let session = fixture.session(action_ordinal);
+    let turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id
+               FROM repo_watch_dispatch_delivery
+              WHERE dispatch_id = $1 AND action_ordinal = $2",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .bind(i32::try_from(action_ordinal + 1)?)
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    let request = ToolRequestId::from_uuid(Uuid::from_u128(request_seed));
+    let report = String::from("the dispatched pull request is converged");
+    insert_achievement_declaration_request(&fixture.pool, session, turn, request, &report).await?;
+    assert_applied_goal_transition(
+        GoalRepository::new(fixture.pool.clone())
+            .declare_achieved(
+                session,
+                GoalReport::try_new(report).expect("fixture goal report is valid"),
+                GoalModelProvenance::new(turn, request),
             )
             .await?,
     );
@@ -788,6 +882,129 @@ async fn stopped_runtime_irrelevant_turn_releases_its_singleton() -> Result<(), 
     withdraw_dispatched_goal(&fixture.pool, fixture.session(0), 0x50_100).await?;
 
     assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// The current taxonomy has no separate stale-dispatch terminal variant: an
+/// operator stop after stale classification is the durable `user_stopped`
+/// transition. It must retain work before its singleton becomes reusable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_stopped_dispatch_requeues_and_redispatches_after_release()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    withdraw_dispatched_goal(&fixture.pool, fixture.session(0), 0x50_200).await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the stopped dispatch obligation is ready after release");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(obligation.latest_event(), &fixture.event);
+    let (_successor_dispatch, successor_sessions) = dispatched(
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
+    );
+    assert_ne!(successor_sessions[0], fixture.session(0));
+    Ok(())
+}
+
+/// Restart recovery classifies an invalidated dispatched turn through the
+/// existing unsuccessful-turn / execution-failure goal path. Reconstructing
+/// the store proves the obligation is durable rather than process-local.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn restart_invalidated_dispatch_recovery_leaves_an_obligation() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    mark_queued_turn_failed(&fixture.pool, session, turn, 0x50_300).await?;
+    check_completed_turn_for_release(&fixture.pool, session, turn).await?;
+    assert_applied_goal_transition(
+        GoalRepository::new(fixture.pool.clone())
+            .block_execution_failure(
+                session,
+                GoalNeed::try_new(String::from("recover the invalidated dispatch"))
+                    .expect("fixture goal need is valid"),
+                GoalSchedulerProvenance::new(turn),
+            )
+            .await?,
+    );
+    let resumed_store = PostgresRepoWatchDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let obligation = resumed_store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("restart recovery retains the invalidated dispatch obligation");
+
+    assert_eq!(obligation.latest_event(), &fixture.event);
+    assert_eq!(obligation.matched_event_count(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn current_head_achievement_seals_without_requeue() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    declare_dispatched_goal_achieved(&fixture, 0, 0x50_400).await?;
+    let obligations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(obligations, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn multiple_terminations_collapse_into_the_latest_state_obligation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    withdraw_dispatched_goal(&fixture.pool, fixture.session(0), 0x50_500).await?;
+    let first: OutstandingTerminationVisibility = sqlx::query_as(
+        "SELECT obligation_id, latest_event_id, matched_event_count, ready
+           FROM repo_watch_outstanding_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let latest = evaluate_conflict(&fixture, 102, SECOND_HEAD).await?;
+    withdraw_dispatched_goal(&fixture.pool, fixture.session(1), 0x50_600).await?;
+    let collapsed: OutstandingTerminationVisibility = sqlx::query_as(
+        "SELECT obligation_id, latest_event_id, matched_event_count, ready
+           FROM repo_watch_outstanding_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(first.latest_event_id, *fixture.event.id().as_uuid());
+    assert_eq!(first.matched_event_count, 1);
+    assert!(!first.ready);
+    assert_eq!(latest.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(collapsed.obligation_id, first.obligation_id);
+    assert_eq!(collapsed.latest_event_id, *latest.event_id.as_uuid());
+    assert_eq!(collapsed.matched_event_count, 2);
+    assert!(collapsed.ready);
     Ok(())
 }
 

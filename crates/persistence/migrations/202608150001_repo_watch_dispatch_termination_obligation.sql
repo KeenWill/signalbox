@@ -1,0 +1,165 @@
+-- Requeue every repository-watch dispatch that releases without converging.
+-- Supersedes the release function from
+-- 202608140100_repo_watch_dispatch_release.sql.
+
+-- A termination-created obligation may owe a second batch for the same event
+-- when no later matching event exists. Fresh evaluation replay is serialized by
+-- its evaluation row, while obligation replay is serialized by settlement.
+ALTER TABLE repo_watch_dispatch_batch
+    DROP CONSTRAINT repo_watch_dispatch_batch_event_id_rule_id_rule_version_key;
+
+CREATE OR REPLACE FUNCTION repo_watch_release_completed_dispatch_batches_for_turn(
+    completed_turn_id uuid,
+    completed_session_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    candidate_dispatch_id uuid;
+BEGIN
+    FOR candidate_dispatch_id IN
+        SELECT DISTINCT action.dispatch_id
+          FROM repo_watch_dispatch_action AS action
+         WHERE action.session_id = completed_session_id
+         ORDER BY action.dispatch_id
+    LOOP
+        PERFORM 1
+          FROM repo_watch_dispatch_batch AS locked_batch
+         WHERE locked_batch.dispatch_id = candidate_dispatch_id
+           FOR UPDATE;
+
+        -- A terminal session leaves the current dispatch state owed unless it
+        -- achieved against the pull request's still-current exact head. The
+        -- active-singleton index collapses sibling terminations and preserves
+        -- any later matching event already recorded by ordinary evaluation.
+        INSERT INTO repo_watch_dispatch_obligation
+            (obligation_id, repository, rule_id, rule_version,
+             singleton_scope, singleton_repository, singleton_pull_request_number,
+             singleton_stack_root_pull_request_number, first_repository,
+             first_event_id, latest_event_id, matched_event_count,
+             blocking_dispatch_id)
+        SELECT batch.dispatch_id, origin.repository, batch.rule_id,
+               batch.rule_version, batch.singleton_scope,
+               batch.singleton_repository, batch.singleton_pull_request_number,
+               batch.singleton_stack_root_pull_request_number, origin.repository,
+               origin.event_id, origin.event_id, 1, batch.dispatch_id
+          FROM repo_watch_dispatch_batch AS batch
+          JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+         WHERE batch.dispatch_id = candidate_dispatch_id
+           AND EXISTS (
+                SELECT 1
+                  FROM repo_watch_dispatch_action AS action
+                 WHERE action.dispatch_id = batch.dispatch_id
+                   AND action.session_id = completed_session_id
+           )
+           AND (
+                SELECT current_goal.event_kind
+                  FROM goal_event AS current_goal
+                 WHERE current_goal.session_id = completed_session_id
+                 ORDER BY current_goal.event_ordinal DESC
+                 LIMIT 1
+           ) IN ('blocked', 'achieved', 'user_stopped')
+           AND NOT (
+                origin.target_kind = 'pull_request'
+                AND (
+                    SELECT current_goal.event_kind
+                      FROM goal_event AS current_goal
+                     WHERE current_goal.session_id = completed_session_id
+                     ORDER BY current_goal.event_ordinal DESC
+                     LIMIT 1
+                ) = 'achieved'
+                AND origin.head_sha = (
+                    SELECT current_state.head_sha
+                      FROM repo_watch_event AS current_state
+                     WHERE current_state.repository = origin.repository
+                       AND current_state.pull_request_number = origin.pull_request_number
+                     ORDER BY current_state.cursor_generation DESC,
+                              current_state.event_ordinal DESC
+                     LIMIT 1
+                )
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_rule_deactivation AS deactivation
+                 WHERE deactivation.repository = origin.repository
+                   AND deactivation.rule_id = batch.rule_id
+                   AND deactivation.rule_version = batch.rule_version
+           )
+           AND (
+                origin.target_kind <> 'pull_request'
+                OR (
+                    SELECT lifecycle.event_kind
+                      FROM repo_watch_event AS lifecycle
+                     WHERE lifecycle.repository = origin.repository
+                       AND lifecycle.pull_request_number = origin.pull_request_number
+                       AND lifecycle.event_kind IN (
+                            'pull_request_opened',
+                            'pull_request_closed',
+                            'pull_request_merged'
+                       )
+                     ORDER BY lifecycle.cursor_generation DESC,
+                              lifecycle.event_ordinal DESC
+                     LIMIT 1
+                ) = 'pull_request_opened'
+           )
+        ON CONFLICT DO NOTHING;
+
+        INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
+        SELECT batch.dispatch_id, clock_timestamp()
+          FROM repo_watch_dispatch_batch AS batch
+         WHERE batch.dispatch_id = candidate_dispatch_id
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_dispatch_release AS released
+                 WHERE released.dispatch_id = batch.dispatch_id
+           )
+           AND batch.action_count = (
+                SELECT count(*)
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_dispatch_delivery AS delivery
+                    ON delivery.dispatch_id = action.dispatch_id
+                   AND delivery.action_ordinal = action.action_ordinal
+                  JOIN turn_lifecycle AS turn
+                    ON turn.turn_id = delivery.turn_id
+                   AND (
+                        turn.state_kind = 'terminal'
+                        OR turn.turn_id = completed_turn_id
+                        OR NOT goal_turn_is_runtime_relevant(
+                            turn.session_id,
+                            turn.turn_id
+                        )
+                   )
+                 WHERE action.dispatch_id = batch.dispatch_id
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM turn_lifecycle AS live_turn
+                         WHERE live_turn.session_id = action.session_id
+                           AND live_turn.state_kind <> 'terminal'
+                           AND goal_turn_is_runtime_relevant(
+                                live_turn.session_id,
+                                live_turn.turn_id
+                           )
+                           AND (
+                                completed_turn_id IS NULL
+                                OR live_turn.turn_id <> completed_turn_id
+                           )
+                   )
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM goal_event AS current_goal
+                         WHERE current_goal.session_id = action.session_id
+                           AND current_goal.event_ordinal = (
+                                SELECT max(candidate.event_ordinal)
+                                  FROM goal_event AS candidate
+                                 WHERE candidate.session_id = action.session_id
+                           )
+                           AND current_goal.event_kind IN (
+                                'commissioned', 'resumed', 'superseded'
+                           )
+                   )
+           )
+        ON CONFLICT DO NOTHING;
+    END LOOP;
+END;
+$$;

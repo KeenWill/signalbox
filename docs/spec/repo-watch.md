@@ -24,9 +24,10 @@ current-state delivery are verified against PR #812
 (`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
 against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, and terminal-target cutoff are also verified against this
-PR. The provider members the poller adopts as check-suite and check-run
-completion generations are verified against PR #541
-(`fix/check-run-updated-at`).
+PR. Requeue after non-converged dispatch termination is verified against this PR
+(`agent/dispatch-requeue-on-invalidation`). The provider members the poller
+adopts as check-suite and check-run completion generations are verified against
+PR #541 (`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
 
@@ -500,16 +501,21 @@ evaluations remain append-only audit facts. The batch releases the singleton at
 the transition that makes every dispatched turn terminal or runtime-irrelevant,
 leaves no live runtime-relevant turn for its session, and leaves no pursuing
 goal. A goal-ending recheck is deferred to its transaction boundary so an active
-turn's stop cascade is visible. The obligation becomes eligible only after that
-release and the same cooldown that would suppress a fresh successor; cooldown
-suppression without an existing obligation does not create one. Eligibility
-settles the obligation and creates its one current-state batch atomically. Equal
-recovery cannot create a second session for the same admitted action or
-obligation. A session whose current goal is pursuing remains nonterminal for
-singleton ownership across the gap between a completed goal turn and its durably
-queued continuation. Goal blocking, achievement, or user stop rechecks release
-after pursuit ends. The append-only dispatch records identify the sessions
-responsible for the PR; no mutable assignment flag replaces them.
+turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
+an achieved session whose dispatch head is no longer the pull request's latest
+durable head, opens the same latest-state obligation before release; sibling
+terminations and matching events collapse into that one obligation without
+regressing its latest event. Achievement is terminal only when the dispatch head
+still exactly equals the pull request's latest durable head. The obligation
+becomes eligible only after release and the same cooldown that would suppress a
+fresh successor; cooldown suppression without an existing obligation does not
+create one. Eligibility settles the obligation and creates its one current-state
+batch atomically. Equal recovery cannot create a second session for the same
+admitted action or obligation. A session whose current goal is pursuing remains
+nonterminal for singleton ownership across the gap between a completed goal turn
+and its durably queued continuation. Goal blocking, achievement, or user stop
+rechecks release after pursuit ends. The append-only dispatch records identify
+the sessions responsible for the PR; no mutable assignment flag replaces them.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
