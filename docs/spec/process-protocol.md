@@ -54,10 +54,11 @@ projections, and the totality of the daemon projection that produces it are
 verified against this PR (`fix/review-read-snapshot-permit`).
 
 The blob upload lifecycle messages below are verified against this implementing
-change (`agent/blob-storage-upload`). The blob read messages and multipart
+change (`agent/blob-storage-upload`). The blob read messages are verified
+against this implementing change (`agent/blob-storage-read-wire`). Multipart
 content arrays remain the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with their implementing
-children.
+child.
 
 The terminal blob-upload command and its bounded, open-once source handling are
 verified against this implementing change

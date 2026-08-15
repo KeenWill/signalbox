@@ -7052,6 +7052,7 @@ pub enum RepoWatchRuleEvaluation {
 pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
+    TargetClosed,
     Occupied,
     Cooldown,
     Dispatched {

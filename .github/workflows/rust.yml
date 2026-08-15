@@ -98,6 +98,8 @@ jobs:
         run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
+      - name: Test the lifecycle watchdog
+        run: python3 tooling/test_supervise_lifecycle.py
       # Drives the sweep against a fake `docker` it puts first on PATH, so it
       # neither needs nor touches the runner's daemon: what is under test is the
       # selection and the failure classification, and a real daemon could not be
@@ -132,7 +134,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            f768b1abfb0e54c2b71297b1184427cce4f7ab6d8caee0c93237bf8a34868454
+            2daf0515f8bb4cdbd6deac22214412b4e9907e90f6fbab7ec1ace643e83e3e8a
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};

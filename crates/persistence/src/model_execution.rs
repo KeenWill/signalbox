@@ -6937,7 +6937,8 @@ async fn terminalize_lifecycle(
     .execute(&mut *connection)
     .await?
     .rows_affected();
-    require_single(rows, "terminal model-call lifecycle")
+    require_single(rows, "terminal model-call lifecycle")?;
+    Ok(())
 }
 
 async fn append_terminal_call_event(
