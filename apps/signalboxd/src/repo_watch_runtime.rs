@@ -5271,14 +5271,14 @@ mod tests {
     fn responses_with_only_an_unsettled_check_run() -> Vec<ScriptedResponse> {
         complete_typed_observation_responses()
             .into_iter()
-            .filter_map(|response| {
+            .map(|response| {
                 if response.target == CHECK_SUITES_TARGET {
-                    Some(ScriptedResponse::ok(
+                    ScriptedResponse::ok(
                         RequestTarget(CHECK_SUITES_TARGET.to_owned()),
                         ResponseBody(settled_check_suites()),
-                    ))
+                    )
                 } else {
-                    Some(response)
+                    response
                 }
             })
             .collect()
