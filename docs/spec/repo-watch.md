@@ -27,17 +27,6 @@ held-slot diagnostics, and terminal-target cutoff are also verified against this
 PR. The provider members the poller adopts as check-suite and check-run
 completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Exact-head convergence assessment and cutoff are
-verified against this PR (`agent/dispatch-autonomy-convergence`).
-(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
-dispatch commissions with its session, the binding of the dispatched work turn
-to that goal's generation, and the occupied-refusal obligation and collapsed
-current-state delivery are verified against PR #812
-(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
-against PR #812 (`agent/daemon-ops-overnight`). The provider members the poller
-adopts as check-suite and check-run completion generations are verified against
-PR #541 (`fix/check-run-updated-at`). Runtime-relevance release, held-slot
-diagnostics, and terminal-target cutoff are verified against this PR
-(`agent/dispatch-autonomy`). Exact-head convergence assessment and cutoff are
 verified against this PR (`agent/dispatch-autonomy-convergence`). Conservative
 stale blocking-review dismissal is verified against this PR
 (`agent/dispatch-autonomy-review-clearance`).

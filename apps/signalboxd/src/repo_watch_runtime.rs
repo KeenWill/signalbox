@@ -680,32 +680,41 @@ impl RepositoryWatchTask {
     async fn reconcile_pending_stale_review_clearances(
         &self,
     ) -> Result<(), RepositoryWatchAttemptError> {
-        let pending = self
-            .store
-            .load_pending_stale_review_clearances(&self.repository)
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        for clearance in &pending {
-            let StaleReviewClearanceObservation::Terminal {
-                outcome,
-                provider_state,
-            } = self
-                .poller
-                .observe_stale_review_clearance(clearance)
-                .await?
-            else {
-                continue;
-            };
-            self.store
-                .record_stale_review_clearance_outcome(
-                    clearance.clearance_id(),
-                    outcome,
-                    provider_state,
-                )
+        let mut after = None;
+        loop {
+            let pending = self
+                .store
+                .claim_pending_stale_review_clearances(&self.repository, after)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            if pending.is_empty() {
+                return Ok(());
+            }
+            after = pending.last().map(|clearance| clearance.clearance_id());
+            for clearance in &pending {
+                let StaleReviewClearanceObservation::Terminal {
+                    outcome,
+                    provider_state,
+                } = self
+                    .poller
+                    .observe_stale_review_clearance(clearance)
+                    .await?
+                else {
+                    continue;
+                };
+                self.store
+                    .record_stale_review_clearance_outcome(
+                        clearance.clearance_id(),
+                        outcome,
+                        provider_state,
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            }
+            if pending.len() < 128 {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 }
 
