@@ -401,7 +401,7 @@ impl InstructionBundleRegistration {
     }
     /// Borrows the source path relative to its authorizing root.
     pub fn relative_source_path(&self) -> &str {
-        &self.source_path.as_str()[self.root_path.as_str().len() + 1..]
+        self.source_path.relative_path()
     }
     /// Borrows an agent document's root-relative directory scope.
     pub fn agent_document_scope(&self) -> Option<&str> {
