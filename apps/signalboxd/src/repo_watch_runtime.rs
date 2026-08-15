@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
-    num::NonZeroU64,
+    num::{NonZeroU16, NonZeroU64},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -23,12 +23,16 @@ use signalbox_application::{
     EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshV1,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWebhookDeliveryV1,
+    RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
     RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
+    derive_repo_watch_events, map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
@@ -40,19 +44,24 @@ use signalbox_domain::{
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
-    PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
+    PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
     RepoWatchCursorCandidate, RepoWatchCursorGeneration,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
 use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObligation;
+use signalbox_persistence::repo_watch_webhook::{
+    PendingRepoWatchWebhookDelivery, PostgresRepoWatchWebhookStore, RepoWatchWebhookDisposition,
+    RepoWatchWebhookPendingPageSize, RepoWatchWebhookProjection, RepoWatchWebhookTargetedQuery,
+    RepoWatchWebhookTerminalRequest,
+};
 use sqlx::PgPool;
 use tokio::{
     select,
-    sync::watch,
+    sync::{mpsc, watch},
     task::JoinSet,
-    time::{Instant, sleep},
+    time::{Instant, sleep_until},
 };
 
 use crate::SessionTemplateConfiguration;
@@ -60,6 +69,7 @@ use crate::configuration::{
     FileCredentialAccess, HubModelConfiguration, RepositoryWatchConfiguration,
     WatchedRepositoryConfiguration,
 };
+use crate::repo_watch_webhook_runtime::{RepoWatchWebhookRuntime, RepoWatchWebhookRuntimeError};
 
 const REST_BASE_URL: &str = "https://api.github.com/";
 const API_VERSION: &str = "2026-03-10";
@@ -82,6 +92,9 @@ const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
 const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
+const WEBHOOK_WORK_CHANNEL_CAPACITY: usize = 1;
+const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
+    NonZeroU16::new(100).expect("webhook pending page size is positive");
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -115,6 +128,8 @@ impl Error for RepositoryWatchRuntimeConstructionError {}
 pub enum RepositoryWatchRuntimeError {
     RepositoryTaskExited,
     RepositoryTaskPanicked,
+    WebhookListenerExited,
+    WebhookListenerFailed,
     TaskSetEmpty,
 }
 
@@ -123,6 +138,10 @@ impl fmt::Display for RepositoryWatchRuntimeError {
         formatter.write_str(match self {
             Self::RepositoryTaskExited => "repository-watch task exited before shutdown",
             Self::RepositoryTaskPanicked => "repository-watch task panicked",
+            Self::WebhookListenerExited => {
+                "repository-watch webhook listener exited before shutdown"
+            }
+            Self::WebhookListenerFailed => "repository-watch webhook listener failed",
             Self::TaskSetEmpty => "repository-watch task set became empty",
         })
     }
@@ -133,6 +152,7 @@ impl Error for RepositoryWatchRuntimeError {}
 /// Supervisor for one independent polling task per configured repository.
 pub struct RepositoryWatchRuntime {
     tasks: Vec<RepositoryWatchTask>,
+    webhook: Option<RepoWatchWebhookRuntime>,
 }
 
 impl RepositoryWatchRuntime {
@@ -146,7 +166,13 @@ impl RepositoryWatchRuntime {
         eligibility_nudge: InProcessEligibilityNudge,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
+        let mut webhook_workers = HashMap::new();
         for repository in configuration.repositories() {
+            let webhook_work = repository.webhook().map(|_| {
+                let (sender, receiver) = mpsc::channel(WEBHOOK_WORK_CHANNEL_CAPACITY);
+                webhook_workers.insert(repository.repository().clone(), sender);
+                receiver
+            });
             tasks.push(RepositoryWatchTask::try_new(
                 repository,
                 RepositoryWatchTaskContext {
@@ -157,10 +183,13 @@ impl RepositoryWatchRuntime {
                     models: models.clone(),
                     credential_pin: credential_pin.clone(),
                     eligibility_nudge: eligibility_nudge.clone(),
+                    webhook_work,
                 },
             )?);
         }
-        Ok(Self { tasks })
+        let webhook = RepoWatchWebhookRuntime::try_new(pool, configuration, webhook_workers)
+            .map_err(|_| RepositoryWatchRuntimeConstructionError)?;
+        Ok(Self { tasks, webhook })
     }
 
     /// Runs every repository task until the daemon broadcasts shutdown.
@@ -175,14 +204,29 @@ impl RepositoryWatchRuntime {
         let mut pollers = Vec::with_capacity(self.tasks.len());
         for task in self.tasks {
             pollers.push(Arc::clone(&task.poller));
-            tasks.spawn(task.run(shutdown.clone()));
+            let task_shutdown = shutdown.clone();
+            tasks.spawn(async move {
+                task.run(task_shutdown).await;
+                RepositoryWatchChildExit::Repository
+            });
+        }
+        if let Some(webhook) = self.webhook {
+            let webhook_shutdown = shutdown.clone();
+            tasks.spawn(async move {
+                RepositoryWatchChildExit::Webhook(webhook.run(webhook_shutdown).await)
+            });
         }
         supervise_repository_tasks(tasks, pollers, shutdown).await
     }
 }
 
+enum RepositoryWatchChildExit {
+    Repository,
+    Webhook(Result<(), RepoWatchWebhookRuntimeError>),
+}
+
 async fn supervise_repository_tasks(
-    mut tasks: JoinSet<()>,
+    mut tasks: JoinSet<RepositoryWatchChildExit>,
     pollers: Vec<Arc<GitHubRepositoryPoller>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RepositoryWatchRuntimeError> {
@@ -206,13 +250,21 @@ async fn supervise_repository_tasks(
                 }
                 completed = tasks.join_next() => {
                     return match completed {
-                        Some(Ok(())) if *shutdown.borrow() => {
+                        Some(Ok(_)) if *shutdown.borrow() => {
                             while let Some(result) = tasks.join_next().await {
                                 result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
                             }
                             Ok(())
                         }
-                        Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
+                        Some(Ok(RepositoryWatchChildExit::Repository)) => {
+                            Err(RepositoryWatchRuntimeError::RepositoryTaskExited)
+                        }
+                        Some(Ok(RepositoryWatchChildExit::Webhook(Ok(())))) => {
+                            Err(RepositoryWatchRuntimeError::WebhookListenerExited)
+                        }
+                        Some(Ok(RepositoryWatchChildExit::Webhook(Err(_)))) => {
+                            Err(RepositoryWatchRuntimeError::WebhookListenerFailed)
+                        }
                         Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
                         None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
                     };
@@ -230,6 +282,17 @@ async fn supervise_repository_tasks(
     result
 }
 
+async fn receive_webhook_work(receiver: &mut Option<mpsc::Receiver<()>>) -> bool {
+    let received = match receiver {
+        Some(receiver) => receiver.recv().await.is_some(),
+        None => std::future::pending().await,
+    };
+    if !received {
+        *receiver = None;
+    }
+    received
+}
+
 struct RepositoryWatchTask {
     repository: RepositorySlug,
     interval: Duration,
@@ -240,6 +303,8 @@ struct RepositoryWatchTask {
     templates: SessionTemplateConfiguration,
     models: HubModelConfiguration,
     eligibility_nudge: InProcessEligibilityNudge,
+    webhook_store: PostgresRepoWatchWebhookStore,
+    webhook_work: Option<mpsc::Receiver<()>>,
     rules_activated: bool,
 }
 
@@ -251,6 +316,7 @@ struct RepositoryWatchTaskContext {
     models: HubModelConfiguration,
     credential_pin: signalbox_persistence::SessionCredentialPin,
     eligibility_nudge: InProcessEligibilityNudge,
+    webhook_work: Option<mpsc::Receiver<()>>,
 }
 
 impl RepositoryWatchTask {
@@ -266,6 +332,7 @@ impl RepositoryWatchTask {
             models,
             credential_pin,
             eligibility_nudge,
+            webhook_work,
         } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
@@ -284,26 +351,83 @@ impl RepositoryWatchTask {
                 credential_reference,
             )?),
             store,
-            dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
+            dispatch_store: PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin),
+            webhook_store: PostgresRepoWatchWebhookStore::new(pool),
             rules,
             templates,
             models,
             eligibility_nudge,
+            webhook_work,
             rules_activated: false,
         })
     }
 
     async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
+        if *shutdown.borrow() {
+            return;
+        }
+        if self.webhook_work.is_some() {
+            let result = select! {
+                result = self.run_webhook_attempt() => Some(result),
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                    None
+                }
+            };
+            let Some(result) = result else {
+                return;
+            };
+            match &result {
+                Ok(()) => tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    "repository-watch startup webhook backlog drained"
+                ),
+                Err(error) => tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    cause_code = error.cause_code(),
+                    "repository-watch startup webhook backlog awaits retry"
+                ),
+            }
+            if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+                return;
+            }
+        }
+        let mut next_poll = Instant::now();
         loop {
             if *shutdown.borrow() {
                 return;
             }
-            let cycle_started = Instant::now();
-            let mut attempt_cancelled = false;
             select! {
-                result = self.run_attempt() => {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                () = sleep_until(next_poll) => {
+                    let cycle_started = Instant::now();
+                    let mut attempt_cancelled = false;
+                    let result = select! {
+                        result = self.run_attempt() => Some(result),
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                attempt_cancelled = true;
+                            }
+                            None
+                        }
+                    };
+                    if attempt_cancelled {
+                        // A cancelled full poll may own spawned PR fetches.
+                        self.poller.drain_fetches().await;
+                        return;
+                    }
+                    let Some(result) = result else {
+                        continue;
+                    };
                     let metrics = self.poller.attempt_metrics();
-                    match result {
+                    match &result {
                         Ok(()) => tracing::debug!(
                             repository = %self.repository.as_str(),
                             "repository-watch polling attempt completed"
@@ -321,28 +445,40 @@ impl RepositoryWatchTask {
                     if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
                     }
+                    next_poll = cycle_started + self.interval;
                 }
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        attempt_cancelled = true;
+                admitted = receive_webhook_work(&mut self.webhook_work) => {
+                    if !admitted {
+                        continue;
                     }
-                }
-            }
-            if attempt_cancelled {
-                // Winning this race dropped the attempt future, which aborts
-                // its spawned pull-request fetches without joining them. Join
-                // them before returning, so the supervisor's clean stop means
-                // every child has actually finished.
-                self.poller.drain_fetches().await;
-                return;
-            }
-            select! {
-                () = sleep(remaining_interval(PollCycleTiming {
-                    interval: self.interval,
-                    elapsed: cycle_started.elapsed(),
-                })) => {}
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
+                    let mut attempt_cancelled = false;
+                    let result = select! {
+                        result = self.run_webhook_attempt() => Some(result),
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                attempt_cancelled = true;
+                            }
+                            None
+                        }
+                    };
+                    if attempt_cancelled {
+                        return;
+                    }
+                    let Some(result) = result else {
+                        continue;
+                    };
+                    match &result {
+                        Ok(()) => tracing::debug!(
+                            repository = %self.repository.as_str(),
+                            "repository-watch webhook work completed"
+                        ),
+                        Err(error) => tracing::warn!(
+                            repository = %self.repository.as_str(),
+                            cause_code = error.cause_code(),
+                            "repository-watch webhook work failed closed"
+                        ),
+                    }
+                    if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
                     }
                 }
@@ -360,6 +496,7 @@ impl RepositoryWatchTask {
             self.process_cutoffs().await?;
             self.process_dispatches().await?;
             self.poll_and_commit().await?;
+            self.process_webhook_deliveries().await?;
             self.process_cutoffs().await?;
             self.process_dispatches().await
         }
@@ -370,6 +507,254 @@ impl RepositoryWatchTask {
             self.poller.invalidate_freshness();
         }
         result
+    }
+
+    async fn run_webhook_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        self.poller.begin_attempt();
+        let result = async {
+            if !self.rules_activated {
+                self.activate_rules().await?;
+                self.rules_activated = true;
+            }
+            self.process_cutoffs().await?;
+            self.process_dispatches().await?;
+            self.process_webhook_deliveries().await?;
+            self.process_cutoffs().await?;
+            self.process_dispatches().await
+        }
+        .await;
+        if result.is_err() {
+            self.poller.invalidate_freshness();
+        }
+        result
+    }
+
+    async fn process_webhook_deliveries(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        let page_size = RepoWatchWebhookPendingPageSize::try_new(WEBHOOK_PENDING_PAGE_SIZE)
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        loop {
+            let deliveries = self
+                .webhook_store
+                .load_pending(&self.repository, page_size)
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            if deliveries.is_empty() {
+                return Ok(());
+            }
+            for delivery in deliveries {
+                self.process_webhook_delivery(&delivery).await?;
+            }
+        }
+    }
+
+    async fn process_webhook_delivery(
+        &mut self,
+        pending: &PendingRepoWatchWebhookDelivery,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let delivery = RepoWatchWebhookDeliveryV1::new(RepoWatchWebhookDeliveryV1Input {
+            repository: pending.repository().clone(),
+            hook_id: pending.key().hook_id(),
+            delivery_id: pending.key().delivery_id(),
+            event: pending.event_name().to_owned(),
+            action: pending.action_name().map(str::to_owned),
+            receipt_sequence: pending.receipt().sequence(),
+            body_digest: *pending.body_digest(),
+        });
+        let mapping = match map_repo_watch_webhook_delivery_v1(&delivery, pending.body()) {
+            Ok(mapping) => mapping,
+            Err(error) => {
+                self.record_webhook_terminal(
+                    pending,
+                    Vec::new(),
+                    RepoWatchWebhookDisposition::Quarantined,
+                    Some(webhook_mapping_error_code(error)),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        match mapping {
+            RepoWatchWebhookMappingV1::Ignored(reason) => {
+                let outcome_code = webhook_ignored_reason_code(reason);
+                tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    hook_id = pending.key().hook_id().get(),
+                    delivery_id = %pending.key().delivery_id(),
+                    event = pending.event_name(),
+                    action = pending.action_name(),
+                    outcome_code,
+                    "signature-valid webhook delivery is outside the mapped set"
+                );
+                self.record_webhook_terminal(
+                    pending,
+                    Vec::new(),
+                    RepoWatchWebhookDisposition::Ignored,
+                    Some(outcome_code),
+                )
+                .await
+            }
+            RepoWatchWebhookMappingV1::MappedNoChange(reason) => {
+                self.record_webhook_terminal(
+                    pending,
+                    Vec::new(),
+                    RepoWatchWebhookDisposition::Ignored,
+                    Some(webhook_no_change_code(reason)),
+                )
+                .await
+            }
+            RepoWatchWebhookMappingV1::Patch(patch) => {
+                let cursor = self
+                    .store
+                    .load_cursor(&self.repository)
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                    .ok_or(RepositoryWatchAttemptError::Persistence)?;
+                let applied = match apply_repo_watch_observation_patch_v1(
+                    cursor.candidate().observation(),
+                    &patch,
+                ) {
+                    Ok(applied) => applied,
+                    Err(_) => {
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Quarantined,
+                            Some("patch_incoherent"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                match applied {
+                    RepoWatchObservationApplyV1::DuplicateState => {
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::DuplicateState,
+                            None,
+                        )
+                        .await
+                    }
+                    RepoWatchObservationApplyV1::Superseded => {
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Superseded,
+                            None,
+                        )
+                        .await
+                    }
+                    RepoWatchObservationApplyV1::Applied(observation) => {
+                        let projections =
+                            shadow_event_projections(&self.repository, &cursor, &observation)?;
+                        self.record_webhook_terminal(
+                            pending,
+                            projections,
+                            RepoWatchWebhookDisposition::Projected,
+                            None,
+                        )
+                        .await
+                    }
+                    RepoWatchObservationApplyV1::NeedsTargetedRefresh {
+                        observation,
+                        refreshes,
+                    } => {
+                        let mut projections =
+                            shadow_event_projections(&self.repository, &cursor, &observation)?;
+                        projections.extend(
+                            refreshes
+                                .iter()
+                                .map(targeted_query_projection)
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
+                        self.targeted_refresh_and_commit(&refreshes).await?;
+                        self.process_dispatches().await?;
+                        self.record_webhook_terminal(
+                            pending,
+                            projections,
+                            RepoWatchWebhookDisposition::Projected,
+                            None,
+                        )
+                        .await
+                    }
+                }
+            }
+        }
+    }
+
+    async fn record_webhook_terminal(
+        &self,
+        pending: &PendingRepoWatchWebhookDelivery,
+        projections: Vec<RepoWatchWebhookProjection>,
+        disposition: RepoWatchWebhookDisposition,
+        outcome_code: Option<&str>,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let request = RepoWatchWebhookTerminalRequest::try_new(
+            projections,
+            disposition,
+            outcome_code.map(str::to_owned),
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        self.webhook_store
+            .record_terminal(pending.key(), &request)
+            .await
+            .map(|_| ())
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)
+    }
+
+    async fn targeted_refresh_and_commit(
+        &mut self,
+        refreshes: &[RepoWatchTargetedRefreshV1],
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let cursor = self
+            .store
+            .load_cursor(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            .ok_or(RepositoryWatchAttemptError::Persistence)?;
+        let targets = targeted_pull_requests(cursor.candidate().observation(), refreshes)?;
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
+        let observation = self
+            .poller
+            .poll_targeted_pull_requests_against_cursor(cursor.candidate().observation(), &targets)
+            .await?;
+        let events = derive_repo_watch_events(
+            &self.repository,
+            Some(cursor.candidate().observation()),
+            &observation,
+            &mut event_identity_frontier,
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+        let outcome = self
+            .store
+            .commit(
+                &self.repository,
+                RepoWatchCommitRequest::new(
+                    Some(cursor.generation()),
+                    RepoWatchCursorCandidate::with_event_identity_frontier(
+                        observation,
+                        event_identity_frontier,
+                    ),
+                    events,
+                ),
+            )
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        match outcome {
+            RepoWatchCommitOutcome::Committed(cursor)
+            | RepoWatchCommitOutcome::Replayed(cursor)
+            | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                self.poller.publish_freshness(cursor.generation());
+                Ok(())
+            }
+            RepoWatchCommitOutcome::Conflict { current: _ } => {
+                Err(RepositoryWatchAttemptError::Persistence)
+            }
+        }
     }
 
     async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -552,6 +937,152 @@ impl RepositoryWatchTask {
                 Err(RepositoryWatchAttemptError::Persistence)
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TargetedPullRequest {
+    number: PullRequestNumber,
+    expected_head: Option<CommitSha>,
+}
+
+fn shadow_event_projections(
+    repository: &RepositorySlug,
+    cursor: &RepoWatchCursor,
+    observation: &RepoWatchObservation,
+) -> Result<Vec<RepoWatchWebhookProjection>, RepositoryWatchAttemptError> {
+    let mut frontier = cursor.candidate().event_identity_frontier().clone();
+    derive_repo_watch_events(
+        repository,
+        Some(cursor.candidate().observation()),
+        observation,
+        &mut frontier,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )
+    .map_err(|_| RepositoryWatchAttemptError::Differ)?
+    .into_iter()
+    .map(|occurrence| {
+        let content_identity = occurrence.content_identity();
+        RepoWatchWebhookProjection::event(
+            content_identity,
+            occurrence.event().kind().name(),
+            content_identity.as_bytes().to_vec(),
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Persistence)
+    })
+    .collect()
+}
+
+fn targeted_query_projection(
+    refresh: &RepoWatchTargetedRefreshV1,
+) -> Result<RepoWatchWebhookProjection, RepositoryWatchAttemptError> {
+    Ok(RepoWatchWebhookProjection::TargetedQuery(match refresh {
+        RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+            RepoWatchWebhookTargetedQuery::PullRequestHydration(*pull_request)
+        }
+        RepoWatchTargetedRefreshV1::Mergeability {
+            pull_request,
+            expected_head: _,
+        } => RepoWatchWebhookTargetedQuery::Mergeability(*pull_request),
+        RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: _,
+            expected_head,
+        }
+        | RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: expected_head,
+        } => RepoWatchWebhookTargetedQuery::CheckRollup(expected_head.clone()),
+    }))
+}
+
+fn targeted_pull_requests(
+    previous: &RepoWatchObservation,
+    refreshes: &[RepoWatchTargetedRefreshV1],
+) -> Result<Vec<TargetedPullRequest>, RepositoryWatchAttemptError> {
+    let mut targets = BTreeMap::new();
+    for refresh in refreshes {
+        match refresh {
+            RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+                insert_targeted_pull_request(&mut targets, *pull_request, None)?;
+            }
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head,
+            }
+            | RepoWatchTargetedRefreshV1::CheckRollup {
+                pull_request,
+                expected_head,
+            } => {
+                insert_targeted_pull_request(
+                    &mut targets,
+                    *pull_request,
+                    Some(expected_head.clone()),
+                )?;
+            }
+            RepoWatchTargetedRefreshV1::CheckRollupForCommit { head } => {
+                for pull_request in previous.state().pull_requests() {
+                    if pull_request.context().head_sha() == head {
+                        insert_targeted_pull_request(
+                            &mut targets,
+                            pull_request.context().number(),
+                            Some(head.clone()),
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(targets.into_values().collect())
+}
+
+fn insert_targeted_pull_request(
+    targets: &mut BTreeMap<u64, TargetedPullRequest>,
+    number: PullRequestNumber,
+    expected_head: Option<CommitSha>,
+) -> Result<(), RepositoryWatchAttemptError> {
+    match targets.entry(number.get()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(TargetedPullRequest {
+                number,
+                expected_head,
+            });
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let retained = entry.get_mut();
+            match (&retained.expected_head, expected_head) {
+                (None, Some(expected)) => retained.expected_head = Some(expected),
+                (Some(retained), Some(expected)) if retained != &expected => {
+                    return Err(RepositoryWatchAttemptError::Normalization);
+                }
+                (None, None) | (Some(_), None) | (Some(_), Some(_)) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+const fn webhook_mapping_error_code(error: RepoWatchWebhookMappingError) -> &'static str {
+    match error {
+        RepoWatchWebhookMappingError::MalformedJson => "malformed_json",
+        RepoWatchWebhookMappingError::MissingField(_) => "missing_field",
+        RepoWatchWebhookMappingError::InvalidField(_) => "invalid_field",
+        RepoWatchWebhookMappingError::RepositoryMismatch => "repository_mismatch",
+        RepoWatchWebhookMappingError::ActionMismatch => "action_mismatch",
+    }
+}
+
+const fn webhook_ignored_reason_code(reason: RepoWatchWebhookIgnoredReasonV1) -> &'static str {
+    match reason {
+        RepoWatchWebhookIgnoredReasonV1::UnmappedEvent => "unmapped_event",
+        RepoWatchWebhookIgnoredReasonV1::UnmappedAction => "unmapped_action",
+        RepoWatchWebhookIgnoredReasonV1::NonBranchPush => "non_branch_push",
+        RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository => "foreign_workflow_repository",
+    }
+}
+
+const fn webhook_no_change_code(reason: RepoWatchWebhookMappedNoChangeV1) -> &'static str {
+    match reason {
+        RepoWatchWebhookMappedNoChangeV1::Ping => "ping",
+        RepoWatchWebhookMappedNoChangeV1::ReviewDismissed => "review_dismissed",
     }
 }
 
@@ -1145,6 +1676,51 @@ impl GitHubRepositoryPoller {
             self.cache().complete_poll();
         }
         result
+    }
+
+    async fn poll_targeted_pull_requests_against_cursor(
+        &self,
+        previous: &RepoWatchObservation,
+        targets: &[TargetedPullRequest],
+    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+        let mut state = RepoWatchRepositoryStateInput {
+            pull_requests: previous.state().pull_requests().to_vec(),
+            workflow_runs: previous.state().workflow_runs().to_vec(),
+            branch_heads: previous.state().branch_heads().to_vec(),
+        };
+        for target in targets {
+            let retained_index = state
+                .pull_requests
+                .iter()
+                .position(|pull_request| pull_request.context().number() == target.number);
+            let retained = retained_index.map(|index| state.pull_requests[index].clone());
+            self.forget_pull_request(target.number.get());
+            let fetched = self
+                .fetch_pull_request(target.number.get(), retained.as_ref())
+                .await?;
+            if target
+                .expected_head
+                .as_ref()
+                .is_some_and(|expected| fetched.state.context().head_sha() != expected)
+            {
+                tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    pull_request = target.number.get(),
+                    "targeted repository refresh was superseded before its response"
+                );
+                continue;
+            }
+            match retained_index {
+                Some(index) => state.pull_requests[index] = fetched.state,
+                None => state.pull_requests.push(fetched.state),
+            }
+        }
+        let state = RepoWatchRepositoryState::try_new(state)
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        Ok(RepoWatchObservation::new(
+            previous.signal_reviewers().to_vec(),
+            state,
+        ))
     }
 
     async fn poll_complete(
@@ -2514,11 +3090,13 @@ impl PollCache {
     }
 }
 
+#[cfg(test)]
 struct PollCycleTiming {
     interval: Duration,
     elapsed: Duration,
 }
 
+#[cfg(test)]
 const fn remaining_interval(timing: PollCycleTiming) -> Duration {
     timing.interval.saturating_sub(timing.elapsed)
 }
@@ -2937,14 +3515,15 @@ mod tests {
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
-        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
-        dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
+        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, ResourceKey,
+        ReviewState, TargetedPullRequest, Url, UuidV7RepoWatchEventIdGenerator, WorkflowName,
+        WorkflowResponse, derive_repo_watch_events, dispatch_context_json,
+        normalize_checks_outcome, normalize_pull_request_context, object_id,
         owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
-        supervise_repository_tasks,
+        supervise_repository_tasks, targeted_pull_requests,
     };
-    use signalbox_application::RepoWatchEventIdentityFrontierV1;
+    use signalbox_application::{RepoWatchEventIdentityFrontierV1, RepoWatchTargetedRefreshV1};
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
@@ -4039,6 +4618,14 @@ mod tests {
         ]
     }
 
+    fn complete_pull_request_responses() -> Vec<ScriptedResponse> {
+        complete_typed_observation_responses()
+            .into_iter()
+            .skip(1)
+            .take(11)
+            .collect()
+    }
+
     /// Descends as the pull number ascends, so an implementation that
     /// accidentally orders fetched pull requests by head identity or head
     /// branch reverses the expected number order instead of matching it.
@@ -4410,13 +4997,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn targeted_refresh_reuses_the_repository_poller_and_preserves_untouched_state() {
+        let previous = complete_typed_observation().await;
+        let server = ScriptedServer::start(complete_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical"),
+            ),
+        };
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .await
+            .expect("targeted refresh succeeds");
+
+        server.finish().await;
+        assert_eq!(refreshed, previous);
+    }
+
+    #[tokio::test]
+    async fn targeted_query_coalescing_retains_the_stricter_head_guard() {
+        let previous = complete_typed_observation().await;
+        let pull_request = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+        );
+        let expected_head =
+            CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical");
+        let refreshes = [
+            RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request },
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head: expected_head.clone(),
+            },
+        ];
+
+        let targets = targeted_pull_requests(&previous, &refreshes)
+            .expect("compatible targeted queries coalesce");
+
+        assert_eq!(
+            targets,
+            vec![TargetedPullRequest {
+                number: pull_request,
+                expected_head: Some(expected_head),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_targeted_head_guards_fail_closed() {
+        let previous = complete_typed_observation().await;
+        let pull_request = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+        );
+        let first_head =
+            CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical");
+        let second_head = CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
+            .expect("changed fixture head SHA is canonical");
+        let refreshes = [
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head: first_head,
+            },
+            RepoWatchTargetedRefreshV1::CheckRollup {
+                pull_request,
+                expected_head: second_head,
+            },
+        ];
+
+        let result = targeted_pull_requests(&previous, &refreshes);
+
+        assert_eq!(result, Err(RepositoryWatchAttemptError::Normalization));
+    }
+
+    #[tokio::test]
     async fn shutdown_wins_when_a_repository_task_exits_cleanly_at_the_same_time() {
         let (sender, receiver) = watch::channel(false);
         let exit = Arc::new(Notify::new());
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let exit = Arc::clone(&exit);
-            async move { exit.notified().await }
+            async move {
+                exit.notified().await;
+                RepositoryWatchChildExit::Repository
+            }
         });
         let trigger = tokio::spawn(async move {
             tokio::task::yield_now().await;
@@ -4461,6 +5129,7 @@ mod tests {
                         Some(RepoWatchCursorGeneration::INITIAL),
                     )
                     .await;
+                RepositoryWatchChildExit::Repository
             }
         });
         server.request_in_flight().await;
@@ -4510,6 +5179,7 @@ mod tests {
                         Some(RepoWatchCursorGeneration::INITIAL),
                     )
                     .await;
+                RepositoryWatchChildExit::Repository
             }
         });
         server.request_in_flight().await;

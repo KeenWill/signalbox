@@ -300,6 +300,7 @@ async fn remove_second_projection_rejection(pool: &PgPool) -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn webhook_admission_distinguishes_equal_replay_from_every_conflict_field()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
@@ -385,6 +386,7 @@ async fn webhook_admission_distinguishes_equal_replay_from_every_conflict_field(
 }
 
 #[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn pending_delivery_survives_store_restart() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let first_store = PostgresRepoWatchWebhookStore::new(pool.clone());
@@ -408,6 +410,7 @@ async fn pending_delivery_survives_store_restart() -> Result<(), Box<dyn Error>>
 }
 
 #[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_projection_and_disposition_are_atomic() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresRepoWatchWebhookStore::new(pool.clone());
@@ -439,6 +442,7 @@ async fn terminal_projection_and_disposition_are_atomic() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresRepoWatchWebhookStore::new(pool.clone());
@@ -473,6 +477,7 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
 }
 
 #[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn parity_view_classifies_all_four_shadow_statuses() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresRepoWatchWebhookStore::new(pool.clone());
@@ -540,6 +545,7 @@ async fn parity_view_classifies_all_four_shadow_statuses() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn payload_retention_requires_terminal_state_and_seven_days() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresRepoWatchWebhookStore::new(pool.clone());
