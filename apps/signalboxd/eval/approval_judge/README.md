@@ -65,6 +65,6 @@ prompt:
    parked request keeps its human approval path.
 
 A prompt-rubric change updates every affected label so the corpus and deployed
-prompt continue to encode one standard. An owner-approved correction to a case
+prompt continue to encode one standard. A user-approved correction to a case
 whose rendered authority was mislabeled may stand alone against the unchanged
 rubric.
