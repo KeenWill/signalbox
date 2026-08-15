@@ -869,6 +869,32 @@ pub(crate) fn repo_watch_singleton_scope_from_str(
     }
 }
 
+/// Closed lifecycle-cutoff dispositions stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchLifecycleCutoffDispositionStorageKind {
+    Terminal,
+    Reopened,
+}
+
+pub(crate) const fn repo_watch_lifecycle_cutoff_disposition_to_str(
+    value: RepoWatchLifecycleCutoffDispositionStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchLifecycleCutoffDispositionStorageKind::Terminal => "terminal",
+        RepoWatchLifecycleCutoffDispositionStorageKind::Reopened => "reopened",
+    }
+}
+
+pub(crate) fn repo_watch_lifecycle_cutoff_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchLifecycleCutoffDispositionStorageKind> {
+    match value {
+        "terminal" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal),
+        "reopened" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened),
+        _ => None,
+    }
+}
+
 /// Closed outcomes stored for one repository-watch rule evaluation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEvaluationOutcomeStorageKind {
@@ -2031,11 +2057,11 @@ mod tests {
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
         PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
-        RepoWatchObligationSettlementStorageKind, RunnerLossPropagationStateStorageKind,
-        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, StoredModelSettingsError,
-        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
-        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
+        RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
+        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
+        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
@@ -2058,7 +2084,8 @@ mod tests {
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
         repo_watch_checks_outcome_to_str, repo_watch_evaluation_outcome_from_str,
         repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
-        repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
+        repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
         repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
@@ -2111,6 +2138,26 @@ mod tests {
             Some(RepoWatchObligationSettlementStorageKind::TargetClosed)
         );
         assert_eq!(repo_watch_obligation_settlement_from_str("unknown"), None);
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str(
+                repo_watch_lifecycle_cutoff_disposition_to_str(
+                    RepoWatchLifecycleCutoffDispositionStorageKind::Terminal,
+                ),
+            ),
+            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal)
+        );
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str(
+                repo_watch_lifecycle_cutoff_disposition_to_str(
+                    RepoWatchLifecycleCutoffDispositionStorageKind::Reopened,
+                ),
+            ),
+            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened)
+        );
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str("unknown"),
+            None
+        );
     }
 
     #[test]

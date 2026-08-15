@@ -23,9 +23,11 @@ use crate::{
     commit_failure_is_ambiguous,
     create_session::insert_fresh_prepared,
     mapping::{
-        RepoWatchEvaluationOutcomeStorageKind, RepoWatchSingletonScopeStorageKind,
-        repo_watch_evaluation_outcome_from_str, repo_watch_evaluation_outcome_to_str,
-        repo_watch_singleton_scope_to_str, session_id_to_uuid,
+        RepoWatchEvaluationOutcomeStorageKind, RepoWatchLifecycleCutoffDispositionStorageKind,
+        RepoWatchSingletonScopeStorageKind, repo_watch_evaluation_outcome_from_str,
+        repo_watch_evaluation_outcome_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
+        repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_singleton_scope_to_str,
+        session_id_to_uuid,
     },
 };
 
@@ -193,20 +195,20 @@ impl PostgresRepoWatchDispatchStore {
         .fetch_optional(&mut *transaction)
         .await?;
         let disposition = if next_lifecycle.as_deref() == Some("pull_request_opened") {
-            "reopened"
+            RepoWatchLifecycleCutoffDispositionStorageKind::Reopened
         } else {
-            "terminal"
+            RepoWatchLifecycleCutoffDispositionStorageKind::Terminal
         };
         sqlx::query(
             "INSERT INTO repo_watch_lifecycle_cutoff (event_id, disposition_kind)
              VALUES ($1, $2)",
         )
         .bind(event_id)
-        .bind(disposition)
+        .bind(repo_watch_lifecycle_cutoff_disposition_to_str(disposition))
         .execute(&mut *transaction)
         .await?;
         let mut cutoff_corruption = None;
-        if disposition == "terminal" {
+        if disposition == RepoWatchLifecycleCutoffDispositionStorageKind::Terminal {
             crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
                 &mut transaction,
                 repository,
@@ -1267,26 +1269,34 @@ async fn terminal_event_has_later_terminal_cutoff(
     transaction: &mut Transaction<'_, Postgres>,
     event: &RepoWatchEvent,
 ) -> Result<bool, RepoWatchDispatchRepositoryError> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM repo_watch_event AS origin
-              JOIN repo_watch_event AS boundary
-                ON boundary.repository = origin.repository
-               AND boundary.pull_request_number = origin.pull_request_number
-               AND (boundary.cursor_generation, boundary.event_ordinal) >
-                   (origin.cursor_generation, origin.event_ordinal)
-              JOIN repo_watch_lifecycle_cutoff AS cutoff
-                ON cutoff.event_id = boundary.event_id
-               AND cutoff.disposition_kind = 'terminal'
-             WHERE origin.event_id = $1
-               AND origin.repository = $2
-        )",
+    let dispositions: Vec<String> = sqlx::query_scalar(
+        "SELECT cutoff.disposition_kind
+           FROM repo_watch_event AS origin
+           JOIN repo_watch_event AS boundary
+             ON boundary.repository = origin.repository
+            AND boundary.pull_request_number = origin.pull_request_number
+            AND (boundary.cursor_generation, boundary.event_ordinal) >
+                (origin.cursor_generation, origin.event_ordinal)
+           JOIN repo_watch_lifecycle_cutoff AS cutoff
+             ON cutoff.event_id = boundary.event_id
+          WHERE origin.event_id = $1
+            AND origin.repository = $2",
     )
     .bind(event.id().as_uuid())
     .bind(event.repository().as_str())
-    .fetch_one(&mut **transaction)
-    .await?)
+    .fetch_all(&mut **transaction)
+    .await?;
+    for disposition in dispositions {
+        let decoded = repo_watch_lifecycle_cutoff_disposition_from_str(&disposition).ok_or(
+            RepoWatchDispatchRepositoryError::Corruption(
+                "repository-watch lifecycle cutoff has an unknown disposition",
+            ),
+        )?;
+        if decoded == RepoWatchLifecycleCutoffDispositionStorageKind::Terminal {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn singleton_is_cooling_down(
