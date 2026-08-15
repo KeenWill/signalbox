@@ -757,8 +757,14 @@ pub trait AuthorizeModelCallTransaction {
 pub enum AuthorizeModelCallOutcome {
     /// The exact prepared authority is stale or has stopped; no send may begin.
     NoSend,
-    /// The exact prepared call committed `InFlight` and may enter its provider.
-    Authorized(Box<AuthorizedModelCall>),
+    /// The exact prepared call committed `InFlight` and may enter its provider
+    /// with the override inventory atomically reloaded at authorization.
+    Authorized {
+        /// Exact authority for the physical provider send.
+        call: Box<AuthorizedModelCall>,
+        /// Overrides frozen into the call before its send transition.
+        armed_user_overrides: Box<[ArmedUserOverride]>,
+    },
 }
 
 /// Authoritative state after an ambiguous send-authorization commit.
@@ -1593,75 +1599,81 @@ where
         };
 
         let permit = self.gate.acquire(attempt).await;
-        let authorized = match self.authorization.authorize(session, call).await {
-            Ok(AuthorizeModelCallOutcome::NoSend) => {
-                drop(capability);
-                drop(permit);
-                return Ok(ModelCallExecutionOutcome::NoWork);
-            }
-            Ok(AuthorizeModelCallOutcome::Authorized(authorized)) => *authorized,
-            Err(error)
-                if matches!(
-                    error.operator_failure_class(),
-                    OperatorFailureClass::Infrastructure {
-                        commit_ambiguous: true
-                    }
-                ) =>
-            {
-                match self
-                    .authorization
-                    .reread_after_ambiguous_commit(session, &prepared_request)
-                    .await
+        let (authorized, armed_user_overrides) =
+            match self.authorization.authorize(session, call).await {
+                Ok(AuthorizeModelCallOutcome::NoSend) => {
+                    drop(capability);
+                    drop(permit);
+                    return Ok(ModelCallExecutionOutcome::NoWork);
+                }
+                Ok(AuthorizeModelCallOutcome::Authorized {
+                    call: authorized,
+                    armed_user_overrides,
+                }) => (*authorized, armed_user_overrides),
+                Err(error)
+                    if matches!(
+                        error.operator_failure_class(),
+                        OperatorFailureClass::Infrastructure {
+                            commit_ambiguous: true
+                        }
+                    ) =>
                 {
-                    Ok(ModelCallAuthorizationReread::Prepared) => {
-                        drop(capability);
-                        drop(permit);
-                        return Err(ModelCallExecutionError::Authorization(error));
-                    }
-                    Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
-                        drop(capability);
-                        drop(permit);
-                        let non_consumption = authorized
-                            .observation_correlation()
-                            .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
-                        return self
-                            .commit_terminal_observation(session, non_consumption, Box::new([]))
-                            .await;
-                    }
-                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
-                        drop(capability);
-                        drop(permit);
-                        let cancellation = stopped
-                            .observation_correlation()
-                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
-                        return self
-                            .commit_terminal_observation(session, cancellation, Box::new([]))
-                            .await;
-                    }
-                    Ok(ModelCallAuthorizationReread::Cancelled) => {
-                        drop(capability);
-                        drop(permit);
-                        return Ok(ModelCallExecutionOutcome::NoWork);
-                    }
-                    Err(reread_error) => {
-                        drop(capability);
-                        drop(permit);
-                        self.retained_state = Some(RetainedModelCallExecutionState {
+                    match self
+                        .authorization
+                        .reread_after_ambiguous_commit(session, &prepared_request)
+                        .await
+                    {
+                        Ok(ModelCallAuthorizationReread::Prepared) => {
+                            drop(capability);
+                            drop(permit);
+                            return Err(ModelCallExecutionError::Authorization(error));
+                        }
+                        Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
+                            drop(capability);
+                            drop(permit);
+                            let non_consumption = authorized
+                                .observation_correlation()
+                                .bind_terminal_observation(
+                                    ModelCallTerminalObservation::KnownFailed,
+                                );
+                            return self
+                                .commit_terminal_observation(session, non_consumption, Box::new([]))
+                                .await;
+                        }
+                        Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                            drop(capability);
+                            drop(permit);
+                            let cancellation = stopped
+                                .observation_correlation()
+                                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                            return self
+                                .commit_terminal_observation(session, cancellation, Box::new([]))
+                                .await;
+                        }
+                        Ok(ModelCallAuthorizationReread::Cancelled) => {
+                            drop(capability);
+                            drop(permit);
+                            return Ok(ModelCallExecutionOutcome::NoWork);
+                        }
+                        Err(reread_error) => {
+                            drop(capability);
+                            drop(permit);
+                            self.retained_state = Some(RetainedModelCallExecutionState {
                             state:
                                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                                     session,
                                     prepared: Box::new(prepared_request),
                                 },
                         });
-                        return Err(ModelCallExecutionError::AuthorizationReread {
-                            authorization_error: error,
-                            reread_error,
-                        });
+                            return Err(ModelCallExecutionError::AuthorizationReread {
+                                authorization_error: error,
+                                reread_error,
+                            });
+                        }
                     }
                 }
-            }
-            Err(error) => return Err(ModelCallExecutionError::Authorization(error)),
-        };
+                Err(error) => return Err(ModelCallExecutionError::Authorization(error)),
+            };
         let acceptance_possible = move || drop(permit);
         let invocation_cancellation = self.authorization.cancellation_signal(session, call);
         let observation = self
@@ -3395,7 +3407,10 @@ mod tests {
             self.outcomes
                 .pop_front()
                 .expect("one fake authorization outcome")
-                .map(|authorized| AuthorizeModelCallOutcome::Authorized(Box::new(authorized)))
+                .map(|authorized| AuthorizeModelCallOutcome::Authorized {
+                    call: Box::new(authorized),
+                    armed_user_overrides: Box::new([]),
+                })
         }
 
         async fn reread_after_ambiguous_commit(

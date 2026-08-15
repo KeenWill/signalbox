@@ -3178,7 +3178,7 @@ async fn checkpoint_restart_model_call(
     if authorize {
         assert!(matches!(
             repository.authorize_send(session, call).await?,
-            AuthorizeModelCallOutcome::Authorized(_)
+            AuthorizeModelCallOutcome::Authorized { .. }
         ));
     }
 
@@ -3231,7 +3231,9 @@ async fn authorize_checkpointed_model_call(
             .await?,
         PrepareInitialModelCallOutcome::Ready { .. }
     ));
-    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized, ..
+    } = repository
         .authorize_send(fixture.session, fixture.call)
         .await?
     else {
@@ -3282,7 +3284,9 @@ async fn authorize_checkpointed_model_call_with_prepared(
     else {
         panic!("the existing Prepared fixture reloads")
     };
-    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized, ..
+    } = repository
         .authorize_send(fixture.session, fixture.call)
         .await?
     else {
@@ -4100,7 +4104,9 @@ async fn authorize_continuation_after_completed_round(
         continuation,
         signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
     );
-    let AuthorizeModelCallOutcome::Authorized(authorized) = model_repository
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized, ..
+    } = model_repository
         .authorize_send(fixture.session, continuation_call)
         .await?
     else {
@@ -4319,8 +4325,9 @@ async fn authorize_delegated_model_call_fixture(
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
     ));
-    let AuthorizeModelCallOutcome::Authorized(authorized) =
-        repository.authorize_send(child, call).await?
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized, ..
+    } = repository.authorize_send(child, call).await?
     else {
         panic!("the delegated terminal fixture authorizes its exact call")
     };
@@ -4415,8 +4422,9 @@ async fn authorize_delegated_successor_model_call_fixture(
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
     ));
-    let AuthorizeModelCallOutcome::Authorized(authorized) =
-        repository.authorize_send(child, call).await?
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized, ..
+    } = repository.authorize_send(child, call).await?
     else {
         panic!("the accepted-input successor authorizes its exact call")
     };

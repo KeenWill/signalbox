@@ -1265,7 +1265,9 @@ async fn prepare_review_turn_call(pool: &PgPool, turn: TurnId) -> PreparedReview
         resumed,
         PrepareInitialModelCallOutcome::Ready { .. }
     ));
-    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized, ..
+    } = repository
         .authorize_send(session, identities.call)
         .await
         .expect("review fixture model call authorizes")

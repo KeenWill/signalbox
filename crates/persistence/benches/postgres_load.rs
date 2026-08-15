@@ -907,7 +907,9 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         }
     }
     let authorized = match model_repository.authorize_send(flow.session, call).await? {
-        AuthorizeModelCallOutcome::Authorized(authorized) => *authorized,
+        AuthorizeModelCallOutcome::Authorized {
+            call: authorized, ..
+        } => *authorized,
         AuthorizeModelCallOutcome::NoSend => {
             return Err(error("checkpointed model call was not authorized"));
         }

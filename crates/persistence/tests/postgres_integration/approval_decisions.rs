@@ -2494,14 +2494,6 @@ async fn armed_override_pre_approves_the_next_matching_proposal() -> Result<(), 
         terminal_delegate_denial(&pool, seed).await?;
     let repository = model_repository.tool_loop_repository();
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
-    let arming = OverrideDeniedToolRequest::try_new(command_id, fixture.session, request)
-        .expect("the fixture command identity is admitted");
-    let applied = repository.override_denied(arming).await?;
-    assert!(matches!(
-        applied.result(),
-        OverrideDeniedToolRequestResult::Applied(_)
-    ));
-
     let PrepareInitialModelCallOutcome::Ready {
         armed_user_overrides,
         ..
@@ -2520,6 +2512,25 @@ async fn armed_override_pre_approves_the_next_matching_proposal() -> Result<(), 
     else {
         panic!("the checkpointed continuation call reloads as Ready")
     };
+    assert!(armed_user_overrides.is_empty());
+
+    let arming = OverrideDeniedToolRequest::try_new(command_id, fixture.session, request)
+        .expect("the fixture command identity is admitted");
+    let applied = repository.override_denied(arming).await?;
+    assert!(matches!(
+        applied.result(),
+        OverrideDeniedToolRequestResult::Applied(_)
+    ));
+
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized,
+        armed_user_overrides,
+    } = model_repository
+        .authorize_send(fixture.session, continuation_call)
+        .await?
+    else {
+        panic!("the checkpointed continuation call authorizes")
+    };
     assert_eq!(
         armed_user_overrides.as_ref(),
         [ArmedUserOverride::new(
@@ -2533,12 +2544,6 @@ async fn armed_override_pre_approves_the_next_matching_proposal() -> Result<(), 
         )]
     );
 
-    let AuthorizeModelCallOutcome::Authorized(authorized) = model_repository
-        .authorize_send(fixture.session, continuation_call)
-        .await?
-    else {
-        panic!("the checkpointed continuation call authorizes")
-    };
     let response =
         ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
             ToolCallProposal::new(

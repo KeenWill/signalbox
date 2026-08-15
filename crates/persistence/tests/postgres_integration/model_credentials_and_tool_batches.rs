@@ -1511,7 +1511,7 @@ async fn delegated_denial_reloads_in_a_continuation_model_frontier() -> Result<(
         model_repository
             .authorize_send(fixture.session, continuation_call)
             .await?,
-        AuthorizeModelCallOutcome::Authorized(_)
+        AuthorizeModelCallOutcome::Authorized { .. }
     ));
 
     pool.close().await;

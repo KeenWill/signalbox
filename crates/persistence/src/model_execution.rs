@@ -746,10 +746,15 @@ impl PostgresModelCallRepository {
             let authorized = execution.authorize_send().map_err(|_| {
                 ModelCallCorruption::Inconsistent("checked Prepared call could not authorize send")
             })?;
+            let armed_user_overrides =
+                load_call_user_overrides(&mut transaction, session, call).await?;
             persist_authorization(&mut transaction, &authorized).await?;
             Ok((
                 true,
-                AuthorizeModelCallOutcome::Authorized(Box::new(authorized)),
+                AuthorizeModelCallOutcome::Authorized {
+                    call: Box::new(authorized),
+                    armed_user_overrides,
+                },
             ))
         }
         .await;

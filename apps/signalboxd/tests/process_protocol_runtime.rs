@@ -4092,7 +4092,7 @@ async fn park_turn_on_ambiguous_model_call(
     else {
         return Err(io::Error::other("the fixture call must checkpoint").into());
     };
-    let AuthorizeModelCallOutcome::Authorized(_) = calls.authorize_send(session, call).await?
+    let AuthorizeModelCallOutcome::Authorized { .. } = calls.authorize_send(session, call).await?
     else {
         return Err(io::Error::other("the fixture call must authorize send").into());
     };
@@ -4902,8 +4902,9 @@ async fn authorize_issued_model_call(
     else {
         return Err(io::Error::other("the fixture call must checkpoint").into());
     };
-    let AuthorizeModelCallOutcome::Authorized(authorized) =
-        calls.authorize_send(session, call).await?
+    let AuthorizeModelCallOutcome::Authorized {
+        call: authorized, ..
+    } = calls.authorize_send(session, call).await?
     else {
         return Err(io::Error::other("the fixture call must authorize send").into());
     };

@@ -6257,7 +6257,10 @@ pub trait AuthorizeModelCallTransaction {
 
 pub enum AuthorizeModelCallOutcome {
     NoSend,
-    Authorized(Box<AuthorizedModelCall>),
+    Authorized {
+        call: Box<AuthorizedModelCall>,
+        armed_user_overrides: Box<[ArmedUserOverride]>,
+    },
 }
 
 pub enum ModelCallAuthorizationReread {
