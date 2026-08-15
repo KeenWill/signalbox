@@ -215,18 +215,8 @@ CREATE TABLE turn_instruction_manifest (
         CHECK (
             eligibility_hash_algorithm = 'sha256_v1'
             AND octet_length(eligibility_hash) = 32
-            AND eligibility_hash = sha256(
-                convert_to('signalbox-instruction-eligibility-v1', 'UTF8')
-            )
             AND manifest_hash_algorithm = 'sha256_v1'
             AND octet_length(manifest_hash) = 32
-            AND manifest_hash = sha256(
-                convert_to('signalbox-turn-instruction-manifest-v1', 'UTF8')
-                || uuid_send(session_id)
-                || uuid_send(turn_id)
-                || eligibility_hash
-                || convert_to(boundary_kind, 'UTF8')
-            )
         ),
     CONSTRAINT turn_instruction_manifest_turn_fk
         FOREIGN KEY (turn_id, session_id)
@@ -383,6 +373,19 @@ BEGIN
         RAISE EXCEPTION 'turn instruction manifest requires a complete discovery'
             USING ERRCODE = '23514',
                   CONSTRAINT = 'turn_instruction_manifest_discovery_complete';
+    END IF;
+    IF NEW.eligibility_hash <> sha256(
+        convert_to('signalbox-instruction-eligibility-v1', 'UTF8')
+    ) OR NEW.manifest_hash <> sha256(
+        convert_to('signalbox-turn-instruction-manifest-v1', 'UTF8')
+        || uuid_send(NEW.session_id)
+        || uuid_send(NEW.turn_id)
+        || NEW.eligibility_hash
+        || convert_to(NEW.boundary_kind, 'UTF8')
+    ) THEN
+        RAISE EXCEPTION 'turn instruction manifest hashes are not canonical'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'turn_instruction_manifest_hash_shape';
     END IF;
     RETURN NEW;
 END;
