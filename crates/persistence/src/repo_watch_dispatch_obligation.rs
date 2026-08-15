@@ -8,7 +8,11 @@ use signalbox_domain::{
 };
 use sqlx::{Postgres, Row, Transaction, types::Uuid};
 
-use crate::mapping::{repo_watch_singleton_scope_from_str, repo_watch_singleton_scope_to_str};
+use crate::mapping::{
+    RepoWatchObligationSettlementStorageKind, repo_watch_obligation_settlement_from_str,
+    repo_watch_obligation_settlement_to_str, repo_watch_singleton_scope_from_str,
+    repo_watch_singleton_scope_to_str,
+};
 use crate::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError, StoredSingletonKey,
     stored_rule_version,
@@ -273,14 +277,14 @@ pub(crate) async fn load_obligation_admission(
     let Some(settled_kind) = settled_kind else {
         return Ok(ObligationAdmission::Pending);
     };
-    match settled_kind.as_str() {
-        "deactivated" => Ok(ObligationAdmission::Settled(
-            RepoWatchRuleEvaluationOutcome::Inactive,
-        )),
-        "target_closed" => Ok(ObligationAdmission::Settled(
-            RepoWatchRuleEvaluationOutcome::TargetClosed,
-        )),
-        "dispatched" => {
+    match repo_watch_obligation_settlement_from_str(&settled_kind) {
+        Some(RepoWatchObligationSettlementStorageKind::Deactivated) => Ok(
+            ObligationAdmission::Settled(RepoWatchRuleEvaluationOutcome::Inactive),
+        ),
+        Some(RepoWatchObligationSettlementStorageKind::TargetClosed) => Ok(
+            ObligationAdmission::Settled(RepoWatchRuleEvaluationOutcome::TargetClosed),
+        ),
+        Some(RepoWatchObligationSettlementStorageKind::Dispatched) => {
             let dispatch_id: Uuid = row.try_get("settled_dispatch_id")?;
             let sessions = sqlx::query_scalar(
                 "SELECT session_id
@@ -306,7 +310,7 @@ pub(crate) async fn load_obligation_admission(
                 },
             ))
         }
-        _ => Err(RepoWatchDispatchRepositoryError::Corruption(
+        None => Err(RepoWatchDispatchRepositoryError::Corruption(
             "repository-watch obligation settlement is unsupported",
         )),
     }
@@ -319,7 +323,7 @@ pub(crate) async fn settle_target_closed_obligation(
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
     let affected = sqlx::query(
         "UPDATE repo_watch_dispatch_obligation
-            SET settled_kind = 'target_closed',
+            SET settled_kind = $3,
                 settled_at = clock_timestamp()
           WHERE obligation_id = $1
             AND latest_event_id = $2
@@ -327,6 +331,9 @@ pub(crate) async fn settle_target_closed_obligation(
     )
     .bind(obligation)
     .bind(event.as_uuid())
+    .bind(repo_watch_obligation_settlement_to_str(
+        RepoWatchObligationSettlementStorageKind::TargetClosed,
+    ))
     .execute(&mut **transaction)
     .await?
     .rows_affected();
@@ -345,7 +352,7 @@ pub(crate) async fn settle_terminal_target_obligations(
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
     sqlx::query(
         "UPDATE repo_watch_dispatch_obligation AS obligation
-            SET settled_kind = 'target_closed',
+            SET settled_kind = $3,
                 settled_at = clock_timestamp()
            FROM repo_watch_event AS event
           WHERE obligation.latest_event_id = event.event_id
@@ -355,6 +362,9 @@ pub(crate) async fn settle_terminal_target_obligations(
     )
     .bind(repository.as_str())
     .bind(pull_request)
+    .bind(repo_watch_obligation_settlement_to_str(
+        RepoWatchObligationSettlementStorageKind::TargetClosed,
+    ))
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -368,7 +378,7 @@ pub(crate) async fn settle_dispatch_obligation(
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
     let affected = sqlx::query(
         "UPDATE repo_watch_dispatch_obligation
-            SET settled_kind = 'dispatched',
+            SET settled_kind = $4,
                 settled_dispatch_id = $3,
                 settled_at = clock_timestamp()
           WHERE obligation_id = $1
@@ -378,6 +388,9 @@ pub(crate) async fn settle_dispatch_obligation(
     .bind(obligation)
     .bind(event.as_uuid())
     .bind(dispatch.as_uuid())
+    .bind(repo_watch_obligation_settlement_to_str(
+        RepoWatchObligationSettlementStorageKind::Dispatched,
+    ))
     .execute(&mut **transaction)
     .await?
     .rows_affected();

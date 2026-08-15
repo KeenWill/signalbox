@@ -23,7 +23,9 @@ use crate::{
     commit_failure_is_ambiguous,
     create_session::insert_fresh_prepared,
     mapping::{
-        RepoWatchSingletonScopeStorageKind, repo_watch_singleton_scope_to_str, session_id_to_uuid,
+        RepoWatchEvaluationOutcomeStorageKind, RepoWatchSingletonScopeStorageKind,
+        repo_watch_evaluation_outcome_from_str, repo_watch_evaluation_outcome_to_str,
+        repo_watch_singleton_scope_to_str, session_id_to_uuid,
     },
 };
 
@@ -544,8 +546,13 @@ impl PostgresRepoWatchDispatchStore {
                 rule_version,
             } => match admission {
                 EvaluationAdmission::Fresh => {
-                    self.record_simple_outcome(&event, &rule_id, rule_version, "not_matched")
-                        .await
+                    self.record_simple_outcome(
+                        &event,
+                        &rule_id,
+                        rule_version,
+                        RepoWatchEvaluationOutcomeStorageKind::NotMatched,
+                    )
+                    .await
                 }
                 EvaluationAdmission::Obligation(_) => {
                     Err(RepoWatchDispatchRepositoryError::Corruption(
@@ -637,7 +644,7 @@ impl PostgresRepoWatchDispatchStore {
                                 &event,
                                 &rule_id,
                                 rule_version,
-                                "target_closed",
+                                RepoWatchEvaluationOutcomeStorageKind::TargetClosed,
                                 None,
                             )
                             .await?;
@@ -668,7 +675,7 @@ impl PostgresRepoWatchDispatchStore {
                         &event,
                         &rule_id,
                         rule_version,
-                        "coalesced",
+                        RepoWatchEvaluationOutcomeStorageKind::Coalesced,
                         None,
                     )
                     .await?;
@@ -694,7 +701,7 @@ impl PostgresRepoWatchDispatchStore {
                             &event,
                             &rule_id,
                             rule_version,
-                            "occupied",
+                            RepoWatchEvaluationOutcomeStorageKind::Occupied,
                             None,
                         )
                         .await?;
@@ -723,7 +730,7 @@ impl PostgresRepoWatchDispatchStore {
                             &event,
                             &rule_id,
                             rule_version,
-                            "cooldown",
+                            RepoWatchEvaluationOutcomeStorageKind::Cooldown,
                             None,
                         )
                         .await?;
@@ -872,7 +879,7 @@ impl PostgresRepoWatchDispatchStore {
                             &event,
                             &rule_id,
                             rule_version,
-                            "dispatched",
+                            RepoWatchEvaluationOutcomeStorageKind::Dispatched,
                             Some(dispatch_id),
                         )
                         .await?;
@@ -926,7 +933,7 @@ impl PostgresRepoWatchDispatchStore {
         event: &RepoWatchEvent,
         rule_id: &RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
-        outcome: &'static str,
+        outcome: RepoWatchEvaluationOutcomeStorageKind,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, event.repository().as_str()).await?;
@@ -1093,7 +1100,7 @@ async fn insert_evaluation(
     event: &RepoWatchEvent,
     rule_id: &RepoWatchRuleId,
     rule_version: RepoWatchRuleVersion,
-    outcome: &'static str,
+    outcome: RepoWatchEvaluationOutcomeStorageKind,
     dispatch: Option<RepoWatchDispatchId>,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
     let affected = sqlx::query(
@@ -1111,7 +1118,7 @@ async fn insert_evaluation(
     .bind(i64::try_from(rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(outcome)
+    .bind(repo_watch_evaluation_outcome_to_str(outcome))
     .bind(dispatch.map(|value| *value.as_uuid()))
     .bind(event.repository().as_str())
     .execute(&mut **transaction)
@@ -1153,12 +1160,21 @@ async fn load_recorded_evaluation(
         return Ok(None);
     };
     let outcome: String = first.try_get("outcome_kind")?;
-    match outcome.as_str() {
-        "not_matched" => Ok(Some(RepoWatchRuleEvaluationOutcome::NotMatched)),
-        "target_closed" => Ok(Some(RepoWatchRuleEvaluationOutcome::TargetClosed)),
-        "occupied" | "coalesced" => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
-        "cooldown" => Ok(Some(RepoWatchRuleEvaluationOutcome::Cooldown)),
-        "dispatched" => {
+    match repo_watch_evaluation_outcome_from_str(&outcome) {
+        Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::NotMatched))
+        }
+        Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::TargetClosed))
+        }
+        Some(
+            RepoWatchEvaluationOutcomeStorageKind::Occupied
+            | RepoWatchEvaluationOutcomeStorageKind::Coalesced,
+        ) => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
+        Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::Cooldown))
+        }
+        Some(RepoWatchEvaluationOutcomeStorageKind::Dispatched) => {
             let dispatch_id: Uuid = first.try_get("dispatch_id")?;
             let sessions = row
                 .iter()
@@ -1174,7 +1190,7 @@ async fn load_recorded_evaluation(
                 sessions: sessions.into_boxed_slice(),
             }))
         }
-        _ => Err(RepoWatchDispatchRepositoryError::Corruption(
+        None => Err(RepoWatchDispatchRepositoryError::Corruption(
             "evaluation outcome is unsupported",
         )),
     }
