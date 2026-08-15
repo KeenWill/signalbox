@@ -110,6 +110,7 @@ query RepositoryWatchConvergence(
     pullRequest(number: $number) {
       headRefOid
       baseRefName
+      baseRefOid
       mergeable
       reviewDecision
       commits(last: 1) {
@@ -593,13 +594,14 @@ impl RepositoryWatchTask {
         .map_err(|_| RepositoryWatchAttemptError::Differ)?;
         let outcome = self
             .store
-            .commit(
+            .commit_with_convergence(
                 &self.repository,
                 RepoWatchCommitRequest::new(
                     cursor_generation,
                     RepoWatchCursorCandidate::new(polled.observation),
                     events,
                 ),
+                &polled.convergence,
             )
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
@@ -607,14 +609,6 @@ impl RepositoryWatchTask {
             RepoWatchCommitOutcome::Committed(cursor)
             | RepoWatchCommitOutcome::Replayed(cursor)
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
-                self.store
-                    .record_convergence_assessments(
-                        &self.repository,
-                        cursor.generation(),
-                        &polled.convergence,
-                    )
-                    .await
-                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                 self.reconcile_pending_stale_review_clearances().await?;
                 let planned_clearances = self
                     .store
@@ -1171,6 +1165,7 @@ struct FetchedPullRequest {
 }
 
 struct FetchedConvergenceEvidence {
+    base_revision: CommitSha,
     review_decision: RepoWatchReviewDecision,
     gating_check_count: u64,
     non_green_gating_checks: Vec<CheckRunName>,
@@ -1185,6 +1180,7 @@ impl FetchedConvergenceEvidence {
             number: state.context().number(),
             head_sha: state.context().head_sha().clone(),
             base_branch: state.context().base_branch().clone(),
+            base_revision: self.base_revision,
             mergeable_state: state.mergeable_state(),
             review_decision: self.review_decision,
             unresolved_threads: state
@@ -1903,6 +1899,7 @@ impl GitHubRepositoryPoller {
         let mut gating_check_count = 0_u64;
         let mut non_green_gating_checks = Vec::new();
         let mut retained_review_decision = None;
+        let mut retained_base_revision = None;
         loop {
             let body = serde_json::to_vec(&GraphQlRequest {
                 query: CONVERGENCE_QUERY,
@@ -1934,6 +1931,12 @@ impl GitHubRepositoryPoller {
             if pull_request.head_ref_oid != context.head_sha().as_str()
                 || pull_request.base_ref_name != context.base_branch().as_str()
                 || provider_mergeable_state != mergeable_state
+            {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            if retained_base_revision
+                .replace(pull_request.base_ref_oid.clone())
+                .is_some_and(|retained| retained != pull_request.base_ref_oid)
             {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
             }
@@ -1982,6 +1985,10 @@ impl GitHubRepositoryPoller {
             page = next_page(page)?;
         }
         Ok(FetchedConvergenceEvidence {
+            base_revision: CommitSha::try_new(
+                retained_base_revision.ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+            )
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
             review_decision: retained_review_decision
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
             gating_check_count,
@@ -3416,6 +3423,8 @@ struct ConvergencePullRequest {
     head_ref_oid: String,
     #[serde(rename = "baseRefName")]
     base_ref_name: String,
+    #[serde(rename = "baseRefOid")]
+    base_ref_oid: String,
     mergeable: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
@@ -4102,6 +4111,7 @@ mod tests {
                     "pullRequest": {
                         "headRefOid": HEAD_SHA,
                         "baseRefName": BASE_BRANCH,
+                        "baseRefOid": BASE_SHA,
                         "mergeable": mergeable,
                         "reviewDecision": "APPROVED",
                         "commits": {
@@ -4953,6 +4963,7 @@ mod tests {
                     "pullRequest": {
                         "headRefOid": head_sha,
                         "baseRefName": BASE_BRANCH,
+                        "baseRefOid": BASE_SHA,
                         "mergeable": "MERGEABLE",
                         "reviewDecision": null,
                         "commits": {
@@ -5332,6 +5343,8 @@ mod tests {
                 .expect("fixture head is canonical"),
             base_branch: BranchName::try_new(String::from(BASE_BRANCH))
                 .expect("fixture base branch is canonical"),
+            base_revision: CommitSha::try_new(String::from(BASE_SHA))
+                .expect("fixture base revision is canonical"),
             mergeable_state: MergeableState::Mergeable,
             review_decision: RepoWatchReviewDecision::ChangesRequested,
             unresolved_threads: Vec::new(),
