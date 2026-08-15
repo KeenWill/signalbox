@@ -24,6 +24,13 @@ if [ -z "$process_name" ] || [ "${#process_name}" -gt 15 ]; then
 	exit 2
 fi
 
+case "$process_name" in
+	*[!A-Za-z0-9_-]*)
+		echo "supervise-lifecycle: process-name must contain only letters, digits, underscores, and hyphens" >&2
+		exit 2
+		;;
+esac
+
 case "$poll_seconds" in
 	'' | *[!0-9]*)
 		echo "supervise-lifecycle: poll-seconds must be a positive integer" >&2
