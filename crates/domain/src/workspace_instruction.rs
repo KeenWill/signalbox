@@ -143,6 +143,7 @@ impl InstructionPath {
 pub struct InstructionSourcePath {
     root_path: InstructionPath,
     relative_leaf: Arc<RelativePathNode>,
+    identity_hash: InstructionDigest,
 }
 
 impl InstructionSourcePath {
@@ -191,9 +192,11 @@ impl InstructionSourcePath {
         let Some(relative_leaf) = interner.intern(&root_path, relative_path) else {
             return Err(InstructionPathError::NotCanonical);
         };
+        let identity_hash = InstructionDigest::sha256(value.as_bytes());
         Ok(Self {
             root_path,
             relative_leaf,
+            identity_hash,
         })
     }
 
@@ -225,7 +228,10 @@ impl InstructionSourcePath {
 
 impl PartialEq for InstructionSourcePath {
     fn eq(&self, other: &Self) -> bool {
-        self.absolute_path() == other.absolute_path()
+        (Arc::ptr_eq(&self.relative_leaf, &other.relative_leaf)
+            && self.root_path == other.root_path)
+            || (self.identity_hash == other.identity_hash
+                && self.absolute_path() == other.absolute_path())
     }
 }
 
@@ -245,7 +251,7 @@ impl Ord for InstructionSourcePath {
 
 impl Hash for InstructionSourcePath {
     fn hash<State: Hasher>(&self, state: &mut State) {
-        self.absolute_path().hash(state);
+        self.identity_hash.hash(state);
     }
 }
 
@@ -427,12 +433,19 @@ impl InstructionBundleRegistration {
                 source.file_name().is_some_and(|name| name == "AGENTS.md")
             }
             (InstructionBundleKind::AgentSkill, Some(metadata)) => {
-                source.file_name().is_some_and(|name| name == "SKILL.md")
-                    && source
-                        .parent()
-                        .and_then(Path::file_name)
+                let nested_skill = source
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == metadata.name());
+                let configured_root_skill = root_kind == InstructionDiscoveryRootKind::Configured
+                    && source == Path::new("SKILL.md")
+                    && Path::new(root_path.as_str())
+                        .file_name()
                         .and_then(|name| name.to_str())
-                        .is_some_and(|name| name == metadata.name())
+                        .is_some_and(|name| name == metadata.name());
+                source.file_name().is_some_and(|name| name == "SKILL.md")
+                    && (nested_skill || configured_root_skill)
             }
             _ => false,
         };
@@ -562,7 +575,7 @@ impl TurnInstructionManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::HashSet;
 
     fn identity<T>(value: u128, constructor: impl FnOnce(uuid::Uuid) -> T) -> T {
         constructor(uuid::Uuid::from_u128(value))
@@ -622,6 +635,27 @@ mod tests {
         ));
 
         assert!(registration.is_none());
+    }
+
+    #[test]
+    fn configured_root_may_name_one_skill_bundle() {
+        let root_path = InstructionPath::try_new(String::from("/workspace/review"))
+            .expect("fixture root is valid");
+        let registration = InstructionBundleRegistration::new(InstructionBundleRegistrationInput {
+            kind: InstructionBundleKind::AgentSkill,
+            root_kind: InstructionDiscoveryRootKind::Configured,
+            root_path: root_path.clone(),
+            source_path: InstructionSourcePath::try_new(
+                root_path,
+                String::from("/workspace/review/SKILL.md"),
+            )
+            .expect("fixture source is valid"),
+            source_bytes: 1,
+            source_hash: InstructionDigest::sha256(b"fixture"),
+            skill: Some(review_skill()),
+        });
+
+        assert!(registration.is_some());
     }
 
     #[test]
@@ -722,7 +756,7 @@ mod tests {
             InstructionSourcePath::try_new(nested_root, String::from("/workspace/sub/AGENTS.md"))
                 .expect("nested source is valid");
 
-        let distinct_sources = BTreeSet::from([from_workspace, from_nested]);
+        let distinct_sources = HashSet::from([from_workspace, from_nested]);
 
         assert_eq!(distinct_sources.len(), 1);
     }
