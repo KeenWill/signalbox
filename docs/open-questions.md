@@ -501,6 +501,13 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
+- **External approval-judge corpus adaptation.** Whether and how to adapt public
+  agent-safety datasets such as R-Judge, AgentHarm, and ToolEmu into the
+  approval-judge case schema remains undecided. A future mapping must select and
+  pin source revisions, establish each dataset's label mapping and trajectory
+  treatment, and verify license terms before redistribution; source content is
+  not vendored. Blocks only external-corpus evaluation, not the synthetic corpus
+  or eval harness.
 - **Turn-origin instructions in the approval-judge request.** The delegated
   request context carries session-scoped authority — the goal generation the
   judged turn is bound to, the template name, and the system prompt frozen for
