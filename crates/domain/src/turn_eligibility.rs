@@ -4648,7 +4648,7 @@ fn reconstitute_inner(
             );
         }
     }
-    let mut consumed_inputs = BTreeSet::new();
+    let mut consumed_inputs = BTreeMap::new();
     let mut consumed_by_call = BTreeMap::<
         crate::ModelCallId,
         Vec<(
@@ -4666,7 +4666,7 @@ fn reconstitute_inner(
                 },
             );
         }
-        if !consumed_inputs.insert(accepted_input) {
+        if consumed_inputs.contains_key(&accepted_input) {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::DuplicateConsumedSteering {
                     accepted_input,
@@ -4689,6 +4689,7 @@ fn reconstitute_inner(
                 },
             );
         };
+        consumed_inputs.insert(accepted_input, *call);
         let source_record = records_by_turn.get(&consumed.source_turn).copied();
         let source_record_matches = source_record.is_some_and(|record| {
             !matches!(record.state, AcceptedInputTurnSchedulingRecordState::Queued)
@@ -4929,7 +4930,7 @@ fn reconstitute_inner(
                 },
             );
         }
-        if !consumed_inputs.insert(accepted_input) {
+        if consumed_inputs.contains_key(&accepted_input) {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::DuplicateConsumedSteering {
                     accepted_input,
@@ -4943,10 +4944,17 @@ fn reconstitute_inner(
                 },
             );
         };
-        if !matches!(
-            consumed.accepted_input.disposition(),
-            AcceptedInputDisposition::ConsumedAsSteering { .. }
-        ) || semantic_source_turn != consumed.source_turn
+        let AcceptedInputDisposition::ConsumedAsSteering { call } =
+            consumed.accepted_input.disposition()
+        else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input,
+                },
+            );
+        };
+        consumed_inputs.insert(accepted_input, *call);
+        if semantic_source_turn != consumed.source_turn
             || accepted_input_turns.contains_key(&accepted_input)
             || records_by_turn.contains_key(&consumed.source_turn)
         {
@@ -6862,7 +6870,7 @@ fn promote_external_interrupt_chains(
 struct ActiveAcceptanceTailReconstitutionEvidence<'a, 'record> {
     records_by_turn: &'a BTreeMap<TurnId, &'record AcceptedInputTurnSchedulingRecord>,
     accepted_input_turns: &'a BTreeMap<AcceptedInputId, TurnId>,
-    consumed_inputs: &'a BTreeSet<AcceptedInputId>,
+    consumed_inputs: &'a BTreeMap<AcceptedInputId, crate::ModelCallId>,
     preceding_non_accepted_terminals: &'a BTreeSet<TurnId>,
     execution_position_by_turn: &'a BTreeMap<TurnId, usize>,
 }
@@ -7054,7 +7062,7 @@ fn reconstitute_active_acceptance_tail(
                                     && expected_active_turn == active
                             )
                     }
-                    AcceptedInputDisposition::ConsumedAsSteering { .. } => {
+                    AcceptedInputDisposition::ConsumedAsSteering { call } => {
                         let source_precedes_active = matches!(
                             entry.delivery,
                             DeliveryRequest::NextSafePoint {
@@ -7071,7 +7079,7 @@ fn reconstitute_active_acceptance_tail(
                             }) || preceding_non_accepted_terminals
                                 .contains(&expected_active_turn)
                         );
-                        consumed_inputs.contains(&accepted_input)
+                        consumed_inputs.get(&accepted_input) == Some(call)
                             && !pending_steering_seen
                             && !accepted_input_turns.contains_key(&accepted_input)
                             && !origin_by_position.contains_key(&entry.position)
@@ -12876,9 +12884,9 @@ mod tests {
             ActiveAcceptanceTailReconstitutionEvidence {
                 records_by_turn: &records,
                 accepted_input_turns: &accepted_input_turns,
-                consumed_inputs: &BTreeSet::from([
-                    predecessor_consumed.accepted_input(),
-                    active_consumed.accepted_input(),
+                consumed_inputs: &BTreeMap::from([
+                    (predecessor_consumed.accepted_input(), model_call_id(74)),
+                    (active_consumed.accepted_input(), model_call_id(75)),
                 ]),
                 preceding_non_accepted_terminals: &BTreeSet::new(),
                 execution_position_by_turn: &execution_position_by_turn,
@@ -12895,6 +12903,44 @@ mod tests {
             active_consumed.accepted_input()
         );
         assert_eq!(consumed[0].source_turn(), active.turn());
+
+        let mut cross_wired_tail = tail_input.clone();
+        cross_wired_tail.entries[1] = SessionAcceptanceTailEntryReconstitutionInput::new(
+            session.id(),
+            AcceptedInputLifecycle::new(
+                predecessor_consumed.accepted_input(),
+                AcceptedInputDisposition::ConsumedAsSteering {
+                    call: model_call_id(76),
+                },
+            ),
+            predecessor_consumed.position(),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: predecessor.turn(),
+            },
+        );
+        let failure = reconstitute_active_acceptance_tail(
+            session.id(),
+            Some(active.turn()),
+            Some(&cross_wired_tail),
+            ActiveAcceptanceTailReconstitutionEvidence {
+                records_by_turn: &records,
+                accepted_input_turns: &accepted_input_turns,
+                consumed_inputs: &BTreeMap::from([
+                    (predecessor_consumed.accepted_input(), model_call_id(74)),
+                    (active_consumed.accepted_input(), model_call_id(75)),
+                ]),
+                preceding_non_accepted_terminals: &BTreeSet::new(),
+                execution_position_by_turn: &execution_position_by_turn,
+            },
+        )
+        .expect_err("cross-wired historical steering must fail closed");
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: predecessor_consumed.accepted_input(),
+            }
+        );
     }
 
     /// S03 / INV-016: later-accepted interrupt work executes before the
