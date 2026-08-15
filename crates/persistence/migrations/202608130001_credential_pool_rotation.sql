@@ -328,6 +328,51 @@ BEGIN
             ON successor.successor_turn_attempt_id = call.turn_attempt_id
          WHERE call.model_call_id = checked_model_call_id
     ) THEN
+        -- A terminal availability successor with no later availability
+        -- successor may have yielded into the ordinary tool-round lifecycle.
+        -- Preserve the availability lineage checks here, then delegate the
+        -- terminal lifecycle shape to the validator that owns tool rounds.
+        IF EXISTS (
+            SELECT 1
+              FROM model_call AS call
+              JOIN credential_pool_availability_successor AS successor
+                ON successor.successor_turn_attempt_id = call.turn_attempt_id
+              JOIN model_call AS predecessor
+                ON predecessor.model_call_id = successor.predecessor_model_call_id
+             WHERE call.model_call_id = checked_model_call_id
+               AND call.turn_id = predecessor.turn_id
+               AND call.session_id = predecessor.session_id
+               AND call.resolved_provider_model_identity_id =
+                   predecessor.resolved_provider_model_identity_id
+               AND ROW(
+                    call.selection_kind,
+                    call.direct_model_selection_id,
+                    call.frozen_model_alias_id,
+                    call.frozen_alias_selected_direct_id
+               ) IS NOT DISTINCT FROM ROW(
+                    predecessor.selection_kind,
+                    predecessor.direct_model_selection_id,
+                    predecessor.frozen_model_alias_id,
+                    predecessor.frozen_alias_selected_direct_id
+               )
+               AND call.state_kind = 'terminal'
+               AND EXISTS (
+                    SELECT 1
+                      FROM tool_round AS round
+                     WHERE round.producing_model_call_id = call.model_call_id
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM credential_pool_availability_successor AS later
+                     WHERE later.predecessor_model_call_id = call.model_call_id
+               )
+        ) THEN
+            PERFORM assert_model_call_final_state_before_credential_pools(
+                checked_model_call_id
+            );
+            RETURN;
+        END IF;
+
         IF NOT EXISTS (
             SELECT 1
               FROM model_call AS call
