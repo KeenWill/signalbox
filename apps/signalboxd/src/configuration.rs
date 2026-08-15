@@ -6965,10 +6965,14 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn configuration_defaults_instruction_roots_to_empty_and_rejects_relative_roots() {
+    fn configuration_defaults_instruction_roots_to_empty() {
         let configuration = HubModelConfiguration::parse(CONFIGURATION)
             .expect("the base fixture omits explicit instruction roots");
         assert!(configuration.workspace_instructions().roots().is_empty());
+    }
+
+    #[test]
+    fn configuration_rejects_relative_instruction_roots() {
         let relative = format!(
             "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = [\"relative/root\"]\n"
         );
