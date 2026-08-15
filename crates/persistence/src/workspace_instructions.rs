@@ -460,28 +460,6 @@ impl WorkspaceInstructionRepository {
             .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("source byte count"))?;
         let elapsed_millis = i64::try_from(snapshot.elapsed_millis())
             .map_err(|_| WorkspaceInstructionRepositoryError::Corruption("elapsed time"))?;
-        sqlx::query(
-            "INSERT INTO instruction_discovery
-                (instruction_discovery_id, session_id, turn_id,
-                 limit_set_version, classified_entry_count, finding_count,
-                 candidate_source_byte_count, elapsed_millis, scan_complete)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
-        .bind(discovery.into_uuid())
-        .bind(manifest.session().into_uuid())
-        .bind(manifest.turn().into_uuid())
-        .bind(
-            i16::try_from(snapshot.limit_set_version()).map_err(|_| {
-                WorkspaceInstructionRepositoryError::Corruption("limit set version")
-            })?,
-        )
-        .bind(classified_entries)
-        .bind(finding_count)
-        .bind(candidate_source_bytes)
-        .bind(elapsed_millis)
-        .bind(snapshot.is_complete())
-        .execute(&mut *connection)
-        .await?;
         for (index, root) in snapshot.roots().iter().enumerate() {
             sqlx::query(
                 "INSERT INTO instruction_discovery_root
@@ -559,6 +537,28 @@ impl WorkspaceInstructionRepository {
             .execute(&mut *connection)
             .await?;
         }
+        sqlx::query(
+            "INSERT INTO instruction_discovery
+                (instruction_discovery_id, session_id, turn_id,
+                 limit_set_version, classified_entry_count, finding_count,
+                 candidate_source_byte_count, elapsed_millis, scan_complete)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(discovery.into_uuid())
+        .bind(manifest.session().into_uuid())
+        .bind(manifest.turn().into_uuid())
+        .bind(
+            i16::try_from(snapshot.limit_set_version()).map_err(|_| {
+                WorkspaceInstructionRepositoryError::Corruption("limit set version")
+            })?,
+        )
+        .bind(classified_entries)
+        .bind(finding_count)
+        .bind(candidate_source_bytes)
+        .bind(elapsed_millis)
+        .bind(snapshot.is_complete())
+        .execute(&mut *connection)
+        .await?;
         if !snapshot.is_complete() {
             return Ok(RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete);
         }
@@ -681,8 +681,9 @@ async fn load_manifest(
     turn: TurnId,
 ) -> Result<Option<(TurnInstructionManifest, bool)>, WorkspaceInstructionRepositoryError> {
     let row = sqlx::query(
-        "SELECT m.turn_instruction_manifest_id, m.eligibility_hash, m.manifest_hash,
-                d.scan_complete
+        "SELECT m.turn_instruction_manifest_id,
+                m.eligibility_hash_algorithm, m.eligibility_hash,
+                m.manifest_hash_algorithm, m.manifest_hash, d.scan_complete
            FROM turn_instruction_manifest AS m
            JOIN instruction_discovery AS d
              ON d.instruction_discovery_id = m.instruction_discovery_id
@@ -698,6 +699,13 @@ async fn load_manifest(
         return Ok(None);
     };
     let id = TurnInstructionManifestId::from_uuid(row.try_get("turn_instruction_manifest_id")?);
+    if row.try_get::<String, _>("eligibility_hash_algorithm")? != "sha256_v1"
+        || row.try_get::<String, _>("manifest_hash_algorithm")? != "sha256_v1"
+    {
+        return Err(WorkspaceInstructionRepositoryError::Corruption(
+            "manifest hash algorithm",
+        ));
+    }
     let eligibility_hash = digest(row.try_get("eligibility_hash")?)?;
     let manifest_hash = digest(row.try_get("manifest_hash")?)?;
     let manifest = TurnInstructionManifest::reconstitute_empty_turn_start(

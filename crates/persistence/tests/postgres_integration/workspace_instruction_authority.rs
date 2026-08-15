@@ -248,3 +248,43 @@ async fn inv061_registered_source_path_retains_its_independent_relative_budget()
     drop(container);
     Ok(())
 }
+
+/// INV-061: the registered source path prefix is measured in characters, so a
+/// non-ASCII root still admits its direct descendants.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_registered_source_path_accepts_a_unicode_root() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let root_path = "/workspace/资料";
+    let source_path = "/workspace/资料/AGENTS.md";
+    let bundle = Uuid::from_u128(0x6851);
+
+    sqlx::query(
+        "INSERT INTO registered_instruction_bundle
+            (instruction_bundle_id, root_kind, root_path, source_path,
+             bundle_kind, skill_name, skill_description, source_byte_length,
+             source_hash_algorithm, source_hash)
+         VALUES ($1, 'configured', $2, $3, 'agent_document', NULL, NULL,
+                 1, 'sha256_v1', $4)",
+    )
+    .bind(bundle)
+    .bind(root_path)
+    .bind(source_path)
+    .bind([0_u8; 32].as_slice())
+    .execute(&pool)
+    .await?;
+    let persisted: String = sqlx::query_scalar(
+        "SELECT source_path
+           FROM registered_instruction_bundle
+          WHERE instruction_bundle_id = $1",
+    )
+    .bind(bundle)
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(persisted, source_path);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
