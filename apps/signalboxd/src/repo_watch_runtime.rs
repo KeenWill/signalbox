@@ -432,14 +432,30 @@ impl RepositoryWatchTask {
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
-        while self
-            .dispatch_store
-            .process_next_convergence_cutoff(&self.repository, || {
-                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
-            })
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
-        {}
+        loop {
+            match self
+                .dispatch_store
+                .process_next_convergence_cutoff(&self.repository, || {
+                    DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
+                )) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_convergence_cutoff_corruption",
+                        error = %error,
+                        "repository-watch convergence cutoff quarantined a corrupt goal; dispatch processing continues"
+                    );
+                    continue;
+                }
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
+        }
         Ok(())
     }
 

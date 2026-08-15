@@ -1430,6 +1430,42 @@ async fn converged_head_releases_singleton_after_ending_commission() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn convergence_cutoff_preserves_progress_after_corrupt_goal() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    corrupt_goal_generation(&fixture.pool, fixture.session(0)).await?;
+    record_merge_ready_head(&fixture, 0x54_400, FIRST_HEAD).await?;
+
+    let error = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_410))
+        })
+        .await
+        .expect_err("corrupt goal is reported after committing cutoff progress");
+    let replayed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_420))
+        })
+        .await?;
+    let cutoff_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_convergence_cutoff")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert!(matches!(
+        error,
+        RepoWatchDispatchRepositoryError::GoalCutoff(
+            signalbox_persistence::goal::GoalRepositoryError::Corruption(_)
+        )
+    ));
+    assert!(!replayed);
+    assert_eq!(cutoff_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn equal_current_convergence_evidence_is_idempotent() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     record_merge_ready_head(&fixture, 0x54_500, FIRST_HEAD).await?;
