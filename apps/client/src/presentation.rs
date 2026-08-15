@@ -1191,6 +1191,7 @@ impl<'a> Output<'a> {
                 occupying_dispatch_id,
                 occupying_session_ids,
                 cooldown_remaining_seconds,
+                cooldown_never_eligible,
                 ready,
             } => {
                 let repository = self.render_field(repository, TextField::DelimitedOnLine);
@@ -1213,10 +1214,14 @@ impl<'a> Output<'a> {
                         format!("{dispatch}:{sessions}")
                     },
                 );
-                let cooldown = cooldown_remaining_seconds.map_or_else(
-                    || String::from("none"),
-                    |seconds| duration_label(seconds.value()),
-                );
+                let cooldown = if *cooldown_never_eligible {
+                    String::from("never")
+                } else {
+                    cooldown_remaining_seconds.map_or_else(
+                        || String::from("none"),
+                        |seconds| duration_label(seconds.value()),
+                    )
+                };
                 writeln!(
                     self.stdout,
                     "queued repository={repository} rule={rule_id}@{} singleton={singleton} \
@@ -3489,14 +3494,16 @@ mod tests {
         DescendantTerminationScope, ErrorCode, ErrorDetail, FailedModelCallDisposition,
         FailedTerminalModelCall, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-        ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-        ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass, RunnerConnectionHealth,
-        RunnerCredentialProfileName, RunnerPlacementRevision, RunnerProjection,
-        RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
-        RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage, SessionEvent,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
-        TurnState, UsageProvenance,
+        ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, OperatorStatusConvergenceSeal,
+        OperatorStatusConvergenceVerdict, OperatorStatusHeldSlotBlocker,
+        OperatorStatusMergeableState, OperatorStatusReviewDecision, OperatorStatusSingletonScope,
+        ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass,
+        RunnerConnectionHealth, RunnerCredentialProfileName, RunnerPlacementRevision,
+        RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey,
+        RunnerSandboxProfile, RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage,
+        SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry,
+        TranscriptTextEntry, TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -3623,6 +3630,97 @@ mod tests {
             )
         );
         assert_eq!(stdout.flushes, 1);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn operator_status_renders_all_sections_and_explains_omitted_usage() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        output
+            .operator_status_counts(1, 1, 1, 1)
+            .expect("in-memory output cannot fail");
+        output
+            .operator_status_item(&ServerMessage::OperatorStatusHeldSlot {
+                dispatch_id: wire_uuid(1),
+                repository: String::from("owner/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                rule_id: String::from("review"),
+                rule_version: CanonicalU64::new(1),
+                singleton_scope: OperatorStatusSingletonScope::PullRequest,
+                singleton_repository: Some(String::from("owner/repo")),
+                singleton_pull_request_number: Some(CanonicalU64::new(41)),
+                singleton_stack_root_pull_request_number: None,
+                held_for_seconds: CanonicalU64::new(3_661),
+                session_ids: vec![wire_uuid(2)],
+                blockers: vec![OperatorStatusHeldSlotBlocker::PursuingGoal],
+            })
+            .expect("in-memory output cannot fail");
+        output
+            .operator_status_item(&ServerMessage::OperatorStatusQueuedObligation {
+                obligation_id: wire_uuid(3),
+                repository: String::from("owner/repo"),
+                rule_id: String::from("review"),
+                rule_version: CanonicalU64::new(1),
+                singleton_scope: OperatorStatusSingletonScope::Rule,
+                singleton_repository: None,
+                singleton_pull_request_number: None,
+                singleton_stack_root_pull_request_number: None,
+                first_event_id: wire_uuid(4),
+                latest_event_id: wire_uuid(5),
+                matched_event_count: CanonicalU64::new(3),
+                waiting_for_seconds: CanonicalU64::new(65),
+                occupying_dispatch_id: None,
+                occupying_session_ids: Vec::new(),
+                cooldown_remaining_seconds: Some(CanonicalU64::new(5)),
+                cooldown_never_eligible: false,
+                ready: false,
+            })
+            .expect("in-memory output cannot fail");
+        output
+            .operator_status_item(&ServerMessage::OperatorStatusPullRequestConvergence {
+                repository: String::from("owner/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                head_sha: String::from("1111111111111111111111111111111111111111"),
+                base_branch: String::from("main"),
+                base_revision: String::from("2222222222222222222222222222222222222222"),
+                mergeable_state: OperatorStatusMergeableState::Mergeable,
+                review_decision: OperatorStatusReviewDecision::Approved,
+                unresolved_thread_count: CanonicalU64::new(0),
+                gating_check_count: CanonicalU64::new(2),
+                non_green_gating_checks: Vec::new(),
+                verdict: OperatorStatusConvergenceVerdict::MergeReady,
+                seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                assessed_seconds_ago: CanonicalU64::new(9),
+            })
+            .expect("in-memory output cannot fail");
+        output
+            .operator_status_item(&ServerMessage::OperatorStatusPendingStaleReviewClearance {
+                repository: String::from("owner/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                current_head_sha: String::from("1111111111111111111111111111111111111111"),
+                review_node_id: String::from("PRR_node"),
+                reviewer: String::from("reviewer"),
+                reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
+                pending_for_seconds: CanonicalU64::new(8),
+            })
+            .expect("in-memory output cannot fail");
+        output
+            .operator_status_model_usage_omitted()
+            .expect("in-memory output cannot fail");
+        drop(output);
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            status held_slots=1 queued_obligations=1 pull_request_convergences=1 pending_stale_review_clearances=1
+            held repository=owner/repo pr=41 rule=review@1 singleton=pull_request:owner/repo#41 held=1h1m1s blockers=pursuing_goal sessions=00000000-0000-0000-0000-000000000002 dispatch=00000000-0000-0000-0000-000000000001
+            queued repository=owner/repo rule=review@1 singleton=rule waiting=1m5s matches=3 ready=false occupying=none cooldown=5s first_event=00000000-0000-0000-0000-000000000004 latest_event=00000000-0000-0000-0000-000000000005 obligation=00000000-0000-0000-0000-000000000003
+            convergence repository=owner/repo pr=41 verdict=merge_ready seal=merge_ready unresolved_threads=0 gating_checks=2 non_green=none mergeable=mergeable review=approved assessed_ago=9s head=1111111111111111111111111111111111111111 base=main@2222222222222222222222222222222222222222
+            stale_review_clearance repository=owner/repo pr=41 reviewer=reviewer pending=8s review=PRR_node reviewed_head=3333333333333333333333333333333333333333 current_head=1111111111111111111111111111111111111111
+            model_usage=omitted reason=no_cheap_status_aggregate
+        "#]]
+        .assert_eq(&rendered);
         assert!(stderr.is_empty());
     }
 
