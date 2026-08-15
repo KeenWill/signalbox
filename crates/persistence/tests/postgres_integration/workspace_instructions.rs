@@ -125,19 +125,39 @@ fn assert_append_only_rejection(result: Result<sqlx::postgres::PgQueryResult, sq
     assert_eq!(database.code().as_deref(), Some("23514"));
 }
 
-async fn assert_truncate_rejection(
-    pool: &PgPool,
-    statement: &'static str,
-) -> Result<(), Box<dyn Error>> {
-    let error = sqlx::query(statement)
-        .execute(pool)
-        .await
-        .expect_err("append-only evidence rejects truncation");
-    let database = error
-        .as_database_error()
-        .expect("truncate rejection is a database error");
-    assert_eq!(database.code().as_deref(), Some("23514"));
-    Ok(())
+#[track_caller]
+fn assert_truncate_rejection<'a>(
+    pool: &'a PgPool,
+    enable_target_trigger: &'static str,
+    truncate_target: &'static str,
+) -> impl std::future::Future<Output = Result<(), Box<dyn Error>>> + 'a {
+    let caller = std::panic::Location::caller();
+    async move {
+        let mut transaction = pool.begin().await?;
+        sqlx::query("SET LOCAL session_replication_role = 'replica'")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(enable_target_trigger)
+            .execute(&mut *transaction)
+            .await?;
+        let error = match sqlx::query(truncate_target)
+            .execute(&mut *transaction)
+            .await
+        {
+            Ok(_) => panic!("append-only evidence accepted truncation requested at {caller}"),
+            Err(error) => error,
+        };
+        transaction.rollback().await?;
+        let database = error.as_database_error().unwrap_or_else(|| {
+            panic!("truncate rejection requested at {caller} was not a database error")
+        });
+        assert_eq!(
+            database.code().as_deref(),
+            Some("23514"),
+            "truncate rejection requested at {caller} used the wrong SQLSTATE"
+        );
+        Ok(())
+    }
 }
 
 async fn queued_instruction_turn(
@@ -780,24 +800,42 @@ async fn inv061_turn_instruction_evidence_is_append_only() -> Result<(), Box<dyn
         )
     );
 
-    assert_truncate_rejection(&pool, "TRUNCATE TABLE instruction_discovery CASCADE").await?;
-    assert_truncate_rejection(&pool, "TRUNCATE TABLE instruction_discovery_root CASCADE").await?;
     assert_truncate_rejection(
         &pool,
+        "ALTER TABLE instruction_discovery ENABLE ALWAYS TRIGGER instruction_discovery_rejects_truncate",
+        "TRUNCATE TABLE instruction_discovery CASCADE",
+    )
+    .await?;
+    assert_truncate_rejection(
+        &pool,
+        "ALTER TABLE instruction_discovery_root ENABLE ALWAYS TRIGGER instruction_discovery_root_rejects_truncate",
+        "TRUNCATE TABLE instruction_discovery_root CASCADE",
+    )
+    .await?;
+    assert_truncate_rejection(
+        &pool,
+        "ALTER TABLE registered_instruction_bundle ENABLE ALWAYS TRIGGER registered_instruction_bundle_rejects_truncate",
         "TRUNCATE TABLE registered_instruction_bundle CASCADE",
     )
     .await?;
     assert_truncate_rejection(
         &pool,
+        "ALTER TABLE instruction_discovery_candidate ENABLE ALWAYS TRIGGER instruction_discovery_candidate_rejects_truncate",
         "TRUNCATE TABLE instruction_discovery_candidate CASCADE",
     )
     .await?;
     assert_truncate_rejection(
         &pool,
+        "ALTER TABLE instruction_discovery_finding ENABLE ALWAYS TRIGGER instruction_discovery_finding_rejects_truncate",
         "TRUNCATE TABLE instruction_discovery_finding CASCADE",
     )
     .await?;
-    assert_truncate_rejection(&pool, "TRUNCATE TABLE turn_instruction_manifest CASCADE").await?;
+    assert_truncate_rejection(
+        &pool,
+        "ALTER TABLE turn_instruction_manifest ENABLE ALWAYS TRIGGER turn_instruction_manifest_rejects_truncate",
+        "TRUNCATE TABLE turn_instruction_manifest CASCADE",
+    )
+    .await?;
 
     let discovery_update = sqlx::query(
         "UPDATE instruction_discovery SET elapsed_millis = elapsed_millis
