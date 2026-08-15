@@ -46,6 +46,24 @@ struct PersistedDiscoveryFinding {
     finding_kind: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct PersistedEvidenceCounts {
+    discovery_count: i64,
+    manifest_count: i64,
+    candidate_count: i64,
+    bundle_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct PersistedRollbackCounts {
+    discovery_count: i64,
+    root_count: i64,
+    candidate_count: i64,
+    bundle_count: i64,
+    finding_count: i64,
+    manifest_count: i64,
+}
+
 #[track_caller]
 fn assert_persisted_candidate(
     persisted: &PersistedCandidate,
@@ -344,6 +362,13 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
     .bind(discovery.into_uuid())
     .fetch_all(&pool)
     .await?;
+    let persisted_workspace_root = persisted_roots
+        .first()
+        .expect("the workspace discovery root is persisted");
+    let expected_workspace_root = snapshot
+        .roots()
+        .first()
+        .expect("the discovery contains the workspace root");
     let persisted_configured_root = persisted_roots
         .get(1)
         .expect("the configured discovery root is persisted");
@@ -352,6 +377,15 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
         .get(1)
         .expect("the discovery contains the configured root");
     assert_eq!(persisted_roots.len(), snapshot.roots().len());
+    assert_eq!(persisted_workspace_root.root_ordinal, 1);
+    assert_eq!(
+        persisted_workspace_root.root_kind,
+        persisted_root_kind(expected_workspace_root.kind())
+    );
+    assert_eq!(
+        persisted_workspace_root.root_path,
+        expected_workspace_root.path().as_str()
+    );
     assert_eq!(persisted_configured_root.root_ordinal, 2);
     assert_eq!(
         persisted_configured_root.root_kind,
@@ -534,18 +568,18 @@ async fn inv061_losing_complete_record_observes_the_winning_manifest() -> Result
             || losing_bundle,
         )
         .await?;
-    let evidence_counts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+    let evidence_counts = sqlx::query_as::<_, PersistedEvidenceCounts>(
         "SELECT
             (SELECT count(*) FROM instruction_discovery
-              WHERE session_id = $1 AND turn_id = $2),
+              WHERE session_id = $1 AND turn_id = $2) AS discovery_count,
             (SELECT count(*) FROM turn_instruction_manifest
-              WHERE session_id = $1 AND turn_id = $2),
+              WHERE session_id = $1 AND turn_id = $2) AS manifest_count,
             (SELECT count(*) FROM instruction_discovery_candidate AS candidate
               JOIN instruction_discovery AS discovery
                 ON discovery.instruction_discovery_id = candidate.instruction_discovery_id
-             WHERE discovery.session_id = $1 AND discovery.turn_id = $2),
+             WHERE discovery.session_id = $1 AND discovery.turn_id = $2) AS candidate_count,
             (SELECT count(*) FROM registered_instruction_bundle
-              WHERE root_path = $3)",
+              WHERE root_path = $3) AS bundle_count",
     )
     .bind(session.into_uuid())
     .bind(turn.into_uuid())
@@ -565,7 +599,95 @@ async fn inv061_losing_complete_record_observes_the_winning_manifest() -> Result
             winning_manifest_id,
         )
     );
-    assert_eq!(evidence_counts, (1, 1, 1, 1));
+    assert_eq!(evidence_counts.discovery_count, 1);
+    assert_eq!(evidence_counts.manifest_count, 1);
+    assert_eq!(evidence_counts.candidate_count, 1);
+    assert_eq!(evidence_counts.bundle_count, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: a failure after the recorder has inserted discovery, root, bundle,
+/// and candidate evidence rolls the entire attempted snapshot back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_mid_record_failure_rolls_back_all_instruction_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, turn) = active_instruction_turn(&pool, 0x6a00).await?;
+    let directory = tempfile::tempdir()?;
+    let root_path = directory.path().canonicalize()?;
+    std::fs::write(root_path.join("AGENTS.md"), "workspace rule\n")?;
+    std::fs::create_dir_all(root_path.join(".agents/skills/review"))?;
+    std::fs::write(
+        root_path.join(".agents/skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review one change\n---\nsteps\n",
+    )?;
+    std::fs::create_dir_all(root_path.join(".agents/skills/broken"))?;
+    std::fs::write(
+        root_path.join(".agents/skills/broken/SKILL.md"),
+        "missing frontmatter\n",
+    )?;
+    let root = signalbox_domain::InstructionPath::try_new(
+        root_path
+            .to_str()
+            .expect("temporary path is UTF-8")
+            .to_owned(),
+    )?;
+    let snapshot = signalbox_application::discover_workspace_instructions(vec![
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+            root,
+        ),
+    ]);
+    let discovery = signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6a10));
+    let manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6a11));
+    let duplicate_bundle =
+        signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6a12));
+    let result =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .record_turn_start(
+            discovery,
+            signalbox_domain::TurnInstructionManifest::empty_turn_start(manifest_id, session, turn),
+            &snapshot,
+            || duplicate_bundle,
+        )
+        .await;
+    let counts = sqlx::query_as::<_, PersistedRollbackCounts>(
+        "SELECT
+            (SELECT count(*) FROM instruction_discovery
+              WHERE instruction_discovery_id = $1) AS discovery_count,
+            (SELECT count(*) FROM instruction_discovery_root
+              WHERE instruction_discovery_id = $1) AS root_count,
+            (SELECT count(*) FROM instruction_discovery_candidate
+              WHERE instruction_discovery_id = $1) AS candidate_count,
+            (SELECT count(*) FROM registered_instruction_bundle
+              WHERE root_path = $2) AS bundle_count,
+            (SELECT count(*) FROM instruction_discovery_finding
+              WHERE instruction_discovery_id = $1) AS finding_count,
+            (SELECT count(*) FROM turn_instruction_manifest
+              WHERE turn_instruction_manifest_id = $3) AS manifest_count",
+    )
+    .bind(discovery.into_uuid())
+    .bind(snapshot.roots()[0].path().as_str())
+    .bind(manifest_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(snapshot.bundles().len(), 2);
+    assert_eq!(snapshot.findings().len(), 1);
+    assert!(result.is_err());
+    assert_eq!(counts.discovery_count, 0);
+    assert_eq!(counts.root_count, 0);
+    assert_eq!(counts.candidate_count, 0);
+    assert_eq!(counts.bundle_count, 0);
+    assert_eq!(counts.finding_count, 0);
+    assert_eq!(counts.manifest_count, 0);
 
     pool.close().await;
     drop(container);
@@ -864,6 +986,128 @@ async fn inv061_unchanged_source_reuses_its_registered_bundle() -> Result<(), Bo
         )
     );
     assert_eq!(second_candidate, registered_bundle.into_uuid());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: changing source bytes at a registered path creates a distinct
+/// retained registration while preserving the prior bundle identity.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_changed_source_creates_a_distinct_registered_bundle() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (first_session, first_turn) = active_instruction_turn(&pool, 0x6b00).await?;
+    let (second_session, second_turn) = active_instruction_turn(&pool, 0x6c00).await?;
+    let directory = tempfile::tempdir()?;
+    let root_path = directory.path().canonicalize()?;
+    let source_path = root_path.join("AGENTS.md");
+    std::fs::write(&source_path, "first workspace rule\n")?;
+    let root = signalbox_domain::InstructionPath::try_new(
+        root_path
+            .to_str()
+            .expect("temporary path is UTF-8")
+            .to_owned(),
+    )?;
+    let first_snapshot = signalbox_application::discover_workspace_instructions(vec![
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+            root.clone(),
+        ),
+    ]);
+    let repository =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        );
+    let first_discovery =
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6d10));
+    let first_manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6d11));
+    let first_bundle = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6d12));
+    let first_outcome = repository
+        .record_turn_start(
+            first_discovery,
+            signalbox_domain::TurnInstructionManifest::empty_turn_start(
+                first_manifest_id,
+                first_session,
+                first_turn,
+            ),
+            &first_snapshot,
+            || first_bundle,
+        )
+        .await?;
+
+    std::fs::write(&source_path, "changed workspace rule\n")?;
+    let second_snapshot = signalbox_application::discover_workspace_instructions(vec![
+        signalbox_application::InstructionDiscoveryRoot::new(
+            signalbox_domain::InstructionDiscoveryRootKind::Workspace,
+            root,
+        ),
+    ]);
+    let second_discovery =
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6e10));
+    let second_manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6e11));
+    let second_bundle = signalbox_domain::InstructionBundleId::from_uuid(Uuid::from_u128(0x6e12));
+    let second_outcome = repository
+        .record_turn_start(
+            second_discovery,
+            signalbox_domain::TurnInstructionManifest::empty_turn_start(
+                second_manifest_id,
+                second_session,
+                second_turn,
+            ),
+            &second_snapshot,
+            || second_bundle,
+        )
+        .await?;
+    let first_candidate = sqlx::query_scalar::<_, Uuid>(
+        "SELECT instruction_bundle_id
+           FROM instruction_discovery_candidate
+          WHERE instruction_discovery_id = $1 AND candidate_ordinal = 1",
+    )
+    .bind(first_discovery.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let second_candidate = sqlx::query_scalar::<_, Uuid>(
+        "SELECT instruction_bundle_id
+           FROM instruction_discovery_candidate
+          WHERE instruction_discovery_id = $1 AND candidate_ordinal = 1",
+    )
+    .bind(second_discovery.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let bundle_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM registered_instruction_bundle WHERE root_path = $1",
+    )
+    .bind(first_snapshot.roots()[0].path().as_str())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(first_snapshot.bundles().len(), 1);
+    assert_eq!(second_snapshot.bundles().len(), 1);
+    assert_ne!(
+        first_snapshot.bundles()[0].source_hash(),
+        second_snapshot.bundles()[0].source_hash()
+    );
+    assert_eq!(
+        first_outcome,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
+            first_manifest_id,
+        )
+    );
+    assert_eq!(
+        second_outcome,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::Recorded(
+            second_manifest_id,
+        )
+    );
+    assert_eq!(first_candidate, first_bundle.into_uuid());
+    assert_eq!(second_candidate, second_bundle.into_uuid());
+    assert_ne!(first_candidate, second_candidate);
+    assert_eq!(bundle_count, 2);
 
     pool.close().await;
     drop(container);
