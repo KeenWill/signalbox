@@ -949,6 +949,27 @@ async fn inv061_counted_activation_records_a_queued_turn_manifest() -> Result<()
         repository.preflight_turn_start(session, turn).await?,
         signalbox_persistence::workspace_instructions::TurnInstructionManifestPreflight::TurnUnavailable
     );
+    let (active_session, active_turn) = active_instruction_turn(&pool, 0x6330).await?;
+    let active_discovery =
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0x6340));
+    let active_manifest_id =
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0x6341));
+    let active_manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
+        active_manifest_id,
+        active_session,
+        active_turn,
+    );
+    assert_eq!(
+        repository
+            .record_counted_activation(
+                active_discovery,
+                active_manifest,
+                &snapshot,
+                || bundle_id,
+            )
+            .await?,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::TurnUnavailable
+    );
 
     pool.close().await;
     drop(container);
