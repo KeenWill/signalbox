@@ -105,8 +105,11 @@ best-effort `lease_offer` projection and handoff is re-verified through this PR
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
 pinned-loss request mismatches). Owner-private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
-(`agent/runner-operation-journal`). Matching terminal-result retention and
-atomic acknowledgement clearing are re-verified through this PR
+(`agent/runner-operation-journal`). Retention of the claimed lease's exact
+non-secret profile/grant authorization, including profileless version-one
+journal upgrade, is verified against this PR
+(`agent/runner-credential-lease-journal`). Matching terminal-result retention
+and atomic acknowledgement clearing are re-verified through this PR
 (`agent/runner-result-journal`), and live exact acknowledgement consumption is
 re-verified through this PR (`agent/runner-result-acknowledgement`). Exact
 heartbeat projection of the current journaled lease phase is re-verified through
@@ -422,9 +425,11 @@ under the existing closed contract, and the exact working directory is a
 canonical directory. It retains the offer in process memory before sending the
 claim, journals nothing before the canonical acknowledgement, then fsyncs
 `waiting_dispatch` before accepting the exact dispatch and its unchanged
-arguments. Every refusal is a bounded `lease_admission_refused` operation
-failure. The shipped production catalog remains empty, so this machinery still
-does not select a production inventory:
+arguments. The claimed journal also retains the exact profile/grant pair, or an
+explicit profileless arm, beside that lease until the lease is cleared. Every
+refusal is a bounded `lease_admission_refused` operation failure. The shipped
+production catalog remains empty, so this machinery still does not select a
+production inventory:
 
 The `runner-execution-proof` Cargo feature is disabled by default and selected
 by the spawned process integration suite. Under that feature, the strict runner
@@ -439,7 +444,8 @@ generic dispatch contract, not a workstation registry decision.
    profile, credential profile, and workspace before replying `lease_claim`.
 2. The daemon commits the exact claim before sending `lease_claimed`. Receipt of
    that acknowledgement is the execution capability held by the runner. Before
-   accepting `dispatch`, the runner fsyncs the complete claimed correlation and
+   accepting `dispatch`, the runner fsyncs the complete claimed correlation,
+   exact selected profile and grant revision or explicit profileless arm, and
    `waiting_dispatch` phase below its private state root. An offer or sent claim
    without the acknowledgement never authorizes execution.
 3. The daemon sends `dispatch`; the runner executes only when both the claimed
@@ -828,37 +834,43 @@ record transport or heartbeat loss rather than presenting the runner as healthy.
 
 The runner's owner-private state root stores at most one retained lease,
 advances it monotonically through the three fsynced phases below, and retains
-one matching bounded terminal envelope only after execution may have started. An
-exact `result_recorded` acknowledgement atomically frees both slots. The root
-also retains at most one pre-claim lease-offer `operation_failed` envelope only
-while both lease slots are empty. Its exact `operation_failure_recorded`
-acknowledgement frees that failure slot. Independently, the root can retain one
-workspace release, advancing exactly from `release_accepted` to
-`release_completed`; the exact release acknowledgement frees that workspace
-slot. A `workspace_cleanup_failed` envelope is admissible only beside the exact
-accepted release it refuses, and its exact failure acknowledgement atomically
-frees both slots. A result acknowledgement preserves this independent workspace
-state. The same workspace slot can instead retain one complete, validated
-repository `workspace_ready` frame beside its exact `ready_unrecorded` reconnect
-correlation; the journal is invalid unless both representations are present and
-equal. Its exact `workspace_recorded` acknowledgement frees both
-representations. The root rejects in-progress provisioning, provisioning
-failure, and leak slots, cross-wired correlations, and journals belonging to
-another enrolled runner. The live serving loop consumes the exact result,
-lease-offer-failure, ready-workspace, completed-release, and release-failure
-acknowledgements for evidence naming the current runner. Its heartbeat repeats
-an accepted or completed release phase, or the exact `failure_unrecorded`
-release correlation after cleanup failure, from the durable journal rather than
-process memory. On resume the runner sends the complete stored inventory. It
-accepts only matching paired `discard_as_recorded` or paired `fail_stale`
-directives for retained terminal evidence and atomically frees both slots. For a
-retained lease-offer failure, `resend` emits the exact stored envelope while
-retaining it, and `discard_as_recorded` or `fail_stale` frees it. Unsupported
-actions preserve the journal and fail closed. The only live failure producer is
-the registration-only empty catalog refusing an offered unknown tool. For
-retained ready-workspace evidence, `resend` emits the complete stored frame
-while retaining it and `fail_stale` frees the exact correlation and payload
-together; every other action preserves them and fails closed.
+the exact non-secret selected profile/grant revision or an explicit profileless
+arm beside that lease. A version-two journal is invalid unless the lease and
+credential-authorization facts are present together. A version-one retained
+lease upgrades as profileless because the prior admission gate rejected every
+credential-bearing offer; it never guesses a profile. The authorization follows
+the lease through claim and canonical dispatch replay. The root retains one
+matching bounded terminal envelope only after execution may have started. An
+exact `result_recorded` acknowledgement atomically frees the lease,
+authorization, and result slots. The root also retains at most one pre-claim
+lease-offer `operation_failed` envelope only while both lease slots are empty.
+Its exact `operation_failure_recorded` acknowledgement frees that failure slot.
+Independently, the root can retain one workspace release, advancing exactly from
+`release_accepted` to `release_completed`; the exact release acknowledgement
+frees that workspace slot. A `workspace_cleanup_failed` envelope is admissible
+only beside the exact accepted release it refuses, and its exact failure
+acknowledgement atomically frees both slots. A result acknowledgement preserves
+this independent workspace state. The same workspace slot can instead retain one
+complete, validated repository `workspace_ready` frame beside its exact
+`ready_unrecorded` reconnect correlation; the journal is invalid unless both
+representations are present and equal. Its exact `workspace_recorded`
+acknowledgement frees both representations. The root rejects in-progress
+provisioning, provisioning failure, and leak slots, cross-wired correlations,
+and journals belonging to another enrolled runner. The live serving loop
+consumes the exact result, lease-offer-failure, ready-workspace,
+completed-release, and release-failure acknowledgements for evidence naming the
+current runner. Its heartbeat repeats an accepted or completed release phase, or
+the exact `failure_unrecorded` release correlation after cleanup failure, from
+the durable journal rather than process memory. On resume the runner sends the
+complete stored inventory. It accepts only matching paired `discard_as_recorded`
+or paired `fail_stale` directives for retained terminal evidence and atomically
+frees both slots. For a retained lease-offer failure, `resend` emits the exact
+stored envelope while retaining it, and `discard_as_recorded` or `fail_stale`
+frees it. Unsupported actions preserve the journal and fail closed. The only
+live failure producer is the registration-only empty catalog refusing an offered
+unknown tool. For retained ready-workspace evidence, `resend` emits the complete
+stored frame while retaining it and `fail_stale` frees the exact correlation and
+payload together; every other action preserves them and fails closed.
 
 For a release-only reconnect inventory, the hub matches its complete correlation
 against the supplied enrollment and canonical durable release state before
