@@ -6261,6 +6261,8 @@ mod tests {
                 .expect("fixture head is canonical"),
             base_branch: BranchName::try_new(String::from(BASE_BRANCH))
                 .expect("fixture base branch is canonical"),
+            base_revision: CommitSha::try_new(String::from(BASE_SHA))
+                .expect("fixture base revision is canonical"),
             mergeable_state: MergeableState::Mergeable,
             review_decision: RepoWatchReviewDecision::ChangesRequested,
             unresolved_threads: Vec::new(),
