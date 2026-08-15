@@ -22,7 +22,7 @@ pub use protocol::{
     ServeOutcome, SocketConnectError, connect_verified,
 };
 pub use state::{
-    EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
-    StateOperation, StateResource,
+    AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, RunnerState,
+    RunnerStateError, RunnerStateRoot, StateOperation, StateResource,
 };
 pub use workspace::{PrivateWorkspaceRequest, RunnerWorkspaceError, RunnerWorkspaceStore};

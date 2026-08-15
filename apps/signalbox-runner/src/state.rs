@@ -49,6 +49,19 @@ pub enum EnrollmentAuthority {
     ReplacementPending,
 }
 
+/// Proof that one exact workspace release is fsynced in the accepted phase.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedWorkspaceRelease {
+    correlation: ReleaseCorrelation,
+}
+
+impl AcceptedWorkspaceRelease {
+    /// Borrows the exact release correlation retained by the journal.
+    pub const fn correlation(&self) -> &ReleaseCorrelation {
+        &self.correlation
+    }
+}
+
 /// Exact daemon-issued identities and current registration fact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -894,6 +907,15 @@ impl RunnerStateRoot {
         write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
         self.inventory = inventory;
         Ok(())
+    }
+
+    /// Fsyncs one exact accepted release and returns deletion authority.
+    pub fn accept_workspace_release(
+        &mut self,
+        correlation: ReleaseCorrelation,
+    ) -> Result<AcceptedWorkspaceRelease, RunnerStateError> {
+        self.record_workspace_release_phase(correlation.clone(), ReleasePhase::ReleaseAccepted)?;
+        Ok(AcceptedWorkspaceRelease { correlation })
     }
 
     /// Atomically releases one completed workspace-release journal after recording.
