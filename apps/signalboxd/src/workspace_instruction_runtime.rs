@@ -12,8 +12,8 @@ use signalbox_domain::{
 };
 use signalbox_persistence::workspace_instructions::{
     CountedActivationInstructionEvidence, RecordTurnInstructionSnapshotOutcome,
-    TurnInstructionManifestPreflight, WorkspaceInstructionRepository,
-    WorkspaceInstructionRepositoryError,
+    TurnInstructionManifestPreflight, WorkspaceInstructionPlacementObservation,
+    WorkspaceInstructionRepository, WorkspaceInstructionRepositoryError,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -108,6 +108,7 @@ pub(crate) struct PreparedCountedActivationInstructions {
     manifest: TurnInstructionManifest,
     snapshot: signalbox_application::InstructionDiscoverySnapshot,
     bundle_ids: Box<[InstructionBundleId]>,
+    placement: WorkspaceInstructionPlacementObservation,
 }
 
 impl PreparedCountedActivationInstructions {
@@ -117,6 +118,7 @@ impl PreparedCountedActivationInstructions {
             &self.manifest,
             &self.snapshot,
             &self.bundle_ids,
+            &self.placement,
         )
     }
 }
@@ -154,7 +156,7 @@ impl WorkspaceInstructionRuntime {
             TurnInstructionManifestPreflight::TurnUnavailable => return Ok(false),
             TurnInstructionManifestPreflight::Absent => {}
         }
-        let snapshot = self.discover(session).await?;
+        let (snapshot, placement) = self.discover(session).await?;
         let discovery = InstructionDiscoveryId::from_uuid(Uuid::now_v7());
         let manifest = TurnInstructionManifest::empty_turn_start(
             TurnInstructionManifestId::from_uuid(Uuid::now_v7()),
@@ -163,9 +165,13 @@ impl WorkspaceInstructionRuntime {
         );
         let outcome = self
             .repository
-            .record_turn_start(discovery, manifest, &snapshot, || {
-                InstructionBundleId::from_uuid(Uuid::now_v7())
-            })
+            .record_turn_start_for_observed_placement(
+                discovery,
+                manifest,
+                &snapshot,
+                &placement,
+                || InstructionBundleId::from_uuid(Uuid::now_v7()),
+            )
             .await
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
         outcome_is_available(outcome)
@@ -198,7 +204,7 @@ impl WorkspaceInstructionRuntime {
             TurnInstructionManifestPreflight::TurnUnavailable => return Ok(None),
             TurnInstructionManifestPreflight::Absent => {}
         }
-        let snapshot = self.discover(session).await?;
+        let (snapshot, placement) = self.discover(session).await?;
         let discovery = InstructionDiscoveryId::from_uuid(Uuid::now_v7());
         let manifest = TurnInstructionManifest::empty_turn_start(
             TurnInstructionManifestId::from_uuid(Uuid::now_v7()),
@@ -208,9 +214,13 @@ impl WorkspaceInstructionRuntime {
         if !snapshot.is_complete() {
             let outcome = self
                 .repository
-                .record_counted_activation(discovery, manifest, &snapshot, || {
-                    InstructionBundleId::from_uuid(Uuid::now_v7())
-                })
+                .record_counted_activation_for_observed_placement(
+                    discovery,
+                    manifest,
+                    &snapshot,
+                    &placement,
+                    || InstructionBundleId::from_uuid(Uuid::now_v7()),
+                )
                 .await
                 .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
             return match outcome {
@@ -239,19 +249,26 @@ impl WorkspaceInstructionRuntime {
             manifest,
             snapshot,
             bundle_ids,
+            placement,
         }))
     }
 
     async fn discover(
         &self,
         session: SessionId,
-    ) -> Result<signalbox_application::InstructionDiscoverySnapshot, WorkspaceInstructionRuntimeError>
-    {
-        let runner_placed = self
+    ) -> Result<
+        (
+            signalbox_application::InstructionDiscoverySnapshot,
+            WorkspaceInstructionPlacementObservation,
+        ),
+        WorkspaceInstructionRuntimeError,
+    > {
+        let placement = self
             .repository
-            .session_has_runner_placement(session)
+            .observe_session_runner_placement(session)
             .await
             .map_err(WorkspaceInstructionRuntimeError::Persistence)?;
+        let runner_placed = placement.runner_owned();
         let mut roots =
             Vec::with_capacity(self.configured_roots.len() + usize::from(!runner_placed));
         let workspace_binding = if !runner_placed && let Some(workspace_root) = &self.workspace_root
@@ -283,7 +300,7 @@ impl WorkspaceInstructionRuntime {
                 return Err(WorkspaceInstructionRuntimeError::UnresolvableWorkspace);
             }
         }
-        Ok(snapshot)
+        Ok((snapshot, placement))
     }
 }
 

@@ -34,6 +34,20 @@ pub enum TurnInstructionManifestPreflight {
     TurnUnavailable,
 }
 
+/// Placement head sampled before a workspace-instruction filesystem scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceInstructionPlacementObservation {
+    head: Option<Decimal>,
+    runner_owned: bool,
+}
+
+impl WorkspaceInstructionPlacementObservation {
+    /// Reports whether the sampled placement gave workspace authority to a runner.
+    pub const fn runner_owned(&self) -> bool {
+        self.runner_owned
+    }
+}
+
 /// One complete queued-turn snapshot prepared for the activation transaction.
 #[derive(Debug)]
 pub struct CountedActivationInstructionEvidence<'a> {
@@ -41,6 +55,7 @@ pub struct CountedActivationInstructionEvidence<'a> {
     manifest: &'a TurnInstructionManifest,
     snapshot: &'a InstructionDiscoverySnapshot,
     bundle_ids: &'a [InstructionBundleId],
+    placement: &'a WorkspaceInstructionPlacementObservation,
 }
 
 impl<'a> CountedActivationInstructionEvidence<'a> {
@@ -51,12 +66,14 @@ impl<'a> CountedActivationInstructionEvidence<'a> {
         manifest: &'a TurnInstructionManifest,
         snapshot: &'a InstructionDiscoverySnapshot,
         bundle_ids: &'a [InstructionBundleId],
+        placement: &'a WorkspaceInstructionPlacementObservation,
     ) -> Self {
         Self {
             discovery,
             manifest,
             snapshot,
             bundle_ids,
+            placement,
         }
     }
 }
@@ -68,6 +85,7 @@ pub enum WorkspaceInstructionRepositoryError {
         source: sqlx::Error,
         commit_ambiguous: bool,
     },
+    PlacementChanged,
     Corruption(&'static str),
 }
 
@@ -75,6 +93,9 @@ impl fmt::Display for WorkspaceInstructionRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database { source, .. } => source.fmt(formatter),
+            Self::PlacementChanged => {
+                formatter.write_str("runner placement changed during workspace discovery")
+            }
             Self::Corruption(reason) => {
                 write!(formatter, "workspace instruction corruption: {reason}")
             }
@@ -86,6 +107,7 @@ impl Error for WorkspaceInstructionRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database { source, .. } => Some(source),
+            Self::PlacementChanged => None,
             Self::Corruption(_) => None,
         }
     }
@@ -116,6 +138,9 @@ impl ClassifyOperatorFailure for WorkspaceInstructionRepositoryError {
                 commit_ambiguous, ..
             } => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: *commit_ambiguous,
+            },
+            Self::PlacementChanged => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
             },
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
         }
@@ -166,8 +191,40 @@ impl WorkspaceInstructionRepository {
     where
         NextBundleId: FnMut() -> InstructionBundleId,
     {
-        self.record_for_state(discovery, manifest, snapshot, next_bundle_id, "active")
-            .await
+        let placement = self
+            .observe_session_runner_placement(manifest.session())
+            .await?;
+        self.record_turn_start_for_observed_placement(
+            discovery,
+            manifest,
+            snapshot,
+            &placement,
+            next_bundle_id,
+        )
+        .await
+    }
+
+    /// Records a turn-start snapshot only while its sampled placement is current.
+    pub async fn record_turn_start_for_observed_placement<NextBundleId>(
+        &self,
+        discovery: InstructionDiscoveryId,
+        manifest: TurnInstructionManifest,
+        snapshot: &InstructionDiscoverySnapshot,
+        placement: &WorkspaceInstructionPlacementObservation,
+        next_bundle_id: NextBundleId,
+    ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
+    where
+        NextBundleId: FnMut() -> InstructionBundleId,
+    {
+        self.record_for_state(
+            discovery,
+            manifest,
+            snapshot,
+            placement,
+            next_bundle_id,
+            "active",
+        )
+        .await
     }
 
     /// Records the empty manifest required by one counted activation while its
@@ -182,30 +239,73 @@ impl WorkspaceInstructionRepository {
     where
         NextBundleId: FnMut() -> InstructionBundleId,
     {
-        self.record_for_state(discovery, manifest, snapshot, next_bundle_id, "queued")
-            .await
+        let placement = self
+            .observe_session_runner_placement(manifest.session())
+            .await?;
+        self.record_counted_activation_for_observed_placement(
+            discovery,
+            manifest,
+            snapshot,
+            &placement,
+            next_bundle_id,
+        )
+        .await
     }
 
-    /// Reports whether durable runner-placement authority owns the session's
-    /// workspace rather than this daemon.
+    /// Records queued-turn evidence only while its sampled placement is current.
+    pub async fn record_counted_activation_for_observed_placement<NextBundleId>(
+        &self,
+        discovery: InstructionDiscoveryId,
+        manifest: TurnInstructionManifest,
+        snapshot: &InstructionDiscoverySnapshot,
+        placement: &WorkspaceInstructionPlacementObservation,
+        next_bundle_id: NextBundleId,
+    ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
+    where
+        NextBundleId: FnMut() -> InstructionBundleId,
+    {
+        self.record_for_state(
+            discovery,
+            manifest,
+            snapshot,
+            placement,
+            next_bundle_id,
+            "queued",
+        )
+        .await
+    }
+
+    /// Samples the exact placement head that decides workspace authority.
+    pub async fn observe_session_runner_placement(
+        &self,
+        session: SessionId,
+    ) -> Result<WorkspaceInstructionPlacementObservation, WorkspaceInstructionRepositoryError> {
+        placement_observation(
+            sqlx::query_as::<_, (Option<Decimal>, Option<String>)>(
+                "SELECT current_placement.event_ordinal, placement.state_kind
+                   FROM session_scheduler AS scheduler
+                   LEFT JOIN runner_current_session_placement AS current_placement
+                     ON current_placement.session_id = scheduler.session_id
+                   LEFT JOIN runner_session_placement_record AS placement
+                     ON placement.session_id = current_placement.session_id
+                    AND placement.event_ordinal = current_placement.event_ordinal
+                  WHERE scheduler.session_id = $1",
+            )
+            .bind(session.into_uuid())
+            .fetch_optional(&self.pool)
+            .await?,
+        )
+    }
+
+    /// Reports whether the currently sampled placement gives workspace authority to a runner.
     pub async fn session_has_runner_placement(
         &self,
         session: SessionId,
     ) -> Result<bool, WorkspaceInstructionRepositoryError> {
-        Ok(sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1
-                   FROM runner_current_session_placement AS current_placement
-                   JOIN runner_session_placement_record AS placement
-                     ON placement.session_id = current_placement.session_id
-                    AND placement.event_ordinal = current_placement.event_ordinal
-                  WHERE current_placement.session_id = $1
-                    AND placement.state_kind <> 'runner_abandoned'
-             )",
-        )
-        .bind(session.into_uuid())
-        .fetch_one(&self.pool)
-        .await?)
+        Ok(self
+            .observe_session_runner_placement(session)
+            .await?
+            .runner_owned())
     }
 
     /// Inserts one complete instruction snapshot inside the transaction that
@@ -219,6 +319,7 @@ impl WorkspaceInstructionRepository {
             manifest,
             snapshot,
             bundle_ids,
+            placement,
         } = evidence;
         if !snapshot.is_complete() {
             return Err(WorkspaceInstructionRepositoryError::Corruption(
@@ -236,6 +337,7 @@ impl WorkspaceInstructionRepository {
             discovery,
             manifest,
             snapshot,
+            placement,
             || {
                 bundle_ids
                     .next()
@@ -280,6 +382,7 @@ impl WorkspaceInstructionRepository {
         discovery: InstructionDiscoveryId,
         manifest: TurnInstructionManifest,
         snapshot: &InstructionDiscoverySnapshot,
+        placement: &WorkspaceInstructionPlacementObservation,
         mut next_bundle_id: NextBundleId,
         required_state: &'static str,
     ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
@@ -292,16 +395,19 @@ impl WorkspaceInstructionRepository {
             discovery,
             &manifest,
             snapshot,
+            placement,
             || Ok(next_bundle_id()),
             required_state,
         )
         .await?;
         match outcome {
-            RecordTurnInstructionSnapshotOutcome::Recorded(_)
-            | RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => transaction
+            RecordTurnInstructionSnapshotOutcome::Recorded(_) => transaction
                 .commit()
                 .await
                 .map_err(WorkspaceInstructionRepositoryError::ambiguous_commit)?,
+            RecordTurnInstructionSnapshotOutcome::DiscoveryIncomplete => {
+                transaction.commit().await?;
+            }
             RecordTurnInstructionSnapshotOutcome::AlreadyRecorded(_)
             | RecordTurnInstructionSnapshotOutcome::TurnUnavailable => {
                 transaction.rollback().await?;
@@ -315,6 +421,7 @@ impl WorkspaceInstructionRepository {
         discovery: InstructionDiscoveryId,
         manifest: &TurnInstructionManifest,
         snapshot: &InstructionDiscoverySnapshot,
+        placement: &WorkspaceInstructionPlacementObservation,
         mut next_bundle_id: NextBundleId,
         required_state: &'static str,
     ) -> Result<RecordTurnInstructionSnapshotOutcome, WorkspaceInstructionRepositoryError>
@@ -330,6 +437,11 @@ impl WorkspaceInstructionRepository {
         .await?
         {
             return Ok(RecordTurnInstructionSnapshotOutcome::TurnUnavailable);
+        }
+        let current_placement =
+            placement_observation_in_connection(connection, manifest.session()).await?;
+        if &current_placement != placement {
+            return Err(WorkspaceInstructionRepositoryError::PlacementChanged);
         }
         if let Some((existing, complete)) =
             load_manifest(connection, manifest.session(), manifest.turn()).await?
@@ -494,6 +606,48 @@ impl WorkspaceInstructionRepository {
             None => Ok(TurnInstructionManifestPreflight::Absent),
         }
     }
+}
+
+fn placement_observation(
+    row: Option<(Option<Decimal>, Option<String>)>,
+) -> Result<WorkspaceInstructionPlacementObservation, WorkspaceInstructionRepositoryError> {
+    let Some((head, state)) = row else {
+        return Err(WorkspaceInstructionRepositoryError::Corruption(
+            "session scheduler missing during placement observation",
+        ));
+    };
+    if head.is_some() != state.is_some() {
+        return Err(WorkspaceInstructionRepositoryError::Corruption(
+            "runner placement head",
+        ));
+    }
+    Ok(WorkspaceInstructionPlacementObservation {
+        head,
+        runner_owned: state
+            .as_deref()
+            .is_some_and(|state| state != "runner_abandoned"),
+    })
+}
+
+async fn placement_observation_in_connection(
+    connection: &mut sqlx::PgConnection,
+    session: SessionId,
+) -> Result<WorkspaceInstructionPlacementObservation, WorkspaceInstructionRepositoryError> {
+    placement_observation(
+        sqlx::query_as::<_, (Option<Decimal>, Option<String>)>(
+            "SELECT current_placement.event_ordinal, placement.state_kind
+               FROM session_scheduler AS scheduler
+               LEFT JOIN runner_current_session_placement AS current_placement
+                 ON current_placement.session_id = scheduler.session_id
+               LEFT JOIN runner_session_placement_record AS placement
+                 ON placement.session_id = current_placement.session_id
+                AND placement.event_ordinal = current_placement.event_ordinal
+              WHERE scheduler.session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(connection)
+        .await?,
+    )
 }
 
 async fn turn_is_available(

@@ -109,3 +109,34 @@ async fn inv061_workspace_instruction_migration_leaves_callless_active_turn_unbo
     drop(container);
     Ok(())
 }
+
+/// INV-061: every append-only instruction-evidence table rejects statement-level
+/// truncation as well as row mutation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_workspace_instruction_evidence_has_every_truncate_guard()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let guard_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+           FROM pg_trigger
+          WHERE tgname IN (
+                'instruction_discovery_rejects_truncate',
+                'instruction_discovery_root_rejects_truncate',
+                'registered_instruction_bundle_rejects_truncate',
+                'instruction_discovery_candidate_rejects_truncate',
+                'instruction_discovery_finding_rejects_truncate',
+                'turn_instruction_manifest_rejects_truncate'
+          )
+            AND (tgtype & 32) = 32",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(guard_count, 6);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

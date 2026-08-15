@@ -3266,11 +3266,18 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
         turn,
     );
     let no_instruction_bundles = [];
+    let instruction_placement =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .observe_session_runner_placement(session)
+        .await?;
     let instruction_evidence = CountedActivationInstructionEvidence::new(
         signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0xcd16)),
         &instruction_manifest,
         &instruction_snapshot,
         &no_instruction_bundles,
+        &instruction_placement,
     );
 
     let committed = activation
@@ -3416,11 +3423,18 @@ async fn inv061_stale_counted_preview_retains_no_instruction_evidence() -> Resul
         turn,
     );
     let no_bundles = [];
+    let placement =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .observe_session_runner_placement(session)
+        .await?;
     let evidence = CountedActivationInstructionEvidence::new(
         signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0xcd2c)),
         &manifest,
         &snapshot,
         &no_bundles,
+        &placement,
     );
 
     let stale = activation

@@ -117,7 +117,7 @@ CREATE TABLE registered_instruction_bundle (
             AND source_path !~ '(^|/)(\.|\.\.)($|/)'
             AND source_path !~ '//'
             AND right(source_path, 1) <> '/'
-            AND source_path LIKE root_path || '/%'
+            AND left(source_path, octet_length(root_path) + 1) = root_path || '/'
         )
 );
 
@@ -239,6 +239,25 @@ FOR EACH ROW EXECUTE FUNCTION reject_instruction_evidence_change();
 CREATE TRIGGER turn_instruction_manifest_is_append_only
 BEFORE UPDATE OR DELETE ON turn_instruction_manifest
 FOR EACH ROW EXECUTE FUNCTION reject_instruction_evidence_change();
+
+CREATE TRIGGER instruction_discovery_rejects_truncate
+BEFORE TRUNCATE ON instruction_discovery
+FOR EACH STATEMENT EXECUTE FUNCTION reject_instruction_evidence_change();
+CREATE TRIGGER instruction_discovery_root_rejects_truncate
+BEFORE TRUNCATE ON instruction_discovery_root
+FOR EACH STATEMENT EXECUTE FUNCTION reject_instruction_evidence_change();
+CREATE TRIGGER registered_instruction_bundle_rejects_truncate
+BEFORE TRUNCATE ON registered_instruction_bundle
+FOR EACH STATEMENT EXECUTE FUNCTION reject_instruction_evidence_change();
+CREATE TRIGGER instruction_discovery_candidate_rejects_truncate
+BEFORE TRUNCATE ON instruction_discovery_candidate
+FOR EACH STATEMENT EXECUTE FUNCTION reject_instruction_evidence_change();
+CREATE TRIGGER instruction_discovery_finding_rejects_truncate
+BEFORE TRUNCATE ON instruction_discovery_finding
+FOR EACH STATEMENT EXECUTE FUNCTION reject_instruction_evidence_change();
+CREATE TRIGGER turn_instruction_manifest_rejects_truncate
+BEFORE TRUNCATE ON turn_instruction_manifest
+FOR EACH STATEMENT EXECUTE FUNCTION reject_instruction_evidence_change();
 
 -- Existing pre-alpha model calls ran with no instruction projection. Their
 -- synthetic discoveries therefore have no roots, candidates, or findings and
