@@ -52,6 +52,7 @@ mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
 mod repo_watch_runtime;
+mod repo_watch_webhook_runtime;
 mod review_orchestration_runtime;
 pub mod runner_protocol_runtime;
 mod session_delegation;

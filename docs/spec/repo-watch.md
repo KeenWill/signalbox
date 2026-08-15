@@ -31,7 +31,9 @@ Conservative stale blocking-review dismissal is verified against this PR
 adopts as check-suite and check-run completion generations are verified against
 PR #541 (`fix/check-run-updated-at`). The source-independent event occurrence
 identity, its durable frontier, and the one-time storage migration are verified
-against this PR (`agent/repo-watch-content-identity`).
+this PR (`agent/repo-watch-content-identity`). The authenticated webhook intake,
+shadow projection, parity view, and targeted refresh behavior are verified
+against this PR (`agent/repo-watch-webhook-receiver`).
 
 ## Configuration and credential boundary
 
@@ -77,6 +79,22 @@ startup or its recovery scan. Its repository request fails closed during
 preparation instead. No credential value is persisted in a cursor, event,
 dispatch record, session parameter, error, or log.
 
+**Implemented behavior.** An optional `repository_watch.webhook` table enables
+one plain local HTTP listener for the watch subsystem. Its bind address is fully
+configurable and defaults to `127.0.0.1:3333`; its absolute local request path
+is required and configurable. Each webhook-enabled repository supplies one
+positive GitHub hook ID and one absolute secret-file path, either both or
+neither. Hook IDs are unique, and webhook secret paths cannot alias any polling,
+session-tool, or other webhook credential path under the same lexical, symlink,
+and Unix file-identity checks. A listener without an enabled repository, or an
+enabled repository without a listener, fails configuration. The daemon binds the
+configured address and verifies requests but knows nothing about tunnels or
+exposure providers. The reference deployment exposes public path
+`/github/webhooks` through Tailscale Funnel `--set-path`, which strips that
+prefix; its configured local path is therefore `/`. The reference secret file is
+`/home/wkg/.config/signalbox/github-webhook-secret`. Public reachability and its
+availability belong to deployment, not to the daemon.
+
 ## Poll transport and differ
 
 **Implemented behavior.** Version one uses conditional-request polling with one
@@ -113,8 +131,10 @@ unconditionally so that probe never manufactures page 101. A failed, rejected,
 partial, or unparseable poll submits no persistence candidate. The
 per-repository interval is measured start to start, so a cadence does not drift
 by the duration of its own attempt; attempts never overlap, and an attempt that
-reaches or exceeds the interval is followed immediately by the next. Version one
-has no webhook fallback and no speculative second polling transport.
+reaches or exceeds the interval is followed immediately by the next. A webhook
+wake serializes with the same repository task and does not reset the full-poll
+deadline; a failed or unavailable webhook endpoint therefore loses acceleration,
+not reconciliation.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
@@ -741,26 +761,76 @@ configured signal-reviewer set. These snapshots remain transport state: rules
 and durable events cannot inspect them. Until this upgrade is built, every
 daemon restart deliberately pays one bounded complete repository poll.
 
-## Designed-for version-two webhook transport
+## Webhook transport and shadow reconciliation
 
-**Committed unimplemented functionality.** No present surface accepts repository
-webhooks. Version two is designed to use a separate network ingress that admits
-GitHub deliveries, verifies `X-Hub-Signature-256` HMAC over the exact request
-bytes before parsing, bounds body and header sizes, rejects missing or malformed
-delivery identity, deduplicates delivery identities, and maps accepted payloads
-into the identical versioned event vocabulary. It has its own listener,
-authentication, admission rules, rate limits, telemetry, and credential
-material. It is never multiplexed onto or tunneled through the local
-process-protocol socket.
+**Implemented behavior.** The listener accepts only `POST` on its configured
+path as plain HTTP. It requires canonical singleton GitHub hook, delivery,
+event, content-type, and `X-Hub-Signature-256` headers; rejects content
+encodings other than absent or `identity`; and accepts transfer encoding only
+when absent or `chunked`. Hook ID selects the repository and its separately
+bounded, reread-on-request secret before the body is interpreted. The receiver
+collects at most 25 MiB, verifies lowercase `sha256=` HMAC-SHA-256 against the
+exact body bytes with constant-time comparison, and only then parses JSON. The
+body's canonical repository must equal the selected repository. It admits at
+most 64 requests concurrently and 3,000 deliveries per hook in each 60-second
+admission window. These are hard safety ceilings, not configuration knobs. The
+listener does not grant GitHub-originated data process-protocol authority,
+session authority, or polling credentials.
 
-**Committed unimplemented functionality.** A future webhook receiver does not
-grant GitHub-originated data process-protocol authority, session authority, or
-watch credentials. Repository-specific secrets select the admitted repository
-before event derivation; a valid signature for one repository cannot submit an
-event for another. Replay, parser differential, oversized-body, timing-safe
-signature comparison, secret rotation, proxy trust, and denial-of-service tests
-are required before that ingress can ship. These requirements constrain
-compatibility only; version one provides no listener or webhook configuration.
+**Implemented behavior.** A verified delivery is durably admitted before the
+listener returns `202 Accepted`. `repo_watch_webhook_delivery` keeps the unique
+`(hook_id, delivery_id)` tombstone, body digest, repository, bounded event and
+action names, receipt sequence, and receipt time; `repo_watch_webhook_payload`
+keeps the exact bytes. An equal replay returns the same success without new
+work. Reuse of that identity with a different digest returns conflict and cannot
+replace the first body. A bounded in-memory wake is only an accelerator: the
+repository task drains durable pending deliveries on startup, after every full
+poll, and when woken, so a full channel or daemon restart loses no admitted
+delivery. A signature-valid delivery whose event or action is outside the mapped
+set, including a broadly subscribed `workflow_job`, is still acknowledged
+successfully and is cheaply logged and recorded as ignored rather than treated
+as an intake failure.
+
+**Implemented behavior.** Shadow mode never inserts a webhook-produced row into
+`repo_watch_event` and never mutates the cursor from a payload-derived patch.
+Instead, the repository's single serialized worker applies the closed guarded
+patch to the latest cursor in memory and runs the same
+`derive_repo_watch_events` differ with the same
+`RepoWatchEventContentIdentityV1` frontier used by polling.
+`repo_watch_webhook_projection` records each resulting version-one content
+identity and event kind, while `repo_watch_webhook_disposition` atomically
+records projected, duplicate-state, superseded, ignored, or quarantined terminal
+disposition. The `repo_watch_webhook_parity` view joins those identities to
+version-one poll-produced `repo_watch_event` rows since that repository's first
+shadow receipt and reports `matched`, `webhook_only`, `poll_only`, or
+`not_directly_mapped`. Event projections intentionally carry no uniqueness
+constraint because separate deliveries may represent one content occurrence.
+Terminal exact payload bytes remain for seven days, after which maintenance may
+delete only the payload; delivery tombstones, digests, projections, and
+dispositions remain append-only.
+
+**Implemented behavior.** The mapped set is pull-request open, reopen, close,
+synchronize, label, unlabel, edit, draft conversion, and ready-for-review;
+submitted pull-request review; resolved or unresolved review thread; completed
+check run; completed check suite; completed workflow run; branch push, create,
+advance, and delete as represented by GitHub's `push` payload; and ping. Review
+dismissal and ping are mapped no-change. Tag pushes, the separate `create` and
+`delete` event families, foreign-repository workflow heads, and every other
+signature-valid event or action are ignored successfully. Guards make stale
+head, lifecycle, branch, workflow-attempt, and immutable-provider facts
+superseded or duplicate rather than allowing regression.
+
+**Implemented behavior.** Payloads do not authoritatively supply GitHub's
+computed mergeability or complete check rollups. A mapped delivery that needs a
+missing pull-request baseline, current mergeability, or a check rollup records a
+targeted-query projection and immediately reuses the repository poller's
+credential, client, conditional cache, normalization, and request bounds to
+fetch only the affected pull requests. Those observations commit through the
+ordinary poll producer and dispatch path. Full polling continues unchanged as
+the slow complete reconciliation sweep and remains authoritative for missed
+deliveries, reactions, and every provider fact outside the mapped set. Poll
+frequency does not drop in shadow mode; any later write mode or slower cadence
+requires a separately reviewed ruling after parity over a real workday.
 
 ## Open edges
 

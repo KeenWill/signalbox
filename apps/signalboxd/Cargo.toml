@@ -14,6 +14,11 @@ test-support = [
 ]
 
 [dependencies]
+axum = { version = "0.8.9", default-features = false, features = [
+    "http1",
+    "tokio",
+] }
+hmac = { version = "0.13.0", default-features = false }
 opentelemetry = { version = "0.32.0", default-features = false, features = [
     "trace",
 ] }
