@@ -493,6 +493,27 @@ impl PostgresRepoWatchStore {
         repository: &RepositorySlug,
         request: RepoWatchCommitRequest,
     ) -> Result<RepoWatchCommitOutcome, RepoWatchStoreError> {
+        self.commit_inner(repository, request, None).await
+    }
+
+    /// Atomically commits the cursor, derived events, convergence assessments,
+    /// and any seals created by those assessments.
+    pub async fn commit_with_convergence(
+        &self,
+        repository: &RepositorySlug,
+        request: RepoWatchCommitRequest,
+        assessments: &[RepoWatchConvergenceAssessment],
+    ) -> Result<RepoWatchCommitOutcome, RepoWatchStoreError> {
+        self.commit_inner(repository, request, Some(assessments))
+            .await
+    }
+
+    async fn commit_inner(
+        &self,
+        repository: &RepositorySlug,
+        request: RepoWatchCommitRequest,
+        assessments: Option<&[RepoWatchConvergenceAssessment]>,
+    ) -> Result<RepoWatchCommitOutcome, RepoWatchStoreError> {
         validate_event_batch(repository, request.events())?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -503,20 +524,43 @@ impl PostgresRepoWatchStore {
         let current_generation = current.as_ref().map(RepoWatchCursor::generation);
         if current_generation != request.expected_generation() {
             let replayed = exact_replay(&mut transaction, repository, &request).await?;
-            transaction.rollback().await?;
-            return Ok(match replayed {
-                Some(cursor) => RepoWatchCommitOutcome::Replayed(cursor),
-                None => RepoWatchCommitOutcome::Conflict {
+            let Some(cursor) = replayed else {
+                transaction.rollback().await?;
+                return Ok(RepoWatchCommitOutcome::Conflict {
                     current: current_generation,
-                },
-            });
+                });
+            };
+            if let Some(assessments) = assessments {
+                Self::record_convergence_assessments_in_transaction(
+                    &mut transaction,
+                    repository,
+                    &cursor,
+                    assessments,
+                )
+                .await?;
+                commit_repo_watch_transaction(transaction).await?;
+            } else {
+                transaction.rollback().await?;
+            }
+            return Ok(RepoWatchCommitOutcome::Replayed(cursor));
         }
         if let Some(current) = current.as_ref()
             && current.candidate() == request.candidate()
         {
             if request.events().is_empty() {
                 let cursor = current.clone();
-                transaction.rollback().await?;
+                if let Some(assessments) = assessments {
+                    Self::record_convergence_assessments_in_transaction(
+                        &mut transaction,
+                        repository,
+                        &cursor,
+                        assessments,
+                    )
+                    .await?;
+                    commit_repo_watch_transaction(transaction).await?;
+                } else {
+                    transaction.rollback().await?;
+                }
                 return Ok(RepoWatchCommitOutcome::Unchanged(cursor));
             }
             transaction.rollback().await?;
@@ -541,23 +585,26 @@ impl PostgresRepoWatchStore {
         .execute(&mut *transaction)
         .await?;
         insert_events(&mut transaction, repository, generation, request.events()).await?;
-        transaction.commit().await.map_err(|error| {
-            if commit_failure_is_ambiguous(&error) {
-                RepoWatchStoreError::CommitAmbiguous(error)
-            } else {
-                RepoWatchStoreError::Database(error)
-            }
-        })?;
-        Ok(RepoWatchCommitOutcome::Committed(RepoWatchCursor {
+        let cursor = RepoWatchCursor {
             repository: repository.clone(),
             generation,
-            candidate: request.candidate,
-        }))
+            candidate: request.candidate.clone(),
+        };
+        if let Some(assessments) = assessments {
+            Self::record_convergence_assessments_in_transaction(
+                &mut transaction,
+                repository,
+                &cursor,
+                assessments,
+            )
+            .await?;
+        }
+        commit_repo_watch_transaction(transaction).await?;
+        Ok(RepoWatchCommitOutcome::Committed(cursor))
     }
 
-    /// Appends changed exact-head convergence evidence and seals every
-    /// converged head. Equal current evidence is an idempotent replay, while a
-    /// seal is monotonic for its exact head.
+    /// Appends changed convergence evidence and seals every converged head/base
+    /// identity. Equal evidence for that identity is an idempotent replay.
     pub async fn record_convergence_assessments(
         &self,
         repository: &RepositorySlug,
@@ -572,25 +619,48 @@ impl PostgresRepoWatchStore {
         let cursor = load_cursor_in_transaction(&mut transaction, repository)
             .await?
             .ok_or(RepoWatchStoreError::ConvergenceEvidenceMismatch)?;
-        let pull_requests = cursor.candidate().observation().state().pull_requests();
-        if cursor.generation() != cursor_generation || pull_requests.len() != assessments.len() {
+        if cursor.generation() != cursor_generation {
             transaction.rollback().await?;
+            return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
+        }
+        Self::record_convergence_assessments_in_transaction(
+            &mut transaction,
+            repository,
+            &cursor,
+            assessments,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn record_convergence_assessments_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+        repository: &RepositorySlug,
+        cursor: &RepoWatchCursor,
+        assessments: &[RepoWatchConvergenceAssessment],
+    ) -> Result<(), RepoWatchStoreError> {
+        let state = cursor.candidate().observation().state();
+        let pull_requests = state.pull_requests();
+        if pull_requests.len() != assessments.len() {
             return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
         }
         let mut assessed_pull_requests = HashSet::with_capacity(assessments.len());
         for assessment in assessments {
             if !assessed_pull_requests.insert(assessment.number()) {
-                transaction.rollback().await?;
                 return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
             }
-            let matches_cursor = pull_requests.iter().any(|pull_request| {
+            let pull_request_matches = pull_requests.iter().any(|pull_request| {
                 pull_request.context().number() == assessment.number()
                     && pull_request.context().head_sha() == assessment.head_sha()
                     && pull_request.context().base_branch() == assessment.base_branch()
                     && pull_request.mergeable_state() == assessment.mergeable_state()
             });
-            if !matches_cursor {
-                transaction.rollback().await?;
+            let base_revision_matches = state.branch_heads().iter().any(|branch_head| {
+                branch_head.branch() == assessment.base_branch()
+                    && branch_head.head() == assessment.base_revision()
+            });
+            if !pull_request_matches || !base_revision_matches {
                 return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
             }
         }
@@ -611,29 +681,31 @@ impl PostgresRepoWatchStore {
                 "SELECT EXISTS (
                     SELECT 1
                       FROM (
-                            SELECT head_sha, base_branch, mergeable_state,
+                            SELECT base_branch, base_revision, mergeable_state,
                                    review_decision, unresolved_threads,
                                    gating_check_count, non_green_gating_checks,
                                    verdict_kind
                               FROM repo_watch_pull_request_convergence_assessment
                              WHERE repository = $1
                                AND pull_request_number = $2
+                               AND head_sha = $3
                              ORDER BY recorded_at DESC, assessment_id DESC
                              LIMIT 1
                            ) AS current
-                     WHERE current.head_sha = $3
-                       AND current.base_branch = $4
-                       AND current.mergeable_state = $5
-                       AND current.review_decision = $6
-                       AND current.unresolved_threads = $7
-                       AND current.gating_check_count = $8
-                       AND current.non_green_gating_checks = $9
-                       AND current.verdict_kind = $10
+                     WHERE current.base_revision = $4
+                       AND current.base_branch = $5
+                       AND current.mergeable_state = $6
+                       AND current.review_decision = $7
+                       AND current.unresolved_threads = $8
+                       AND current.gating_check_count = $9
+                       AND current.non_green_gating_checks = $10
+                       AND current.verdict_kind = $11
                 )",
             )
             .bind(repository.as_str())
             .bind(Decimal::from(assessment.number().get()))
             .bind(assessment.head_sha().as_str())
+            .bind(assessment.base_revision().as_str())
             .bind(assessment.base_branch().as_str())
             .bind(repo_watch_mergeable_state_to_str(
                 assessment.mergeable_state(),
@@ -645,7 +717,7 @@ impl PostgresRepoWatchStore {
             .bind(gating_check_count)
             .bind(&non_green_gating_checks)
             .bind(repo_watch_convergence_verdict_to_str(assessment.verdict()))
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await?;
             if evidence_is_unchanged {
                 continue;
@@ -654,17 +726,18 @@ impl PostgresRepoWatchStore {
             sqlx::query(
                 "INSERT INTO repo_watch_pull_request_convergence_assessment
                     (assessment_id, repository, cursor_generation,
-                     pull_request_number, head_sha, base_branch, mergeable_state,
-                     review_decision, unresolved_threads, gating_check_count,
-                     non_green_gating_checks, verdict_kind)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                     pull_request_number, head_sha, base_branch, base_revision,
+                     mergeable_state, review_decision, unresolved_threads,
+                     gating_check_count, non_green_gating_checks, verdict_kind)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
             )
             .bind(assessment_id)
             .bind(repository.as_str())
-            .bind(generation_to_i64(cursor_generation))
+            .bind(generation_to_i64(cursor.generation()))
             .bind(Decimal::from(assessment.number().get()))
             .bind(assessment.head_sha().as_str())
             .bind(assessment.base_branch().as_str())
+            .bind(assessment.base_revision().as_str())
             .bind(repo_watch_mergeable_state_to_str(
                 assessment.mergeable_state(),
             ))
@@ -675,26 +748,26 @@ impl PostgresRepoWatchStore {
             .bind(gating_check_count)
             .bind(&non_green_gating_checks)
             .bind(repo_watch_convergence_verdict_to_str(assessment.verdict()))
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
             if assessment.verdict() != RepoWatchConvergenceVerdict::NotConverged {
                 sqlx::query(
                     "INSERT INTO repo_watch_pull_request_convergence
-                        (repository, pull_request_number, head_sha,
+                        (repository, pull_request_number, head_sha, base_revision,
                          assessment_id, convergence_kind)
-                     VALUES ($1,$2,$3,$4,$5)
+                     VALUES ($1,$2,$3,$4,$5,$6)
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(repository.as_str())
                 .bind(Decimal::from(assessment.number().get()))
                 .bind(assessment.head_sha().as_str())
+                .bind(assessment.base_revision().as_str())
                 .bind(assessment_id)
                 .bind(repo_watch_convergence_verdict_to_str(assessment.verdict()))
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             }
         }
-        transaction.commit().await?;
         Ok(())
     }
 
@@ -1024,6 +1097,18 @@ fn decode_cursor_row(
 
 fn generation_to_i64(generation: RepoWatchCursorGeneration) -> i64 {
     generation.get() as i64
+}
+
+async fn commit_repo_watch_transaction(
+    transaction: Transaction<'_, Postgres>,
+) -> Result<(), RepoWatchStoreError> {
+    transaction.commit().await.map_err(|error| {
+        if commit_failure_is_ambiguous(&error) {
+            RepoWatchStoreError::CommitAmbiguous(error)
+        } else {
+            RepoWatchStoreError::Database(error)
+        }
+    })
 }
 
 async fn exact_replay(
