@@ -151,6 +151,7 @@ pub struct ProcessOperatorStatusQueuedObligation {
     occupying_dispatch_id: Option<Uuid>,
     occupying_session_ids: Vec<Uuid>,
     cooldown_remaining_seconds: Option<u64>,
+    cooldown_never_eligible: bool,
     ready: bool,
 }
 
@@ -201,6 +202,10 @@ impl ProcessOperatorStatusQueuedObligation {
 
     pub const fn cooldown_remaining_seconds(&self) -> Option<u64> {
         self.cooldown_remaining_seconds
+    }
+
+    pub const fn cooldown_never_eligible(&self) -> bool {
+        self.cooldown_never_eligible
     }
 
     pub const fn ready(&self) -> bool {
@@ -524,11 +529,14 @@ async fn declare_status_cursors(
                     (transaction_timestamp() - owed_since))))::numeric
                     AS waiting_for_seconds,
                 occupying_dispatch_id, occupying_session_ids,
-                CASE WHEN eligible_at > transaction_timestamp()
+                CASE WHEN eligible_at = 'infinity'::timestamptz THEN NULL
+                     WHEN eligible_at > transaction_timestamp()
                      THEN ceil(extract(epoch FROM
                          (eligible_at - transaction_timestamp())))::numeric
                      ELSE NULL
                 END AS cooldown_remaining_seconds,
+                eligible_at = 'infinity'::timestamptz
+                    AS cooldown_never_eligible,
                 ready
            FROM repo_watch_outstanding_dispatch_obligation
           ORDER BY owed_since, obligation_id",
@@ -627,6 +635,7 @@ fn decode_queued_obligation(
             .try_get::<Option<Decimal>, _>("cooldown_remaining_seconds")?
             .map(|value| positive_decimal(value, "cooldown remaining"))
             .transpose()?,
+        cooldown_never_eligible: row.try_get("cooldown_never_eligible")?,
         ready: row.try_get("ready")?,
     })
 }

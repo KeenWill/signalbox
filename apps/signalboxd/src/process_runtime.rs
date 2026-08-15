@@ -9282,6 +9282,7 @@ fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
                 cooldown_remaining_seconds: item
                     .cooldown_remaining_seconds()
                     .map(CanonicalU64::new),
+                cooldown_never_eligible: item.cooldown_never_eligible(),
                 ready: item.ready(),
             }
         }

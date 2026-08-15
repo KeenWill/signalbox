@@ -7094,6 +7094,7 @@ pub enum ServerMessage {
         occupying_session_ids: Vec<CanonicalUuid>,
         #[serde(deserialize_with = "deserialize_required_nullable")]
         cooldown_remaining_seconds: Option<CanonicalU64>,
+        cooldown_never_eligible: bool,
         ready: bool,
     },
     /// One latest pull-request convergence assessment.
@@ -7942,6 +7943,7 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
             occupying_dispatch_id,
             occupying_session_ids,
             cooldown_remaining_seconds,
+            cooldown_never_eligible,
             ready,
             ..
         } => {
@@ -7958,8 +7960,11 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                 && occupying_session_ids.len() <= 32
                 && values_are_distinct(occupying_session_ids)
                 && occupying_dispatch_id.is_some() == !occupying_session_ids.is_empty()
+                && !(cooldown_remaining_seconds.is_some() && *cooldown_never_eligible)
                 && !(*ready
-                    && (occupying_dispatch_id.is_some() || cooldown_remaining_seconds.is_some()))
+                    && (occupying_dispatch_id.is_some()
+                        || cooldown_remaining_seconds.is_some()
+                        || *cooldown_never_eligible))
         }
         ServerMessage::OperatorStatusPullRequestConvergence {
             repository,
@@ -9018,9 +9023,12 @@ mod tests {
         ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
         ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
         ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
-        PROTOCOL_VERSION, PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail,
-        RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
-        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict,
+        OperatorStatusHeldSlotBlocker, OperatorStatusMergeableState, OperatorStatusReviewDecision,
+        OperatorStatusSingletonScope, PROTOCOL_VERSION, PositiveCanonicalU64, ProtocolVersion,
+        ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -9384,6 +9392,157 @@ mod tests {
         );
         assert_eq!(String::from_utf8(encoded.clone())?, expected);
         assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::ReadOperatorStatus {},
+            r#"{"type":"read_operator_status"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatusHeldSlot {
+                dispatch_id: uuid(2),
+                repository: String::from("owner/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                rule_id: String::from("review"),
+                rule_version: CanonicalU64::new(1),
+                singleton_scope: OperatorStatusSingletonScope::PullRequest,
+                singleton_repository: Some(String::from("owner/repo")),
+                singleton_pull_request_number: Some(CanonicalU64::new(41)),
+                singleton_stack_root_pull_request_number: None,
+                held_for_seconds: CanonicalU64::new(90),
+                session_ids: vec![uuid(3)],
+                blockers: vec![
+                    OperatorStatusHeldSlotBlocker::UndeliveredAction,
+                    OperatorStatusHeldSlotBlocker::PursuingGoal,
+                ],
+            },
+            r#"{"type":"operator_status_held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"owner/repo","pull_request_number":"41","rule_id":"review","rule_version":"1","singleton_scope":"pull_request","singleton_repository":"owner/repo","singleton_pull_request_number":"41","singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":["undelivered_action","pursuing_goal"]}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatusQueuedObligation {
+                obligation_id: uuid(4),
+                repository: String::from("owner/repo"),
+                rule_id: String::from("review"),
+                rule_version: CanonicalU64::new(1),
+                singleton_scope: OperatorStatusSingletonScope::Rule,
+                singleton_repository: None,
+                singleton_pull_request_number: None,
+                singleton_stack_root_pull_request_number: None,
+                first_event_id: uuid(5),
+                latest_event_id: uuid(6),
+                matched_event_count: CanonicalU64::new(3),
+                waiting_for_seconds: CanonicalU64::new(45),
+                occupying_dispatch_id: None,
+                occupying_session_ids: Vec::new(),
+                cooldown_remaining_seconds: Some(CanonicalU64::new(15)),
+                cooldown_never_eligible: false,
+                ready: false,
+            },
+            r#"{"type":"operator_status_queued_obligation","obligation_id":"00000000-0000-0000-0000-000000000004","repository":"owner/repo","rule_id":"review","rule_version":"1","singleton_scope":"rule","singleton_repository":null,"singleton_pull_request_number":null,"singleton_stack_root_pull_request_number":null,"first_event_id":"00000000-0000-0000-0000-000000000005","latest_event_id":"00000000-0000-0000-0000-000000000006","matched_event_count":"3","waiting_for_seconds":"45","occupying_dispatch_id":null,"occupying_session_ids":[],"cooldown_remaining_seconds":"15","cooldown_never_eligible":false,"ready":false}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatusPullRequestConvergence {
+                repository: String::from("owner/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                head_sha: String::from("1111111111111111111111111111111111111111"),
+                base_branch: String::from("main"),
+                base_revision: String::from("2222222222222222222222222222222222222222"),
+                mergeable_state: OperatorStatusMergeableState::Mergeable,
+                review_decision: OperatorStatusReviewDecision::Approved,
+                unresolved_thread_count: CanonicalU64::new(0),
+                gating_check_count: CanonicalU64::new(2),
+                non_green_gating_checks: Vec::new(),
+                verdict: OperatorStatusConvergenceVerdict::MergeReady,
+                seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                assessed_seconds_ago: CanonicalU64::new(12),
+            },
+            r#"{"type":"operator_status_pull_request_convergence","repository":"owner/repo","pull_request_number":"41","head_sha":"1111111111111111111111111111111111111111","base_branch":"main","base_revision":"2222222222222222222222222222222222222222","mergeable_state":"mergeable","review_decision":"approved","unresolved_thread_count":"0","gating_check_count":"2","non_green_gating_checks":[],"verdict":"merge_ready","seal":"merge_ready","assessed_seconds_ago":"12"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatusPendingStaleReviewClearance {
+                repository: String::from("owner/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                current_head_sha: String::from("1111111111111111111111111111111111111111"),
+                review_node_id: String::from("PRR_node"),
+                reviewer: String::from("reviewer"),
+                reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
+                pending_for_seconds: CanonicalU64::new(8),
+            },
+            r#"{"type":"operator_status_pending_stale_review_clearance","repository":"owner/repo","pull_request_number":"41","current_head_sha":"1111111111111111111111111111111111111111","review_node_id":"PRR_node","reviewer":"reviewer","reviewed_head_sha":"3333333333333333333333333333333333333333","pending_for_seconds":"8"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatusEnd {
+                held_slot_count: CanonicalU64::new(1),
+                queued_obligation_count: CanonicalU64::new(1),
+                pull_request_convergence_count: CanonicalU64::new(1),
+                pending_stale_review_clearance_count: CanonicalU64::new(1),
+            },
+            r#"{"type":"operator_status_end","held_slot_count":"1","queued_obligation_count":"1","pull_request_convergence_count":"1","pending_stale_review_clearance_count":"1"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn operator_status_rejects_contradictory_singletons_and_ready_waits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let invalid_singleton = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::OperatorStatusHeldSlot {
+                dispatch_id: uuid(2),
+                repository: String::from("owner/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                rule_id: String::from("review"),
+                rule_version: CanonicalU64::new(1),
+                singleton_scope: OperatorStatusSingletonScope::Rule,
+                singleton_repository: Some(String::from("owner/repo")),
+                singleton_pull_request_number: None,
+                singleton_stack_root_pull_request_number: None,
+                held_for_seconds: CanonicalU64::new(1),
+                session_ids: vec![uuid(3)],
+                blockers: Vec::new(),
+            },
+        );
+        assert_eq!(
+            invalid_singleton,
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+
+        let invalid_ready = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::OperatorStatusQueuedObligation {
+                obligation_id: uuid(4),
+                repository: String::from("owner/repo"),
+                rule_id: String::from("review"),
+                rule_version: CanonicalU64::new(1),
+                singleton_scope: OperatorStatusSingletonScope::Rule,
+                singleton_repository: None,
+                singleton_pull_request_number: None,
+                singleton_stack_root_pull_request_number: None,
+                first_event_id: uuid(5),
+                latest_event_id: uuid(6),
+                matched_event_count: CanonicalU64::new(1),
+                waiting_for_seconds: CanonicalU64::new(1),
+                occupying_dispatch_id: None,
+                occupying_session_ids: Vec::new(),
+                cooldown_remaining_seconds: Some(CanonicalU64::new(1)),
+                cooldown_never_eligible: false,
+                ready: true,
+            },
+        );
+        assert_eq!(
+            invalid_ready,
+            Err(FrameValidationError::OperatorStatusShape)
+        );
         Ok(())
     }
 
