@@ -5546,8 +5546,12 @@ impl InstructionPath {
 }
 pub struct InstructionSourcePath { /* private */ }
 impl InstructionSourcePath {
-    pub fn try_new(value: String) -> Result<Self, InstructionPathError>;
-    pub fn as_str(&self) -> &str;
+    pub fn try_new(
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn absolute_path(&self) -> String;
+    pub fn relative_path(&self) -> &str;
 }
 pub enum InstructionPathError {
     Empty,
