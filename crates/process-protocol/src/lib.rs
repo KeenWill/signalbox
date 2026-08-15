@@ -8024,7 +8024,7 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                 && operator_status_sha_is_valid(reviewed_head_sha)
                 && current_head_sha != reviewed_head_sha
         }
-        ServerMessage::OperatorStatusStart {} | ServerMessage::OperatorStatusEnd { .. } | _ => true,
+        _ => true,
     };
     if valid {
         Ok(())

@@ -3637,79 +3637,80 @@ mod tests {
     fn operator_status_renders_all_sections_and_explains_omitted_usage() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut output = Output::new(&mut stdout, &mut stderr, false);
-        output
-            .operator_status_counts(1, 1, 1, 1)
-            .expect("in-memory output cannot fail");
-        output
-            .operator_status_item(&ServerMessage::OperatorStatusHeldSlot {
-                dispatch_id: wire_uuid(1),
-                repository: String::from("owner/repo"),
-                pull_request_number: CanonicalU64::new(41),
-                rule_id: String::from("review"),
-                rule_version: CanonicalU64::new(1),
-                singleton_scope: OperatorStatusSingletonScope::PullRequest,
-                singleton_repository: Some(String::from("owner/repo")),
-                singleton_pull_request_number: Some(CanonicalU64::new(41)),
-                singleton_stack_root_pull_request_number: None,
-                held_for_seconds: CanonicalU64::new(3_661),
-                session_ids: vec![wire_uuid(2)],
-                blockers: vec![OperatorStatusHeldSlotBlocker::PursuingGoal],
-            })
-            .expect("in-memory output cannot fail");
-        output
-            .operator_status_item(&ServerMessage::OperatorStatusQueuedObligation {
-                obligation_id: wire_uuid(3),
-                repository: String::from("owner/repo"),
-                rule_id: String::from("review"),
-                rule_version: CanonicalU64::new(1),
-                singleton_scope: OperatorStatusSingletonScope::Rule,
-                singleton_repository: None,
-                singleton_pull_request_number: None,
-                singleton_stack_root_pull_request_number: None,
-                first_event_id: wire_uuid(4),
-                latest_event_id: wire_uuid(5),
-                matched_event_count: CanonicalU64::new(3),
-                waiting_for_seconds: CanonicalU64::new(65),
-                occupying_dispatch_id: None,
-                occupying_session_ids: Vec::new(),
-                cooldown_remaining_seconds: Some(CanonicalU64::new(5)),
-                cooldown_never_eligible: false,
-                ready: false,
-            })
-            .expect("in-memory output cannot fail");
-        output
-            .operator_status_item(&ServerMessage::OperatorStatusPullRequestConvergence {
-                repository: String::from("owner/repo"),
-                pull_request_number: CanonicalU64::new(41),
-                head_sha: String::from("1111111111111111111111111111111111111111"),
-                base_branch: String::from("main"),
-                base_revision: String::from("2222222222222222222222222222222222222222"),
-                mergeable_state: OperatorStatusMergeableState::Mergeable,
-                review_decision: OperatorStatusReviewDecision::Approved,
-                unresolved_thread_count: CanonicalU64::new(0),
-                gating_check_count: CanonicalU64::new(2),
-                non_green_gating_checks: Vec::new(),
-                verdict: OperatorStatusConvergenceVerdict::MergeReady,
-                seal: Some(OperatorStatusConvergenceSeal::MergeReady),
-                assessed_seconds_ago: CanonicalU64::new(9),
-            })
-            .expect("in-memory output cannot fail");
-        output
-            .operator_status_item(&ServerMessage::OperatorStatusPendingStaleReviewClearance {
-                repository: String::from("owner/repo"),
-                pull_request_number: CanonicalU64::new(41),
-                current_head_sha: String::from("1111111111111111111111111111111111111111"),
-                review_node_id: String::from("PRR_node"),
-                reviewer: String::from("reviewer"),
-                reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
-                pending_for_seconds: CanonicalU64::new(8),
-            })
-            .expect("in-memory output cannot fail");
-        output
-            .operator_status_model_usage_omitted()
-            .expect("in-memory output cannot fail");
-        drop(output);
+        {
+            let mut output = Output::new(&mut stdout, &mut stderr, false);
+            output
+                .operator_status_counts(1, 1, 1, 1)
+                .expect("in-memory output cannot fail");
+            output
+                .operator_status_item(&ServerMessage::OperatorStatusHeldSlot {
+                    dispatch_id: wire_uuid(1),
+                    repository: String::from("owner/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::PullRequest,
+                    singleton_repository: Some(String::from("owner/repo")),
+                    singleton_pull_request_number: Some(CanonicalU64::new(41)),
+                    singleton_stack_root_pull_request_number: None,
+                    held_for_seconds: CanonicalU64::new(3_661),
+                    session_ids: vec![wire_uuid(2)],
+                    blockers: vec![OperatorStatusHeldSlotBlocker::PursuingGoal],
+                })
+                .expect("in-memory output cannot fail");
+            output
+                .operator_status_item(&ServerMessage::OperatorStatusQueuedObligation {
+                    obligation_id: wire_uuid(3),
+                    repository: String::from("owner/repo"),
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::Rule,
+                    singleton_repository: None,
+                    singleton_pull_request_number: None,
+                    singleton_stack_root_pull_request_number: None,
+                    first_event_id: wire_uuid(4),
+                    latest_event_id: wire_uuid(5),
+                    matched_event_count: CanonicalU64::new(3),
+                    waiting_for_seconds: CanonicalU64::new(65),
+                    occupying_dispatch_id: None,
+                    occupying_session_ids: Vec::new(),
+                    cooldown_remaining_seconds: Some(CanonicalU64::new(5)),
+                    cooldown_never_eligible: false,
+                    ready: false,
+                })
+                .expect("in-memory output cannot fail");
+            output
+                .operator_status_item(&ServerMessage::OperatorStatusPullRequestConvergence {
+                    repository: String::from("owner/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    head_sha: String::from("1111111111111111111111111111111111111111"),
+                    base_branch: String::from("main"),
+                    base_revision: String::from("2222222222222222222222222222222222222222"),
+                    mergeable_state: OperatorStatusMergeableState::Mergeable,
+                    review_decision: OperatorStatusReviewDecision::Approved,
+                    unresolved_thread_count: CanonicalU64::new(0),
+                    gating_check_count: CanonicalU64::new(2),
+                    non_green_gating_checks: Vec::new(),
+                    verdict: OperatorStatusConvergenceVerdict::MergeReady,
+                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                    assessed_seconds_ago: CanonicalU64::new(9),
+                })
+                .expect("in-memory output cannot fail");
+            output
+                .operator_status_item(&ServerMessage::OperatorStatusPendingStaleReviewClearance {
+                    repository: String::from("owner/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    current_head_sha: String::from("1111111111111111111111111111111111111111"),
+                    review_node_id: String::from("PRR_node"),
+                    reviewer: String::from("reviewer"),
+                    reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
+                    pending_for_seconds: CanonicalU64::new(8),
+                })
+                .expect("in-memory output cannot fail");
+            output
+                .operator_status_model_usage_omitted()
+                .expect("in-memory output cannot fail");
+        }
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
