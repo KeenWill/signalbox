@@ -6251,14 +6251,23 @@ pub trait RunnerWorkspaceReadyTransaction {
     fn record(
         &mut self,
         receipt: RunnerWorkspaceReadyReceipt,
+        identities: PinnedRunnerReplacementIdentities,
     ) -> impl Future<Output = Result<RunnerWorkspaceReadyReceipt, Self::Error>> + Send;
 }
 
-pub struct RunnerWorkspaceReadyService<Transaction> { /* private */ }
-impl<Transaction> RunnerWorkspaceReadyService<Transaction> {
-    pub const fn new(transaction: Transaction) -> Self;
+pub trait RunnerWorkspaceReadyIdGenerator {
+    fn next_identities(&mut self) -> PinnedRunnerReplacementIdentities;
 }
-impl<Transaction: RunnerWorkspaceReadyTransaction> RunnerWorkspaceReadyService<Transaction> {
+
+pub struct UuidV7RunnerWorkspaceReadyIdGenerator;
+
+pub struct RunnerWorkspaceReadyService<Transaction, Ids> { /* private */ }
+impl<Transaction, Ids> RunnerWorkspaceReadyService<Transaction, Ids> {
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self;
+}
+impl<Transaction: RunnerWorkspaceReadyTransaction, Ids: RunnerWorkspaceReadyIdGenerator>
+    RunnerWorkspaceReadyService<Transaction, Ids>
+{
     pub async fn execute(
         &mut self,
         receipt: RunnerWorkspaceReadyReceipt,
@@ -11394,7 +11403,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
 | application: runner_operation_failure              | 6 (incl. 1 trait)     |
 | application: runner_workspace_release              | 3 (incl. 1 trait)     |
-| application: runner_workspace_ready                | 6 (incl. 1 trait)     |
+| application: runner_workspace_ready                | 8 (incl. 2 traits)    |
 | application: runner_lease_claim                    | 3 (incl. 1 trait)     |
 | application: runner_lease_result                   | 3 (incl. 1 trait)     |
 | application: pinned_runner_dispatch                | 11 (incl. 3 traits)   |
@@ -11417,4 +11426,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **320 (+1 free fn)**  |
+| **signalbox-application total**                    | **322 (+1 free fn)**  |

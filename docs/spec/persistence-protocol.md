@@ -67,7 +67,10 @@ acknowledgement projection is verified against this PR
 (`agent/daemon-runner-workspace-ready-routing`). The version-two ready receipt's
 runner-authored absolute execution directory and fail-closed typed readback are
 verified against this PR (`agent/runner-workspace-ready-execution-directory`).
-Existing-pin attempt-and-offer atomicity is verified against this PR
+Repository receipt consumption, atomic pinned replacement, and same-runner
+predecessor release enqueue are verified against this PR
+(`agent/runner-repository-replacement-terminalization`). Existing-pin
+attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -733,9 +736,10 @@ Representation rules, all enforced in the schema:
   result as activation authority, and typed readback independently rejoins the
   pending relation, both enrollment audits, the predecessor loss, current
   registration, connection, placement, and boundary before returning the
-  receipt. **Committed unimplemented functionality.** Repository-backed pending
-  replacement remains staged until the workspace-receipt terminal transaction
-  exists.
+  receipt. Migration `202608150101` extends the same terminal transaction to an
+  exact repository-ready receipt. It activates the pending enrollment and
+  revokes the predecessor in the same commit as the successor workspace,
+  placement boundary, outbox event, credential grant, and result.
 - Migration `202608110027` retains one pending managed-workspace release under
   the complete wire correlation plus storage-only predecessor, successor,
   enrollment, and connected-event identities. Its deferred check admits only a
@@ -797,9 +801,28 @@ Representation rules, all enforced in the schema:
   composition has no repository-workspace producer, the migration refuses a
   populated version-one receipt relation rather than inventing an absolute path
   for evidence that never carried one.
+- Migration `202608150101` adds one distinct immutable semantic-entry/frontier
+  identity pair to each new receipt and correlates an applied pinned result to
+  its exact repository authorization. Receipt admission commits the replayable
+  evidence first, then the frontier-root terminal transaction locks the session
+  scheduler and rechecks the command, lost placement, current connected target,
+  authorization, and receipt. It consumes the exact execution directory,
+  manifest, repository recovery, sandbox, and credential facts; installs the
+  successor placement and any advanced credential grant; appends the retained
+  placement entry, frontier, outbox event, and result atomically; and activates
+  an exact pending target in that same commit. A receipt retained behind an
+  in-flight model call is consumed by the existing observation finalizer after
+  that call's durable frontier becomes the exact prefix. A checked same-runner
+  replacement additionally enqueues the retired predecessor manifest under the
+  current connected authority in the same transaction, while an unreachable
+  distinct predecessor produces no release. Deferred relational checks bind the
+  result to every authority, workspace, boundary, activation, and release fact.
+  Equal receipt replay retries terminalization from the retained identities
+  without changing them. A lost placement with an interrupted physical attempt,
+  an active runner-recovery turn with no in-flight model observation, or an
+  earlier nonempty frontier with no such observation remains staged.
 - **Committed unimplemented functionality.** No heartbeat path reconciles
-  provisioning progress, and no present transaction consumes the receipt to
-  terminalize the repository-backed replacement.
+  provisioning progress.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
