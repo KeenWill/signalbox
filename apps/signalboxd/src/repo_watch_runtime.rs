@@ -510,6 +510,10 @@ impl RepositoryWatchTask {
             .as_ref()
             .map(|cursor| cursor.candidate().observation());
         let cursor_generation = cursor.as_ref().map(|cursor| cursor.generation());
+        let mut event_identity_frontier = cursor
+            .as_ref()
+            .map(|cursor| cursor.candidate().event_identity_frontier().clone())
+            .unwrap_or_default();
         let observation = self
             .poller
             .poll_against_cursor(previous, cursor_generation)
@@ -518,6 +522,7 @@ impl RepositoryWatchTask {
             &self.repository,
             previous,
             &observation,
+            &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| RepositoryWatchAttemptError::Differ)?;
@@ -527,7 +532,10 @@ impl RepositoryWatchTask {
                 &self.repository,
                 RepoWatchCommitRequest::new(
                     cursor_generation,
-                    RepoWatchCursorCandidate::new(observation),
+                    RepoWatchCursorCandidate::with_event_identity_frontier(
+                        observation,
+                        event_identity_frontier,
+                    ),
                     events,
                 ),
             )
@@ -2936,6 +2944,7 @@ mod tests {
         owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
         supervise_repository_tasks,
     };
+    use signalbox_application::RepoWatchEventIdentityFrontierV1;
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
@@ -5063,10 +5072,12 @@ mod tests {
             .await
             .expect("the deferred remote state is fetched");
         server.finish().await;
+        let mut event_identity_frontier = RepoWatchEventIdentityFrontierV1::default();
         let events = derive_repo_watch_events(
             &fixture.poller.repository,
             Some(&previous),
             &current,
+            &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .expect("the deferred review wave forms events");
@@ -5075,7 +5086,7 @@ mod tests {
 
         assert_eq!(events.len(), deferred_reviews.len());
         assert_eq!(
-            events[0].kind(),
+            events[0].event().kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
                 reviewer: deferred_reviews[0].reviewer().clone(),
                 state: deferred_reviews[0]
@@ -5085,7 +5096,7 @@ mod tests {
             }
         );
         assert_eq!(
-            events[1].kind(),
+            events[1].event().kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
                 reviewer: deferred_reviews[1].reviewer().clone(),
                 state: deferred_reviews[1]
@@ -5095,7 +5106,7 @@ mod tests {
             }
         );
         assert_eq!(
-            events[2].kind(),
+            events[2].event().kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
                 reviewer: deferred_reviews[2].reviewer().clone(),
                 state: deferred_reviews[2]

@@ -7,11 +7,11 @@
 use std::{error::Error, time::Duration};
 
 use signalbox_application::{
-    RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
-    UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
+    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver, UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
@@ -164,6 +164,16 @@ fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Err
             current: MergeableState::Conflicting,
         },
     )?)
+}
+
+fn identified_event(event: RepoWatchEvent) -> RepoWatchEventOccurrenceV1 {
+    let mut identity = [0_u8; 32];
+    identity[..16].copy_from_slice(event.id().as_uuid().as_bytes());
+    identity[16..].copy_from_slice(event.id().as_uuid().as_bytes());
+    RepoWatchEventOccurrenceV1::from_parts(
+        event,
+        RepoWatchEventContentIdentityV1::from_bytes(identity),
+    )
 }
 
 fn rule_with_actions_and_cooldown(
@@ -573,7 +583,11 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
         event_store
             .commit(
                 &repository,
-                RepoWatchCommitRequest::new(None, initial, vec![opened_event(100, INITIAL_HEAD)?]),
+                RepoWatchCommitRequest::new(
+                    None,
+                    initial,
+                    vec![identified_event(opened_event(100, INITIAL_HEAD)?)],
+                ),
             )
             .await?,
     );
@@ -588,7 +602,7 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(observation.clone()),
-                vec![event.clone()],
+                vec![identified_event(event.clone())],
             ),
         )
         .await?;
@@ -670,7 +684,7 @@ async fn load_conflict(
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(observation.clone()),
-                vec![event],
+                vec![identified_event(event)],
             ),
         )
         .await?;
@@ -702,7 +716,7 @@ async fn commit_lifecycle(
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(observation),
-                vec![event],
+                vec![identified_event(event)],
             ),
         )
         .await?;
@@ -1046,7 +1060,10 @@ async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Resul
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial),
-                    vec![opened_event(TERMINAL_RULE_OPENED_EVENT_ID, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(
+                        TERMINAL_RULE_OPENED_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -1062,7 +1079,10 @@ async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Resul
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(merged.clone()),
-                vec![merged_event(TERMINAL_RULE_MERGED_EVENT_ID, SECOND_HEAD)?],
+                vec![identified_event(merged_event(
+                    TERMINAL_RULE_MERGED_EVENT_ID,
+                    SECOND_HEAD,
+                )?)],
             ),
         )
         .await?;
@@ -1124,7 +1144,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial),
-                    vec![opened_event(0x54_300, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(0x54_300, INITIAL_HEAD)?)],
                 ),
             )
             .await?,
@@ -1141,7 +1161,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     Some(first_generation),
                     RepoWatchCursorCandidate::new(first_merged),
-                    vec![merged_event(0x54_310, SECOND_HEAD)?],
+                    vec![identified_event(merged_event(0x54_310, SECOND_HEAD)?)],
                 ),
             )
             .await?,
@@ -1155,7 +1175,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     Some(second_generation),
                     RepoWatchCursorCandidate::new(reopened),
-                    vec![opened_event(0x54_320, THIRD_HEAD)?],
+                    vec![identified_event(opened_event(0x54_320, THIRD_HEAD)?)],
                 ),
             )
             .await?,
@@ -1168,7 +1188,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
             RepoWatchCommitRequest::new(
                 Some(third_generation),
                 RepoWatchCursorCandidate::new(second_merged.clone()),
-                vec![merged_event(0x54_330, THIRD_HEAD)?],
+                vec![identified_event(merged_event(0x54_330, THIRD_HEAD)?)],
             ),
         )
         .await?;
