@@ -22,6 +22,7 @@ use signalbox_domain::{
     InstructionBundleKind, InstructionBundleRegistration, InstructionBundleRegistrationInput,
     InstructionDigest, InstructionDiscoveryRootKind, InstructionPath, InstructionSkillMetadata,
     InstructionSkillMetadataInput, InstructionSourcePath, InstructionSourcePathInterner,
+    InstructionSourcePathPrefix,
 };
 
 /// One explicit authority root to scan.
@@ -193,6 +194,7 @@ struct ClassifiedDirectoryEntry {
 struct PendingDirectory {
     parent: Option<usize>,
     name: Option<OsString>,
+    source_prefix: Result<InstructionSourcePathPrefix, InstructionDiscoveryFindingKind>,
 }
 
 #[cfg(unix)]
@@ -285,6 +287,7 @@ impl Drop for FilesystemWorkerCompletion {
 struct CandidateLocation<'a> {
     directory_descriptor: &'a OwnedFd,
     directory: &'a std::path::Path,
+    directory_prefix: Result<&'a InstructionSourcePathPrefix, InstructionDiscoveryFindingKind>,
     source_name: &'a OsStr,
 }
 
@@ -294,6 +297,7 @@ struct DirectoryLocation<'a> {
     descriptor: &'a OwnedFd,
     absolute: &'a std::path::Path,
     relative: &'a std::path::Path,
+    source_prefix: Result<&'a InstructionSourcePathPrefix, InstructionDiscoveryFindingKind>,
 }
 
 /// Greedily walks every supplied root without following symbolic links.
@@ -376,6 +380,9 @@ fn walk_root(
     let mut directories = vec![PendingDirectory {
         parent: None,
         name: None,
+        source_prefix: Ok(InstructionSourcePathInterner::root_prefix(
+            root.path().clone(),
+        )),
     }];
     let mut pending = vec![0_usize];
     while let Some(current_directory) = pending.pop() {
@@ -495,6 +502,10 @@ fn walk_root(
                 descriptor: &directory_descriptor,
                 absolute: &directory,
                 relative: &relative_directory,
+                source_prefix: directories[current_directory]
+                    .source_prefix
+                    .as_ref()
+                    .map_err(|kind| *kind),
             },
             &entries,
             bundles,
@@ -508,10 +519,24 @@ fn walk_root(
                 return false;
             }
             if classified_entry.file_type == rustix::fs::FileType::Directory {
+                let source_prefix = match directories[current_directory].source_prefix.as_ref() {
+                    Ok(prefix) => classified_entry
+                        .name
+                        .to_str()
+                        .ok_or(InstructionDiscoveryFindingKind::NonUtf8SourcePath)
+                        .and_then(|name| {
+                            state
+                                .source_paths
+                                .append_prefix(prefix, name)
+                                .map_err(|_| InstructionDiscoveryFindingKind::EntryUnreadable)
+                        }),
+                    Err(kind) => Err(*kind),
+                };
                 let child = directories.len();
                 directories.push(PendingDirectory {
                     parent: Some(current_directory),
                     name: Some(classified_entry.name),
+                    source_prefix,
                 });
                 pending.push(child);
             }
@@ -569,6 +594,7 @@ fn inspect_directory(
             CandidateLocation {
                 directory_descriptor: location.descriptor,
                 directory: location.absolute,
+                directory_prefix: location.source_prefix,
                 source_name: &agents.name,
             },
             InstructionBundleKind::AgentDocument,
@@ -607,6 +633,7 @@ fn inspect_directory(
             CandidateLocation {
                 directory_descriptor: location.descriptor,
                 directory: location.absolute,
+                directory_prefix: location.source_prefix,
                 source_name: &skill.name,
             },
             InstructionBundleKind::AgentSkill,
@@ -632,13 +659,16 @@ fn register_file(
     state: &mut DiscoveryState,
 ) -> bool {
     let source = location.directory.join(location.source_name);
-    let source_path =
-        match source_path_for_registration(root.path(), &source, &mut state.source_paths) {
-            Ok(path) => path,
-            Err(kind) => {
-                return push_path_finding(&source, root.path(), kind, findings, state);
-            }
-        };
+    let source_path = match source_path_for_registration(
+        location.directory_prefix,
+        location.source_name,
+        &mut state.source_paths,
+    ) {
+        Ok(path) => path,
+        Err(kind) => {
+            return push_path_finding(&source, root.path(), kind, findings, state);
+        }
+    };
     if !state.seen_sources.insert(source_path.clone()) {
         return true;
     }
@@ -753,14 +783,15 @@ fn parse_skill_before_deadline(
 }
 
 fn source_path_for_registration(
-    root_path: &InstructionPath,
-    source: &std::path::Path,
+    directory: Result<&InstructionSourcePathPrefix, InstructionDiscoveryFindingKind>,
+    source_name: &OsStr,
     interner: &mut InstructionSourcePathInterner,
 ) -> Result<InstructionSourcePath, InstructionDiscoveryFindingKind> {
-    let source = source
+    let directory = directory?;
+    let source_name = source_name
         .to_str()
         .ok_or(InstructionDiscoveryFindingKind::NonUtf8SourcePath)?;
-    InstructionSourcePath::try_new_in(interner, root_path.clone(), source.to_owned())
+    InstructionSourcePath::try_new_under(interner, directory, source_name)
         .map_err(|_| InstructionDiscoveryFindingKind::EntryUnreadable)
 }
 
@@ -1915,14 +1946,17 @@ mod tests {
             PendingDirectory {
                 parent: None,
                 name: Some(OsString::from("parent")),
+                source_prefix: Err(InstructionDiscoveryFindingKind::NonUtf8SourcePath),
             },
             PendingDirectory {
                 parent: Some(0),
                 name: Some(OsString::from("left")),
+                source_prefix: Err(InstructionDiscoveryFindingKind::NonUtf8SourcePath),
             },
             PendingDirectory {
                 parent: Some(0),
                 name: Some(OsString::from("right")),
+                source_prefix: Err(InstructionDiscoveryFindingKind::NonUtf8SourcePath),
             },
         ];
 
@@ -2000,6 +2034,7 @@ mod tests {
             CandidateLocation {
                 directory_descriptor: &descriptor,
                 directory: temporary.path(),
+                directory_prefix: Err(InstructionDiscoveryFindingKind::NonUtf8SourcePath),
                 source_name: OsStr::new("AGENTS.md"),
             },
             &candidate,
@@ -2163,10 +2198,12 @@ mod tests {
     #[test]
     fn source_relative_path_must_fit_the_independent_path_bound() {
         let root = InstructionPath::try_new(String::from("/r")).expect("fixture root is valid");
-        let source = PathBuf::from(format!("/r/{}", "a".repeat(4_097)));
+        let root_prefix = InstructionSourcePathInterner::root_prefix(root);
+        let source_name = "a".repeat(4_097);
         let mut interner = InstructionSourcePathInterner::new();
 
-        let result = source_path_for_registration(&root, &source, &mut interner);
+        let result =
+            source_path_for_registration(Ok(&root_prefix), OsStr::new(&source_name), &mut interner);
 
         assert_eq!(
             result,
