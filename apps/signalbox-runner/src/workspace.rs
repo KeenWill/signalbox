@@ -5,6 +5,7 @@ use std::{
     ffi::{OsStr, OsString},
     fmt,
     fs::File,
+    future::Future,
     io::{self, Read, Write},
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
@@ -21,8 +22,8 @@ use rustix::{
 };
 use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{
-    CanonicalUuid, ManifestLifecycle, PositiveU64, ReadyManifest, SandboxProfile, WorkingDirectory,
-    WorkspaceManifest, workspace_manifest_digest,
+    CanonicalUuid, Digest, ManifestLifecycle, PositiveU64, ProfileName, ReadyManifest, Recovery,
+    RepositoryKey, SandboxProfile, WorkingDirectory, WorkspaceManifest, workspace_manifest_digest,
 };
 use uuid::Uuid;
 
@@ -34,6 +35,7 @@ const MANIFEST_FILE: &str = "workspace-manifest.json";
 const MAXIMUM_MANIFEST_BYTES: u64 = 16 * 1024;
 const SESSIONS_DIRECTORY: &str = "sessions";
 const PRIVATE_WORKSPACE_DIRECTORY: &str = "work";
+const REPOSITORY_WORKSPACE_DIRECTORY: &str = "repo";
 const TRASH_DIRECTORY: &str = "trash";
 
 /// Complete durable facts needed to prepare one repository-free managed root.
@@ -87,6 +89,127 @@ impl PrivateWorkspaceRequest {
             self.session,
             self.placement_revision.get(),
         )
+    }
+}
+
+/// Complete durable facts needed to publish one repository workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryWorkspaceRequest {
+    session: CanonicalUuid,
+    placement_revision: PositiveU64,
+    runner: CanonicalUuid,
+    repository: RepositoryKey,
+    canonical_clone_url_digest: Digest,
+    credential_profile: Option<ProfileName>,
+    sandbox_profile: SandboxProfile,
+}
+
+impl RepositoryWorkspaceRequest {
+    /// Constructs one explicit repository-workspace request.
+    pub const fn new(
+        session: CanonicalUuid,
+        placement_revision: PositiveU64,
+        runner: CanonicalUuid,
+        repository: RepositoryKey,
+        canonical_clone_url_digest: Digest,
+        credential_profile: Option<ProfileName>,
+        sandbox_profile: SandboxProfile,
+    ) -> Self {
+        Self {
+            session,
+            placement_revision,
+            runner,
+            repository,
+            canonical_clone_url_digest,
+            credential_profile,
+            sandbox_profile,
+        }
+    }
+
+    /// Returns the owning session.
+    pub const fn session(&self) -> CanonicalUuid {
+        self.session
+    }
+
+    /// Returns the positive placement revision.
+    pub const fn placement_revision(&self) -> PositiveU64 {
+        self.placement_revision
+    }
+
+    /// Returns the cleanup-owning runner.
+    pub const fn runner(&self) -> CanonicalUuid {
+        self.runner
+    }
+
+    /// Borrows the exact configured repository key.
+    pub const fn repository(&self) -> &RepositoryKey {
+        &self.repository
+    }
+
+    /// Borrows the canonical configured clone-URL digest.
+    pub const fn canonical_clone_url_digest(&self) -> &Digest {
+        &self.canonical_clone_url_digest
+    }
+
+    /// Borrows the independently optional selected credential profile.
+    pub const fn credential_profile(&self) -> Option<&ProfileName> {
+        self.credential_profile.as_ref()
+    }
+
+    /// Returns the exact sandbox profile.
+    pub const fn sandbox_profile(&self) -> SandboxProfile {
+        self.sandbox_profile
+    }
+
+    fn relative_path(&self) -> String {
+        format!(
+            "{SESSIONS_DIRECTORY}/{}/{}/{REPOSITORY_WORKSPACE_DIRECTORY}",
+            self.session,
+            self.placement_revision.get(),
+        )
+    }
+}
+
+/// Descriptor-authenticated empty repository directory supplied to one preparer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryWorkspaceTarget {
+    path: PathBuf,
+}
+
+impl RepositoryWorkspaceTarget {
+    /// Borrows the canonical staging directory mounted for repository preparation.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Failure before or after one caller-owned repository preparation operation.
+#[derive(Debug)]
+pub enum PrepareRepositoryWorkspaceError<PreparationError> {
+    /// Descriptor-relative storage or publication failed.
+    Storage(RunnerWorkspaceError),
+    /// The caller-owned restricted preparation operation failed.
+    Preparation(PreparationError),
+}
+
+impl<PreparationError> fmt::Display for PrepareRepositoryWorkspaceError<PreparationError> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Storage(_) => "runner repository workspace storage failed",
+            Self::Preparation(_) => "runner repository workspace preparation failed",
+        })
+    }
+}
+
+impl<PreparationError> Error for PrepareRepositoryWorkspaceError<PreparationError>
+where
+    PreparationError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            Self::Preparation(error) => Some(error),
+        }
     }
 }
 
@@ -160,6 +283,107 @@ impl RunnerWorkspaceStore {
         }
     }
 
+    /// Prepares and atomically publishes one repository, or replays its ready manifest.
+    pub async fn prepare_repository_workspace<Prepare, Preparation, PreparationError>(
+        &self,
+        request: &RepositoryWorkspaceRequest,
+        prepare: Prepare,
+    ) -> Result<ReadyManifest, PrepareRepositoryWorkspaceError<PreparationError>>
+    where
+        Prepare: FnOnce(RepositoryWorkspaceTarget) -> Preparation,
+        Preparation: Future<Output = Result<Recovery, PreparationError>>,
+    {
+        let sessions = open_or_create_directory(&self.root, SESSIONS_DIRECTORY)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let session_name = request.session().to_string();
+        let session = open_or_create_directory(&sessions, &session_name)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let placement_name = request.placement_revision().get().to_string();
+        let execution_path = self.canonical_root.join(request.relative_path());
+        match open_directory(&session, &placement_name) {
+            Ok(placement) => {
+                return read_ready_repository_workspace(&placement, request, &execution_path)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(PrepareRepositoryWorkspaceError::Storage(
+                    RunnerWorkspaceError::Io(error),
+                ));
+            }
+        }
+
+        let manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+        let staging_name = format!(".{placement_name}-{manifest_id}.staging");
+        mkdirat(
+            &session,
+            staging_name.as_str(),
+            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+        )
+        .map_err(rustix_io)
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let staging = open_created_directory(&session, &staging_name)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let repository = open_or_create_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let staging_execution_path = self
+            .canonical_root
+            .join(SESSIONS_DIRECTORY)
+            .join(&session_name)
+            .join(&staging_name)
+            .join(REPOSITORY_WORKSPACE_DIRECTORY);
+        let target_path = checked_execution_directory(&staging_execution_path, &repository)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let recovery = prepare(RepositoryWorkspaceTarget {
+            path: PathBuf::from(target_path.as_str()),
+        })
+        .await
+        .map_err(PrepareRepositoryWorkspaceError::Preparation)?;
+        checked_execution_directory(&staging_execution_path, &repository)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let mut manifest =
+            repository_manifest(ManifestLifecycle::Staging, manifest_id, request, recovery);
+        write_manifest(&staging, &manifest).map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        repository
+            .sync_all()
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        manifest.lifecycle = ManifestLifecycle::Ready;
+        write_manifest(&staging, &manifest).map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        staging
+            .sync_all()
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let repository_is_retained =
+            path_names_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY, &repository)
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let staging_is_retained = path_names_directory(&session, &staging_name, &staging)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        if !repository_is_retained || !staging_is_retained {
+            return Err(PrepareRepositoryWorkspaceError::Storage(
+                RunnerWorkspaceError::ManifestConflict,
+            ));
+        }
+        renameat_with(
+            &session,
+            staging_name.as_str(),
+            &session,
+            placement_name.as_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(rustix_io)
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        session
+            .sync_all()
+            .map_err(RunnerWorkspaceError::CommitAmbiguous)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let placement = open_directory(&session, &placement_name)
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        read_ready_repository_workspace(&placement, request, &execution_path)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)
+    }
+
     /// Deletes one exact private root only after its release is durably accepted.
     pub fn release_private_root(
         &self,
@@ -185,6 +409,58 @@ impl RunnerWorkspaceStore {
             (None, None) => Ok(()),
         }
     }
+}
+
+fn repository_manifest(
+    lifecycle: ManifestLifecycle,
+    manifest_id: CanonicalUuid,
+    request: &RepositoryWorkspaceRequest,
+    recovery: Recovery,
+) -> WorkspaceManifest {
+    WorkspaceManifest {
+        lifecycle,
+        manifest_id,
+        session: request.session(),
+        placement_revision: request.placement_revision(),
+        runner: request.runner(),
+        repository: Some(request.repository().clone()),
+        canonical_clone_url_digest: Some(request.canonical_clone_url_digest().clone()),
+        credential_profile: request.credential_profile().cloned(),
+        sandbox_profile: request.sandbox_profile(),
+        relative_path: request.relative_path(),
+        recovery: Some(recovery),
+    }
+}
+
+fn read_ready_repository_workspace(
+    placement: &File,
+    request: &RepositoryWorkspaceRequest,
+    execution_path: &Path,
+) -> Result<ReadyManifest, RunnerWorkspaceError> {
+    let manifest = read_manifest(placement)?;
+    let recovery = manifest
+        .recovery
+        .clone()
+        .ok_or(RunnerWorkspaceError::ManifestConflict)?;
+    let expected = repository_manifest(
+        ManifestLifecycle::Ready,
+        manifest.manifest_id,
+        request,
+        recovery,
+    );
+    if manifest != expected {
+        return Err(RunnerWorkspaceError::ManifestConflict);
+    }
+    let repository = open_directory(placement, REPOSITORY_WORKSPACE_DIRECTORY)
+        .map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
+    let execution_directory = checked_execution_directory(execution_path, &repository)?;
+    let manifest_digest =
+        workspace_manifest_digest(&manifest).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
+    Ok(ReadyManifest {
+        manifest,
+        manifest_digest,
+        execution_directory,
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -665,9 +941,9 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt as _};
 
     use signalbox_runner_wire::{
-        Advertisement, CanonicalUuid, ManifestLifecycle, PositiveU64, ReleaseCorrelation,
-        ReleasePhase, SandboxProfile, WorkspaceOperation, advertisement_digest,
-        workspace_manifest_digest,
+        Advertisement, CanonicalUuid, ManifestLifecycle, PositiveU64, ProfileName, Recovery,
+        ReleaseCorrelation, ReleasePhase, RepositoryKey, SandboxProfile, WorkspaceOperation,
+        advertisement_digest, clone_url_digest, workspace_manifest_digest,
     };
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -675,8 +951,8 @@ mod tests {
     use crate::{EnrollmentAuthority, EnrollmentReceipt, RunnerStateRoot};
 
     use super::{
-        DOCUMENT_MODE, MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError,
-        TRASH_DIRECTORY,
+        DOCUMENT_MODE, MANIFEST_FILE, PrepareRepositoryWorkspaceError, PrivateWorkspaceRequest,
+        RepositoryWorkspaceRequest, RunnerWorkspaceError, TRASH_DIRECTORY,
     };
 
     const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e1;
@@ -688,6 +964,9 @@ mod tests {
     const AUTHENTICATION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e5;
     const OPEN_DIRECTORY_MODE: u32 = 0o750;
     const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
+    const EXPECTED_REPOSITORY_RELATIVE_PATH: &str =
+        "sessions/018f6f10-0000-7000-8000-0000000000e1/3/repo";
+    const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -731,6 +1010,46 @@ mod tests {
         )
     }
 
+    fn repository_request() -> RepositoryWorkspaceRequest {
+        RepositoryWorkspaceRequest::new(
+            CanonicalUuid::from_uuid(Uuid::from_u128(SESSION)),
+            PositiveU64::try_new(PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            CanonicalUuid::from_uuid(Uuid::from_u128(RUNNER)),
+            RepositoryKey::try_new("signalbox".to_owned())
+                .expect("the fixture repository key is valid"),
+            clone_url_digest(CLONE_URL),
+            Some(
+                ProfileName::try_new("github-runner".to_owned())
+                    .expect("the fixture profile name is valid"),
+            ),
+            SandboxProfile::WorkspaceRestricted,
+        )
+    }
+
+    async fn publish_repository(
+        state: &RunnerStateRoot,
+        recovery: Recovery,
+    ) -> signalbox_runner_wire::ReadyManifest {
+        publish_repository_request(state, &repository_request(), recovery).await
+    }
+
+    async fn publish_repository_request(
+        state: &RunnerStateRoot,
+        request: &RepositoryWorkspaceRequest,
+        recovery: Recovery,
+    ) -> signalbox_runner_wire::ReadyManifest {
+        state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(request, |target| async move {
+                fs::write(target.path().join("prepared"), b"repository\n")?;
+                Ok::<Recovery, std::io::Error>(recovery)
+            })
+            .await
+            .expect("the repository workspace publishes")
+    }
+
     fn release_correlation(prepared: &signalbox_runner_wire::ReadyManifest) -> ReleaseCorrelation {
         ReleaseCorrelation {
             session_id: prepared.manifest.session,
@@ -738,6 +1057,221 @@ mod tests {
             runner_id: prepared.manifest.runner,
             manifest_id: prepared.manifest.manifest_id,
         }
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_publishes_exact_branch_ready_facts() {
+        let (parent, state) = fixture_root();
+        let expected = repository_request();
+        let expected_recovery = Recovery::Branch {
+            name: "main".to_owned(),
+            revision: "a".repeat(40),
+        };
+        let prepared = publish_repository(&state, expected_recovery.clone()).await;
+        let placement = parent
+            .path()
+            .join("runner-state")
+            .join("sessions")
+            .join(expected.session().to_string())
+            .join(expected.placement_revision().get().to_string());
+        let expected_execution_directory = placement
+            .join("repo")
+            .canonicalize()
+            .expect("the published repository directory has a canonical path");
+        let manifest_mode = fs::metadata(placement.join(MANIFEST_FILE))
+            .expect("the protected manifest is inspectable")
+            .permissions()
+            .mode()
+            & 0o7777;
+
+        assert_eq!(prepared.manifest.session, expected.session());
+        assert_eq!(prepared.manifest.runner, expected.runner());
+        assert_eq!(prepared.manifest.lifecycle, ManifestLifecycle::Ready);
+        assert_eq!(
+            prepared.manifest.relative_path,
+            EXPECTED_REPOSITORY_RELATIVE_PATH
+        );
+        assert_eq!(
+            prepared.execution_directory.as_str(),
+            expected_execution_directory
+                .to_str()
+                .expect("the fixture path is UTF-8")
+        );
+        assert_eq!(
+            prepared.manifest_digest,
+            workspace_manifest_digest(&prepared.manifest)
+                .expect("the ready repository manifest has its canonical digest")
+        );
+        assert_eq!(
+            prepared.manifest.repository.as_ref(),
+            Some(expected.repository())
+        );
+        assert_eq!(
+            prepared.manifest.canonical_clone_url_digest.as_ref(),
+            Some(expected.canonical_clone_url_digest())
+        );
+        assert_eq!(
+            prepared.manifest.credential_profile.as_ref(),
+            expected.credential_profile()
+        );
+        assert_eq!(prepared.manifest.recovery, Some(expected_recovery));
+        assert_eq!(manifest_mode, DOCUMENT_MODE);
+        assert_eq!(
+            fs::read(placement.join("repo").join("prepared"))
+                .expect("the prepared repository file is readable"),
+            b"repository\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_reopen_replays_exact_commit_without_preparing_again() {
+        let (parent, state) = fixture_root();
+        let expected_recovery = Recovery::Commit {
+            revision: "b".repeat(40),
+        };
+        let first = publish_repository(&state, expected_recovery).await;
+        drop(state);
+        let reopened = RunnerStateRoot::open(&parent.path().join("runner-state"))
+            .expect("the runner root reopens after restart");
+        let replay = reopened
+            .workspace_store()
+            .expect("the reopened root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |_| async {
+                Err::<Recovery, std::io::Error>(std::io::Error::other(
+                    "replay must not prepare the repository",
+                ))
+            })
+            .await
+            .expect("the durable repository workspace replays");
+
+        assert_eq!(replay, first);
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_publishes_an_unborn_branch_without_a_revision() {
+        let (_parent, state) = fixture_root();
+        let mut request = repository_request();
+        request.credential_profile = None;
+        let expected_recovery = Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        };
+        let prepared =
+            publish_repository_request(&state, &request, expected_recovery.clone()).await;
+
+        assert_eq!(prepared.manifest.recovery, Some(expected_recovery));
+        assert!(prepared.manifest.credential_profile.is_none());
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_preparation_failure_never_publishes_the_placement() {
+        let (parent, state) = fixture_root();
+        let expected = repository_request();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&expected, |_| async {
+                Err::<Recovery, std::io::Error>(std::io::Error::other(
+                    "the fixture preparation fails",
+                ))
+            })
+            .await
+            .expect_err("a failed preparation cannot publish a workspace");
+        let placement = parent
+            .path()
+            .join("runner-state")
+            .join("sessions")
+            .join(expected.session().to_string())
+            .join(expected.placement_revision().get().to_string());
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Preparation(_)
+        ));
+        assert!(!placement.exists());
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rejects_unchecked_recovery_before_publication() {
+        let (parent, state) = fixture_root();
+        let expected = repository_request();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&expected, |_| async {
+                Ok::<Recovery, std::io::Error>(Recovery::UnbornBranch {
+                    name: "..".to_owned(),
+                })
+            })
+            .await
+            .expect_err("an unchecked recovery value cannot publish a workspace");
+        let placement = parent
+            .path()
+            .join("runner-state")
+            .join("sessions")
+            .join(expected.session().to_string())
+            .join(expected.placement_revision().get().to_string());
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::CorruptManifest)
+        ));
+        assert!(!placement.exists());
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_replay_rejects_a_changed_clone_url_identity() {
+        let (_parent, state) = fixture_root();
+        publish_repository(
+            &state,
+            Recovery::Branch {
+                name: "main".to_owned(),
+                revision: "c".repeat(40),
+            },
+        )
+        .await;
+        let mut conflict = repository_request();
+        conflict.canonical_clone_url_digest =
+            clone_url_digest("https://github.com/KeenWill/signalbox-renamed.git");
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms another workspace store")
+            .prepare_repository_workspace(&conflict, |_| async {
+                Err::<Recovery, std::io::Error>(std::io::Error::other(
+                    "conflicting replay must not prepare the repository",
+                ))
+            })
+            .await
+            .expect_err("another clone URL cannot reinterpret the repository workspace");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::ManifestConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_the_staging_directory_identity_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let replacement = target.path().with_file_name("replacement-repo");
+                fs::rename(target.path(), &replacement)?;
+                fs::create_dir(target.path())?;
+                fs::set_permissions(target.path(), fs::Permissions::from_mode(0o700))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Branch {
+                    name: "main".to_owned(),
+                    revision: "d".repeat(40),
+                })
+            })
+            .await
+            .expect_err("a replaced staging path cannot be published");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::ManifestConflict)
+        ));
     }
 
     #[test]

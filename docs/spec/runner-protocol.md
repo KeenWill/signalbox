@@ -70,10 +70,13 @@ consumption into atomic pinned-replacement terminalization is verified against
 this PR (`agent/runner-repository-replacement-terminalization`). Reconstruction
 and exact-connection delivery of a durable repository provisioning authorization
 is verified against this PR (`agent/runner-workspace-provision-delivery`).
-Journal-authorized private-root trash publication, deletion, and exact replay
-are verified against this PR (`agent/runner-private-workspace-release`).
-Accepted-release protocol handoff, heartbeat-serving cleanup, and success and
-failure journaling before projection are verified against this PR
+Descriptor-pinned repository staging, exact manifest publication, and restart
+replay are verified against this PR
+(`agent/runner-repository-workspace-publication`). Journal-authorized
+private-root trash publication, deletion, and exact replay are verified against
+this PR (`agent/runner-private-workspace-release`). Accepted-release protocol
+handoff, heartbeat-serving cleanup, and success and failure journaling before
+projection are verified against this PR
 (`agent/runner-live-workspace-release-handoff`). Top-level private-root cleanup
 composition is verified against this PR
 (`agent/runner-private-release-composition`). Established-connection routing of
@@ -1979,13 +1982,32 @@ constructs its complete closed `workspace_provision` correlation, and routes it
 only to the authorization's enrollment, runner, and physical connection epoch.
 The broker queue remains process-local and creates no authority; a missing
 authorization, invalid wire projection, absent exact connection, or full queue
-fails without changing the durable stage. **Committed unimplemented
-functionality.** No present request or startup scanner invokes that producer.
-The top-level runner process does not invoke the private-root producer, and no
-path places a produced ready manifest into the retained ready frame. No present
-runner provisions or deletes a repository workspace, and startup staging/leak
-reconciliation remains absent. The typed `RecoveryUnavailable` seam therefore
-remains on live workspace provisioning.
+fails without changing the durable stage.
+
+The repository workspace store creates one owner-private descriptor-pinned
+staging and repository directory for the exact session and successor revision,
+then supplies only the authenticated empty repository path to a caller-owned
+asynchronous preparation operation. Before publication it rechecks both
+directory identities, admits only a closed valid Git recovery arm, writes and
+fsyncs the protected `staging` and `ready` manifests outside the mounted
+repository, fsyncs the repository and staging directories, and renames the
+placement with `RENAME_NOREPLACE`. Restart reopens the published directory,
+revalidates the exact runner, repository, clone-URL digest, optional credential,
+sandbox, relative path, recovery, and execution-directory identity, and returns
+the same ready frame without invoking preparation again. Preparation failure,
+invalid recovery, changed configuration identity, or path replacement never
+publishes the final placement. This storage boundary executes no Git process and
+does not claim that caller-supplied recovery describes a clone; the production
+restricted preparer remains the authority that must derive those facts from Git.
+
+**Committed unimplemented functionality.** No present request or startup scanner
+invokes the daemon producer, and no present live runner invokes this storage
+boundary with a restricted Git preparer. The top-level runner process does not
+invoke the private-root producer, and no path places a produced ready manifest
+into the retained ready frame. No present runner provisions or deletes a
+repository workspace, and startup staging/leak reconciliation remains absent.
+The typed `RecoveryUnavailable` seam therefore remains on live workspace
+provisioning.
 
 The application receipt boundary accepts complete already-validated
 repository-workspace manifest facts and the runner-authored absolute execution
