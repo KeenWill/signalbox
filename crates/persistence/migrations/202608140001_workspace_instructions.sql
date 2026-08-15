@@ -267,6 +267,7 @@ DECLARE
     root_max_ordinal bigint;
     candidate_count bigint;
     candidate_max_ordinal bigint;
+    candidate_source_byte_sum numeric;
     actual_finding_count bigint;
     finding_max_ordinal bigint;
     limit_finding_count bigint;
@@ -290,6 +291,19 @@ BEGIN
         RAISE EXCEPTION 'instruction discovery candidate inventory is not contiguous'
             USING ERRCODE = '23514',
                   CONSTRAINT = 'instruction_discovery_candidate_inventory_exact';
+    END IF;
+    SELECT coalesce(sum(bundle.source_byte_length), 0)
+      INTO candidate_source_byte_sum
+      FROM instruction_discovery_candidate AS candidate
+      JOIN registered_instruction_bundle AS bundle
+        ON bundle.instruction_bundle_id = candidate.instruction_bundle_id
+     WHERE candidate.instruction_discovery_id = NEW.instruction_discovery_id;
+    IF candidate_count > NEW.classified_entry_count
+        OR candidate_source_byte_sum > NEW.candidate_source_byte_count
+    THEN
+        RAISE EXCEPTION 'instruction discovery candidates exceed consumed resources'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'instruction_discovery_candidate_usage_within_consumed';
     END IF;
     IF EXISTS (
         SELECT 1
@@ -343,9 +357,34 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION validate_turn_instruction_manifest_discovery()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM instruction_discovery AS discovery
+         WHERE discovery.instruction_discovery_id = NEW.instruction_discovery_id
+           AND discovery.session_id = NEW.session_id
+           AND discovery.turn_id = NEW.turn_id
+           AND discovery.scan_complete
+    ) THEN
+        RAISE EXCEPTION 'turn instruction manifest requires a complete discovery'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'turn_instruction_manifest_discovery_complete';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE TRIGGER instruction_discovery_validates_before_seal
 BEFORE INSERT ON instruction_discovery
 FOR EACH ROW EXECUTE FUNCTION validate_instruction_discovery_seal();
+
+CREATE TRIGGER turn_instruction_manifest_validates_discovery
+BEFORE INSERT ON turn_instruction_manifest
+FOR EACH ROW EXECUTE FUNCTION validate_turn_instruction_manifest_discovery();
 
 CREATE TRIGGER instruction_discovery_root_insert_before_seal
 BEFORE INSERT ON instruction_discovery_root

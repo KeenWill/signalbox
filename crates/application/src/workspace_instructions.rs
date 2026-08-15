@@ -900,6 +900,25 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
     worker_name: &'static str,
     task: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, FilesystemTaskError> {
+    run_bounded_filesystem_task_with_wait_deadline(
+        registry,
+        max_workers,
+        deadline,
+        || deadline,
+        worker_name,
+        task,
+    )
+}
+
+#[cfg(unix)]
+fn run_bounded_filesystem_task_with_wait_deadline<T: Send + 'static>(
+    registry: Arc<FilesystemWorkerRegistry>,
+    max_workers: usize,
+    admission_deadline: Instant,
+    wait_deadline: impl FnOnce() -> Instant,
+    worker_name: &'static str,
+    task: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, FilesystemTaskError> {
     let mut state = registry
         .state
         .lock()
@@ -917,7 +936,7 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
         if state.running < max_workers {
             break;
         }
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let Some(remaining) = admission_deadline.checked_duration_since(Instant::now()) else {
             return Err(FilesystemTaskError::Deadline);
         };
         let waited = registry
@@ -925,11 +944,11 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
             .wait_timeout(state, remaining)
             .map_err(|_| FilesystemTaskError::Unavailable)?;
         state = waited.0;
-        if waited.1.timed_out() && Instant::now() >= deadline {
+        if waited.1.timed_out() && Instant::now() >= admission_deadline {
             return Err(FilesystemTaskError::Deadline);
         }
     }
-    if Instant::now() >= deadline {
+    if Instant::now() >= admission_deadline {
         return Err(FilesystemTaskError::Deadline);
     }
 
@@ -952,6 +971,7 @@ fn run_bounded_filesystem_task<T: Send + 'static>(
     state.workers.push(worker);
     drop(state);
 
+    let deadline = wait_deadline();
     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
         return Err(FilesystemTaskError::Deadline);
     };
@@ -1039,6 +1059,7 @@ fn read_candidate(
 #[cfg(all(unix, test))]
 fn read_candidate_before_deadline(
     source_file: impl Read + Send + 'static,
+    wait_deadline: impl FnOnce() -> Instant,
     source: &std::path::Path,
     fallback: &InstructionPath,
     findings: &mut Vec<InstructionDiscoveryFinding>,
@@ -1048,13 +1069,14 @@ fn read_candidate_before_deadline(
         .limits
         .candidate_source_bytes
         .saturating_sub(state.candidate_source_bytes);
-    let deadline = state.started + state.limits.elapsed;
+    let admission_deadline = Instant::now() + Duration::from_secs(30);
     let observed = Arc::new(AtomicU64::new(0));
     let worker_observed = Arc::clone(&observed);
-    let read_result = run_bounded_filesystem_task(
+    let read_result = run_bounded_filesystem_task_with_wait_deadline(
         Arc::clone(&FILESYSTEM_WORKERS),
         MAX_FILESYSTEM_WORKERS,
-        deadline,
+        admission_deadline,
+        wait_deadline,
         "signalbox-instruction-read",
         move || {
             let mut bytes = Vec::new();
@@ -1500,6 +1522,8 @@ mod tests {
     struct BytesThenBlock {
         bytes: Option<Vec<u8>>,
         blocker: std::os::unix::net::UnixStream,
+        ready: Option<mpsc::SyncSender<()>>,
+        release: mpsc::Receiver<()>,
     }
 
     #[cfg(unix)]
@@ -1518,6 +1542,14 @@ mod tests {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if let Some(bytes) = self.bytes.take() {
                 buffer[..bytes.len()].copy_from_slice(&bytes);
+                self.ready
+                    .take()
+                    .expect("fixture readiness is signalled once")
+                    .send(())
+                    .expect("deadline controller awaits fixture readiness");
+                self.release
+                    .recv()
+                    .expect("deadline controller releases the partial read");
                 return Ok(bytes.len());
             }
             self.blocker.read(buffer)
@@ -1802,6 +1834,8 @@ mod tests {
         let source = PathBuf::from("/workspace/AGENTS.md");
         let fallback = InstructionPath::try_new(String::from("/workspace"))
             .expect("fixture fallback is valid");
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
         let mut findings = Vec::new();
         let mut state = test_state(test_limits(4, 4, 64, Duration::from_millis(5)));
 
@@ -1809,6 +1843,18 @@ mod tests {
             BytesThenBlock {
                 bytes: Some(partial.clone()),
                 blocker: reader,
+                ready: Some(ready_sender),
+                release: release_receiver,
+            },
+            move || {
+                ready_receiver
+                    .recv()
+                    .expect("the reader publishes partial bytes before the deadline starts");
+                let deadline = Instant::now() + Duration::from_millis(5);
+                release_sender
+                    .send(())
+                    .expect("the reader accepts its partial-read release");
+                deadline
             },
             &source,
             &fallback,
@@ -2168,12 +2214,16 @@ mod tests {
 
     #[test]
     fn crlf_portable_skill_frontmatter_is_accepted() {
-        let source = "---\r\nname: review-rust\r\ndescription: Review Rust.\r\n---\r\n# Review\r\n";
+        let expected_name = "review-rust";
+        let expected_description = "Review Rust.";
+        let source = format!(
+            "---\r\nname: {expected_name}\r\ndescription: {expected_description}\r\n---\r\n# Review\r\n"
+        );
 
-        let skill = parse_skill(source, "review-rust").expect("CRLF frontmatter is portable");
+        let skill = parse_skill(&source, expected_name).expect("CRLF frontmatter is portable");
 
-        assert_eq!(skill.name(), "review-rust");
-        assert_eq!(skill.description(), "Review Rust.");
+        assert_eq!(skill.name(), expected_name);
+        assert_eq!(skill.description(), expected_description);
     }
 
     #[test]

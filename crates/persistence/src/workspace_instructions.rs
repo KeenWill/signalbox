@@ -45,6 +45,12 @@ pub struct WorkspaceInstructionPlacementObservation {
     runner_owned: bool,
 }
 
+#[derive(sqlx::FromRow)]
+struct WorkspaceInstructionPlacementRow {
+    event_ordinal: Option<Decimal>,
+    state_kind: Option<String>,
+}
+
 impl WorkspaceInstructionPlacementObservation {
     /// Reports whether the sampled placement gave workspace authority to a runner.
     pub const fn runner_owned(&self) -> bool {
@@ -285,7 +291,7 @@ impl WorkspaceInstructionRepository {
         session: SessionId,
     ) -> Result<WorkspaceInstructionPlacementObservation, WorkspaceInstructionRepositoryError> {
         placement_observation(
-            sqlx::query_as::<_, (Option<Decimal>, Option<String>)>(
+            sqlx::query_as::<_, WorkspaceInstructionPlacementRow>(
                 "SELECT current_placement.event_ordinal, placement.state_kind
                    FROM session_scheduler AS scheduler
                    LEFT JOIN runner_current_session_placement AS current_placement
@@ -613,9 +619,13 @@ impl WorkspaceInstructionRepository {
 }
 
 fn placement_observation(
-    row: Option<(Option<Decimal>, Option<String>)>,
+    row: Option<WorkspaceInstructionPlacementRow>,
 ) -> Result<WorkspaceInstructionPlacementObservation, WorkspaceInstructionRepositoryError> {
-    let Some((head, state)) = row else {
+    let Some(WorkspaceInstructionPlacementRow {
+        event_ordinal: head,
+        state_kind: state,
+    }) = row
+    else {
         return Err(WorkspaceInstructionRepositoryError::Corruption(
             "session scheduler missing during placement observation",
         ));
@@ -644,7 +654,7 @@ async fn placement_observation_in_connection(
     session: SessionId,
 ) -> Result<WorkspaceInstructionPlacementObservation, WorkspaceInstructionRepositoryError> {
     placement_observation(
-        sqlx::query_as::<_, (Option<Decimal>, Option<String>)>(
+        sqlx::query_as::<_, WorkspaceInstructionPlacementRow>(
             "SELECT current_placement.event_ordinal, placement.state_kind
                FROM session_scheduler AS scheduler
                LEFT JOIN runner_current_session_placement AS current_placement
