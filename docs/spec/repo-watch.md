@@ -17,15 +17,16 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
-(`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against this PR (`agent/repo-watch-review-reliability`). The provider members
-the poller adopts as check-suite and check-run completion generations are
-verified against PR #541 (`fix/check-run-updated-at`). The goal a dispatch
-commissions with its session, and the binding of the dispatched work turn to
-that goal's generation, are verified against this PR
-(`agent/commission-binding`). The occupied-refusal obligation and collapsed
-current-state delivery below are verified against this PR
-(`agent/repo-watch-dispatch-loop`).
+(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
+dispatch commissions with its session, the binding of the dispatched work turn
+to that goal's generation, and the occupied-refusal obligation and collapsed
+current-state delivery are verified against PR #812
+(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
+against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
+held-slot diagnostics, and terminal-target cutoff are also verified against this
+PR. The provider members the poller adopts as check-suite and check-run
+completion generations are verified against PR #541
+(`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
 
@@ -113,7 +114,7 @@ has no webhook fallback and no speculative second polling transport.
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
 the fetched pull requests are ordered by number before comparison, so
-concurrency cannot reorder a baseline. A single attempt may transfer up to 512
+concurrency cannot reorder a baseline. A single attempt may transfer up to 768
 MiB of response bytes; what one poller retains between attempts is bounded
 separately and lower, because retention is per watched repository and therefore
 multiplies by the configured repository count.
@@ -496,17 +497,41 @@ obligation for that singleton. Further matching facts join its latest-event
 projection and increment its count, including a match racing with release, so
 one singleton has at most one outstanding obligation. Their individual terminal
 evaluations remain append-only audit facts. The batch releases the singleton at
-the terminal transition that makes every dispatched session in that batch
-terminal. The obligation becomes eligible only after that release and the same
-cooldown that would suppress a fresh successor; cooldown suppression without an
-existing obligation does not create one. Eligibility settles the obligation and
-creates its one current-state batch atomically. Equal recovery cannot create a
-second session for the same admitted action or obligation. A session whose
-current goal is pursuing remains nonterminal for singleton ownership across the
-gap between a completed goal turn and its durably queued continuation. Goal
-blocking, achievement, or user stop rechecks release after pursuit ends. The
-append-only dispatch records identify the sessions responsible for the PR; no
-mutable assignment flag replaces them.
+the transition that makes every dispatched turn terminal or runtime-irrelevant,
+leaves no live runtime-relevant turn for its session, and leaves no pursuing
+goal. A goal-ending recheck is deferred to its transaction boundary so an active
+turn's stop cascade is visible. The obligation becomes eligible only after that
+release and the same cooldown that would suppress a fresh successor; cooldown
+suppression without an existing obligation does not create one. Eligibility
+settles the obligation and creates its one current-state batch atomically. Equal
+recovery cannot create a second session for the same admitted action or
+obligation. A session whose current goal is pursuing remains nonterminal for
+singleton ownership across the gap between a completed goal turn and its durably
+queued continuation. Goal blocking, achievement, or user stop rechecks release
+after pursuit ends. The append-only dispatch records identify the sessions
+responsible for the PR; no mutable assignment flag replaces them.
+
+**Implemented behavior.** A pull-request close or merge durably records one
+lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
+the ordinary parent-only stop to each generation-one goal it commissioned for
+the pull request; it cannot stop descendants, a later user-authored generation,
+or an unrelated session. A later open event makes an earlier unprocessed cutoff
+a recorded reopen instead. Dispatch admission rechecks the latest durable
+lifecycle under the repository lock. A terminal cutoff settles every outstanding
+obligation for that pull request immediately, without waiting for singleton or
+cooldown readiness; the admission recheck is the race-closing backstop. Either
+path settles stale nonterminal work as `target_closed` without creating a
+session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
+event itself remains dispatch-eligible; the terminal event is the cutoff fact,
+not work made stale by that fact. Corruption in one commissioned goal rolls back
+that goal's stop to a savepoint but does not roll back the cutoff: the terminal
+event remains durably dispositioned, healthy commissioned goals are stopped, and
+later cutoffs remain eligible for processing.
+
+**Implemented behavior.** Held singleton batches are directly observable in the
+`repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
+pull request, rule, singleton key, sessions, and held-since time; states each
+release clause independently; and names every failing clause in `blockers`.
 
 **Implemented behavior.** Outstanding obligations are directly observable in the
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
@@ -514,7 +539,8 @@ repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
 sessions, cooldown eligibility, and present readiness. Rule deactivation settles
 an obligation without dispatch rather than leaving permanently owed work for
-semantics that are no longer configured.
+semantics that are no longer configured; terminal-target settlement likewise
+records why the obligation no longer remains owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes

@@ -12,17 +12,23 @@ use signalbox_application::{
     RepoWatchSingletonKey,
 };
 use signalbox_domain::{
-    FrozenAliasDefinition, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug,
-    SessionId,
+    DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
+    GoalUserCommand, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, SessionId,
 };
-use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
+use sqlx::{Acquire, PgPool, Postgres, Row, Transaction, types::Uuid};
 
 use crate::{
     commit_failure_is_ambiguous,
     create_session::insert_fresh_prepared,
     mapping::{
-        RepoWatchSingletonScopeStorageKind, repo_watch_singleton_scope_to_str, session_id_to_uuid,
+        RepoWatchEvaluationOutcomeStorageKind, RepoWatchLifecycleCutoffDispositionStorageKind,
+        RepoWatchSingletonScopeStorageKind, repo_watch_evaluation_outcome_from_str,
+        repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
+        repo_watch_lifecycle_cutoff_disposition_from_str,
+        repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_singleton_scope_to_str,
+        session_id_to_uuid,
     },
 };
 
@@ -37,6 +43,7 @@ pub enum RepoWatchDispatchRepositoryError {
     SessionCreation(crate::create_session::CreateSessionRepositoryError),
     InitialInput(crate::submit_input::SubmitInputRepositoryError),
     GoalCommission(crate::goal::GoalRepositoryError),
+    GoalCutoff(crate::goal::GoalRepositoryError),
     ReusedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
@@ -62,6 +69,7 @@ impl fmt::Display for RepoWatchDispatchRepositoryError {
             Self::SessionCreation(error) => error.fmt(formatter),
             Self::InitialInput(error) => error.fmt(formatter),
             Self::GoalCommission(error) => error.fmt(formatter),
+            Self::GoalCutoff(error) => error.fmt(formatter),
             Self::EventStore(error) => error.fmt(formatter),
             Self::ReusedRuleIdentity {
                 rule_id,
@@ -99,6 +107,7 @@ impl Error for RepoWatchDispatchRepositoryError {
             Self::SessionCreation(error) => Some(error),
             Self::InitialInput(error) => Some(error),
             Self::GoalCommission(error) => Some(error),
+            Self::GoalCutoff(error) => Some(error),
             Self::ReusedRuleIdentity { .. }
             | Self::ChangedRuleIdentity { .. }
             | Self::Corruption(_) => None,
@@ -129,6 +138,207 @@ impl PostgresRepoWatchDispatchStore {
 
     pub(crate) const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Processes the oldest unhandled pull-request closure and withdraws every
+    /// still-active generation-one goal commissioned for that pull request.
+    pub async fn process_next_lifecycle_cutoff<NextCommandId>(
+        &self,
+        repository: &RepositorySlug,
+        mut next_command_id: NextCommandId,
+    ) -> Result<bool, RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, repository.as_str()).await?;
+        let candidate = sqlx::query(
+            "SELECT event.event_id, event.pull_request_number,
+                    event.cursor_generation, event.event_ordinal
+               FROM repo_watch_event AS event
+              WHERE event.repository = $1
+                AND event.event_kind IN ('pull_request_closed', 'pull_request_merged')
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_lifecycle_cutoff AS cutoff
+                     WHERE cutoff.event_id = event.event_id
+                )
+              ORDER BY event.cursor_generation, event.event_ordinal
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(candidate) = candidate else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let event_id: Uuid = candidate.try_get("event_id")?;
+        let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
+        let cursor_generation: i64 = candidate.try_get("cursor_generation")?;
+        let event_ordinal: i32 = candidate.try_get("event_ordinal")?;
+        let next_lifecycle: Option<String> = sqlx::query_scalar(
+            "SELECT event_kind
+               FROM repo_watch_event
+              WHERE repository = $1
+                AND pull_request_number = $2
+                AND event_kind IN (
+                    'pull_request_opened', 'pull_request_closed', 'pull_request_merged'
+                )
+                AND (cursor_generation, event_ordinal) > ($3, $4)
+              ORDER BY cursor_generation, event_ordinal
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .bind(pull_request_number)
+        .bind(cursor_generation)
+        .bind(event_ordinal)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let next_lifecycle = next_lifecycle
+            .map(|kind| {
+                repo_watch_event_kind_from_str(&kind).ok_or(
+                    RepoWatchDispatchRepositoryError::Corruption(
+                        "lifecycle cutoff has an unknown following event kind",
+                    ),
+                )
+            })
+            .transpose()?;
+        let disposition = if next_lifecycle == Some(RepoWatchEventKindNameV1::PullRequestOpened) {
+            RepoWatchLifecycleCutoffDispositionStorageKind::Reopened
+        } else {
+            RepoWatchLifecycleCutoffDispositionStorageKind::Terminal
+        };
+        sqlx::query(
+            "INSERT INTO repo_watch_lifecycle_cutoff (event_id, disposition_kind)
+             VALUES ($1, $2)",
+        )
+        .bind(event_id)
+        .bind(repo_watch_lifecycle_cutoff_disposition_to_str(disposition))
+        .execute(&mut *transaction)
+        .await?;
+        let mut cutoff_corruption = None;
+        if disposition == RepoWatchLifecycleCutoffDispositionStorageKind::Terminal {
+            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
+                &mut transaction,
+                repository,
+                pull_request_number,
+                RepoWatchEventId::from_uuid(event_id),
+            )
+            .await?;
+            let sessions = sqlx::query_scalar::<_, Uuid>(
+                "SELECT DISTINCT action.session_id
+                   FROM repo_watch_dispatch_action AS action
+                   JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
+                  WHERE origin.repository = $1
+                    AND origin.pull_request_number = $2
+                    AND origin.event_id <> $3
+                    AND EXISTS (
+                        SELECT 1
+                          FROM goal_event AS commissioned_goal
+                         WHERE commissioned_goal.session_id = action.session_id
+                    )
+                  ORDER BY action.session_id",
+            )
+            .bind(repository.as_str())
+            .bind(pull_request_number)
+            .bind(event_id)
+            .fetch_all(&mut *transaction)
+            .await?;
+            for session_id in sessions {
+                let session = SessionId::from_uuid(session_id);
+                let command = GoalUserCommand::new(
+                    next_command_id(),
+                    session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                );
+                let mut savepoint = transaction.begin().await?;
+                match crate::goal::insert_repo_watch_composed_stop(&mut savepoint, command.clone())
+                    .await
+                {
+                    Ok(stopped) => {
+                        if stopped {
+                            sqlx::query(
+                                "INSERT INTO repo_watch_lifecycle_cutoff_goal
+                                    (event_id, session_id, goal_command_id)
+                                 VALUES ($1, $2, $3)",
+                            )
+                            .bind(event_id)
+                            .bind(session_id)
+                            .bind(command.command_id().as_uuid())
+                            .execute(&mut *savepoint)
+                            .await?;
+                        }
+                        savepoint.commit().await?;
+                    }
+                    Err(crate::goal::GoalRepositoryError::Corruption(error)) => {
+                        savepoint.rollback().await?;
+                        cutoff_corruption
+                            .get_or_insert(crate::goal::GoalRepositoryError::Corruption(error));
+                    }
+                    Err(error) => {
+                        savepoint.rollback().await?;
+                        return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+                    }
+                }
+            }
+        }
+        commit(transaction).await?;
+        if let Some(error) = cutoff_corruption {
+            return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+        }
+        Ok(true)
+    }
+
+    /// Drains durable lifecycle cutoffs before repository-specific tasks start.
+    pub async fn process_pending_lifecycle_cutoffs<NextCommandId>(
+        &self,
+        mut next_command_id: NextCommandId,
+    ) -> Result<(), RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        loop {
+            let repository: Option<String> = sqlx::query_scalar(
+                "SELECT event.repository
+                   FROM repo_watch_event AS event
+                  WHERE event.event_kind IN ('pull_request_closed', 'pull_request_merged')
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_lifecycle_cutoff AS cutoff
+                         WHERE cutoff.event_id = event.event_id
+                    )
+                  ORDER BY event.repository, event.cursor_generation, event.event_ordinal
+                  LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(repository) = repository else {
+                return Ok(());
+            };
+            let repository = RepositorySlug::try_new(repository).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "pending lifecycle cutoff has an invalid repository",
+                )
+            })?;
+            match self
+                .process_next_lifecycle_cutoff(&repository, &mut next_command_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(RepoWatchDispatchRepositoryError::Corruption(
+                        "selected pending lifecycle cutoff disappeared",
+                    ));
+                }
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    crate::goal::GoalRepositoryError::Corruption(_),
+                )) => {}
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Deactivates rules belonging to repositories absent from configuration.
@@ -397,8 +607,13 @@ impl PostgresRepoWatchDispatchStore {
                 rule_version,
             } => match admission {
                 EvaluationAdmission::Fresh => {
-                    self.record_simple_outcome(&event, &rule_id, rule_version, "not_matched")
-                        .await
+                    self.record_simple_outcome(
+                        &event,
+                        &rule_id,
+                        rule_version,
+                        RepoWatchEvaluationOutcomeStorageKind::NotMatched,
+                    )
+                    .await
                 }
                 EvaluationAdmission::Obligation(_) => {
                     Err(RepoWatchDispatchRepositoryError::Corruption(
@@ -477,6 +692,40 @@ impl PostgresRepoWatchDispatchStore {
                     transaction.rollback().await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
                 }
+                let terminal_event = matches!(
+                    event.kind(),
+                    RepoWatchEventKindV1::PullRequestClosed
+                        | RepoWatchEventKindV1::PullRequestMerged
+                );
+                let terminal_event_is_superseded = terminal_event
+                    && terminal_event_has_later_terminal_cutoff(&mut transaction, &event).await?;
+                if (!terminal_event || terminal_event_is_superseded)
+                    && !event_target_is_open(&mut transaction, &event).await?
+                {
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                RepoWatchEvaluationOutcomeStorageKind::TargetClosed,
+                                None,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::settle_target_closed_obligation(
+                                &mut transaction,
+                                obligation_id,
+                                event.id(),
+                            )
+                            .await?;
+                        }
+                    }
+                    commit(transaction).await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::TargetClosed);
+                }
                 if matched_admission == MatchedAdmission::Fresh
                     && crate::repo_watch_dispatch_obligation::active_obligation_exists(
                         &mut transaction,
@@ -491,7 +740,7 @@ impl PostgresRepoWatchDispatchStore {
                         &event,
                         &rule_id,
                         rule_version,
-                        "coalesced",
+                        RepoWatchEvaluationOutcomeStorageKind::Coalesced,
                         None,
                     )
                     .await?;
@@ -517,7 +766,7 @@ impl PostgresRepoWatchDispatchStore {
                             &event,
                             &rule_id,
                             rule_version,
-                            "occupied",
+                            RepoWatchEvaluationOutcomeStorageKind::Occupied,
                             None,
                         )
                         .await?;
@@ -546,7 +795,7 @@ impl PostgresRepoWatchDispatchStore {
                             &event,
                             &rule_id,
                             rule_version,
-                            "cooldown",
+                            RepoWatchEvaluationOutcomeStorageKind::Cooldown,
                             None,
                         )
                         .await?;
@@ -695,7 +944,7 @@ impl PostgresRepoWatchDispatchStore {
                             &event,
                             &rule_id,
                             rule_version,
-                            "dispatched",
+                            RepoWatchEvaluationOutcomeStorageKind::Dispatched,
                             Some(dispatch_id),
                         )
                         .await?;
@@ -749,7 +998,7 @@ impl PostgresRepoWatchDispatchStore {
         event: &RepoWatchEvent,
         rule_id: &RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
-        outcome: &'static str,
+        outcome: RepoWatchEvaluationOutcomeStorageKind,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, event.repository().as_str()).await?;
@@ -916,7 +1165,7 @@ async fn insert_evaluation(
     event: &RepoWatchEvent,
     rule_id: &RepoWatchRuleId,
     rule_version: RepoWatchRuleVersion,
-    outcome: &'static str,
+    outcome: RepoWatchEvaluationOutcomeStorageKind,
     dispatch: Option<RepoWatchDispatchId>,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
     let affected = sqlx::query(
@@ -934,7 +1183,7 @@ async fn insert_evaluation(
     .bind(i64::try_from(rule_version.get()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
     })?)
-    .bind(outcome)
+    .bind(repo_watch_evaluation_outcome_to_str(outcome))
     .bind(dispatch.map(|value| *value.as_uuid()))
     .bind(event.repository().as_str())
     .execute(&mut **transaction)
@@ -976,11 +1225,21 @@ async fn load_recorded_evaluation(
         return Ok(None);
     };
     let outcome: String = first.try_get("outcome_kind")?;
-    match outcome.as_str() {
-        "not_matched" => Ok(Some(RepoWatchRuleEvaluationOutcome::NotMatched)),
-        "occupied" | "coalesced" => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
-        "cooldown" => Ok(Some(RepoWatchRuleEvaluationOutcome::Cooldown)),
-        "dispatched" => {
+    match repo_watch_evaluation_outcome_from_str(&outcome) {
+        Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::NotMatched))
+        }
+        Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::TargetClosed))
+        }
+        Some(
+            RepoWatchEvaluationOutcomeStorageKind::Occupied
+            | RepoWatchEvaluationOutcomeStorageKind::Coalesced,
+        ) => Ok(Some(RepoWatchRuleEvaluationOutcome::Occupied)),
+        Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::Cooldown))
+        }
+        Some(RepoWatchEvaluationOutcomeStorageKind::Dispatched) => {
             let dispatch_id: Uuid = first.try_get("dispatch_id")?;
             let sessions = row
                 .iter()
@@ -996,7 +1255,7 @@ async fn load_recorded_evaluation(
                 sessions: sessions.into_boxed_slice(),
             }))
         }
-        _ => Err(RepoWatchDispatchRepositoryError::Corruption(
+        None => Err(RepoWatchDispatchRepositoryError::Corruption(
             "evaluation outcome is unsupported",
         )),
     }
@@ -1035,6 +1294,73 @@ async fn occupying_dispatch(
     .fetch_optional(&mut **transaction)
     .await?
     .map(RepoWatchDispatchId::from_uuid))
+}
+
+async fn event_target_is_open(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    let RepoWatchEventTarget::PullRequest(context) = event.target() else {
+        return Ok(true);
+    };
+    let lifecycle = sqlx::query_scalar::<_, String>(
+        "SELECT event_kind
+           FROM repo_watch_event
+          WHERE repository = $1
+            AND pull_request_number = $2
+            AND event_kind IN (
+                'pull_request_opened', 'pull_request_closed', 'pull_request_merged'
+            )
+          ORDER BY cursor_generation DESC, event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(event.repository().as_str())
+    .bind(Decimal::from(context.number().get()))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+        "pull-request event has no durable lifecycle",
+    ))?;
+    let lifecycle = repo_watch_event_kind_from_str(&lifecycle).ok_or(
+        RepoWatchDispatchRepositoryError::Corruption(
+            "pull-request lifecycle has an unknown event kind",
+        ),
+    )?;
+    Ok(lifecycle == RepoWatchEventKindNameV1::PullRequestOpened)
+}
+
+async fn terminal_event_has_later_terminal_cutoff(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    let dispositions: Vec<String> = sqlx::query_scalar(
+        "SELECT cutoff.disposition_kind
+           FROM repo_watch_event AS origin
+           JOIN repo_watch_event AS boundary
+             ON boundary.repository = origin.repository
+            AND boundary.pull_request_number = origin.pull_request_number
+            AND (boundary.cursor_generation, boundary.event_ordinal) >
+                (origin.cursor_generation, origin.event_ordinal)
+           JOIN repo_watch_lifecycle_cutoff AS cutoff
+             ON cutoff.event_id = boundary.event_id
+          WHERE origin.event_id = $1
+            AND origin.repository = $2",
+    )
+    .bind(event.id().as_uuid())
+    .bind(event.repository().as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    for disposition in dispositions {
+        let decoded = repo_watch_lifecycle_cutoff_disposition_from_str(&disposition).ok_or(
+            RepoWatchDispatchRepositoryError::Corruption(
+                "repository-watch lifecycle cutoff has an unknown disposition",
+            ),
+        )?;
+        if decoded == RepoWatchLifecycleCutoffDispositionStorageKind::Terminal {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn singleton_is_cooling_down(

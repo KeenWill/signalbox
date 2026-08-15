@@ -37,6 +37,7 @@ use tokio::sync::watch;
 
 use tracing::Instrument;
 pub mod approval_judge_eval;
+mod blob_read_runtime;
 mod blob_storage_configuration;
 mod blob_storage_runtime;
 mod blob_upload_runtime;
