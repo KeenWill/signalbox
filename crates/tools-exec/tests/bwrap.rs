@@ -110,6 +110,17 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     assert_real_bwrap_result(loopback_result, ci)?;
 
+    let timeout_arguments = ExecArguments {
+        program: String::from("sh"),
+        arguments: vec![String::from("-c"), String::from("printf started; sleep 2")],
+        working_directory: String::from("."),
+        timeout_seconds: 1,
+    };
+
+    let timeout_result = runner.try_run(timeout_arguments).await?;
+
+    assert_real_bwrap_timeout(timeout_result, ci)?;
+
     let missing_arguments = ExecArguments {
         program: String::from("signalbox-exec-definitely-missing-target"),
         arguments: Vec::new(),
@@ -172,6 +183,27 @@ fn assert_real_bwrap_result(
         }
         confinement => Err(format!(
             "unexpected real bubblewrap result: confinement={confinement:?}, outcome={:?}, stdout={:?}, stderr={:?}",
+            result.outcome, result.stdout, result.stderr
+        )
+        .into()),
+    }
+}
+
+fn assert_real_bwrap_timeout(
+    result: signalbox_tools_exec::ExecResult,
+    ci: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match result.confinement {
+        ExecutionConfinement::FilesystemConfined => {
+            assert_eq!(result.outcome, ProcessOutcome::TimedOut);
+            assert_eq!(result.stdout.text, "started");
+            Ok(())
+        }
+        ExecutionConfinement::SandboxRefused {
+            availability: BwrapAvailability::Unusable,
+        } => real_bwrap_refusal_policy(ci).map_err(std::io::Error::other).map_err(Into::into),
+        confinement => Err(format!(
+            "unexpected real bubblewrap timeout result: confinement={confinement:?}, outcome={:?}, stdout={:?}, stderr={:?}",
             result.outcome, result.stdout, result.stderr
         )
         .into()),
