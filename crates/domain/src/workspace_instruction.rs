@@ -2,6 +2,7 @@
 
 use std::{
     cmp::Ordering,
+    collections::BTreeMap,
     error::Error,
     fmt,
     hash::{Hash, Hasher},
@@ -52,6 +53,53 @@ impl InstructionDigest {
     }
 }
 
+/// One component in an immutable root-relative prefix chain.
+#[derive(Debug)]
+struct RelativePathNode {
+    parent: Option<Arc<Self>>,
+    component: Arc<str>,
+}
+
+/// Root-scoped builder that shares repeated source-path ancestry.
+#[derive(Debug, Default)]
+pub struct InstructionSourcePathInterner {
+    edges: BTreeMap<(InstructionPath, Option<usize>, String), Arc<RelativePathNode>>,
+}
+
+impl InstructionSourcePathInterner {
+    /// Creates an empty source-path interner.
+    pub const fn new() -> Self {
+        Self {
+            edges: BTreeMap::new(),
+        }
+    }
+
+    fn intern(
+        &mut self,
+        root_path: &InstructionPath,
+        relative_path: &str,
+    ) -> Option<Arc<RelativePathNode>> {
+        let mut parent: Option<Arc<RelativePathNode>> = None;
+        for component in relative_path.split('/') {
+            let parent_identity = parent.as_ref().map(|node| Arc::as_ptr(node) as usize);
+            let key = (root_path.clone(), parent_identity, component.to_owned());
+            let node = match self.edges.get(&key).cloned() {
+                Some(node) => node,
+                None => {
+                    let node = Arc::new(RelativePathNode {
+                        parent: parent.clone(),
+                        component: component.into(),
+                    });
+                    self.edges.insert(key, Arc::clone(&node));
+                    node
+                }
+            };
+            parent = Some(node);
+        }
+        parent
+    }
+}
+
 /// One canonical absolute UTF-8 path admitted to durable instruction evidence.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InstructionPath(Arc<str>);
@@ -89,17 +137,26 @@ impl InstructionPath {
 
 /// One canonical absolute UTF-8 candidate path admitted to durable evidence.
 ///
-/// The representation shares its independently bounded root and retains only
-/// the root-relative suffix per source.
+/// The representation shares its independently bounded root and any repeated
+/// root-relative ancestry while retaining exact source spelling.
 #[derive(Clone, Debug)]
 pub struct InstructionSourcePath {
     root_path: InstructionPath,
-    relative_path: Arc<str>,
+    relative_leaf: Arc<RelativePathNode>,
 }
 
 impl InstructionSourcePath {
     /// Validates an absolute source spelling beneath its authorizing root.
     pub fn try_new(
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError> {
+        Self::try_new_in(&mut InstructionSourcePathInterner::new(), root_path, value)
+    }
+
+    /// Validates a source spelling while sharing ancestry through `interner`.
+    pub fn try_new_in(
+        interner: &mut InstructionSourcePathInterner,
         root_path: InstructionPath,
         value: String,
     ) -> Result<Self, InstructionPathError> {
@@ -131,34 +188,44 @@ impl InstructionSourcePath {
         if relative_path.len() > MAX_INSTRUCTION_PATH_BYTES {
             return Err(InstructionPathError::TooLong);
         }
+        let Some(relative_leaf) = interner.intern(&root_path, relative_path) else {
+            return Err(InstructionPathError::NotCanonical);
+        };
         Ok(Self {
             root_path,
-            relative_path: relative_path.into(),
+            relative_leaf,
         })
     }
 
     /// Renders the exact canonical absolute source path.
     pub fn absolute_path(&self) -> String {
-        format!("{}/{}", self.root_path.as_str(), self.relative_path)
+        format!("{}/{}", self.root_path.as_str(), self.relative_path())
     }
 
-    /// Borrows the source path relative to its authorizing root.
-    pub fn relative_path(&self) -> &str {
-        &self.relative_path
-    }
-
-    fn absolute_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.root_path
-            .as_str()
-            .bytes()
-            .chain(std::iter::once(b'/'))
-            .chain(self.relative_path.bytes())
+    /// Renders the source path relative to its authorizing root.
+    pub fn relative_path(&self) -> String {
+        let mut nodes = Vec::new();
+        let mut current = Some(&*self.relative_leaf);
+        while let Some(node) = current {
+            nodes.push(node);
+            current = node.parent.as_deref();
+        }
+        let byte_len = nodes.iter().map(|node| node.component.len()).sum::<usize>()
+            + nodes.len().saturating_sub(1);
+        let mut rendered = String::with_capacity(byte_len);
+        for node in nodes.into_iter().rev() {
+            if !rendered.is_empty() {
+                rendered.push('/');
+            }
+            rendered.push_str(&node.component);
+        }
+        rendered
     }
 }
 
 impl PartialEq for InstructionSourcePath {
     fn eq(&self, other: &Self) -> bool {
-        self.absolute_bytes().eq(other.absolute_bytes())
+        self.absolute_path() == other.absolute_path()
     }
 }
 
@@ -172,16 +239,13 @@ impl PartialOrd for InstructionSourcePath {
 
 impl Ord for InstructionSourcePath {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.absolute_bytes().cmp(other.absolute_bytes())
+        self.absolute_path().cmp(&other.absolute_path())
     }
 }
 
 impl Hash for InstructionSourcePath {
     fn hash<State: Hasher>(&self, state: &mut State) {
-        (self.root_path.as_str().len() + 1 + self.relative_path.len()).hash(state);
-        for byte in self.absolute_bytes() {
-            byte.hash(state);
-        }
+        self.absolute_path().hash(state);
     }
 }
 
@@ -356,7 +420,8 @@ impl InstructionBundleRegistration {
             source_hash,
             skill,
         } = input;
-        let source = Path::new(source_path.relative_path());
+        let relative_path = source_path.relative_path();
+        let source = Path::new(&relative_path);
         let shape_matches = match (kind, skill.as_ref()) {
             (InstructionBundleKind::AgentDocument, None) => {
                 source.file_name().is_some_and(|name| name == "AGENTS.md")
@@ -606,9 +671,53 @@ mod tests {
         assert!(Arc::ptr_eq(&root.0, &cloned_root.0));
         assert!(Arc::ptr_eq(&root.0, &source.root_path.0));
         assert!(Arc::ptr_eq(
-            &source.relative_path,
-            &cloned_source.relative_path
+            &source.relative_leaf,
+            &cloned_source.relative_leaf
         ));
+    }
+
+    #[test]
+    fn sibling_source_paths_share_their_root_relative_ancestry() {
+        let root =
+            InstructionPath::try_new(String::from("/workspace")).expect("fixture root is valid");
+        let mut interner = InstructionSourcePathInterner::new();
+        let first = InstructionSourcePath::try_new_in(
+            &mut interner,
+            root.clone(),
+            String::from("/workspace/long/common/prefix/first/AGENTS.md"),
+        )
+        .expect("first sibling source is valid");
+        let second = InstructionSourcePath::try_new_in(
+            &mut interner,
+            root.clone(),
+            String::from("/workspace/long/common/prefix/second/AGENTS.md"),
+        )
+        .expect("second sibling source is valid");
+        let first_parent = first
+            .relative_leaf
+            .parent
+            .as_ref()
+            .expect("the first source has a parent directory");
+        let second_parent = second
+            .relative_leaf
+            .parent
+            .as_ref()
+            .expect("the second source has a parent directory");
+        let first_common_prefix = first_parent
+            .parent
+            .as_ref()
+            .expect("the first sibling has a common prefix");
+        let second_common_prefix = second_parent
+            .parent
+            .as_ref()
+            .expect("the second sibling has a common prefix");
+
+        assert_eq!(first.relative_path(), "long/common/prefix/first/AGENTS.md");
+        assert_eq!(
+            second.relative_path(),
+            "long/common/prefix/second/AGENTS.md"
+        );
+        assert!(Arc::ptr_eq(first_common_prefix, second_common_prefix));
     }
 
     #[test]
