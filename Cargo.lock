@@ -3154,6 +3154,7 @@ name = "signalbox-application"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "serde_json",
  "signalbox-domain",
  "tokio",
  "tracing",
