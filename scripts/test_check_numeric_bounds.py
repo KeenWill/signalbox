@@ -226,6 +226,57 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertIn("MAX_DERIVED_BYTES", result.stdout)
         self.assertIn("invalid derived declaration", result.stdout)
 
+    def test_generic_non_zero_declaration_is_enforced(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "const MAX_ATTEMPTS: std::num::NonZero<u32> = std::num::NonZero::<u32>::MAX;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_ATTEMPTS", result.stdout)
+
+    def test_derived_escape_fails_on_a_qualified_repetition_of_the_source(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: ceiling - protects against oversized text\n"
+            "const MAX_BASE: usize = 1024;\n"
+            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "const MAX_TOTAL_BYTES: usize = MAX_BASE + other::MAX_BASE;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_TOTAL_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
+    def test_derived_escape_resolves_a_source_declared_in_the_initializer(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "const MAX_TOTAL_BYTES: usize = {\n"
+            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    const MAX_BASE: usize = 1024;\n"
+            "    MAX_BASE * 4\n"
+            "};\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_derived_escape_fails_when_a_renaming_local_import_shadows_the_source(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: tunable - controls the ordinary retained size\n"
+            "const MAX_IMPORTED: usize = 1024;\n"
+            "mod inner {\n"
+            "    use super::MAX_BASE as MAX_IMPORTED;\n"
+            "    // numeric-bound: derived ceiling from MAX_IMPORTED\n"
+            "    const MAX_DERIVED_BYTES: usize = MAX_IMPORTED * 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DERIVED_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
     def test_derived_escape_fails_when_an_import_shadows_the_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
@@ -256,6 +307,38 @@ class NumericBoundCheckerTests(unittest.TestCase):
         result = run_checker(
             ENFORCED_FILE,
             "#[cfg(test)]\nconst MAX_FIXTURE_BYTES: usize = 4;\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_path_attributed_test_module_inside_an_inline_module_does_not_gate(self) -> None:
+        # rustc resolves a `#[path]` inside an inline module under that
+        # module's directory; verified against the compiler.
+        result = run_checker_tree(
+            {
+                ENFORCED_FILE: (
+                    'mod outer {\n    #[cfg(test)]\n    #[path = "fixture.rs"]\n'
+                    "    mod tests;\n}\n"
+                ),
+                ENFORCED_FILE.with_name("outer") / "fixture.rs": (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_conventional_root_name_inside_a_test_tree_does_not_gate(self) -> None:
+        result = run_checker_tree(
+            {
+                ENFORCED_FILE: "#[cfg(test)]\nmod tests;\n",
+                ENFORCED_FILE.with_name("tests.rs"): "mod main;\n",
+                ENFORCED_FILE.with_name("tests") / "main.rs": (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)

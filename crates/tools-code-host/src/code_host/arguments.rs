@@ -6,9 +6,9 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::de::DeserializeOwned;
 use signalbox_domain::NormalizedToolArguments;
 
-// numeric-bound: ceiling - protects request memory from oversized repository names
+// numeric-bound: tunable - the repository spelling this tool advertises accepting
 pub(super) const MAX_REPOSITORY_BYTES: usize = 256;
-// numeric-bound: ceiling - protects request memory from oversized file paths
+// numeric-bound: tunable - the file path length this tool advertises accepting
 pub(super) const MAX_FILE_PATH_BYTES: usize = 4 * 1024;
 // numeric-bound: ceiling - protects request and provider memory from oversized comments
 pub(super) const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;

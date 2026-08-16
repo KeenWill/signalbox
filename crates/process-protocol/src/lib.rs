@@ -142,7 +142,7 @@ pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
 /// Maximum UTF-8 bytes in one deployment-owned billing rate version.
-// numeric-bound: ceiling - protects rate metadata storage and frame size
+// numeric-bound: tunable - admits the deployment-owned rate version text
 pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
 
 /// Maximum concerns in one frozen review-orchestration attempt.

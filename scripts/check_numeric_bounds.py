@@ -119,10 +119,12 @@ ENFORCED_ROOTS = (
 # `Duration` one declaration to this scan, and the signed `NonZeroI*` family is
 # listed beside the unsigned one: a spelling this pattern misses is an
 # undeclared bound the gate silently accepts.
+INTEGER_TYPE = r"[ui](?:8|16|32|64|128|size)"
 NUMERIC_TYPE = (
     r"(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*"
-    r"(?:[ui](?:8|16|32|64|128|size)|f(?:32|64)|Duration|"
-    r"NonZero(?:U8|U16|U32|U64|U128|Usize|I8|I16|I32|I64|I128|Isize))"
+    rf"(?:{INTEGER_TYPE}|f(?:32|64)|Duration|"
+    r"NonZero(?:U8|U16|U32|U64|U128|Usize|I8|I16|I32|I64|I128|Isize)|"
+    rf"NonZero\s*<\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*{INTEGER_TYPE}\s*>)"
 )
 CONSTANT = re.compile(
     rf"(?m)^(?P<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?const\s+"
@@ -130,6 +132,7 @@ CONSTANT = re.compile(
 )
 USE_STATEMENT = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s[^;]*;")
 LOCAL_USE = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:self|super)\s*::")
+RENAMING_USE = re.compile(r"\bas\b")
 # Unlike a reference in an initializer, an imported name is looked for through
 # its path, so this deliberately matches the qualified spelling too.
 IMPORTED_NAME = re.compile(r"\b(?P<name>[A-Z][A-Z0-9_]*)\b")
@@ -161,6 +164,7 @@ class Bound:
     name: str
     line: int
     offset: int
+    extent: int
     scope: tuple[int, int] | None
     initializer: str
     annotation: str
@@ -376,11 +380,16 @@ def declared_modules(
         )
         attributes = text[match.start("attributes") : match.end("attributes")]
         explicit = PATH_ATTRIBUTE.search(attributes)
+        segments = enclosing_module_names(match.start(), inline)
         if explicit is not None:
-            file = Path(os.path.normpath(path.parent / explicit.group("path")))
+            # A `#[path]` outside any inline module is relative to the declaring
+            # file's own directory; inside one it picks up the enclosing module
+            # names, which for a non-mod-rs file already include its stem.
+            attributed = directory.joinpath(*segments) if segments else path.parent
+            file = Path(os.path.normpath(attributed / explicit.group("path")))
             found.append((file, file.parent, gated))
             continue
-        base = directory.joinpath(*enclosing_module_names(match.start(), inline))
+        base = directory.joinpath(*segments)
         name = match.group("name")
         found.append((base / f"{name}.rs", base / name, gated))
         found.append((base / name / "mod.rs", base / name, gated))
@@ -397,8 +406,13 @@ def test_only_sources(sources: dict[Path, str], blanked: dict[Path, str]) -> set
     it.
     """
     reached: dict[bool, set[Path]] = {True: set(), False: set()}
+    # A crate root is `<package>/src/lib.rs` or `<package>/src/main.rs`. Matching
+    # the basename alone would seed a `tests/main.rs` deep inside a test tree as
+    # its own ungated root and take that whole subtree back out of test-only.
     frontier = [
-        (path, path.parent, False) for path in sources if path.name in CRATE_ROOTS
+        (path, path.parent, False)
+        for path in sources
+        if path.name in CRATE_ROOTS and path.parent.name == "src"
     ]
     while frontier:
         path, directory, gated = frontier.pop()
@@ -452,13 +466,15 @@ def imported_names(path: Path, code: str, blocks: list[tuple[int, int]]) -> list
     recording where each import is in scope is what lets the owner resolution
     refuse rather than reach past it. A `self::` or `super::` path is skipped:
     it re-binds an item from an enclosing module, which within one file is the
-    declaration resolution would have reached anyway. Glob imports bind nothing
-    nameable here, and a `super::super::` path that climbs out of the file is
-    treated as local; both are stated limits.
+    declaration resolution would have reached anyway — unless it renames, since
+    `use super::MAX_BASE as MAX_IMPORTED` binds a name no declaration here
+    carries. Glob imports bind nothing nameable, and a `super::super::` path
+    that climbs out of the file is treated as local; both are stated limits.
     """
     imports = []
     for statement in USE_STATEMENT.finditer(code):
-        if LOCAL_USE.match(statement.group()) is not None:
+        local = LOCAL_USE.match(statement.group()) is not None
+        if local and RENAMING_USE.search(statement.group()) is None:
             continue
         for match in IMPORTED_NAME.finditer(statement.group()):
             imports.append(
@@ -518,6 +534,7 @@ def inventory(root: Path) -> tuple[list[Bound], list[Import]]:
                     name=name,
                     line=line,
                     offset=match.start(),
+                    extent=end,
                     scope=innermost_scope(match.start(), blocks),
                     initializer=code[match.end() : end],
                     annotation=annotation,
@@ -560,9 +577,17 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
         return -1 if candidate.scope is None else candidate.scope[0]
 
     def in_scope(candidate: Bound | Import, bound: Bound) -> bool:
-        return candidate.scope is None or (
-            candidate.scope[0] <= bound.offset <= candidate.scope[1]
-        )
+        """Report whether ``candidate`` is visible where ``bound`` reads it.
+
+        Visibility is judged at the reference rather than at the declaration:
+        a block inside the initializer sits after the declared item's own
+        offset, so `const TOTAL: usize = { const BASE: usize = 1; BASE * 4 };`
+        resolves through the second clause.
+        """
+        if candidate.scope is None:
+            return True
+        start, end = candidate.scope
+        return start <= bound.offset <= end or bound.offset <= start <= end <= bound.extent
 
     def visible_owner(bound: Bound, source: str) -> Bound | None:
         """Resolve ``source`` as the Rust scope around ``bound`` would.
@@ -629,9 +654,13 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
         found = []
         for match in REFERENCED_BOUND.finditer(bound.initializer):
             name = match.group("name")
-            if name in {source, bound.name} or not is_boundary_name(name):
-                continue
             qualified = bool(match.group("qualifier"))
+            # Only the bare spelling is the source already accounted for; a
+            # qualified repetition of the same name is a different item.
+            if not qualified and name in {source, bound.name}:
+                continue
+            if not is_boundary_name(name):
+                continue
             found.append((name, None if qualified else visible_owner(bound, name)))
         return found
 
