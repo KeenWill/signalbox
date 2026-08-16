@@ -182,8 +182,10 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
     let mut output = vec![0.0_f32; 5_760 * metadata.channels];
     let mut decoded_frames = 0_u64;
     let mut audio_packets = 0_u64;
+    let mut final_granule = None;
+    let mut saw_end_of_stream = false;
     while let Some(packet) = packets.read_packet().map_err(|_| "malformed_audio")? {
-        if packet.stream_serial() != serial || packet.data.is_empty() {
+        if saw_end_of_stream || packet.stream_serial() != serial || packet.data.is_empty() {
             return Err("malformed_audio");
         }
         let frames = decoder
@@ -195,11 +197,25 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
         audio_packets = audio_packets
             .checked_add(1)
             .ok_or("duration_limit_exceeded")?;
-        validate_duration(decoded_frames, metadata.sample_rate_hz)?;
+        validate_ogg_decode_bound(decoded_frames, pre_skip)?;
+        if packet.last_in_page() {
+            final_granule = Some(packet.absgp_page());
+        }
+        if packet.last_in_stream() {
+            saw_end_of_stream = true;
+        }
     }
-    if audio_packets == 0 || decoded_frames < u64::from(pre_skip) {
+    if audio_packets == 0 || decoded_frames < u64::from(pre_skip) || !saw_end_of_stream {
         return Err("malformed_audio");
     }
+    let final_granule = final_granule.ok_or("malformed_audio")?;
+    let presented_frames = final_granule
+        .checked_sub(u64::from(pre_skip))
+        .ok_or("malformed_audio")?;
+    if final_granule > decoded_frames {
+        return Err("malformed_audio");
+    }
+    validate_duration(presented_frames, metadata.sample_rate_hz)?;
     Ok(metadata)
 }
 
@@ -228,22 +244,26 @@ fn mp3_audio_bytes(bytes: &[u8]) -> Result<&[u8], &'static str> {
 }
 
 fn parse_opus_head(bytes: &[u8]) -> Result<(AudioMetadata, u16), &'static str> {
-    if bytes.len() != 19 || !bytes.starts_with(b"OpusHead") || bytes[8] != 1 {
+    let prefix = bytes.get(..19).ok_or("malformed_audio")?;
+    if !prefix.starts_with(b"OpusHead") || prefix[8] != 1 {
         return Err("malformed_audio");
     }
-    let channels = usize::from(bytes[9]);
-    if channels == 0 || channels > 2 {
+    let channels = usize::from(prefix[9]);
+    if channels == 0 {
         return Err("channel_limit_exceeded");
     }
-    if bytes[18] != 0 {
+    if prefix[18] != 0 {
         return Err("unsupported_opus_mapping");
+    }
+    if bytes.len() != 19 || channels > 2 {
+        return Err("channel_limit_exceeded");
     }
     let metadata = AudioMetadata {
         channels,
         sample_rate_hz: 48_000,
     };
     validate_shape(metadata)?;
-    Ok((metadata, u16::from_le_bytes([bytes[10], bytes[11]])))
+    Ok((metadata, u16::from_le_bytes([prefix[10], prefix[11]])))
 }
 
 fn valid_opus_tags(bytes: &[u8]) -> bool {
@@ -261,9 +281,43 @@ fn valid_opus_tags(bytes: &[u8]) -> bool {
     let Some(comment_count_offset) = 12_usize.checked_add(vendor_length) else {
         return false;
     };
-    bytes
+    let Some(comment_count_bytes) = bytes
         .get(comment_count_offset..comment_count_offset.saturating_add(4))
-        .is_some()
+        .and_then(|value| <[u8; 4]>::try_from(value).ok())
+    else {
+        return false;
+    };
+    let Ok(comment_count) = usize::try_from(u32::from_le_bytes(comment_count_bytes)) else {
+        return false;
+    };
+    let Some(mut offset) = comment_count_offset.checked_add(4) else {
+        return false;
+    };
+    if comment_count > bytes.len().saturating_sub(offset) / 4 {
+        return false;
+    }
+    for _ in 0..comment_count {
+        let Some(data_offset) = offset.checked_add(4) else {
+            return false;
+        };
+        let Some(length_bytes) = bytes
+            .get(offset..data_offset)
+            .and_then(|value| <[u8; 4]>::try_from(value).ok())
+        else {
+            return false;
+        };
+        let Some(length) = usize::try_from(u32::from_le_bytes(length_bytes)).ok() else {
+            return false;
+        };
+        let Some(next) = data_offset.checked_add(length) else {
+            return false;
+        };
+        if bytes.get(data_offset..next).is_none() {
+            return false;
+        }
+        offset = next;
+    }
+    true
 }
 
 fn validate_shape(metadata: AudioMetadata) -> Result<(), &'static str> {
@@ -286,6 +340,18 @@ fn validate_duration(decoded_frames: u64, sample_rate_hz: u32) -> Result<(), &'s
     Ok(())
 }
 
+fn validate_ogg_decode_bound(decoded_frames: u64, pre_skip: u16) -> Result<(), &'static str> {
+    let maximum_decoded_frames = 48_000_u64
+        .checked_mul(MAX_AUDIO_DURATION_SECONDS)
+        .and_then(|frames| frames.checked_add(u64::from(pre_skip)))
+        .and_then(|frames| frames.checked_add(5_760))
+        .ok_or("duration_limit_exceeded")?;
+    if decoded_frames > maximum_decoded_frames {
+        return Err("duration_limit_exceeded");
+    }
+    Ok(())
+}
+
 fn metadata_json(metadata: AudioMetadata) -> Result<String, ProcessorFailure> {
     serde_json::to_string(&serde_json::json!({
         "channels": metadata.channels,
@@ -298,5 +364,33 @@ fn malformed(format: AdapterFormat, reason: &str) -> ProcessorValidationOutput {
     ProcessorValidationOutput::Malformed {
         media_type: String::from(format.media_type()),
         reason_code: String::from(reason),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_opus_head, valid_opus_tags};
+
+    #[test]
+    fn opus_tags_rejects_a_declared_comment_without_its_length_or_data() {
+        let mut tags = b"OpusTags".to_vec();
+        tags.extend_from_slice(&0_u32.to_le_bytes());
+        tags.extend_from_slice(&1_u32.to_le_bytes());
+
+        assert!(!valid_opus_tags(&tags));
+    }
+
+    #[test]
+    fn opus_head_classifies_mapping_family_one_as_unsupported() {
+        let mut head = b"OpusHead".to_vec();
+        head.push(1);
+        head.push(6);
+        head.extend_from_slice(&0_u16.to_le_bytes());
+        head.extend_from_slice(&48_000_u32.to_le_bytes());
+        head.extend_from_slice(&0_i16.to_le_bytes());
+        head.push(1);
+        head.extend_from_slice(&[4, 2, 0, 1, 2, 3, 4, 5]);
+
+        assert_eq!(parse_opus_head(&head), Err("unsupported_opus_mapping"));
     }
 }

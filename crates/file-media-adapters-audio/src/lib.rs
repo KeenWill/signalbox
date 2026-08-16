@@ -17,14 +17,16 @@ use signalbox_file_media_runtime::{
 const PROVIDER_NAME: &str = "signalbox_audio";
 const READER_REVISION: &str = "v1";
 const METADATA_VIEW_NAME: &str = "metadata";
+/// Hard safety ceiling covering the exact probe prefix and possible one-byte suffix.
+const AUDIO_PROBE_CUMULATIVE_BYTES: u64 = 65;
 
-/// Maximum encoded bytes one audio adapter accepts.
-pub const MAX_AUDIO_SOURCE_BYTES: u64 = 262_144;
-/// Maximum channel count admitted by the WAV, MP3, and FLAC adapters.
+/// Hard safety ceiling bounding whole-source worker memory while admitting ordinary audio.
+pub const MAX_AUDIO_SOURCE_BYTES: u64 = 64 * 1_024 * 1_024;
+/// Hard safety ceiling bounding decoder expansion by channel count.
 pub const MAX_AUDIO_CHANNELS: usize = 8;
-/// Maximum sample rate admitted by an audio adapter.
+/// Hard safety ceiling bounding decoder work by sample rate.
 pub const MAX_AUDIO_SAMPLE_RATE_HZ: u32 = 192_000;
-/// Maximum decoded duration admitted by an audio adapter.
+/// Hard safety ceiling bounding full-decode latency by presented duration.
 pub const MAX_AUDIO_DURATION_SECONDS: u64 = 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,10 +64,7 @@ impl AdapterFormat {
                 prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WAVE".as_slice())
             }
             Self::Mp3 => {
-                prefix.starts_with(b"ID3")
-                    || prefix
-                        .get(..2)
-                        .is_some_and(|bytes| bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+                prefix.starts_with(b"ID3") || prefix.get(..4).is_some_and(valid_mp3_frame_header)
             }
             Self::Flac => prefix.starts_with(b"fLaC"),
             Self::OggOpus => {
@@ -75,6 +74,32 @@ impl AdapterFormat {
                         .any(|window| window == b"OpusHead")
             }
         }
+    }
+}
+
+fn valid_mp3_frame_header(bytes: &[u8]) -> bool {
+    let version = (bytes[1] >> 3) & 0x03;
+    let layer = (bytes[1] >> 1) & 0x03;
+    let bitrate = (bytes[2] >> 4) & 0x0f;
+    let sample_rate = (bytes[2] >> 2) & 0x03;
+    bytes[0] == 0xff
+        && bytes[1] & 0xe0 == 0xe0
+        && version != 0x01
+        && layer != 0x00
+        && bitrate != 0x00
+        && bitrate != 0x0f
+        && sample_rate != 0x03
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdapterFormat;
+
+    #[test]
+    fn mp3_probe_rejects_aac_adts_header() {
+        let aac_adts_header = [0xff, 0xf1, 0x50, 0x80];
+
+        assert!(!AdapterFormat::Mp3.matches_signature(&aac_adts_header));
     }
 }
 
@@ -159,7 +184,7 @@ fn reader(
         reader: FileReaderName::try_new(format.reader_name())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
-        probe: ProbeDeclaration::new(64, 1, 2, MAX_AUDIO_SOURCE_BYTES),
+        probe: ProbeDeclaration::new(64, 1, 2, AUDIO_PROBE_CUMULATIVE_BYTES),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,

@@ -12,6 +12,19 @@ pub(crate) enum FixtureFormat {
     OggOpus,
 }
 
+struct OggOpusFixture {
+    packet_count: usize,
+    frame_size: usize,
+    pre_skip: u16,
+    final_granule: u64,
+    ending: OggEnding,
+}
+
+enum OggEnding {
+    EndOfStream,
+    EndOfPage,
+}
+
 impl FixtureFormat {
     pub(crate) const fn media_type(self) -> &'static str {
         match self {
@@ -28,16 +41,14 @@ pub(crate) fn valid(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Error>> {
         FixtureFormat::Wav => wav(8_000, 800),
         FixtureFormat::Mp3 => mp3(8_000, 800),
         FixtureFormat::Flac => flac(8_000, 800),
-        FixtureFormat::OggOpus => ogg_opus(5, 960),
+        FixtureFormat::OggOpus => ogg_opus(OggOpusFixture {
+            packet_count: 5,
+            frame_size: 960,
+            pre_skip: 0,
+            final_granule: 4_800,
+            ending: OggEnding::EndOfStream,
+        }),
     }
-}
-
-pub(crate) fn expected_metadata(format: FixtureFormat) -> serde_json::Value {
-    let sample_rate_hz = match format {
-        FixtureFormat::OggOpus => 48_000,
-        FixtureFormat::Wav | FixtureFormat::Mp3 | FixtureFormat::Flac => 8_000,
-    };
-    serde_json::json!({"channels": 1, "sample_rate_hz": sample_rate_hz})
 }
 
 pub(crate) fn truncated(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -69,8 +80,34 @@ pub(crate) fn duration_bomb(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Er
         FixtureFormat::Wav => wav(1_000, 61_000),
         FixtureFormat::Mp3 => mp3(8_000, 488_000),
         FixtureFormat::Flac => flac(8_000, 488_000),
-        FixtureFormat::OggOpus => ogg_opus(3_001, 960),
+        FixtureFormat::OggOpus => ogg_opus(OggOpusFixture {
+            packet_count: 3_001,
+            frame_size: 960,
+            pre_skip: 0,
+            final_granule: 2_880_960,
+            ending: OggEnding::EndOfStream,
+        }),
     }
+}
+
+pub(crate) fn ogg_opus_without_end_of_stream() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus(OggOpusFixture {
+        packet_count: 5,
+        frame_size: 960,
+        pre_skip: 0,
+        final_granule: 4_800,
+        ending: OggEnding::EndOfPage,
+    })
+}
+
+pub(crate) fn ogg_opus_trimmed_to_duration_limit() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus(OggOpusFixture {
+        packet_count: 3_001,
+        frame_size: 960,
+        pre_skip: 312,
+        final_granule: 2_880_312,
+        ending: OggEnding::EndOfStream,
+    })
 }
 
 fn wav(sample_rate_hz: u32, frames: usize) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -196,35 +233,48 @@ fn flac_crc16(bytes: &[u8]) -> u16 {
     crc
 }
 
-fn ogg_opus(packet_count: usize, frame_size: usize) -> Result<Vec<u8>, Box<dyn Error>> {
+fn ogg_opus(fixture: OggOpusFixture) -> Result<Vec<u8>, Box<dyn Error>> {
     const SERIAL: u32 = 0x51_67_6e_6c;
     let mut encoder = OpusEncoder::new(48_000, 1, Application::Audio)?;
     encoder.bitrate_bps = 6_000;
-    let samples = vec![0.0_f32; frame_size];
+    let samples = vec![0.0_f32; fixture.frame_size];
     let mut encoded = vec![0_u8; 1_276];
-    let packet_bytes = encoder.encode(&samples, frame_size, &mut encoded)?;
+    let packet_bytes = encoder.encode(&samples, fixture.frame_size, &mut encoded)?;
     encoded.truncate(packet_bytes);
 
     let mut writer = PacketWriter::new(Vec::new());
-    writer.write_packet(opus_head(), SERIAL, PacketWriteEndInfo::EndPage, 0)?;
+    writer.write_packet(
+        opus_head(fixture.pre_skip),
+        SERIAL,
+        PacketWriteEndInfo::EndPage,
+        0,
+    )?;
     writer.write_packet(opus_tags(), SERIAL, PacketWriteEndInfo::NormalPacket, 0)?;
-    for packet_index in 0..packet_count {
-        let end = if packet_index + 1 == packet_count {
-            PacketWriteEndInfo::EndStream
+    for packet_index in 0..fixture.packet_count {
+        let final_packet = packet_index + 1 == fixture.packet_count;
+        let end = if final_packet {
+            match fixture.ending {
+                OggEnding::EndOfStream => PacketWriteEndInfo::EndStream,
+                OggEnding::EndOfPage => PacketWriteEndInfo::EndPage,
+            }
         } else {
             PacketWriteEndInfo::NormalPacket
         };
-        let granule = u64::try_from(packet_index + 1)? * u64::try_from(frame_size)?;
+        let granule = if final_packet {
+            fixture.final_granule
+        } else {
+            u64::try_from(packet_index + 1)? * u64::try_from(fixture.frame_size)?
+        };
         writer.write_packet(encoded.clone(), SERIAL, end, granule)?;
     }
     Ok(writer.into_inner())
 }
 
-fn opus_head() -> Vec<u8> {
+fn opus_head(pre_skip: u16) -> Vec<u8> {
     let mut head = b"OpusHead".to_vec();
     head.push(1);
     head.push(1);
-    head.extend_from_slice(&0_u16.to_le_bytes());
+    head.extend_from_slice(&pre_skip.to_le_bytes());
     head.extend_from_slice(&48_000_u32.to_le_bytes());
     head.extend_from_slice(&0_i16.to_le_bytes());
     head.push(0);
