@@ -3904,6 +3904,7 @@ mod tests {
         let advertisement = empty_advertisement();
         let correlation = release_correlation();
         let (complete_cleanup, cleanup_completed) = tokio::sync::oneshot::channel();
+        let (projection_observed, allow_runner_finish) = tokio::sync::oneshot::channel();
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
 
@@ -3928,6 +3929,9 @@ mod tests {
                 .release_while_serving(&mut state, release, cleanup)
                 .await
                 .expect("cleanup completes while the connection stays live");
+            allow_runner_finish
+                .await
+                .expect("the durable projection is observed before runner completion");
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
@@ -3960,6 +3964,17 @@ mod tests {
                 .send(())
                 .expect("the cleanup fixture receives completion");
             let released = receive_hub_message(&mut hub_io).await;
+            let projected_state = state_root(&parent);
+            assert_eq!(
+                projected_state.reconnect_inventory().workspace_operation,
+                Some(WorkspaceOperation::Release {
+                    correlation: correlation.clone(),
+                    phase: ReleasePhase::ReleaseCompleted,
+                })
+            );
+            projection_observed
+                .send(())
+                .expect("the runner waits for durable projection observation");
             (acknowledgement, released)
         };
         let ((), (acknowledgement, released)) = tokio::join!(runner, hub);
@@ -3998,6 +4013,7 @@ mod tests {
         let mut state = enrolled_state(&parent);
         let advertisement = empty_advertisement();
         let correlation = release_correlation();
+        let (projection_observed, allow_runner_finish) = tokio::sync::oneshot::channel();
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
 
@@ -4016,6 +4032,9 @@ mod tests {
                 .release_while_serving(&mut state, release, async { Err::<(), ()>(()) })
                 .await
                 .expect("the cleanup failure is durably projected");
+            allow_runner_finish
+                .await
+                .expect("the durable failure is observed before runner completion");
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
@@ -4035,7 +4054,24 @@ mod tests {
                 }),
             )
             .await;
-            receive_hub_message(&mut hub_io).await
+            let failure = receive_hub_message(&mut hub_io).await;
+            let expected = expected_workspace_cleanup_failure(correlation.clone());
+            let projected_state = state_root(&parent);
+            assert_eq!(
+                projected_state.reconnect_inventory().workspace_operation,
+                Some(WorkspaceOperation::Release {
+                    correlation: correlation.clone(),
+                    phase: ReleasePhase::ReleaseAccepted,
+                })
+            );
+            assert_eq!(
+                projected_state.reconnect_inventory().operation_failure,
+                Some(expected)
+            );
+            projection_observed
+                .send(())
+                .expect("the runner waits for durable failure observation");
+            failure
         };
         let ((), failure) = tokio::join!(runner, hub);
         let expected = expected_workspace_cleanup_failure(correlation.clone());
