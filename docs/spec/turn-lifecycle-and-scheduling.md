@@ -9,6 +9,9 @@ transition into runner recovery was verified against this PR
 The active-tail predecessor-steering correction was verified against this PR
 (`agent/daemon-ops-overnight`).
 
+The deployment-owned scheduler pass limit is verified against this PR
+(`agent/daemon-ops-overnight`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -401,22 +404,24 @@ the sweep (INV-007).
   delayed, not burst. A failed sweep is logged with its operator classification
   and retried at the next interval.
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
-  passes, deduplicates hints for a session already in flight (recording one
+  passes by default, or the deployment's configured nonzero bound of at most
+  1,024, deduplicates hints for a session already in flight (recording one
   rerun), and keeps an in-progress sweep read alive across pass completions. A
   failed or panicked pass is logged and retried by a later hint or sweep;
   nothing is lost because the rows are the queue. A pass about to perform
   attachment store I/O first tries the blob contract's separate
   attachment-preparation permit without waiting. If none is immediately
-  available, the pass relinquishes its 16-pass capacity, ends, and leaves only
-  the durable `Prepared` row for a later sweep. After acquiring a permit, its
-  task remains in flight for per-session deduplication but relinquishes the
+  available, the pass relinquishes its scheduler-pass capacity, ends, and leaves
+  only the durable `Prepared` row for a later sweep. After acquiring a permit,
+  its task remains in flight for per-session deduplication but relinquishes the
   scheduler-pass slot during store I/O; after successful verification it
   reacquires a slot before send authorization and its guarded transaction
   revalidates authority. A model-originated `blob_read` uses the same slot
   handoff after it acquires the blob contract's non-waiting direct-read permit:
   its physical attempt remains in flight during store traversal, and it
   reacquires a slot before committing correlated result evidence or crash-loss
-  classification. At most 16 direct reads can wait at that reacquisition point.
+  classification. At most the configured scheduler-pass bound (16 by default) of
+  direct reads can wait at that reacquisition point.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
