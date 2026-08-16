@@ -1,6 +1,8 @@
 -- Admit positive rule revisions and retain field fingerprints for exact
 -- configuration diagnostics without storing configured rule contents.
 
+-- Supersedes the single-revision repo_watch_rule_activation_rule_version_check
+-- defined by 202608030004_repo_watch_dispatch.sql.
 ALTER TABLE repo_watch_rule_activation
     DROP CONSTRAINT repo_watch_rule_activation_rule_version_check,
     ADD CONSTRAINT repo_watch_rule_activation_rule_version_check
@@ -34,16 +36,22 @@ BEFORE TRUNCATE ON repo_watch_rule_field_fingerprint
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
+-- Supersedes the single-revision repo_watch_dispatch_batch_rule_version_check
+-- defined by 202608030004_repo_watch_dispatch.sql.
 ALTER TABLE repo_watch_dispatch_batch
     DROP CONSTRAINT repo_watch_dispatch_batch_rule_version_check,
     ADD CONSTRAINT repo_watch_dispatch_batch_rule_version_check
         CHECK (rule_version > 0);
 
+-- Supersedes the single-revision repo_watch_rule_evaluation_rule_version_check
+-- defined by 202608030004_repo_watch_dispatch.sql.
 ALTER TABLE repo_watch_rule_evaluation
     DROP CONSTRAINT repo_watch_rule_evaluation_rule_version_check,
     ADD CONSTRAINT repo_watch_rule_evaluation_rule_version_check
         CHECK (rule_version > 0);
 
+-- Supersedes the single-revision repo_watch_dispatch_obligation_rule_version_check
+-- defined by 202608140003_repo_watch_dispatch_obligation.sql.
 ALTER TABLE repo_watch_dispatch_obligation
     DROP CONSTRAINT repo_watch_dispatch_obligation_rule_version_check,
     ADD CONSTRAINT repo_watch_dispatch_obligation_rule_version_check
