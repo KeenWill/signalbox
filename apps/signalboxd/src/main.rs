@@ -1577,12 +1577,10 @@ async fn run_hub(
     );
     let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
     let mut scheduler = match scheduler_max_in_flight_passes {
-        Some(0) => SchedulerLoop::paused(work_source, pass),
-        Some(limit) => SchedulerLoop::with_max_in_flight(
-            work_source,
-            pass,
-            NonZeroUsize::new(limit).expect("positive parsed scheduler limit is nonzero"),
-        ),
+        Some(limit) => match NonZeroUsize::new(limit) {
+            Some(limit) => SchedulerLoop::with_max_in_flight(work_source, pass, limit),
+            None => SchedulerLoop::paused(work_source, pass),
+        },
         None => SchedulerLoop::new(work_source, pass),
     };
     if let Some(limit) = scheduler_max_in_flight_passes {
