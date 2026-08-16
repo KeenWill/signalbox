@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The program-journal append transaction, reconstitution boundary, lock inventory,
+and migration were verified against this PR (`agent/program-substrate-journal`).
+
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
 (`agent/judge-denial-reason`).
@@ -147,7 +150,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-seven files, `202607180001` through
+`crates/persistence/migrations/` — seventy-eight files, `202607180001` through
 `202608140100` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -204,6 +207,13 @@ log.
 
 Implemented table families (across the forward-only migrations):
 
+- `program_run_journal_stream`, its mutable per-run sequence allocator,
+  append-only `program_run_journal_entry` frames, and the typed
+  `program_run_journal_nondeterminism` evidence record. The allocator serializes
+  each run's global, request, and delivery orders; deferred checks require its
+  committed counters to equal the journal maxima. The adapter's composable
+  delivery append begins and commits no transaction, so a transactional effect
+  records its consequence and answer through one caller-owned commit;
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `replace_session_metadata_command`,
@@ -664,8 +674,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-three explicit lock
-statements live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-four explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -714,13 +724,22 @@ statements live in the schema instead:
   migration `202608110006` adds a transaction-level runner-identity advisory
   lock between the scheduler and enrollment locks, and enrollment insertion and
   loss-cursor completion take that same identity lock before they can publish
-  the competing fact.
+  the competing fact; and
+- the program-journal append-sequence trigger in migration `202608140004` takes
+  `FOR UPDATE` on the run's sequence row before admitting the next contiguous
+  global and direction-specific ordinal.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
 because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
+
+- **Program journal append**: the adapter locks the run's sequence row
+  `FOR UPDATE`, inserts the immutable frame, then advances that same sequence
+  row. The insert trigger reacquires the already-held row lock to reject a frame
+  that does not extend the committed global position and its applicable request
+  or delivery ordinal by exactly one.
 
 - **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
   insertion and the command/session uniqueness constraints serialize competing
