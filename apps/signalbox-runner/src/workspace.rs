@@ -334,11 +334,22 @@ impl RunnerWorkspaceStore {
             .join(REPOSITORY_WORKSPACE_DIRECTORY);
         let target_path = checked_execution_directory(&staging_execution_path, &repository)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let recovery = prepare(RepositoryWorkspaceTarget {
+        let recovery = match prepare(RepositoryWorkspaceTarget {
             path: PathBuf::from(target_path.as_str()),
         })
         .await
-        .map_err(PrepareRepositoryWorkspaceError::Preparation)?;
+        {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                remove_open_directory_tree(&session, OsStr::new(&staging_name), staging)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+                session
+                    .sync_all()
+                    .map_err(RunnerWorkspaceError::CommitAmbiguous)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+                return Err(PrepareRepositoryWorkspaceError::Preparation(error));
+            }
+        };
         checked_execution_directory(&staging_execution_path, &repository)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let mut manifest =
@@ -680,13 +691,22 @@ fn open_or_create_directory(parent: &File, name: &str) -> Result<File, RunnerWor
     match open_directory(parent, name) {
         Ok(directory) => Ok(directory),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
-            let directory = open_created_directory(parent, name)?;
-            parent.sync_all().map_err(RunnerWorkspaceError::Io)?;
-            Ok(directory)
+            create_or_open_directory(parent, name)
         }
         Err(error) => Err(RunnerWorkspaceError::Io(error)),
     }
+}
+
+fn create_or_open_directory(parent: &File, name: &str) -> Result<File, RunnerWorkspaceError> {
+    let directory = match mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+        Ok(()) => open_created_directory(parent, name)?,
+        Err(error) if error == rustix::io::Errno::EXIST => {
+            open_directory(parent, name).map_err(RunnerWorkspaceError::Io)?
+        }
+        Err(error) => return Err(rustix_io(error)),
+    };
+    parent.sync_all().map_err(RunnerWorkspaceError::Io)?;
+    Ok(directory)
 }
 
 fn open_optional_directory(
@@ -1174,7 +1194,8 @@ mod tests {
         let failure = state
             .workspace_store()
             .expect("the locked root forms a workspace store")
-            .prepare_repository_workspace(&expected, |_| async {
+            .prepare_repository_workspace(&expected, |target| async move {
+                fs::write(target.path().join("partial"), b"partial repository\n")?;
                 Err::<Recovery, std::io::Error>(std::io::Error::other(
                     "the fixture preparation fails",
                 ))
@@ -1187,12 +1208,41 @@ mod tests {
             .join("sessions")
             .join(expected.session().to_string())
             .join(expected.placement_revision().get().to_string());
+        let session = placement
+            .parent()
+            .expect("the placement fixture has a session parent");
 
         assert!(matches!(
             failure,
             PrepareRepositoryWorkspaceError::Preparation(_)
         ));
         assert!(!placement.exists());
+        assert_eq!(
+            fs::read_dir(session)
+                .expect("the session remains readable after failed preparation")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn directory_creation_reopens_a_concurrent_winner() {
+        let parent = tempfile::tempdir().expect("the directory race fixture parent exists");
+        let winner_name = "winner";
+        let winner = parent.path().join(winner_name);
+        fs::create_dir(&winner).expect("the concurrent winner creates the directory");
+        fs::set_permissions(&winner, fs::Permissions::from_mode(0o700))
+            .expect("the concurrent winner directory is owner-private");
+        let parent_descriptor =
+            fs::File::open(parent.path()).expect("the directory race fixture parent opens");
+
+        let reopened = super::create_or_open_directory(&parent_descriptor, winner_name)
+            .expect("the concurrent winner is reopened and validated");
+
+        assert!(
+            super::path_names_directory(&parent_descriptor, winner_name, &reopened)
+                .expect("the reopened winner retains its exact directory identity")
+        );
     }
 
     #[tokio::test]
