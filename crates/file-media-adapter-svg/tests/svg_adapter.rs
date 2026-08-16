@@ -136,6 +136,9 @@ async fn generated_svg_validates_and_extracts_text() -> Result<(), Box<dyn Error
 async fn generated_svg_metadata_reports_fixture_shape() -> Result<(), Box<dyn Error>> {
     let fixture = SvgFixture::ordinary();
     let expected_elements = fixture.expected_elements();
+    let expected_width = fixture.expected_width();
+    let expected_height = fixture.expected_height();
+    let expected_view_box = fixture.expected_view_box();
     let source = fixture.into_source()?;
     let result = read(
         &DirectProcessor::new(),
@@ -147,12 +150,9 @@ async fn generated_svg_metadata_reports_fixture_shape() -> Result<(), Box<dyn Er
     let body = complete_structure(result)?;
 
     assert_eq!(body["elements"], expected_elements);
-    assert_eq!(body["width"], 320.0);
-    assert_eq!(body["height"], 200.0);
-    assert_eq!(
-        body["view_box"],
-        serde_json::json!([0.0, 0.0, 320.0, 200.0])
-    );
+    assert_eq!(body["width"], expected_width);
+    assert_eq!(body["height"], expected_height);
+    assert_eq!(body["view_box"], serde_json::json!(expected_view_box));
     Ok(())
 }
 
@@ -214,6 +214,149 @@ async fn oversized_source_is_a_typed_validation_limit() -> Result<(), Box<dyn Er
 #[tokio::test]
 async fn malformed_dimension_is_rejected_before_metadata_output() -> Result<(), Box<dyn Error>> {
     assert_malformed(SvgFixture::malformed_dimension(), "malformed_svg").await
+}
+
+#[tokio::test]
+async fn prefixed_svg_namespace_is_accepted() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(
+        br#"<s:svg xmlns:s="http://www.w3.org/2000/svg"><s:text>ok</s:text></s:svg>"#,
+    )
+    .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreign_prefixed_svg_root_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(br#"<evil:svg xmlns="http://www.w3.org/2000/svg" xmlns:evil="urn:evil"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn animation_element_is_rejected_as_active_content() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><animate attributeName="x"/></svg>"#,
+        ),
+        "active_content",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn built_in_attribute_entity_is_accepted() -> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" aria-label="A &amp; B"/>"#)
+            .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdata_in_text_is_extracted_as_inert_text() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(
+        br#"<svg xmlns="http://www.w3.org/2000/svg"><text><![CDATA[a < b]]></text></svg>"#,
+    )
+    .into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "text",
+        serde_json::json!({}),
+    )
+    .await?;
+
+    assert_eq!(complete_text(result)?, "a < b\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn trailing_document_entity_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg"/>&amp;"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn malformed_view_box_separator_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0,,0,320,200"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn escaped_css_resource_reference_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><path fill="u\72 l(https://example.invalid/x)"/></svg>"#,
+        ),
+        "external_reference",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declaration_after_comment_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(
+            br#"<!--before--><?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#,
+        ),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn forbidden_attribute_control_character_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(b"<svg xmlns=\"http://www.w3.org/2000/svg\" aria-label=\"a\x01b\"/>"),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn relative_dimension_units_are_valid_without_numeric_metadata() -> Result<(), Box<dyn Error>>
+{
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="10cm"/>"#)
+            .into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+    let body = complete_structure(result)?;
+
+    assert_eq!(body["width"], serde_json::Value::Null);
+    assert_eq!(body["height"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_xml_comment_syntax_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg"><!--a--b--></svg>"#),
+        "malformed_svg",
+    )
+    .await
 }
 
 #[tokio::test]

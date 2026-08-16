@@ -6,12 +6,21 @@ use signalbox_file_media_runtime::{
 };
 
 const FIXTURE_TEXT: &str = "generated SVG text";
+const FIXTURE_WIDTH: f64 = 320.0;
+const FIXTURE_HEIGHT: f64 = 200.0;
+const FIXTURE_VIEW_BOX: [f64; 4] = [0.0, 0.0, 320.0, 200.0];
 
 pub struct SvgFixture {
     bytes: Vec<u8>,
 }
 
 impl SvgFixture {
+    pub fn raw(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+        }
+    }
+
     pub fn ordinary() -> Self {
         Self::from_body(&format!(
             r#"<text x="1" y="2">{FIXTURE_TEXT}</text><path d="M0 0 L1 1"/>"#,
@@ -80,6 +89,18 @@ impl SvgFixture {
 
     pub const fn expected_elements(&self) -> usize {
         3
+    }
+
+    pub const fn expected_width(&self) -> f64 {
+        FIXTURE_WIDTH
+    }
+
+    pub const fn expected_height(&self) -> f64 {
+        FIXTURE_HEIGHT
+    }
+
+    pub const fn expected_view_box(&self) -> [f64; 4] {
+        FIXTURE_VIEW_BOX
     }
 
     pub fn into_source(self) -> Result<MemorySource, Box<dyn Error>> {

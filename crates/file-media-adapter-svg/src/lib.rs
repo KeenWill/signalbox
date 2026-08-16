@@ -3,8 +3,10 @@
 use std::{error::Error, num::NonZeroU64, str::FromStr};
 
 use quick_xml::{
-    Reader,
-    events::{BytesStart, Event},
+    NsReader,
+    escape::unescape,
+    events::{BytesDecl, BytesStart, Event},
+    name::ResolveResult,
 };
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
@@ -98,7 +100,7 @@ impl FileMediaProvider for SvgProvider {
             }
             let bytes = read_all(source).await?;
             require_active(cancellation)?;
-            match parse_svg(&bytes, false) {
+            match parse_svg(&bytes, ParseMode::MetadataOnly) {
                 Ok(parsed) => validated_output(request.evidence, &parsed),
                 Err(issue) => Ok(malformed_validation(issue.reason())),
             }
@@ -115,7 +117,7 @@ impl FileMediaProvider for SvgProvider {
         Box::pin(async move {
             require_reader(reader)?;
             require_active(cancellation)?;
-            if request.file.detected_media_type().as_str() != MEDIA_TYPE {
+            if request.detected_media_type.as_str() != MEDIA_TYPE {
                 return Err(ProcessorFailure::Protocol);
             }
             if !empty_options(&request.options) {
@@ -128,8 +130,12 @@ impl FileMediaProvider for SvgProvider {
             }
             let bytes = read_all(source).await?;
             require_active(cancellation)?;
-            let collect_text = request.view.as_str() == TEXT_VIEW;
-            let parsed = match parse_svg(&bytes, collect_text) {
+            let mode = if request.view.as_str() == TEXT_VIEW {
+                ParseMode::CollectText
+            } else {
+                ParseMode::MetadataOnly
+            };
+            let parsed = match parse_svg(&bytes, mode) {
                 Ok(parsed) => parsed,
                 Err(ParseIssue::TextOutput) => return Ok(ProcessorReadOutput::OutputUnitTooLarge),
                 Err(_) => return Err(ProcessorFailure::Failed),
@@ -206,6 +212,18 @@ struct ParsedSvg {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParseMode {
+    MetadataOnly,
+    CollectText,
+}
+
+impl ParseMode {
+    const fn collects_text(self) -> bool {
+        matches!(self, Self::CollectText)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParseIssue {
     Malformed,
     ActiveContent,
@@ -235,64 +253,41 @@ enum ProbeRoot {
 }
 
 fn probe_root(bytes: &[u8]) -> ProbeRoot {
-    if std::str::from_utf8(bytes).is_err() || declares_non_utf8(bytes) {
-        return if looks_like_svg(bytes) {
-            ProbeRoot::MalformedSvg
-        } else {
-            ProbeRoot::Other
-        };
-    }
-    let mut reader = Reader::from_reader(bytes);
+    let mut reader = NsReader::from_reader(bytes);
     let mut buffer = Vec::new();
+    let mut declaration_is_utf8 = true;
     loop {
-        match reader.read_event_into(&mut buffer) {
-            Ok(Event::Start(start) | Event::Empty(start)) => {
-                if local_name(start.name().as_ref()) != b"svg" {
+        match reader.read_resolved_event_into(&mut buffer) {
+            Ok((namespace, Event::Start(start) | Event::Empty(start))) => {
+                if start.local_name().as_ref() != b"svg" {
                     return ProbeRoot::Other;
                 }
-                return if root_has_namespace(&start) {
+                return if declaration_is_utf8 && is_svg_namespace(&namespace) {
                     ProbeRoot::Svg
                 } else {
                     ProbeRoot::MalformedSvg
                 };
             }
-            Ok(Event::DocType(_) | Event::PI(_) | Event::GeneralRef(_)) => {
-                return if looks_like_svg(bytes) {
-                    ProbeRoot::MalformedSvg
-                } else {
-                    ProbeRoot::Other
-                };
+            Ok((_, Event::Decl(declaration))) => {
+                declaration_is_utf8 = declaration_uses_utf8(&declaration).unwrap_or(false);
             }
-            Ok(Event::Text(text)) => match text.xml10_content() {
+            Ok((_, Event::DocType(_) | Event::PI(_) | Event::GeneralRef(_) | Event::CData(_))) => {
+                return ProbeRoot::Other;
+            }
+            Ok((_, Event::Text(text))) => match text.xml10_content() {
                 Ok(text) if text.trim().is_empty() => {}
                 _ => return ProbeRoot::Other,
             },
-            Ok(Event::Eof) => {
-                return if looks_like_svg(bytes) {
-                    ProbeRoot::MalformedSvg
-                } else {
-                    ProbeRoot::Other
-                };
-            }
-            Err(_) => {
-                return if looks_like_svg(bytes) {
-                    ProbeRoot::MalformedSvg
-                } else {
-                    ProbeRoot::Other
-                };
-            }
+            Ok((_, Event::Eof)) | Err(_) => return ProbeRoot::Other,
             _ => {}
         }
         buffer.clear();
     }
 }
 
-fn parse_svg(bytes: &[u8], collect_text: bool) -> Result<ParsedSvg, ParseIssue> {
+fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
     std::str::from_utf8(bytes).map_err(|_| ParseIssue::Malformed)?;
-    if declares_non_utf8(bytes) {
-        return Err(ParseIssue::Malformed);
-    }
-    let mut reader = Reader::from_reader(bytes);
+    let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut parsed = ParsedSvg {
@@ -307,38 +302,56 @@ fn parse_svg(bytes: &[u8], collect_text: bool) -> Result<ParsedSvg, ParseIssue> 
     let mut text_depth = 0_usize;
     let mut root_seen = false;
     let mut root_closed = false;
+    let mut declaration_seen = false;
+    let mut prolog_event_seen = false;
     loop {
         match reader
-            .read_event_into(&mut buffer)
+            .read_resolved_event_into(&mut buffer)
             .map_err(|_| ParseIssue::Malformed)?
         {
-            Event::Start(start) => {
-                inspect_element(&start, depth, &mut attributes, &mut parsed, root_seen)?;
+            (namespace, Event::Start(start)) => {
+                prolog_event_seen = true;
+                inspect_element(
+                    &start,
+                    &namespace,
+                    depth,
+                    &mut attributes,
+                    &mut parsed,
+                    root_seen,
+                )?;
                 root_seen = true;
                 depth = depth.checked_add(1).ok_or(ParseIssue::StructureLimit)?;
                 if depth > MAX_DEPTH {
                     return Err(ParseIssue::StructureLimit);
                 }
-                if local_name(start.name().as_ref()) == b"text" {
+                if is_svg_element(&namespace, start.local_name().as_ref(), b"text") {
                     text_depth = text_depth
                         .checked_add(1)
                         .ok_or(ParseIssue::StructureLimit)?;
                 }
             }
-            Event::Empty(empty) => {
-                inspect_element(&empty, depth, &mut attributes, &mut parsed, root_seen)?;
+            (namespace, Event::Empty(empty)) => {
+                prolog_event_seen = true;
+                inspect_element(
+                    &empty,
+                    &namespace,
+                    depth,
+                    &mut attributes,
+                    &mut parsed,
+                    root_seen,
+                )?;
                 if depth == 0 {
                     root_seen = true;
                     root_closed = true;
                 }
             }
-            Event::End(end) => {
+            (namespace, Event::End(end)) => {
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
-                if local_name(end.name().as_ref()) == b"text" {
+                if is_svg_element(&namespace, end.local_name().as_ref(), b"text") {
                     text_depth = text_depth.checked_sub(1).ok_or(ParseIssue::Malformed)?;
-                    if collect_text && !parsed.text.ends_with('\n') {
+                    if mode.collects_text() && !parsed.text.ends_with('\n') {
                         append_text(&mut parsed.text, "\n")?;
                     }
                 }
@@ -347,16 +360,31 @@ fn parse_svg(bytes: &[u8], collect_text: bool) -> Result<ParsedSvg, ParseIssue> 
                     root_closed = true;
                 }
             }
-            Event::Text(text) => {
+            (_, Event::Text(text)) => {
                 let decoded = text.xml10_content().map_err(|_| ParseIssue::Malformed)?;
                 if depth == 0 && !decoded.trim().is_empty() {
                     return Err(ParseIssue::Malformed);
                 }
-                if collect_text && text_depth > 0 {
+                if depth == 0 {
+                    prolog_event_seen = true;
+                }
+                if mode.collects_text() && text_depth > 0 {
                     append_text(&mut parsed.text, &decoded)?;
                 }
             }
-            Event::GeneralRef(reference) => {
+            (_, Event::CData(cdata)) => {
+                if depth == 0 {
+                    return Err(ParseIssue::Malformed);
+                }
+                let decoded = cdata.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                if mode.collects_text() && text_depth > 0 {
+                    append_text(&mut parsed.text, &decoded)?;
+                }
+            }
+            (_, Event::GeneralRef(reference)) => {
+                if depth == 0 {
+                    return Err(ParseIssue::Malformed);
+                }
                 let decoded = reference.decode().map_err(|_| ParseIssue::Malformed)?;
                 let value = match decoded.as_ref() {
                     "amp" => "&",
@@ -366,17 +394,31 @@ fn parse_svg(bytes: &[u8], collect_text: bool) -> Result<ParsedSvg, ParseIssue> 
                     "quot" => "\"",
                     _ => return Err(ParseIssue::Malformed),
                 };
-                if collect_text && text_depth > 0 {
+                if mode.collects_text() && text_depth > 0 {
                     append_text(&mut parsed.text, value)?;
                 }
             }
-            Event::Decl(_) if !root_seen => {}
-            Event::Comment(_) => {}
-            Event::DocType(_) | Event::PI(_) | Event::CData(_) | Event::Decl(_) => {
-                return Err(ParseIssue::ActiveContent);
+            (_, Event::Decl(declaration))
+                if !root_seen && !declaration_seen && !prolog_event_seen =>
+            {
+                declaration_seen = true;
+                if !declaration_uses_utf8(&declaration).map_err(|_| ParseIssue::Malformed)? {
+                    return Err(ParseIssue::Malformed);
+                }
             }
-            Event::Eof if root_seen && root_closed && depth == 0 => break,
-            Event::Eof => return Err(ParseIssue::Malformed),
+            (_, Event::Comment(comment)) => {
+                if comment.as_ref().windows(2).any(|window| window == b"--") {
+                    return Err(ParseIssue::Malformed);
+                }
+                if depth == 0 {
+                    prolog_event_seen = true;
+                }
+            }
+            (_, Event::Decl(_)) => return Err(ParseIssue::Malformed),
+            (_, Event::DocType(_)) => return Err(ParseIssue::Malformed),
+            (_, Event::PI(_)) => return Err(ParseIssue::ActiveContent),
+            (_, Event::Eof) if root_seen && root_closed && depth == 0 => break,
+            (_, Event::Eof) => return Err(ParseIssue::Malformed),
         }
         buffer.clear();
     }
@@ -385,6 +427,7 @@ fn parse_svg(bytes: &[u8], collect_text: bool) -> Result<ParsedSvg, ParseIssue> 
 
 fn inspect_element(
     element: &BytesStart<'_>,
+    namespace: &ResolveResult<'_>,
     depth: usize,
     attribute_count: &mut usize,
     parsed: &mut ParsedSvg,
@@ -393,19 +436,19 @@ fn inspect_element(
     if depth == 0 && root_seen {
         return Err(ParseIssue::Malformed);
     }
-    let binding = element.name();
-    let name = local_name(binding.as_ref());
+    let binding = element.local_name();
+    let name = binding.as_ref();
     if depth == 0 {
-        if name != b"svg" || !root_has_namespace(element) {
+        if !is_svg_element(namespace, name, b"svg") {
             return Err(ParseIssue::Malformed);
         }
-    } else if name == b"svg" {
+    } else if is_svg_element(namespace, name, b"svg") {
         return Err(ParseIssue::NestedSvg);
     }
-    if active_element(name) {
+    if is_svg_namespace(namespace) && active_element(name) {
         return Err(ParseIssue::ActiveContent);
     }
-    if resource_element(name) {
+    if is_svg_namespace(namespace) && resource_element(name) {
         return Err(ParseIssue::ExternalReference);
     }
     parsed.elements = parsed
@@ -423,22 +466,31 @@ fn inspect_element(
         if *attribute_count > MAX_ATTRIBUTES || attribute.value.len() > MAX_ATTRIBUTE_BYTES {
             return Err(ParseIssue::StructureLimit);
         }
-        let key = local_name(attribute.key.as_ref());
-        let value =
+        let key_binding = attribute.key.local_name();
+        let key = key_binding.as_ref();
+        let raw_value =
             std::str::from_utf8(attribute.value.as_ref()).map_err(|_| ParseIssue::Malformed)?;
-        if value.contains('&') {
+        if raw_value.contains('<') || !has_only_xml10_characters(raw_value) {
+            return Err(ParseIssue::Malformed);
+        }
+        let value = unescape(raw_value).map_err(|_| ParseIssue::Malformed)?;
+        let value = value.as_ref();
+        if !has_only_xml10_characters(value) {
             return Err(ParseIssue::Malformed);
         }
         if key.starts_with(b"on") || key == b"style" {
             return Err(ParseIssue::ActiveContent);
         }
-        if key == b"href" || contains_ascii_case_insensitive(value.as_bytes(), b"url(") {
+        if key == b"href"
+            || contains_ascii_case_insensitive(value.as_bytes(), b"url(")
+            || (resource_capable_attribute(key) && value.contains('\\'))
+        {
             return Err(ParseIssue::ExternalReference);
         }
         if depth == 0 {
             match key {
-                b"width" => parsed.width = Some(parse_dimension(value)?),
-                b"height" => parsed.height = Some(parse_dimension(value)?),
+                b"width" => parsed.width = parse_dimension(value)?,
+                b"height" => parsed.height = parse_dimension(value)?,
                 b"viewBox" => parsed.view_box = Some(parse_view_box(value)?),
                 _ => {}
             }
@@ -447,19 +499,31 @@ fn inspect_element(
     Ok(())
 }
 
-fn root_has_namespace(element: &BytesStart<'_>) -> bool {
-    element
-        .attributes()
-        .filter_map(Result::ok)
-        .any(|attribute| {
-            attribute.key.as_ref() == b"xmlns" && attribute.value.as_ref() == SVG_NAMESPACE
-        })
+fn is_svg_namespace(namespace: &ResolveResult<'_>) -> bool {
+    matches!(
+        namespace,
+        ResolveResult::Bound(namespace) if namespace.as_ref() == SVG_NAMESPACE
+    )
+}
+
+fn is_svg_element(namespace: &ResolveResult<'_>, local_name: &[u8], expected: &[u8]) -> bool {
+    is_svg_namespace(namespace) && local_name == expected
 }
 
 fn active_element(name: &[u8]) -> bool {
     matches!(
         name,
-        b"script" | b"style" | b"foreignObject" | b"iframe" | b"object" | b"embed"
+        b"script"
+            | b"style"
+            | b"foreignObject"
+            | b"iframe"
+            | b"object"
+            | b"embed"
+            | b"animate"
+            | b"animateMotion"
+            | b"animateTransform"
+            | b"set"
+            | b"discard"
     )
 }
 
@@ -467,9 +531,40 @@ fn resource_element(name: &[u8]) -> bool {
     matches!(name, b"image" | b"audio" | b"video")
 }
 
-fn parse_dimension(value: &str) -> Result<f64, ParseIssue> {
-    let number = value.strip_suffix("px").unwrap_or(value);
-    let parsed = number.parse::<f64>().map_err(|_| ParseIssue::Malformed)?;
+fn resource_capable_attribute(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"fill"
+            | b"stroke"
+            | b"filter"
+            | b"clip-path"
+            | b"mask"
+            | b"cursor"
+            | b"marker"
+            | b"marker-start"
+            | b"marker-mid"
+            | b"marker-end"
+    )
+}
+
+fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
+    if let Ok(parsed) = parse_nonnegative_finite(value) {
+        return Ok(Some(parsed));
+    }
+    if let Some(number) = value.strip_suffix("px") {
+        return parse_nonnegative_finite(number).map(Some);
+    }
+    for unit in ["%", "em", "ex", "in", "cm", "mm", "pt", "pc"] {
+        if let Some(number) = value.strip_suffix(unit) {
+            parse_nonnegative_finite(number)?;
+            return Ok(None);
+        }
+    }
+    Err(ParseIssue::Malformed)
+}
+
+fn parse_nonnegative_finite(value: &str) -> Result<f64, ParseIssue> {
+    let parsed = value.parse::<f64>().map_err(|_| ParseIssue::Malformed)?;
     if parsed.is_finite() && parsed >= 0.0 {
         Ok(parsed)
     } else {
@@ -478,9 +573,13 @@ fn parse_dimension(value: &str) -> Result<f64, ParseIssue> {
 }
 
 fn parse_view_box(value: &str) -> Result<[f64; 4], ParseIssue> {
-    let mut values = value
-        .split(|character: char| character.is_ascii_whitespace() || character == ',')
-        .filter(|part| !part.is_empty())
+    let comma_groups: Vec<&str> = value.split(',').collect();
+    if comma_groups.iter().any(|group| group.trim().is_empty()) {
+        return Err(ParseIssue::Malformed);
+    }
+    let mut values = comma_groups
+        .into_iter()
+        .flat_map(str::split_ascii_whitespace)
         .map(|part| part.parse::<f64>().map_err(|_| ParseIssue::Malformed));
     let view_box = [
         values.next().ok_or(ParseIssue::Malformed)??,
@@ -580,19 +679,22 @@ fn empty_options(options: &serde_json::Value) -> bool {
     options.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
-fn local_name(name: &[u8]) -> &[u8] {
-    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+fn declaration_uses_utf8(declaration: &BytesDecl<'_>) -> Result<bool, ()> {
+    match declaration.encoding() {
+        None => Ok(true),
+        Some(Ok(encoding)) => Ok(encoding.as_ref().eq_ignore_ascii_case(b"utf-8")
+            || encoding.as_ref().eq_ignore_ascii_case(b"utf8")),
+        Some(Err(_)) => Err(()),
+    }
 }
 
-fn looks_like_svg(bytes: &[u8]) -> bool {
-    bytes.windows(4).any(|window| window == b"<svg")
-}
-
-fn declares_non_utf8(bytes: &[u8]) -> bool {
-    let lowered: Vec<u8> = bytes.iter().take(256).map(u8::to_ascii_lowercase).collect();
-    lowered.windows(8).any(|window| window == b"encoding")
-        && !lowered.windows(5).any(|window| window == b"utf-8")
-        && !lowered.windows(4).any(|window| window == b"utf8")
+fn has_only_xml10_characters(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+            || ('\u{20}'..='\u{d7ff}').contains(&character)
+            || ('\u{e000}'..='\u{fffd}').contains(&character)
+            || ('\u{10000}'..='\u{10ffff}').contains(&character)
+    })
 }
 
 fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
