@@ -155,15 +155,25 @@ Detection follows one fixed algorithm:
 
 1. Verify source digest and length through ordinary replica traversal.
 2. Run relevant probes in isolation under their range and byte budgets.
-3. Validate the sole strong candidate, or return `AmbiguousType` for
-   incompatible strong claims. Registration order never breaks a tie.
-4. With no strong claim, a syntactically valid declared type may nominate its
+3. Partition probe results by canonical media type and owner. A
+   `RecognizedMalformed` claim conflicts with any candidate for another type or
+   owner and returns `AmbiguousType`; multiple malformed claims for the same
+   type and owner collapse to that type's deterministic registered reason code.
+4. With no conflicting claim, any `RecognizedMalformed` result returns
+   `Malformed` immediately. It never falls back to a candidate, declared type,
+   or text.
+5. Validate the sole strong candidate, or return `AmbiguousType` for
+   incompatible strong claims. Registration order never breaks a tie. After
+   successful validation, compare its canonical type with the syntactically
+   valid declared type; disagreement returns `DeclaredTypeMismatch` rather than
+   a validated file.
+6. With no strong claim, a syntactically valid declared type may nominate its
    sole provider for structural validation. The declaration is not proof.
-5. With no declared candidate, a text provider may claim only after complete
+7. With no declared candidate, a text provider may claim only after complete
    streaming UTF-8 and control-policy validation.
-6. Validation failure after a recognized signature is `Malformed`, never a
+8. Validation failure after a recognized signature is `Malformed`, never a
    fallback to text or a weaker candidate.
-7. No successful candidate is ordinary `UnknownType`; the blob stays stored and
+9. No successful candidate is ordinary `UnknownType`; the blob stays stored and
    raw-readable.
 
 Polyglots are admitted only when every strong claim resolves to the same type
@@ -192,7 +202,18 @@ The provider contract is logically:
 ```text
 trait FileMediaProvider {
   fn declaration(&self) -> FileMediaProviderDeclaration;
-  async fn inspect(request, verified_source, cancellation) -> InspectOutcome;
+  async fn probe(
+    request,
+    verified_source,
+    bounded_probe_reads,
+    cancellation,
+  ) -> ProbeOutcome;
+  async fn validate(
+    request,
+    selected_probe,
+    verified_source,
+    cancellation,
+  ) -> ValidateOutcome;
   async fn read(
     request,
     validated_file,
@@ -203,9 +224,12 @@ trait FileMediaProvider {
 }
 ```
 
-An implementation may keep an opaque capability between stages. The contract is
-that validation precedes interpretation, both stages are bounded and
-cancellable, and truncated worker output is never success.
+The registry collects every bounded `ProbeOutcome`, applies the fixed selection
+algorithm, and invokes `validate` only on the selected provider. An
+implementation may keep an opaque, request-bound capability between those
+stages. The contract is that probing precedes registry selection, validation
+precedes interpretation, every stage is bounded and cancellable, and truncated
+worker output is never success.
 
 Registry construction rejects duplicate identities or exact MIME owners,
 duplicate view names, non-object schemas, unsupported output kinds, absent or
@@ -256,28 +280,41 @@ the containment boundary.
 
 ### `file_inspect`
 
-Arguments are exactly `{ digest }`, plus a stable visible-part selector when the
-same digest has several frontier uses with different metadata. Authorization
-reuses the `blob_read` rendered-frontier allow-set. Success is compact JSON
-with:
+Every rendered attachment stub adds `part_selector` containing the immutable
+semantic-entry identity and the attachment's zero-based part ordinal. The pair
+is stable across replay and identifies one exact `FileUse`; digest alone never
+chooses among uses. Arguments are exactly `{ digest, part_selector }`, and the
+digest must equal the digest in that selected visible stub. Authorization reuses
+the `blob_read` rendered-frontier allow-set and additionally verifies the exact
+selector. The permission default is `Auto` and the effect class is
+`ExternalEffect`, because inspection can issue an authenticated object-store
+read visible to its operator. Success is compact JSON with:
 
 - digest, decimal byte length, attachment kind, declared type, and filename;
-- status `validated`, `unknown`, `malformed`, `ambiguous`, or
-  `declared_mismatch`;
+- status `validated` or `unknown`;
 - detected type and reader identity when validated;
 - bounded provider metadata; and
 - ordered view declarations available to `file_read`.
 
 Unknown is successful inspection with no views. Malformed, ambiguity, and
-mismatch are known failures because an intended interpretation could not be
-safely established. Outcomes expose no content beyond admitted metadata.
+mismatch are known failures using the exact closed application-facing variants
+`Malformed`, `AmbiguousType`, and `DeclaredTypeMismatch`; they never persist the
+success JSON schema. Outcomes expose no content beyond admitted metadata.
 
 ### `file_read`
 
-Arguments are `{ digest, view, options }` plus the selector when required. The
-executor repeats inspection; it never trusts model-supplied type or reader
-identity. The selected view must exist and `options` must validate against its
-registered object schema.
+Arguments are exactly
+`{ digest, part_selector, view, options, continuation }`. The permission default
+is `Auto` and the effect class is `ExternalEffect`, because a read can perform
+observable authenticated store reads and publish a generated artifact. On an
+initial request, `options` is the provider object and `continuation` is null. On
+a continuation request, `options` is null and `continuation` is the cursor from
+the preceding result; the cursor carries and authenticates the original
+normalized options and next semantic position. The executor repeats inspection;
+it never trusts model-supplied type or reader identity. The selected view must
+exist, the initial `options` must validate against its registered object schema,
+and a continuation must bind the same digest, selector, reader identity, and
+view.
 
 - `Text` returns admitted UTF-8 with truncation and continuation facts.
 - `Structured` returns canonical compact JSON with the same facts.
@@ -286,11 +323,12 @@ registered object schema.
 - `File` returns a reference only when the selected model adapter supports a
   reviewed general-file input contract; it never silently becomes text.
 
-Pagination uses a common opaque authenticated cursor binding digest, reader
-identity, view, normalized options, and position. It is at most 1,024 bytes and
-expires on restart; expiry restarts the read rather than guessing. Providers
-expose semantic positions such as page, row, section, frame, or time span, not
-parser offsets.
+Pagination uses a common opaque authenticated cursor binding digest, part
+selector, reader identity, view, normalized initial options, and position. It is
+at most 1,024 bytes and expires on restart; an expired cursor returns a typed
+invalid-continuation failure and the model may issue a new initial request rather
+than the executor guessing. Providers expose semantic positions such as page,
+row, section, frame, or time span, not parser offsets.
 
 Raw `blob_read` remains beside these tools as the unknown-format and diagnostic
 escape hatch. A typed reader never falls back to raw bytes for recognized
@@ -316,9 +354,14 @@ presentation. Filename, parser text, store, and object key are absent. The
 enclosing tool result keeps request correlation and order.
 
 New output streams through generated-artifact ingest. Publication and
-verification precede registration; registration precedes result commit. Failure
-may leave an unreferenced orphan, never a dangling result. Equal output bytes
-converge by digest, and ambiguous publication cannot become tool success.
+verification precede registration; registration precedes result commit. Before
+committing any successful reference, the continuation transaction prospectively
+projects the complete rendered frontier and rejects the read if adding that
+reference would exceed the selected model call's reference-count or aggregate
+media ceiling. The rejection commits known-failure evidence but no reference, so
+every committed reference is admissible to its mandatory continuation call.
+Failure may leave an unreferenced orphan, never a dangling result. Equal output
+bytes converge by digest, and ambiguous publication cannot become tool success.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
@@ -362,8 +405,8 @@ A stored blob may remain multi-gigabyte. A compatible reader streams it under a
 finite cumulative source-work limit; a whole-decode view may return
 `SourceTooLarge` without invalidating the blob. Text/structure stops before the
 first complete semantic unit that would cross output bounds; a single oversized
-unit returns `UnitTooLarge`, never partial UTF-8 or JSON. Image and audio limits
-are checked before decode allocation.
+unit returns `OutputUnitTooLarge`, never partial UTF-8 or JSON. Image and audio
+limits are checked before decode allocation.
 
 Per-turn governance adds durable typed-read count and source-work reservations.
 One tool request charges once before authorization and is never refunded or
@@ -380,7 +423,7 @@ BlobNotVisible | BlobMissing | BlobCorrupt | BlobUnavailable
 | DeclaredTypeMismatch { declared, detected }
 | Malformed { media_type, reason_code }
 | EncryptedOrLocked { media_type }
-| UnsupportedView | InvalidViewArguments
+| UnsupportedView | InvalidViewArguments | InvalidContinuation
 | SourceTooLarge { maximum_bytes } | ExpansionLimitExceeded { limit_kind }
 | OutputUnitTooLarge | ProcessorUnavailable
 | ProcessorFailed { reason_code } | ProcessorTimedOut | Cancelled
