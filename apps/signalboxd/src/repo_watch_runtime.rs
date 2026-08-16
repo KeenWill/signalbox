@@ -40,8 +40,9 @@ use signalbox_domain::{
     GitHubObjectId, LabelName, MergeableState, ModelAlias, PullRequestBody,
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
     ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent,
-    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, ReviewState, ReviewThreadId, UserContent, WorkflowName,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId, UserContent,
+    WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
@@ -126,9 +127,6 @@ const WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 // out the full poll that performs it, so a sustained stream re-arms its own wake
 // instead of holding the worker across poll deadlines.
 const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 2;
-// One row is enough to answer whether anything is still pending.
-const WEBHOOK_PRESENCE_PAGE_SIZE: NonZeroU16 =
-    NonZeroU16::new(1).expect("webhook presence page size is positive");
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -1057,8 +1055,8 @@ impl RepositoryWatchTask {
             };
             if deliveries.is_empty() {
                 // The queue this drain was carrying the shadow for is empty, so
-                // a poll that had to leave the shadow in place can now hand it
-                // the cursor it committed.
+                // a poll that left the shadow in place hands it over now. There
+                // is no await between the observation and the replacement.
                 self.replace_superseded_webhook_shadow();
             }
             let mut progressed = false;
@@ -1118,22 +1116,11 @@ impl RepositoryWatchTask {
         }
     }
 
-    /// Whether this repository has any delivery still awaiting a disposition.
-    async fn webhook_pending_is_empty(&self) -> Result<bool, RepositoryWatchAttemptError> {
-        let page_size = RepoWatchWebhookPendingPageSize::try_new(WEBHOOK_PRESENCE_PAGE_SIZE)
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        self.webhook_store
-            .load_pending(&self.repository, page_size)
-            .await
-            .map(|deliveries| deliveries.is_empty())
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)
-    }
-
-    /// Hands the shadow baseline over to a poll that had to leave it in place.
+    /// Hands the shadow baseline over to the cursor a full poll committed.
     ///
-    /// A poll retains the shadow while deliveries admitted before it are still
-    /// pending. Once they have drained, its cursor is the newer complete
-    /// reconciliation and the next delivery reloads from it.
+    /// Called only where the pending page has just been observed empty, with no
+    /// await between the two, so a delivery admitted after that observation is
+    /// newer than the committed cursor and correctly reloads from it.
     fn replace_superseded_webhook_shadow(&mut self) {
         if self.webhook_shadow_superseded {
             self.webhook_shadow = None;
@@ -1609,7 +1596,7 @@ impl RepositoryWatchTask {
                     repository = %self.repository.as_str(),
                     cause_code = "repository_identity_frontier_exhausted",
                     error = %error,
-                    "repository-watch identity frontier cannot assign another occurrence; every later comparison fails the same way"
+                    "repository-watch identity frontier cannot assign another occurrence; an observation introducing no new stream can still succeed"
                 );
                 RepositoryWatchAttemptError::IdentityFrontier
             }
@@ -1635,18 +1622,15 @@ impl RepositoryWatchTask {
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
                 self.poller.publish_freshness(cursor.generation());
                 // A full poll is the complete reconciliation sweep, so the
-                // cursor it commits authoritatively replaces everything the
-                // webhook stream had accumulated in memory — but only once
-                // nothing is still waiting. The queue is read here, after the
-                // commit, so a delivery admitted while this poll was fetching
-                // is seen too; one left pending would otherwise apply to state
-                // this cursor already contains and record nothing.
-                if self.webhook_pending_is_empty().await? {
-                    self.webhook_shadow = None;
-                    self.webhook_shadow_superseded = false;
-                } else {
-                    self.webhook_shadow_superseded = true;
-                }
+                // cursor it commits supersedes everything the webhook stream
+                // had accumulated in memory. It is not handed over here: this
+                // task cannot read the queue atomically with an admission
+                // committing on the listener, so a delivery admitted while this
+                // poll was fetching could be applied to a cursor that already
+                // contains its transition. The handoff happens in the drain
+                // instead, where an empty page and the replacement are decided
+                // without an await between them.
+                self.webhook_shadow_superseded = true;
                 Ok(())
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
@@ -1717,6 +1701,17 @@ fn shadow_event_projections(
     )
     .map_err(|_| RepositoryWatchAttemptError::Differ)?
     .into_iter()
+    // A delivery carries neither computed mergeability nor an aggregate check
+    // rollup, so an occurrence of either kind here is an artefact of rebuilding
+    // state rather than something the payload observed. Projecting it would
+    // invent a webhook-only row for a value only polling can supply.
+    .filter(|occurrence| {
+        !matches!(
+            occurrence.event().kind().name(),
+            RepoWatchEventKindNameV1::MergeableStateChanged
+                | RepoWatchEventKindNameV1::ChecksCompleted
+        )
+    })
     .map(|occurrence| {
         let content_identity = occurrence.content_identity();
         RepoWatchWebhookProjection::event(
@@ -2279,8 +2274,45 @@ impl RepositoryWatchAttemptError {
         }
     }
 
+    /// Whether this failure should stop repository watching altogether.
+    ///
+    /// This is not "retrying cannot help". Returning `true` ends this
+    /// repository's task, and `run_repository_watch` answers a task that ends
+    /// before shutdown by aborting every other repository task and reporting
+    /// `RepositoryTaskExited`, which the runtime treats as a lifecycle defect.
+    /// The blast radius is therefore all repository watching, so only a
+    /// failure that indicts the configuration behind every task belongs here.
+    ///
+    /// A rule identity that no longer matches its durable record is such a
+    /// failure: the rules this daemon was started with no longer describe the
+    /// database, and continuing would dispatch against a stale contract.
+    ///
+    /// An exhausted identity frontier is not. `StreamLimit` refuses only an
+    /// observation that introduces a stream the frontier has never counted;
+    /// streams already counted keep advancing at the ceiling, so a later
+    /// observation that adds no new stream — the new label or reaction is
+    /// removed, say — succeeds. Stopping on it would let one repository's
+    /// transient over-limit observation disable every other repository's watch
+    /// until restart. The recorded `repository_identity_frontier_exhausted`
+    /// cause code is the operator's signal instead.
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
+        match self {
+            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity => true,
+            Self::Credential
+            | Self::Request
+            | Self::Rejected
+            | Self::ResponseTooLarge
+            | Self::InvalidResponse
+            | Self::InvalidEntityTag
+            | Self::MissingCachedResource
+            | Self::ResourceLimit
+            | Self::Normalization
+            | Self::PullRequestFetchAbandoned
+            | Self::Differ
+            | Self::IdentityFrontier
+            | Self::Dispatch
+            | Self::Persistence => false,
+        }
     }
 }
 
