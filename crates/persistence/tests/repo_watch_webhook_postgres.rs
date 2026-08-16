@@ -18,8 +18,9 @@ use signalbox_persistence::{
     repo_watch_webhook::{
         MAX_PENDING_PAGE_BYTES, PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission,
         RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition,
-        RepoWatchWebhookPendingPageSize, RepoWatchWebhookProjection, RepoWatchWebhookTargetedQuery,
-        RepoWatchWebhookTerminalOutcome, RepoWatchWebhookTerminalRequest,
+        RepoWatchWebhookParityCauseV1, RepoWatchWebhookPendingPageSize, RepoWatchWebhookProjection,
+        RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalOutcome,
+        RepoWatchWebhookTerminalRequest,
     },
 };
 use sqlx::{
@@ -156,6 +157,7 @@ fn event_projection(identity: [u8; 32]) -> Result<RepoWatchWebhookProjection, Bo
         RepoWatchEventContentIdentityV1::from_bytes(identity),
         RepoWatchEventKindNameV1::BranchWorkflowRunCompleted,
         vec![0x41],
+        None,
     )?)
 }
 
@@ -234,6 +236,51 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
 
 /// Seeds one poll-produced event. Exactly one content-identity version is
 /// storable, so the version the parity view filters on is not a fixture axis.
+/// Seeds one poll event of a family webhooks are not designed to reproduce.
+async fn seed_poll_only_family_event(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 2, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 2,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity,
+            producer, target_kind, event_kind, checks_outcome,
+            pull_request_number, head_sha, head_repository, base_branch,
+            head_branch, title, body, labels, draft, recorded_at
+         ) VALUES (
+            $1, $2, 1, 1, 1, 1, $3, 'poll', 'pull_request',
+            'checks_completed', 'success',
+            7, $4, $2, 'main', 'topic', 'fixture', '', ARRAY[]::text[], false,
+            transaction_timestamp()
+         )",
+    )
+    .bind(Uuid::from_u128(0x9F1))
+    .bind(REPOSITORY)
+    .bind(POLL_ONLY_IDENTITY.as_slice())
+    .bind(HEAD_SHA)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 async fn insert_poll_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event_id: Uuid,
@@ -722,6 +769,112 @@ async fn parity_view_classifies_all_four_shadow_statuses() -> Result<(), Box<dyn
     .fetch_all(&pool)
     .await?;
     assert_eq!(refresh, expected_refresh_targets());
+    Ok(())
+}
+
+/// One projected occurrence that already names why it may not match.
+fn caused_event_projection(
+    identity: [u8; 32],
+    cause: RepoWatchWebhookParityCauseV1,
+) -> Result<RepoWatchWebhookProjection, Box<dyn Error>> {
+    Ok(RepoWatchWebhookProjection::event(
+        RepoWatchEventContentIdentityV1::from_bytes(identity),
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted,
+        vec![0x41],
+        Some(cause),
+    )?)
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_webhook_only_row_reports_the_cause_its_delivery_recorded() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x601);
+    admit_fixture(&store, key).await?;
+    store
+        .record_terminal(
+            key,
+            &projected_request(vec![caused_event_projection(
+                WEBHOOK_ONLY_IDENTITY,
+                RepoWatchWebhookParityCauseV1::CrossDrainShadowGap,
+            )?])?,
+        )
+        .await?;
+
+    let causes = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, cause FROM repo_watch_webhook_parity
+          WHERE projection_kind = 'event'",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        causes,
+        vec![(
+            "webhook_only".to_owned(),
+            Some("cross_drain_shadow_gap".to_owned())
+        )]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_poll_only_family_row_derives_its_cause() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x602);
+    admit_fixture(&store, key).await?;
+    store
+        .record_terminal(key, &projected_request(Vec::new())?)
+        .await?;
+    seed_poll_only_family_event(&pool).await?;
+
+    let unexplained = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM repo_watch_webhook_parity
+          WHERE status IN ('webhook_only', 'poll_only') AND cause IS NULL",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let derived = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, cause FROM repo_watch_webhook_parity
+          WHERE status = 'poll_only'",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        derived,
+        vec![("poll_only".to_owned(), Some("poll_only_family".to_owned()))]
+    );
+    assert_eq!(unexplained, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_uncaused_divergence_fails_the_parity_gate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x603);
+    admit_fixture(&store, key).await?;
+    store
+        .record_terminal(
+            key,
+            &projected_request(vec![event_projection(WEBHOOK_ONLY_IDENTITY)?])?,
+        )
+        .await?;
+
+    let unexplained = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM repo_watch_webhook_parity
+          WHERE status IN ('webhook_only', 'poll_only') AND cause IS NULL",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(unexplained, 1);
     Ok(())
 }
 

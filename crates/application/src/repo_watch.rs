@@ -71,10 +71,16 @@ const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 pub struct RepoWatchEventContentIdentityV1([u8; 32]);
 
 impl RepoWatchEventContentIdentityV1 {
+    /// Rebuilds an identity from its stored 32 bytes.
+    ///
+    /// This is the storage decoder's constructor: it asserts nothing about the
+    /// bytes beyond their length, because a stored identity was computed when
+    /// its occurrence was derived and cannot be recomputed from the row.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
+    /// The identity's 32 bytes, for storage or comparison.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -88,6 +94,11 @@ pub struct RepoWatchEventIdentityFrontierEntryV1 {
 }
 
 impl RepoWatchEventIdentityFrontierEntryV1 {
+    /// Pairs one stream identity with the last sequence assigned on it.
+    ///
+    /// Entries are the frontier's durable form. Building one states no
+    /// invariant on its own; the frontier checks uniqueness across entries when
+    /// it is assembled.
     pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self {
         Self {
             stream_identity,
@@ -95,6 +106,7 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
         }
     }
 
+    /// The domain-separated identity of the stream this entry counts.
     pub const fn stream_identity(&self) -> &[u8; 32] {
         &self.stream_identity
     }
@@ -111,6 +123,11 @@ pub struct RepoWatchEventIdentityFrontierV1 {
 }
 
 impl RepoWatchEventIdentityFrontierV1 {
+    /// Rebuilds a frontier from its stored entries.
+    ///
+    /// Rejects entries that repeat a stream, and entries beyond the stream
+    /// ceiling, so a decoded frontier holds the same invariants as one the
+    /// differ advanced.
     pub fn try_from_entries(
         entries: Vec<RepoWatchEventIdentityFrontierEntryV1>,
     ) -> Result<Self, RepoWatchEventIdentityFrontierError> {
@@ -129,6 +146,10 @@ impl RepoWatchEventIdentityFrontierV1 {
         Ok(Self { sequences })
     }
 
+    /// The frontier's entries in canonical stream-identity order.
+    ///
+    /// Ordering is canonical so an encoded cursor payload is byte-stable, which
+    /// the durable canonicalization check depends on.
     pub fn entries(
         &self,
     ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_ {
@@ -162,8 +183,14 @@ impl RepoWatchEventIdentityFrontierV1 {
 /// Why an occurrence frontier could not represent another event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchEventIdentityFrontierError {
+    /// Stored entries named one stream twice, so its sequence is ambiguous.
     DuplicateStream,
+    /// The repository holds the most recurring streams a frontier may carry.
+    ///
+    /// Reached only when assembling a stored frontier or introducing a new
+    /// stream; a stream already counted keeps advancing at the ceiling.
     StreamLimit,
+    /// One stream assigned every occurrence number a `u64` can hold.
     SequenceExhausted,
 }
 
@@ -206,14 +233,23 @@ impl RepoWatchEventOccurrenceV1 {
         }
     }
 
+    /// The normalized event this occurrence states.
     pub const fn event(&self) -> &RepoWatchEvent {
         &self.event
     }
 
+    /// The occurrence's source-independent content identity.
+    ///
+    /// Two producers deriving this occurrence produce this same value, which is
+    /// what lets storage recognize a restatement of an already-recorded fact.
     pub const fn content_identity(&self) -> RepoWatchEventContentIdentityV1 {
         self.content_identity
     }
 
+    /// Discards the identity and keeps the event.
+    ///
+    /// For callers that have already recorded or compared the identity; the
+    /// pairing cannot be rebuilt afterwards outside the differ.
     pub fn into_event(self) -> RepoWatchEvent {
         self.event
     }
@@ -854,9 +890,37 @@ enum RepoWatchDifferFailure {
     IdentityFrontier(RepoWatchEventIdentityFrontierError),
 }
 
+/// Which part of derivation failed.
+///
+/// Lets a caller classify a derivation failure without reading `Display` text.
+/// The two carry different operational meaning: event construction indicates a
+/// differ defect on one observation, while an identity-frontier failure recurs
+/// on every later comparison for that repository until the frontier changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchDifferFailureKind {
+    /// The differ assembled an event the domain rejects.
+    EventConstruction,
+    /// The occurrence frontier could not assign the next sequence.
+    IdentityFrontier,
+}
+
 /// Internal coherence failure while deriving a domain event or its identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchDifferError(RepoWatchDifferFailure);
+
+impl RepoWatchDifferError {
+    /// Which part of derivation failed.
+    pub const fn kind(&self) -> RepoWatchDifferFailureKind {
+        match self.0 {
+            RepoWatchDifferFailure::EventConstruction(_) => {
+                RepoWatchDifferFailureKind::EventConstruction
+            }
+            RepoWatchDifferFailure::IdentityFrontier(_) => {
+                RepoWatchDifferFailureKind::IdentityFrontier
+            }
+        }
+    }
+}
 
 impl fmt::Display for RepoWatchDifferError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

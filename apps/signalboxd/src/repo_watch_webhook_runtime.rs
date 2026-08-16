@@ -5,7 +5,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    net::{SocketAddr, TcpListener as StdTcpListener},
+    net::TcpListener as StdTcpListener,
     num::NonZeroU64,
     pin::Pin,
     sync::{Arc, Mutex, PoisonError},
@@ -19,9 +19,14 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, Request, StatusCode},
     routing::post,
-    serve::Listener,
 };
 use hmac::{Hmac, KeyInit, Mac};
+use hyper::server::conn::http1;
+use hyper_util::{
+    rt::{TokioIo, TokioTimer},
+    server::graceful::GracefulShutdown,
+    service::TowerToHyperService,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use signalbox_domain::RepositorySlug;
@@ -34,6 +39,7 @@ use sqlx::PgPool;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
+    select,
     sync::{OwnedSemaphorePermit, Semaphore, watch},
     time::{Instant as TokioInstant, Sleep, sleep, timeout},
 };
@@ -72,8 +78,23 @@ pub(crate) const MAX_WEBHOOK_DELIVERIES_PER_MINUTE: u32 = 3_000;
 /// Hard safety ceiling on connections held at once, including those that have
 /// sent no complete request yet. Nothing the handler bounds begins until whole
 /// request headers arrive, so this is what keeps a peer that opens sockets and
-/// withholds headers from exhausting daemon descriptors.
+/// withholds headers from exhausting daemon descriptors. It is taken at accept
+/// time, before any router or handler work.
 pub(crate) const MAX_WEBHOOK_CONNECTIONS: usize = 256;
+/// Hard safety ceiling on the aggregate header-field bytes one request may
+/// carry, counted across every name and value. GitHub's own delivery headers
+/// are a small fraction of this.
+pub(crate) const MAX_WEBHOOK_HEADER_BYTES: usize = 32 * 1024;
+/// Hard safety ceiling on how many header fields one request head may carry,
+/// which bounds head parsing independently of their total size.
+pub(crate) const MAX_WEBHOOK_HEADER_COUNT: usize = 64;
+/// Hard safety ceiling on the read buffer one connection may grow while its
+/// head is still incomplete. This is the memory bound below the router, which
+/// refuses a head that cannot fit it; the exact aggregate ceiling above is
+/// enforced on the parsed head before any credential or body work.
+const MAX_WEBHOOK_HEAD_BUFFER_BYTES: usize = 64 * 1024;
+/// How long a graceful shutdown waits for connections already being served.
+const WEBHOOK_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Hard safety deadline for one connection read to make progress. It covers the
 /// request line and headers, which are read before any handler runs.
 pub(crate) const WEBHOOK_CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(15);
@@ -214,10 +235,8 @@ impl RepoWatchWebhookRuntime {
             .route(&self.path, post(admit_webhook))
             .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
             .with_state(self.state);
-        axum::serve(listener, router)
-            .with_graceful_shutdown(webhook_shutdown(shutdown))
-            .await
-            .map_err(RepoWatchWebhookRuntimeError)
+        serve_bounded_webhook_connections(listener, router, shutdown).await;
+        Ok(())
     }
 }
 
@@ -238,20 +257,18 @@ fn bind_listener(
 /// deadline needs, so nothing bounds a peer between accept and the first
 /// complete request. These two bounds do: the budget caps how many such peers
 /// can exist, and the deadline retires any one that stops making progress.
-struct BoundedWebhookListener {
+pub(crate) struct BoundedWebhookListener {
     listener: TcpListener,
     connections: Arc<Semaphore>,
     read_timeout: Duration,
 }
 
-impl Listener for BoundedWebhookListener {
-    type Io = DeadlinedConnection<TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+impl BoundedWebhookListener {
+    async fn accept(&mut self) -> DeadlinedConnection<TcpStream> {
         loop {
             // Taken before accepting, so a peer beyond the budget waits in the
-            // kernel backlog rather than holding a daemon descriptor.
+            // kernel backlog rather than holding a daemon descriptor. Nothing
+            // router-side or handler-side has run at this point.
             let permit = match Arc::clone(&self.connections).acquire_owned().await {
                 Ok(permit) => permit,
                 // This listener owns the budget and never closes it. Were that
@@ -259,11 +276,8 @@ impl Listener for BoundedWebhookListener {
                 Err(_) => std::future::pending().await,
             };
             match self.listener.accept().await {
-                Ok((stream, address)) => {
-                    return (
-                        DeadlinedConnection::new(stream, self.read_timeout, permit),
-                        address,
-                    );
+                Ok((stream, _address)) => {
+                    return DeadlinedConnection::new(stream, self.read_timeout, permit);
                 }
                 Err(error) => {
                     drop(permit);
@@ -277,9 +291,54 @@ impl Listener for BoundedWebhookListener {
             }
         }
     }
+}
 
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.listener.local_addr()
+/// Serves accepted connections under the raw-head ceilings.
+///
+/// Hyper is driven directly because `axum::serve` builds its connection with
+/// default HTTP/1 settings, and the head ceilings sit on that builder: a
+/// request head that exceeds either is refused before the router exists.
+pub(crate) async fn serve_bounded_webhook_connections(
+    mut listener: BoundedWebhookListener,
+    router: Router,
+    shutdown: watch::Receiver<bool>,
+) {
+    let graceful = GracefulShutdown::new();
+    let mut stopping = Box::pin(webhook_shutdown(shutdown));
+    loop {
+        let connection = select! {
+            () = &mut stopping => break,
+            connection = listener.accept() => connection,
+        };
+        let served = http1::Builder::new()
+            .timer(TokioTimer::new())
+            .max_headers(MAX_WEBHOOK_HEADER_COUNT)
+            .max_buf_size(MAX_WEBHOOK_HEAD_BUFFER_BYTES)
+            .header_read_timeout(WEBHOOK_CONNECTION_READ_TIMEOUT)
+            .serve_connection(
+                TokioIo::new(connection),
+                TowerToHyperService::new(router.clone()),
+            );
+        let watched = graceful.watch(served);
+        tokio::spawn(async move {
+            if let Err(error) = watched.await {
+                tracing::debug!(
+                    cause_code = "webhook_connection_failed",
+                    error = %error,
+                    "repository-watch webhook connection ended before completing a request"
+                );
+            }
+        });
+    }
+    // A connection that never finishes must not hold daemon shutdown open.
+    if timeout(WEBHOOK_SHUTDOWN_GRACE, graceful.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            cause_code = "webhook_shutdown_deadline",
+            "repository-watch webhook connections outlived the shutdown grace period"
+        );
     }
 }
 
@@ -560,6 +619,7 @@ fn body_budget_granules(bytes: usize) -> u32 {
 
 const fn rejected_http_status(error: WebhookHttpRejection) -> StatusCode {
     match error {
+        WebhookHttpRejection::HeadTooLarge => StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
         WebhookHttpRejection::InvalidContentLength => StatusCode::PAYLOAD_TOO_LARGE,
         WebhookHttpRejection::InvalidSignature => StatusCode::UNAUTHORIZED,
         WebhookHttpRejection::DuplicateHeader
@@ -608,6 +668,7 @@ impl GitHubWebhookHeadersV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WebhookHttpRejection {
     DuplicateHeader,
+    HeadTooLarge,
     InvalidContentEncoding,
     InvalidContentLength,
     InvalidContentType,
@@ -622,6 +683,7 @@ pub(crate) enum WebhookHttpRejection {
 pub(crate) fn parse_github_headers(
     headers: &HeaderMap,
 ) -> Result<GitHubWebhookHeadersV1, WebhookHttpRejection> {
+    require_bounded_head(headers)?;
     require_content_type(headers)?;
     require_supported_encoding(headers)?;
     require_supported_transfer_encoding(headers)?;
@@ -637,6 +699,26 @@ pub(crate) fn parse_github_headers(
         signature,
         declared_body_bytes,
     })
+}
+
+/// Refuses a request head beyond either hard ceiling.
+///
+/// This runs before any other header is read, so an oversized head costs one
+/// pass over fields the connection had already been allowed to buffer.
+fn require_bounded_head(headers: &HeaderMap) -> Result<(), WebhookHttpRejection> {
+    if headers.len() > MAX_WEBHOOK_HEADER_COUNT {
+        return Err(WebhookHttpRejection::HeadTooLarge);
+    }
+    let mut head_bytes = 0_usize;
+    for (name, value) in headers {
+        head_bytes = head_bytes
+            .saturating_add(name.as_str().len())
+            .saturating_add(value.len());
+        if head_bytes > MAX_WEBHOOK_HEADER_BYTES {
+            return Err(WebhookHttpRejection::HeadTooLarge);
+        }
+    }
+    Ok(())
 }
 
 fn required_header<'headers>(
@@ -887,7 +969,8 @@ mod tests {
 
     use super::{
         FileCredentialAccess, GitHubWebhookHeadersV1, MAX_WEBHOOK_BODY_BYTES,
-        MAX_WEBHOOK_DELIVERIES_PER_MINUTE, MAX_WEBHOOK_IN_FLIGHT, MAX_WEBHOOK_SECRET_BYTES,
+        MAX_WEBHOOK_CONNECTIONS, MAX_WEBHOOK_DELIVERIES_PER_MINUTE, MAX_WEBHOOK_HEADER_BYTES,
+        MAX_WEBHOOK_HEADER_COUNT, MAX_WEBHOOK_IN_FLIGHT, MAX_WEBHOOK_SECRET_BYTES,
         WEBHOOK_BODY_BUDGET_GRANULES, WEBHOOK_BODY_READ_TIMEOUT, WEBHOOK_CONNECTION_READ_TIMEOUT,
         WebhookBodyRejection, WebhookHookBinding, WebhookHttpRejection, WebhookHttpState,
         WebhookRateLimiter, admit_webhook, body_budget_granules, parse_github_headers,
@@ -1243,6 +1326,183 @@ mod tests {
                 .expect("fixture limiter is uncontended")
                 .is_empty()
         );
+    }
+
+    /// Serves a trivial router behind the real bounded listener.
+    async fn bounded_listener_fixture() -> (
+        std::net::SocketAddr,
+        TempDir,
+        tokio::sync::watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the fixture binds an ephemeral port");
+        let address = listener
+            .local_addr()
+            .expect("the fixture listener reports its address");
+        let bounded = super::BoundedWebhookListener {
+            listener,
+            connections: std::sync::Arc::new(Semaphore::new(MAX_WEBHOOK_CONNECTIONS)),
+            read_timeout: super::WEBHOOK_CONNECTION_READ_TIMEOUT,
+        };
+        let (directory, state) = fixture_state();
+        let router = axum::Router::new()
+            .route("/", axum::routing::post(admit_webhook))
+            .layer(axum::extract::DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
+            .with_state(state);
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let served = tokio::spawn(super::serve_bounded_webhook_connections(
+            bounded, router, shutdown,
+        ));
+        (address, directory, stop, served)
+    }
+
+    /// Appends `count` distinct filler header fields.
+    ///
+    /// The loop lives here rather than in a test body so each test stays
+    /// straight-line, as `docs/agents/testing-style.md` rule 2 requires.
+    fn append_filler_headers(headers: &mut HeaderMap, count: usize) {
+        for index in 0..count {
+            headers.append(
+                axum::http::HeaderName::from_bytes(format!("x-fixture-{index}").as_bytes())
+                    .expect("the fixture header name is valid"),
+                HeaderValue::from_static("1"),
+            );
+        }
+    }
+
+    /// Builds `count` distinct header fields.
+    ///
+    /// The loop lives here rather than in a test body so each test stays
+    /// straight-line, as `docs/agents/testing-style.md` rule 2 requires.
+    fn repeated_header_block(count: usize) -> String {
+        use std::fmt::Write as _;
+
+        let mut headers = String::new();
+        for index in 0..count {
+            write!(&mut headers, "x-fixture-{index}: 1\r\n")
+                .expect("writing to String cannot fail");
+        }
+        headers
+    }
+
+    async fn request_status_line(address: std::net::SocketAddr, request: &str) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("the fixture connects to its own listener");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("the fixture writes its request head");
+        let mut response = Vec::new();
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await;
+        String::from_utf8_lossy(&response)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn a_request_head_beyond_the_field_ceiling_is_refused() {
+        let (address, _directory, stop, served) = bounded_listener_fixture().await;
+        let request = format!(
+            "POST / HTTP/1.1\r\nhost: fixture\r\n{}\r\n",
+            repeated_header_block(MAX_WEBHOOK_HEADER_COUNT + 8)
+        );
+
+        let status = request_status_line(address, &request).await;
+
+        assert!(
+            status.contains("431"),
+            "a head beyond the field ceiling must be refused, got {status:?}"
+        );
+        let _ = stop.send(true);
+        let _ = served.await;
+    }
+
+    #[test]
+    fn a_head_beyond_the_aggregate_byte_ceiling_is_refused() {
+        let mut headers = valid_headers();
+        let oversized = "x".repeat(MAX_WEBHOOK_HEADER_BYTES);
+        headers.insert(
+            "x-fixture",
+            HeaderValue::from_str(&oversized).expect("the fixture value is an HTTP value"),
+        );
+
+        assert_eq!(
+            parse_github_headers(&headers),
+            Err(WebhookHttpRejection::HeadTooLarge)
+        );
+    }
+
+    #[test]
+    fn a_head_at_the_aggregate_byte_ceiling_is_admitted() {
+        let headers = valid_headers();
+        let occupied: usize = headers
+            .iter()
+            .map(|(name, value)| name.as_str().len() + value.len())
+            .sum();
+        let mut headers = headers;
+        let remaining = MAX_WEBHOOK_HEADER_BYTES - occupied - "x-fixture".len();
+        headers.insert(
+            "x-fixture",
+            HeaderValue::from_str(&"x".repeat(remaining))
+                .expect("the fixture value is an HTTP value"),
+        );
+
+        assert!(parse_github_headers(&headers).is_ok());
+    }
+
+    #[test]
+    fn a_head_beyond_the_field_count_ceiling_is_refused() {
+        let mut headers = valid_headers();
+        append_filler_headers(&mut headers, MAX_WEBHOOK_HEADER_COUNT);
+
+        assert_eq!(
+            parse_github_headers(&headers),
+            Err(WebhookHttpRejection::HeadTooLarge)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_head_beyond_the_aggregate_byte_ceiling_is_refused_on_the_wire() {
+        let (address, _directory, stop, served) = bounded_listener_fixture().await;
+        let oversized = "x".repeat(MAX_WEBHOOK_HEADER_BYTES);
+        let request = format!("POST / HTTP/1.1\r\nhost: fixture\r\nx-fixture: {oversized}\r\n\r\n");
+
+        let status = request_status_line(address, &request).await;
+
+        assert!(
+            status.contains("431"),
+            "a head beyond the aggregate ceiling must be refused, got {status:?}"
+        );
+        let _ = stop.send(true);
+        let _ = served.await;
+    }
+
+    #[tokio::test]
+    async fn a_head_within_both_ceilings_reaches_header_admission() {
+        let (address, _directory, stop, served) = bounded_listener_fixture().await;
+        let request = format!(
+            "POST / HTTP/1.1\r\nhost: fixture\r\ncontent-length: 0\r\n{}\r\n",
+            repeated_header_block(MAX_WEBHOOK_HEADER_COUNT / 4)
+        );
+
+        let status = request_status_line(address, &request).await;
+
+        // The head clears both ceilings and is then refused for the GitHub
+        // headers it lacks, which is admission rather than an ingress bound.
+        assert!(
+            status.contains("400"),
+            "a head within both ceilings must reach admission, got {status:?}"
+        );
+        let _ = stop.send(true);
+        let _ = served.await;
     }
 
     #[tokio::test(start_paused = true)]

@@ -3253,6 +3253,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let counted_operation = model_calls
         .preview_activation_operation(preview.prepared(), counted_call)
         .await?
+        .expect("an admitted credential previews the activation operation")
         .render(Box::new([]))?;
     let counted_entries = counted_operation
         .request()

@@ -490,6 +490,7 @@ mod tests {
         ExchangeFacts {
             provider_request_id: Some(ProviderRequestId::new("req_1")),
             http_status: Some(200),
+            retry_after: None,
         }
     }
 
