@@ -1280,10 +1280,13 @@ never-eligible cooldown rather than a numeric duration. A convergence row
 carries repository and pull request, head and base revisions, base branch,
 mergeable state, review decision, unresolved-thread and gating-check counts,
 sorted non-green check names, verdict, optional matching durable seal, and
-whole-second assessment age. A pending-clearance row carries repository and pull
-request, current and reviewed heads, review identity, reviewer, and whole-second
-pending duration. Every duration is clamped nonnegative and sampled against the
-database transaction timestamp, not a client clock.
+whole-second assessment age. Each non-green check name is canonical padded
+base64 of its exact UTF-8 bytes on the wire, keeping the complete admitted
+10,000-name inventory below the frame cap even under worst-case JSON escaping.
+A pending-clearance row carries repository and pull request, current and
+reviewed heads, review identity, reviewer, and whole-second pending duration.
+Every duration is clamped nonnegative and sampled against the database
+transaction timestamp, not a client clock.
 
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
 indices, counts, and outbox cursors are canonical decimal strings, preserving
@@ -2537,8 +2540,11 @@ owner-only daemon socket; it never opens the database itself. It validates the
 fixed section order and all four terminal counts before printing anything. The
 first output line names those counts, followed by one human-scannable line per
 row with `held`, `queued`, `convergence`, or `stale_review_clearance` as its
-kind. Durations use compact day, hour, minute, and second units. Process-derived
-text uses the terminal-safe field escaping unless `--raw-output` is selected.
+kind. A convergence line prints `non_green_count` beside the comma-joined
+`non_green` field, so an empty inventory cannot collide with a check literally
+named `none`. Durations use compact day, hour, minute, and second units.
+Process-derived text uses terminal-safe field escaping unless `--raw-output` is
+selected.
 The final `model_usage=omitted` line states that no cheap status aggregate is
 available: model usage crosses this protocol only inside each complete session
 transcript, and `status` does not issue one transcript read per session.
