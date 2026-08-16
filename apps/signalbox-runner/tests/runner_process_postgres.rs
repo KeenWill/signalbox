@@ -145,12 +145,13 @@ async fn s30_inv042_spawned_runner_enrolls_against_durable_daemon() -> Result<()
     let runner_root = directory.path().join("runner-state");
     let configuration_path = directory.path().join("runner.toml");
     let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let pinned_executable = std::env::current_exe()?;
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-exec_supervisor_executable = "{runner_binary}"
-bubblewrap_path = "{runner_binary}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -160,6 +161,8 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        pinned_executable.display(),
+        pinned_executable.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
@@ -217,12 +220,13 @@ async fn s32_inv042_inv044_spawned_runner_loss_reaches_its_placed_session()
     let working_directory = directory.path().join("session-workspace");
     let configuration_path = directory.path().join("runner.toml");
     let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let pinned_executable = std::env::current_exe()?;
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-exec_supervisor_executable = "{runner_binary}"
-bubblewrap_path = "{runner_binary}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -232,6 +236,8 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        pinned_executable.display(),
+        pinned_executable.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
