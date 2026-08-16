@@ -13,6 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     future::Future,
+    num::NonZeroUsize,
     path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -1576,12 +1577,17 @@ async fn run_hub(
     );
     let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
     let mut scheduler = match scheduler_max_in_flight_passes {
-        Some(limit) => SchedulerLoop::with_max_in_flight(work_source, pass, limit),
+        Some(0) => SchedulerLoop::paused(work_source, pass),
+        Some(limit) => SchedulerLoop::with_max_in_flight(
+            work_source,
+            pass,
+            NonZeroUsize::new(limit).expect("positive parsed scheduler limit is nonzero"),
+        ),
         None => SchedulerLoop::new(work_source, pass),
     };
     if let Some(limit) = scheduler_max_in_flight_passes {
         tracing::info!(
-            max_in_flight_passes = limit.get(),
+            max_in_flight_passes = limit,
             "scheduler pass admission uses the deployment override"
         );
     }

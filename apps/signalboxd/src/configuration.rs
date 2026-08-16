@@ -4,7 +4,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt, fs, io,
-    num::NonZeroUsize,
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -558,7 +557,7 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
-    scheduler_max_in_flight_passes: Option<NonZeroUsize>,
+    scheduler_max_in_flight_passes: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1574,7 +1573,7 @@ impl HubModelConfiguration {
     }
 
     /// Returns the deployment override for concurrent scheduler passes.
-    pub const fn scheduler_max_in_flight_passes(&self) -> Option<NonZeroUsize> {
+    pub const fn scheduler_max_in_flight_passes(&self) -> Option<usize> {
         self.scheduler_max_in_flight_passes
     }
 
@@ -2402,7 +2401,7 @@ fn parse_daemon_tool_settings(
 
 fn parse_scheduler_max_in_flight_passes(
     item: Option<&Item>,
-) -> Result<Option<NonZeroUsize>, HubModelConfigurationError> {
+) -> Result<Option<usize>, HubModelConfigurationError> {
     let Some(item) = item else {
         return Ok(None);
     };
@@ -2415,8 +2414,7 @@ fn parse_scheduler_max_in_flight_passes(
         .get("max_in_flight_passes")
         .and_then(Item::as_integer)
         .and_then(|value| usize::try_from(value).ok())
-        .and_then(NonZeroUsize::new)
-        .filter(|value| value.get() <= MAX_SCHEDULER_IN_FLIGHT_PASSES)
+        .filter(|value| *value <= MAX_SCHEDULER_IN_FLIGHT_PASSES)
         .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
     Ok(Some(limit))
 }
@@ -3488,7 +3486,6 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 mod tests {
     use std::{
         collections::HashSet,
-        num::NonZeroUsize,
         path::{Path, PathBuf},
         sync::Arc,
         time::Duration,
@@ -4607,18 +4604,26 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             .expect("the bounded scheduler override is valid");
 
         assert_eq!(default.scheduler_max_in_flight_passes(), None);
+        assert_eq!(overridden.scheduler_max_in_flight_passes(), Some(4));
+    }
+
+    #[test]
+    fn scheduler_pass_limit_accepts_zero_as_an_explicit_pause() {
+        let paused = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 0\n\n[compaction]",
+        );
+
         assert_eq!(
-            overridden.scheduler_max_in_flight_passes(),
-            NonZeroUsize::new(4)
+            HubModelConfiguration::parse(&paused)
+                .expect("the paused scheduler setting is valid")
+                .scheduler_max_in_flight_passes(),
+            Some(0)
         );
     }
 
     #[test]
     fn scheduler_pass_limit_rejects_values_outside_its_closed_table() {
-        let zero = CONFIGURATION.replace(
-            "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 0\n\n[compaction]",
-        );
         let excessive = CONFIGURATION.replace(
             "[compaction]",
             "[scheduler]\nmax_in_flight_passes = 1025\n\n[compaction]",
@@ -4628,10 +4633,6 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             "[scheduler]\nmax_in_flight_passes = 4\nextra = 1\n\n[compaction]",
         );
 
-        assert_eq!(
-            HubModelConfiguration::parse(&zero).err(),
-            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
-        );
         assert_eq!(
             HubModelConfiguration::parse(&excessive).err(),
             Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
