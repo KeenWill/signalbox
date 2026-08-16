@@ -30,41 +30,53 @@ query($owner: String!, $name: String!, $after: String, $tracked: [ID!]!) {
       nodes {
         id
         number
-        state
-        title
-        url
-        isDraft
-        baseRefName
         headRefName
-        headRefOid
-        mergeable
-        reviewThreads(first: 100) {
-          nodes { isResolved }
-          pageInfo { hasNextPage endCursor }
-        }
-        commits(last: 1) {
-          nodes {
-            commit {
-              oid
-              statusCheckRollup {
-                contexts(first: 100) {
-                  nodes {
-                    __typename
-                    ... on CheckRun { name status conclusion }
-                    ... on StatusContext { context state }
-                  }
-                  pageInfo { hasNextPage endCursor }
-                }
-              }
-            }
-          }
-        }
       }
       pageInfo { hasNextPage endCursor }
     }
   }
   tracked: nodes(ids: $tracked) {
     ... on PullRequest { id number state mergedAt closedAt headRefName headRefOid }
+  }
+}
+"""
+
+PULL_REQUEST_DETAILS_QUERY = """
+query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on PullRequest {
+      id
+      number
+      state
+      title
+      url
+      isDraft
+      baseRefName
+      headRefName
+      headRefOid
+      mergeable
+      reviewThreads(first: 100) {
+        nodes { isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion }
+                  ... on StatusContext { context state }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
 """
@@ -81,6 +93,7 @@ GREEN_CHECK_RUN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 GREEN_STATUS_CONTEXT_STATES = frozenset({"SUCCESS"})
 STATE_VERSION = 1
 PAGINATION_BATCH_SIZE = 20
+DETAIL_BATCH_SIZE = 20
 
 
 @dataclasses.dataclass(frozen=True)
@@ -150,9 +163,9 @@ class GitHubGraphQL:
         return response["data"]
 
     def snapshot(
-        self, tracked_node_ids: Sequence[str]
+        self, tracked_node_ids: Sequence[str], head_pattern: str
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        pull_requests: list[dict[str, Any]] = []
+        open_pull_requests: list[dict[str, Any]] = []
         tracked: list[dict[str, Any]] = []
         tracked_batches = list(chunks(tracked_node_ids, 100)) or [()]
         first_tracked_batch = tracked_batches.pop(0)
@@ -168,7 +181,7 @@ class GitHubGraphQL:
                 },
             )
             connection = data["repository"]["pullRequests"]
-            pull_requests.extend(normalize_pull_request(node) for node in connection["nodes"])
+            open_pull_requests.extend(connection["nodes"])
             if after is None:
                 tracked.extend(node for node in data["tracked"] if node is not None)
             if not connection["pageInfo"]["hasNextPage"]:
@@ -177,6 +190,21 @@ class GitHubGraphQL:
         for tracked_batch in tracked_batches:
             data = self.execute(TERMINAL_PULL_REQUESTS_QUERY, {"tracked": list(tracked_batch)})
             tracked.extend(node for node in data["tracked"] if node is not None)
+        tracked_ids = set(tracked_node_ids)
+        detail_ids = [
+            node["id"]
+            for node in open_pull_requests
+            if node["id"] in tracked_ids
+            or fnmatch.fnmatchcase(node.get("headRefName") or "", head_pattern)
+        ]
+        pull_requests: list[dict[str, Any]] = []
+        for detail_batch in chunks(detail_ids, DETAIL_BATCH_SIZE):
+            data = self.execute(PULL_REQUEST_DETAILS_QUERY, {"ids": list(detail_batch)})
+            pull_requests.extend(
+                normalize_pull_request(node)
+                for node in data["nodes"]
+                if node is not None
+            )
         self._finish_paginated_connections(pull_requests)
         return pull_requests, tracked
 
@@ -482,13 +510,22 @@ def nonnegative_number(value: Any, name: str) -> float:
     return number
 
 
-def load_state(path: Path) -> dict[str, Any]:
+def load_state(path: Path, repository: str) -> dict[str, Any]:
     if not path.exists():
-        return {"version": STATE_VERSION, "pull_requests": {}}
+        return {
+            "version": STATE_VERSION,
+            "repository": repository,
+            "pull_requests": {},
+        }
     with path.open(encoding="utf-8") as stream:
         state = json.load(stream)
-    if state.get("version") != STATE_VERSION or not isinstance(state.get("pull_requests"), dict):
+    valid_shape = state.get("version") == STATE_VERSION and isinstance(
+        state.get("pull_requests"), dict
+    )
+    if not valid_shape:
         raise ValueError(f"unsupported or malformed state file: {path}")
+    if state.get("repository") != repository:
+        raise ValueError(f"state file belongs to another repository: {path}")
     return state
 
 
@@ -611,11 +648,10 @@ def process_pull_request(
         }
     )
     computed = evaluate_convergence(pull_request)
-    if computed["converged"]:
-        record["unconverged_since"] = None
-        record["idle_since"] = None
-    elif record.get("unconverged_since") is None:
+    if not computed["converged"] and record.get("unconverged_since") is None:
         record["unconverged_since"] = now
+    clear_unconverged_after_log = computed["converged"]
+    clear_idle_after_log = computed["converged"]
 
     decision = choose_decision(
         converged=computed["converged"],
@@ -638,6 +674,9 @@ def process_pull_request(
             )
         except subprocess.TimeoutExpired:
             decision = Decision("skipped", "active-command-timed-out")
+        except OSError as error:
+            decision = Decision("skipped", f"active-command-start-failed:{error.errno}")
+            detail = str(error)[:512]
         else:
             if active_result.returncode not in (0, 1):
                 decision = Decision("skipped", f"active-command-exited:{active_result.returncode}")
@@ -645,7 +684,7 @@ def process_pull_request(
             else:
                 active_work = active_result.returncode == 0
                 if active_work:
-                    record["idle_since"] = None
+                    clear_idle_after_log = True
                 elif record.get("idle_since") is None:
                     record["idle_since"] = now
                 command_state = computed_command_state(pull_request, computed, record, now)
@@ -659,6 +698,9 @@ def process_pull_request(
                     dispatch_configured=bool(config.dispatch_command),
                 )
     if decision.name == "dispatch":
+        previous_dispatch = record.get("last_dispatched_at")
+        record["last_dispatched_at"] = now
+        save_state(config.state_file, state)
         try:
             dispatch_result = run_operator_command(
                 config.dispatch_command,
@@ -667,14 +709,24 @@ def process_pull_request(
                 config.command_timeout_seconds,
             )
         except subprocess.TimeoutExpired:
-            decision = Decision("skipped", "dispatch-command-timed-out")
+            decision = Decision(
+                "skipped", "dispatch-command-timed-out-cool-off-retained"
+            )
+        except OSError as error:
+            record["last_dispatched_at"] = previous_dispatch
+            save_state(config.state_file, state)
+            decision = Decision(
+                "skipped", f"dispatch-command-start-failed:{error.errno}"
+            )
+            detail = str(error)[:512]
         else:
             detail = command_detail(dispatch_result)
             if dispatch_result.returncode == 0:
                 decision = Decision("dispatched", "operator-command-accepted-dispatch")
-                record["last_dispatched_at"] = now
-                record["idle_since"] = None
+                clear_idle_after_log = True
             else:
+                record["last_dispatched_at"] = previous_dispatch
+                save_state(config.state_file, state)
                 decision = Decision(
                     "skipped", f"dispatch-command-exited:{dispatch_result.returncode}"
                 )
@@ -682,6 +734,10 @@ def process_pull_request(
     if detail:
         log_record["operator_output"] = detail
     logger.write(log_record)
+    if clear_unconverged_after_log:
+        record["unconverged_since"] = None
+    if clear_idle_after_log:
+        record["idle_since"] = None
     return {
         "pull_request": pull_request["number"],
         "decision": decision.name,
@@ -705,6 +761,8 @@ def record_terminal_pull_requests(
         record = records.get(str(pull_request["number"]), {})
         if record.get("terminal_state") == pull_request["state"]:
             continue
+        unconverged_since = record.get("unconverged_since")
+        idle_since = record.get("idle_since")
         record.update(
             {
                 "node_id": pull_request["id"],
@@ -712,8 +770,6 @@ def record_terminal_pull_requests(
                 "head_oid": pull_request.get("headRefOid"),
                 "terminal_state": pull_request["state"],
                 "terminal_at": pull_request.get("mergedAt") or pull_request.get("closedAt"),
-                "unconverged_since": None,
-                "idle_since": None,
             }
         )
         records[str(pull_request["number"])] = record
@@ -733,32 +789,40 @@ def record_terminal_pull_requests(
                 "decision": "skipped",
                 "reason": reason,
                 "convergence_reasons": [],
-                "unconverged_since": None,
-                "unconverged_for_seconds": None,
-                "idle_since": None,
-                "idle_for_seconds": None,
+                "unconverged_since": (
+                    utc_timestamp(unconverged_since)
+                    if unconverged_since is not None
+                    else None
+                ),
+                "unconverged_for_seconds": duration_since(unconverged_since, now),
+                "idle_since": utc_timestamp(idle_since) if idle_since is not None else None,
+                "idle_for_seconds": duration_since(idle_since, now),
             }
         )
+        record["unconverged_since"] = None
+        record["idle_since"] = None
         summaries.append(
             {
                 "pull_request": pull_request["number"],
                 "decision": "skipped",
                 "reason": reason,
-                "idle_for_seconds": None,
+                "idle_for_seconds": duration_since(idle_since, now),
             }
         )
     return summaries
 
 
 def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
-    state = load_state(config.state_file)
+    state = load_state(config.state_file, config.repository)
     active_records = [
         record
         for record in state["pull_requests"].values()
         if record.get("node_id") and not record.get("terminal_state")
     ]
     tracked_node_ids = [record["node_id"] for record in active_records]
-    pull_requests, tracked = GitHubGraphQL(config.repository).snapshot(tracked_node_ids)
+    pull_requests, tracked = GitHubGraphQL(config.repository).snapshot(
+        tracked_node_ids, config.head_pattern
+    )
     now = time.time()
     summaries = record_terminal_pull_requests(config, logger, state, tracked, now)
     for pull_request in pull_requests:
@@ -768,6 +832,8 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
             continue
         existing = state["pull_requests"].get(str(pull_request["number"]))
         if existing and not existing.get("terminal_state"):
+            unconverged_since = existing.get("unconverged_since")
+            idle_since = existing.get("idle_since")
             existing["terminal_state"] = "UNWATCHED"
             logger.write(
                 {
@@ -780,18 +846,26 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
                     "decision": "skipped",
                     "reason": "head-branch-no-longer-matches-pattern",
                     "convergence_reasons": [],
-                    "unconverged_since": None,
-                    "unconverged_for_seconds": None,
-                    "idle_since": None,
-                    "idle_for_seconds": None,
+                    "unconverged_since": (
+                        utc_timestamp(unconverged_since)
+                        if unconverged_since is not None
+                        else None
+                    ),
+                    "unconverged_for_seconds": duration_since(unconverged_since, now),
+                    "idle_since": (
+                        utc_timestamp(idle_since) if idle_since is not None else None
+                    ),
+                    "idle_for_seconds": duration_since(idle_since, now),
                 }
             )
+            existing["unconverged_since"] = None
+            existing["idle_since"] = None
             summaries.append(
                 {
                     "pull_request": pull_request["number"],
                     "decision": "skipped",
                     "reason": "head-branch-no-longer-matches-pattern",
-                    "idle_for_seconds": None,
+                    "idle_for_seconds": duration_since(idle_since, now),
                 }
             )
     save_state(config.state_file, state)
@@ -822,7 +896,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"configuration error: {error}", file=sys.stderr)
         return 2
-    logger = JsonLogger(config.log_file)
+    try:
+        logger = JsonLogger(config.log_file)
+    except OSError as error:
+        print(f"configuration error: {error}", file=sys.stderr)
+        return 2
     try:
         while True:
             try:

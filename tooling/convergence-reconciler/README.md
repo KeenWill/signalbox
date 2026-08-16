@@ -11,7 +11,8 @@ The script writes one JSON log record for every decision. By default those
 records go to standard error and a compact operator summary goes to standard
 output. `--log-file` appends the records to a file instead. A small JSON state
 file remembers watched pull requests, terminal states, when a pull request
-became unconverged or observably idle, and successful dispatch times.
+became unconverged or observably idle, and successful dispatch times. Each state
+file is bound to one repository and is rejected under another.
 
 ## Requirements and invocation
 
@@ -61,13 +62,15 @@ passed to operator commands. No other name is excluded.
 reported but is not an extra convergence condition: the commissioned predicate
 names only threads, checks, and conflicts.
 
-The initial query retrieves 100 open pull requests at a time with the first 100
-review threads and first 100 check contexts for each. It filters head branches
-locally with Python's case-sensitive shell-pattern matching. Additional thread
-or check pages are fetched with dynamically aliased GraphQL fields, up to 20
-continuations in one request. The script makes no REST requests. Previously
-watched node IDs are folded into the same GraphQL call so merged and closed pull
-requests can be recorded once and then omitted from future queries.
+The initial lightweight query retrieves 100 open pull-request identities at a
+time and filters head branches locally with Python's case-sensitive
+shell-pattern matching. Matching and previously tracked open pull requests are
+then fetched in batches of 20, including their first 100 review threads and
+first 100 check contexts. Additional thread or check pages use dynamically
+aliased GraphQL fields, up to 20 continuations in one request. The script makes
+no REST requests. Previously watched node IDs are folded into the listing call
+so merged and closed pull requests can be recorded once and then omitted from
+future queries.
 
 ## Decision flow
 
@@ -85,8 +88,12 @@ For each matching pull request, one of these decisions is logged:
 The active-work command runs only for an unconverged pull request outside its
 cool-off. Exit status 0 means active, 1 means inactive, and any other status is
 an error that prevents dispatch. The dispatch command runs only after an
-inactive result; only exit status 0 starts a cool-off. Both commands are run
-directly, without a shell, and receive two appended positional arguments:
+inactive result. Immediately before dispatch, the state file records a cool-off
+fence. A definite start failure or nonzero exit removes that fence; a timeout
+keeps it because dispatch may have happened. This prevents an ambiguous command
+outcome or later tick failure from causing an immediate duplicate dispatch. Both
+commands are run directly, without a shell, and receive two appended positional
+arguments:
 
 1. the decimal pull-request number;
 2. one compact JSON object containing the head and base refs, exact head and
@@ -101,10 +108,11 @@ decision log. The configurable command timeout is an operational bound that
 protects tick latency; its default is 60 seconds.
 
 An unconverged observation starts `unconverged_since`. An inactive result starts
-`idle_since`; active work or a successful dispatch clears it. Every subsequent
-decision record contains both timestamps and elapsed seconds, so the JSON log
-alone answers when an unconverged pull request was observed idle and for how
-long. Convergence clears both clocks.
+`idle_since`; active work or a successful dispatch clears it after the
+transition decision records its final duration. Every subsequent decision record
+contains both timestamps and elapsed seconds, so the JSON log alone answers when
+an unconverged pull request was observed idle and for how long. Convergence and
+terminal states likewise record the final duration before clearing both clocks.
 
 ## Configuration
 
@@ -158,7 +166,8 @@ python3 tooling/convergence-reconciler/reconcile.py
 
 These examples intentionally use placeholders and relative paths. Deployment
 accounts, session mechanisms, sockets, hosts, and persistent paths remain
-operator choices.
+operator choices. Run exactly one reconciler process per state file; external
+service supervision owns that singleton policy.
 
 ## Tests
 
