@@ -39,7 +39,7 @@ async fn utf8_text_rejects_oversized_input_with_registered_reason() -> Result<()
 #[tokio::test]
 async fn json_detects_validates_and_returns_structured_data() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::json_document());
-    let expected = serde_json::json!({"name":"fixture","values":[1,2,3]});
+    let expected = fixtures::json_document_value();
 
     let inspection = support::inspect(&source, "application/json").await?;
     support::assert_validated_media(inspection, "application/json");
@@ -77,10 +77,7 @@ async fn json_rejects_oversized_input_with_registered_reason() -> Result<(), Box
 #[tokio::test]
 async fn csv_detects_validates_and_returns_headers_and_rows() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_table());
-    let expected = serde_json::json!({
-        "headers":["name","value"],
-        "rows":[["alpha","1"],["beta","2"]]
-    });
+    let expected = fixtures::csv_table_value();
 
     let inspection = support::inspect(&source, "text/csv").await?;
     support::assert_validated_media(inspection, "text/csv");

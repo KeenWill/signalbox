@@ -10,12 +10,23 @@ pub(crate) fn json_document() -> Vec<u8> {
     br#"{"name":"fixture","values":[1,2,3]}"#.to_vec()
 }
 
+pub(crate) fn json_document_value() -> serde_json::Value {
+    serde_json::json!({"name":"fixture","values":[1,2,3]})
+}
+
 pub(crate) fn truncated_json() -> Vec<u8> {
     br#"{"name":"fixture""#.to_vec()
 }
 
 pub(crate) fn csv_table() -> Vec<u8> {
     b"name,value\nalpha,1\nbeta,2\n".to_vec()
+}
+
+pub(crate) fn csv_table_value() -> serde_json::Value {
+    serde_json::json!({
+        "headers":["name","value"],
+        "rows":[["alpha","1"],["beta","2"]]
+    })
 }
 
 pub(crate) fn truncated_csv() -> Vec<u8> {
