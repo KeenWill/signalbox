@@ -503,8 +503,10 @@ cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the dispatch gate and applies the attempt's
-effect-class crash-loss transition before surfacing that failure. A failed
-classification retains the exact attempt identity and permit for another
+effect-class crash-loss transition. A committed classification contains the
+failure as the ordinary `CrashClassified` outcome, so the affected turn either
+fails or parks for reconciliation without failing unrelated session execution. A
+failed classification retains the exact attempt identity and permit for another
 classification pass, and the returned combined error preserves both the executor
 failure and the classification failure. Evidence carrying a different dispatch
 correlation follows the same classification-before-release path, surfacing the
