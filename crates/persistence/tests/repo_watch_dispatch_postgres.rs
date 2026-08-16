@@ -1853,6 +1853,43 @@ async fn equal_current_convergence_evidence_is_idempotent() -> Result<(), Box<dy
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn cutoff_binds_seal_and_current_identity_assessments_separately()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_550, FIRST_HEAD).await?;
+    let current = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("the sealed cursor exists");
+    record_assessment_at_base(
+        &fixture,
+        current.generation(),
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )
+    .await?;
+
+    let processed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_551))
+        })
+        .await?;
+    let assessments_differ: bool = sqlx::query_scalar(
+        "SELECT assessment_id <> identity_assessment_id
+           FROM repo_watch_convergence_cutoff",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(processed);
+    assert!(assessments_differ);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stale_cutoff_waits_until_its_sealed_identity_is_current_again()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
