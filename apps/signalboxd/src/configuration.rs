@@ -82,7 +82,10 @@ pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
-const MAX_SCHEDULER_IN_FLIGHT_PASSES: usize = 1_024;
+// Configuration may lower or pause the application's established 16-pass
+// admission ceiling, but it cannot raise the provider, tool, and database
+// pressure that the scheduler baseline already bounds.
+const MAX_SCHEDULER_IN_FLIGHT_PASSES: usize = 16;
 
 /// One provider-availability cause a pool trigger can react to.
 ///
@@ -4596,7 +4599,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     fn scheduler_pass_limit_is_optional_and_accepts_a_bounded_override() {
         let configured = CONFIGURATION.replace(
             "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 4\n\n[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 16\n\n[compaction]",
         );
         let default = HubModelConfiguration::parse(CONFIGURATION)
             .expect("the fixture configuration is valid");
@@ -4604,7 +4607,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             .expect("the bounded scheduler override is valid");
 
         assert_eq!(default.scheduler_max_in_flight_passes(), None);
-        assert_eq!(overridden.scheduler_max_in_flight_passes(), Some(4));
+        assert_eq!(overridden.scheduler_max_in_flight_passes(), Some(16));
     }
 
     #[test]
@@ -4626,7 +4629,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     fn scheduler_pass_limit_rejects_values_outside_its_closed_table() {
         let excessive = CONFIGURATION.replace(
             "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 1025\n\n[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 17\n\n[compaction]",
         );
         let unknown = CONFIGURATION.replace(
             "[compaction]",
