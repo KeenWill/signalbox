@@ -3020,6 +3020,7 @@ mod tests {
     const EXPECTED_FEATURE_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Failure;
     const EXPECTED_MAIN_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Success;
     const PULL_NUMBER: u64 = 7;
+    const BASE_ADVANCE_EVENT_ID: u128 = 72;
     const HEAD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OWED_EVENT_HEAD_SHA: &str = "dddddddddddddddddddddddddddddddddddddddd";
     const OWED_MATCH_COUNT: u64 = 51;
@@ -3027,6 +3028,7 @@ mod tests {
     const BASE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HEAD_REPOSITORY: &str = "fork/repository";
     const HEAD_BRANCH: &str = "feature/watch";
+    const AGENT_HEAD_BRANCH: &str = "agent/dependent";
     const BASE_BRANCH: &str = "main";
     const PULL_TITLE: &str = "Exercise repository watch";
     const PULL_BODY: &str = "Typed fixture body";
@@ -6093,6 +6095,50 @@ mod tests {
         assert_eq!(encoded["event"]["target"]["head_branch"], HEAD_BRANCH);
         assert_eq!(encoded["event"]["kind"], "MergeableStateChanged");
         assert_eq!(encoded["event"]["payload"]["current"], "conflicting");
+    }
+
+    #[test]
+    fn base_advance_dispatch_context_targets_the_dependent_pull_request() {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
+            .expect("fixture repository is valid");
+        let base_branch =
+            BranchName::try_new(BASE_BRANCH.to_owned()).expect("fixture base branch is valid");
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(
+                PULL_NUMBER
+                    .try_into()
+                    .expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+            head_repository: repository.clone(),
+            base_branch: base_branch.clone(),
+            head_branch: BranchName::try_new(AGENT_HEAD_BRANCH.to_owned())
+                .expect("fixture head branch is valid"),
+            title: PullRequestTitle::try_new(PULL_TITLE.to_owned())
+                .expect("fixture title is valid"),
+            body: PullRequestBody::try_new(PULL_BODY.to_owned()).expect("fixture body is valid"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(BASE_ADVANCE_EVENT_ID)),
+            repository,
+            context,
+            RepoWatchEventKindV1::BaseAdvanced {
+                branch: base_branch,
+            },
+        )
+        .expect("fixture event is coherent");
+        let encoded: serde_json::Value =
+            serde_json::from_str(&dispatch_context_json(&event)).expect("dispatch context is JSON");
+
+        assert_eq!(encoded["type"], "pull_request");
+        assert_eq!(encoded["number"], PULL_NUMBER);
+        assert_eq!(encoded["event"]["target"]["base_branch"], BASE_BRANCH);
+        assert_eq!(encoded["event"]["target"]["head_branch"], AGENT_HEAD_BRANCH);
+        assert_eq!(encoded["event"]["kind"], "BaseAdvanced");
+        assert_eq!(encoded["event"]["payload"]["branch"], BASE_BRANCH);
     }
 
     #[tokio::test]
