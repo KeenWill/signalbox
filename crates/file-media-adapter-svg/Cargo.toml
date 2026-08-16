@@ -1,0 +1,31 @@
+[package]
+name = "signalbox-file-media-adapter-svg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "signalbox-file-media-svg-worker"
+path = "src/bin/signalbox-file-media-svg-worker.rs"
+
+[dependencies]
+quick-xml = "0.41.0"
+serde_json = "1.0.140"
+signalbox-file-media-processor-runtime = { path = "../file-media-processor-runtime" }
+signalbox-file-media-runtime = { path = "../file-media-runtime" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt",
+] }
+
+[lints]
+workspace = true
