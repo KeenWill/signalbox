@@ -841,6 +841,15 @@ pub enum RetainedModelCallObservationStatus {
     Pending,
     /// The exact observation is already represented durably.
     AlreadyCommitted,
+    /// The observation committed and its availability successor is durable.
+    ///
+    /// Distinct from `AlreadyCommitted` because the turn is still active on
+    /// the successor attempt: the caller must keep driving it after the
+    /// enclosed remaining delay rather than treating the turn as finished.
+    AvailabilitySuccessorCommitted {
+        /// Remaining wait before the successor attempt may prepare.
+        retry_backoff: Duration,
+    },
     /// A newer logical terminal proof made the retained provider result inert.
     DiscardedByLogicalTerminal,
 }
@@ -1491,6 +1500,15 @@ where
                         return Ok(ModelCallExecutionOutcome::ObservationAlreadyCommitted(
                             retained.call(),
                         ));
+                    }
+                    Ok(RetainedModelCallObservationStatus::AvailabilitySuccessorCommitted {
+                        retry_backoff,
+                    }) => {
+                        // The commit landed with its successor, so the turn is
+                        // active on a new attempt rather than terminal. Waiting
+                        // out the remaining delay returns the caller to ordinary
+                        // preparation, which owns the successor from here.
+                        return Ok(ModelCallExecutionOutcome::RetryBackoff(retry_backoff));
                     }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self

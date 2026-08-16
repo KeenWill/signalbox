@@ -1741,6 +1741,23 @@ impl PostgresModelCallRepository {
                                 .map(encode_provider_failure_cause)
                         && stored.usage == encode_token_usage(observation.usage()) =>
                 {
+                    // A commit-ambiguous driver error can hide a commit that
+                    // durably created an availability successor. The
+                    // predecessor is then terminal while its turn stays active
+                    // on the successor attempt, which is not the terminal
+                    // failed turn the ordinary closure predicate requires.
+                    if let Some(retry_backoff) = committed_availability_successor_backoff(
+                        &mut transaction,
+                        observation.call(),
+                    )
+                    .await?
+                    {
+                        return Ok(
+                            RetainedModelCallObservationStatus::AvailabilitySuccessorCommitted {
+                                retry_backoff,
+                            },
+                        );
+                    }
                     if !terminal_observation_closure_matches(&mut transaction, session, observation)
                         .await?
                     {
@@ -5205,6 +5222,33 @@ async fn consume_pool_member_actions(
     .execute(&mut *connection)
     .await?;
     Ok(())
+}
+
+/// Reports the remaining successor delay when this call already substituted.
+///
+/// The successor row is written in the same transaction that terminalizes its
+/// predecessor, so its presence proves the commit landed. The delay is
+/// recovered from the successor attempt's own durable deadline; an elapsed
+/// deadline yields zero rather than absence.
+async fn committed_availability_successor_backoff(
+    connection: &mut PgConnection,
+    predecessor: ModelCallId,
+) -> Result<Option<Duration>, ModelCallRepositoryError> {
+    let successor: Option<Uuid> = sqlx::query_scalar(
+        "SELECT successor_turn_attempt_id
+           FROM credential_pool_availability_successor
+          WHERE predecessor_model_call_id = $1",
+    )
+    .bind(predecessor.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(successor) = successor else {
+        return Ok(None);
+    };
+    let remaining =
+        load_availability_successor_backoff(connection, TurnAttemptId::from_uuid(successor))
+            .await?;
+    Ok(Some(remaining.unwrap_or(Duration::ZERO)))
 }
 
 async fn load_availability_successor_backoff(
