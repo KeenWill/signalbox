@@ -514,8 +514,10 @@ Achievement is terminal exactly when that delivered state is still the pull
 request's latest durable head, so the successor that carried the newest head
 seals instead of owing another batch after every cooldown. A branch target
 records no durable revision, only a workflow conclusion, so achievement is its
-own seal there. A batch owes at most one requeue, at its own release; a later
-goal generation its session accepts afterwards terminates without reopening one.
+own seal there. A batch owes at most one requeue, at its own release, and the
+terminal event deciding it is the one ending the generation the dispatch
+commissioned; a later goal generation its session accepts terminates without
+reopening one, including while a sibling action still holds the batch.
 Termination takes the singleton advisory key that admission takes, and locks the
 rule activation row that recording a deactivation shares, so a match racing a
 termination joins its obligation and a racing deactivation cannot miss it.

@@ -19,9 +19,16 @@ ALTER TABLE repo_watch_dispatch_batch
 -- A fresh batch delivers its originating event, but an obligation successor
 -- replays a still-matching earlier event over the target's collapsed current
 -- state. Comparing achievement against the originating event would therefore
--- requeue a successor that already carried the newest head, forever. NULL means
--- the batch delivered exactly its originating event, which is also the honest
--- reading of every batch admitted before this migration.
+-- requeue a successor that already carried the newest head, forever.
+--
+-- NULL means the batch delivered exactly its originating event. For a batch
+-- admitted before this migration that is exact for a fresh batch and
+-- deliberately conservative for an obligation successor, whose delivered state
+-- this schema did not record: such a successor is read as stale and redispatched
+-- once, rather than sealed against a state it may not have carried. The
+-- reconstruction that would narrow this -- the newest event recorded before the
+-- batch was admitted -- is not the accepted context either, so it trades a
+-- bounded redelivery for a silent skip. This migration writes no data.
 ALTER TABLE repo_watch_dispatch_batch
     ADD COLUMN delivered_state_event_id uuid;
 
@@ -31,41 +38,6 @@ ALTER TABLE repo_watch_dispatch_batch
         REFERENCES repo_watch_event(event_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT;
-
--- A batch admitted before this migration carries no delivered-state record.
--- NULL is already the honest answer for a fresh batch, which delivered its
--- originating event. An obligation successor did not — it replayed a
--- still-matching earlier event over collapsed current state — so leaving it NULL
--- would read an achievement against still-current state as stale and redispatch
--- converged work. Reconstruct those from committed history: the newest event for
--- the target recorded no later than the batch was admitted. Ordering by
--- recorded_at is unsound for a live admission, where a commit that started
--- earlier may land later, but every transaction involved here committed before
--- this migration began. The append-only guard is lifted only to fill a column
--- that did not exist when these rows were written; no recorded fact changes.
-ALTER TABLE repo_watch_dispatch_batch
-    DISABLE TRIGGER repo_watch_dispatch_batch_is_append_only;
-
-UPDATE repo_watch_dispatch_batch AS batch
-   SET delivered_state_event_id = (
-        SELECT state.event_id
-          FROM repo_watch_event AS state
-          JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
-         WHERE state.repository = origin.repository
-           AND state.pull_request_number = origin.pull_request_number
-           AND state.recorded_at <= batch.admitted_at
-         ORDER BY state.cursor_generation DESC,
-                  state.event_ordinal DESC
-         LIMIT 1
-   )
- WHERE EXISTS (
-        SELECT 1
-          FROM repo_watch_dispatch_obligation AS obligation
-         WHERE obligation.settled_dispatch_id = batch.dispatch_id
-   );
-
-ALTER TABLE repo_watch_dispatch_batch
-    ENABLE TRIGGER repo_watch_dispatch_batch_is_append_only;
 
 CREATE FUNCTION repo_watch_stamp_dispatch_batch_delivered_state()
 RETURNS trigger
@@ -158,10 +130,27 @@ DECLARE
     candidate_singleton_key text;
     terminal_goal_kind text;
 BEGIN
+    -- The terminal event that matters is the one ending the generation this
+    -- dispatch commissioned, not whatever the session is doing now. A session
+    -- whose sibling action still holds the batch unreleased may legally accept
+    -- an unrelated successor goal, and reading that successor's termination
+    -- would owe a requeue for work the dispatched generation already converged.
     SELECT current_goal.event_kind
       INTO terminal_goal_kind
       FROM goal_event AS current_goal
      WHERE current_goal.session_id = completed_session_id
+       AND current_goal.generation = (
+            SELECT dispatched_turn.goal_generation
+              FROM repo_watch_dispatch_action AS action
+              JOIN repo_watch_dispatch_delivery AS delivery
+                ON delivery.dispatch_id = action.dispatch_id
+               AND delivery.action_ordinal = action.action_ordinal
+              JOIN goal_turn AS dispatched_turn
+                ON dispatched_turn.session_id = action.session_id
+               AND dispatched_turn.turn_id = delivery.turn_id
+             WHERE action.dispatch_id = candidate_dispatch_id
+               AND action.session_id = completed_session_id
+       )
      ORDER BY current_goal.event_ordinal DESC
      LIMIT 1;
 

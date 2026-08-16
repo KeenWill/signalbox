@@ -105,6 +105,11 @@ const REOPENED_CLOSE_OPENED_EVENT_ID: u128 = 0x5a_000;
 const REOPENED_CLOSE_CLOSED_EVENT_ID: u128 = 0x5a_100;
 const REOPENED_CLOSE_REOPENED_EVENT_ID: u128 = 0x5a_200;
 const REOPENED_CLOSE_STOP_COMMAND_ID: u128 = 0x5a_300;
+const SIBLING_ACHIEVEMENT_REQUEST_ID: u128 = 0x5b_000;
+const SIBLING_ATTACH_COMMAND_ID: u128 = 0x5b_100;
+const SIBLING_STOP_COMMAND_ID: u128 = 0x5b_200;
+const SIBLING_GOAL_INPUT_ID: u128 = 0x5b_300;
+const SIBLING_GOAL_TURN_ID: u128 = 0x5b_400;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -1534,6 +1539,45 @@ async fn achievement_after_a_head_change_requeues_once_and_then_seals() -> Resul
         0,
         "the successor already carried the current head, so its achievement seals"
     );
+    Ok(())
+}
+
+/// The released-batch guard only excludes successor generations once the whole
+/// batch releases. While a sibling action still holds it, an achieved session
+/// may accept an unrelated successor goal, so the terminal event that decides
+/// the requeue is the one ending the generation the dispatch commissioned.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_successor_goal_beside_a_pursuing_sibling_owes_nothing() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let session = fixture.session(0);
+    declare_dispatched_goal_achieved(&fixture, 0, SIBLING_ACHIEVEMENT_REQUEST_ID).await?;
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(SIBLING_ATTACH_COMMAND_ID)),
+                    session,
+                    GoalUserAction::Attach(GoalStatement::try_new(String::from(
+                        "an unrelated successor goal beside a pursuing sibling",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(SIBLING_GOAL_INPUT_ID)),
+                    TurnId::from_uuid(Uuid::from_u128(SIBLING_GOAL_TURN_ID)),
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    withdraw_dispatched_goal(&fixture.pool, session, SIBLING_STOP_COMMAND_ID).await?;
+
+    assert_eq!(
+        release_count(&fixture).await?,
+        0,
+        "the pursuing sibling still holds the batch"
+    );
+    assert_eq!(outstanding_obligation_count(&fixture.pool).await?, 0);
     Ok(())
 }
 
