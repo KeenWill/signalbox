@@ -133,6 +133,13 @@ never raise the hard safety ceiling.
 Set a hard safety ceiling at the real production danger point. Ordinary real
 work must not reach it; otherwise it is a product limit, not runaway protection.
 
+A constant whose name reads like a bound but states a fixed representation fact
+— a numeric type's exact maximum, UTF-8's continuation width, the denominator of
+a percentage — is **not a bound**, and says so in place of a kind. Declaring it
+keeps the exception visible where silence would read as an undeclared cap. The
+label is never available to a value the code compares live input against: that
+is a ceiling or a tunable, whatever its name suggests.
+
 ## Conventions at component seams
 
 The core principles imply the following narrower rules where representations,

@@ -82,9 +82,11 @@ pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes returned by one direct blob-range request.
+// numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum replica count representable by the version-one deployment catalog.
+// numeric-bound: ceiling - restates blob-store's durable catalog capacity
 pub const MAX_BLOB_REPLICA_COUNT: u64 = signalbox_blob_store::MAX_BLOB_STORES as u64;
 
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.

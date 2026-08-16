@@ -3,8 +3,15 @@
 
 The inventory is every integer, float, ``Duration``, or ``NonZero*`` Rust
 constant under ``crates/*/src`` and ``apps/*/src`` whose name contains one of
-the boundary tokens in ``BOUNDARY_TOKENS``. Test-only modules are inventoried
-but do not gate because their constants describe fixtures, not runtime safety.
+the boundary tokens in ``BOUNDARY_TOKENS``. Ordinary Rust spellings of those
+types count: a qualified path such as ``std::time::Duration`` and the signed
+``NonZeroI*`` family are inventoried alongside their bare and unsigned
+spellings, so no accepted spelling carries an undeclared bound past the gate.
+
+Test-only modules are inventoried but do not gate because their constants
+describe fixtures, not runtime safety. A module written ``#[cfg(test)] mod
+tests;`` is test-only across the separate file it names, whether that file is
+found by Rust's directory rule or named outright by a ``#[path]`` attribute.
 
 The blocking scope is deliberately smaller than the inventory: production
 constants in application orchestration, provider-neutral model runtime,
@@ -18,15 +25,21 @@ An in-scope declaration must be immediately preceded by one of:
     // numeric-bound: tunable - controls the default exchange wait
     // numeric-bound: not-a-bound - fixed decimal representation maximum
 
-The kind and one-line rationale are mechanically required; review decides
-whether they are true. A mechanically derived bound may use the narrow escape
+``docs/style.md`` defines all three kinds and owns the semantic question of
+which one a given constant deserves. The kind and one-line rationale are
+mechanically required here; review decides whether they are true.
+
+A mechanically derived bound may use the narrow escape
 
     // numeric-bound: derived ceiling from MAX_SOURCE_CHARACTERS
 
 only when its initializer actually references the named, same-file bound and
-the source resolves to a direct declaration of the same kind. This keeps
-self-evident byte/unit translations from repeating rationale while preventing
-an unexplained independent cap from hiding behind the escape.
+that name resolves unambiguously to a direct declaration of the same kind. This
+keeps self-evident byte/unit translations from repeating rationale while
+preventing an unexplained independent cap from hiding behind the escape. A
+source name that two modules in one file both declare resolves to neither: the
+scan is lexical and cannot tell which declaration the initializer sees, so it
+reports the ambiguity rather than guessing.
 
 Because discovery is deliberately lexical, a fixed representation fact whose
 name contains a boundary token may declare ``not-a-bound`` with a one-line
@@ -40,6 +53,7 @@ Run from the repository root. ``--root`` exists only for checker self-tests.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -72,9 +86,14 @@ ENFORCED_ROOTS = (
     "crates/process-protocol/src",
     "crates/tools-code-host/src",
 )
+# The optional leading qualifier makes `std::time::Duration` and bare
+# `Duration` one declaration to this scan, and the signed `NonZeroI*` family is
+# listed beside the unsigned one: a spelling this pattern misses is an
+# undeclared bound the gate silently accepts.
 NUMERIC_TYPE = (
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*"
     r"(?:[ui](?:8|16|32|64|128|size)|f(?:32|64)|Duration|"
-    r"NonZero(?:U8|U16|U32|U64|U128|Usize))"
+    r"NonZero(?:U8|U16|U32|U64|U128|Usize|I8|I16|I32|I64|I128|Isize))"
 )
 CONSTANT = re.compile(
     rf"(?m)^(?P<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?const\s+"
@@ -93,6 +112,14 @@ TEST_MODULE = re.compile(
     r"(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
     re.MULTILINE,
 )
+EXTERNAL_MODULE = re.compile(
+    r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)+)"
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
+    re.MULTILINE,
+)
+CFG_TEST_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+PATH_ATTRIBUTE = re.compile(r"#\s*\[\s*path\s*=\s*\"(?P<path>[^\"]+)\"\s*\]")
+MODULE_ROOTS = frozenset({"lib.rs", "main.rs", "mod.rs"})
 
 
 @dataclass(frozen=True)
@@ -193,6 +220,36 @@ def test_ranges(code: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def external_test_sources(path: Path, text: str, code: str) -> set[Path]:
+    """Report the sources a `#[cfg(test)] mod name;` in ``path`` owns.
+
+    Rust reaches such a module either through an explicit ``#[path]``, which is
+    relative to the declaring file's directory, or through the directory that
+    file owns; both spellings are followed, and a returned directory owns every
+    source beneath it. Attributes are matched against ``code`` so a
+    commented-out declaration cannot claim a file, then re-read from ``text``
+    because blanking has emptied the ``#[path]`` string literal.
+    """
+    directory = path.parent if path.name in MODULE_ROOTS else path.with_suffix("")
+    owned: set[Path] = set()
+    for match in EXTERNAL_MODULE.finditer(code):
+        if CFG_TEST_ATTRIBUTE.search(match.group("attributes")) is None:
+            continue
+        attributes = text[match.start("attributes") : match.end("attributes")]
+        explicit = PATH_ATTRIBUTE.search(attributes)
+        if explicit is not None:
+            owned.add(Path(os.path.normpath(path.parent / explicit.group("path"))))
+            continue
+        name = match.group("name")
+        owned.add(directory / f"{name}.rs")
+        owned.add(directory / name)
+    return owned
+
+
+def in_test_sources(path: Path, test_sources: set[Path]) -> bool:
+    return path in test_sources or any(parent in test_sources for parent in path.parents)
+
+
 def in_ranges(position: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= position <= end for start, end in ranges)
 
@@ -223,11 +280,16 @@ def source_files(root: Path) -> list[Path]:
 
 
 def inventory(root: Path) -> list[Bound]:
+    sources = {path: path.read_text(encoding="utf-8") for path in source_files(root)}
+    blanked = {path: blank_non_code(text) for path, text in sources.items()}
+    test_sources: set[Path] = set()
+    for path, text in sources.items():
+        test_sources |= external_test_sources(path, text, blanked[path])
     bounds = []
-    for path in source_files(root):
-        text = path.read_text(encoding="utf-8")
-        code = blank_non_code(text)
+    for path, text in sources.items():
+        code = blanked[path]
         ranges = test_ranges(code)
+        external = in_test_sources(path, test_sources)
         lines = text.splitlines()
         relative = path.relative_to(root)
         for match in CONSTANT.finditer(code):
@@ -244,7 +306,7 @@ def inventory(root: Path) -> list[Bound]:
                     line=line,
                     initializer=code[match.end() : end],
                     annotation=annotation,
-                    test_only=in_ranges(match.start(), ranges),
+                    test_only=external or in_ranges(match.start(), ranges),
                 )
             )
     return bounds
@@ -270,7 +332,13 @@ def declaration(bound: Bound) -> tuple[str, str, str | None] | None:
 def validate(bounds: list[Bound]) -> list[str]:
     failures = []
     enforced = [bound for bound in bounds if is_enforced(bound)]
-    by_file_and_name = {(bound.path, bound.name): bound for bound in enforced}
+    by_file_and_name: dict[tuple[Path, str], Bound] = {}
+    ambiguous: set[tuple[Path, str]] = set()
+    for bound in enforced:
+        key = (bound.path, bound.name)
+        if key in by_file_and_name:
+            ambiguous.add(key)
+        by_file_and_name[key] = bound
 
     def resolves_to_direct(bound: Bound, kind: str, seen: set[str]) -> bool:
         parsed = declaration(bound)
@@ -281,7 +349,10 @@ def validate(bounds: list[Bound]) -> list[str]:
             return bool(parsed[1].strip())
         if source in seen or re.search(rf"\b{re.escape(source)}\b", bound.initializer) is None:
             return False
-        owner = by_file_and_name.get((bound.path, source))
+        key = (bound.path, source)
+        if key in ambiguous:
+            return False
+        owner = by_file_and_name.get(key)
         return owner is not None and resolves_to_direct(owner, kind, seen | {source})
 
     for bound in enforced:
@@ -293,6 +364,11 @@ def validate(bounds: list[Bound]) -> list[str]:
         kind, rationale, source = parsed
         if source is None and not rationale.strip():
             failures.append(f"{location} has an empty rationale")
+        elif source is not None and (bound.path, source) in ambiguous:
+            failures.append(
+                f"{location} derives from {source}, which the file declares "
+                "more than once"
+            )
         elif source is not None and not resolves_to_direct(bound, kind, {bound.name}):
             failures.append(
                 f"{location} has an invalid derived declaration from {source}"

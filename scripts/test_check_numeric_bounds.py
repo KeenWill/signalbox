@@ -11,15 +11,17 @@ from pathlib import Path
 
 CHECKER = Path(__file__).resolve().parent / "check_numeric_bounds.py"
 ENFORCED_FILE = Path("crates/application/src/lib.rs")
+ENFORCED_MODULE_FILE = Path("crates/application/src/scheduler.rs")
 OUTSIDE_FILE = Path("crates/domain/src/lib.rs")
 
 
-def run_checker(path: Path, text: str) -> subprocess.CompletedProcess[str]:
+def run_checker_tree(sources: dict[Path, str]) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="signalbox-numeric-bounds-") as directory:
         root = Path(directory)
-        fixture = root / path
-        fixture.parent.mkdir(parents=True)
-        fixture.write_text(text, encoding="utf-8")
+        for relative, text in sources.items():
+            fixture = root / relative
+            fixture.parent.mkdir(parents=True, exist_ok=True)
+            fixture.write_text(text, encoding="utf-8")
         return subprocess.run(
             [sys.executable, str(CHECKER), "--root", str(root)],
             check=False,
@@ -28,18 +30,30 @@ def run_checker(path: Path, text: str) -> subprocess.CompletedProcess[str]:
         )
 
 
+def run_checker(path: Path, text: str) -> subprocess.CompletedProcess[str]:
+    return run_checker_tree({path: text})
+
+
 class NumericBoundCheckerTests(unittest.TestCase):
-    def test_direct_ceiling_and_tunable_declarations_pass(self) -> None:
+    def test_direct_ceiling_declaration_passes(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
             "// numeric-bound: ceiling - protects against retained input growth\n"
-            "const MAX_INPUT_BYTES: usize = 1024;\n"
+            "const MAX_INPUT_BYTES: usize = 1024;\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 enforced", result.stdout)
+
+    def test_direct_tunable_declaration_passes(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
             "// numeric-bound: tunable - controls the ordinary wait\n"
             "const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);\n",
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("2 enforced", result.stdout)
+        self.assertIn("1 enforced", result.stdout)
 
     def test_missing_declaration_fails_with_location_and_name(self) -> None:
         result = run_checker(ENFORCED_FILE, "const MAX_INPUT_BYTES: usize = 1024;\n")
@@ -47,6 +61,21 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("crates/application/src/lib.rs:1", result.stdout)
         self.assertIn("MAX_INPUT_BYTES", result.stdout)
+
+    def test_qualified_duration_declaration_is_enforced(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(1);\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_WAIT", result.stdout)
+
+    def test_signed_non_zero_declaration_is_enforced(self) -> None:
+        result = run_checker(ENFORCED_FILE, "const MAX_DELTA: NonZeroI64 = NonZeroI64::MAX;\n")
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DELTA", result.stdout)
 
     def test_valid_derived_ceiling_inherits_the_source_rationale(self) -> None:
         result = run_checker(
@@ -89,10 +118,57 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("invalid derived declaration", result.stdout)
 
+    def test_derived_escape_fails_when_the_source_name_is_ambiguous(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "mod first {\n"
+            "    // numeric-bound: not-a-bound - fixed decimal radix\n"
+            "    const MAX_BASE: usize = 10;\n"
+            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
+            "}\n"
+            "mod second {\n"
+            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    const MAX_BASE: usize = 1024;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DERIVED_BYTES", result.stdout)
+        self.assertIn("declares more than once", result.stdout)
+
     def test_test_module_bound_is_inventoried_without_gating(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
             "#[cfg(test)]\nmod tests {\n    const MAX_FIXTURE_BYTES: usize = 4;\n}\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_external_test_module_bound_is_inventoried_without_gating(self) -> None:
+        result = run_checker_tree(
+            {
+                ENFORCED_FILE: "#[cfg(test)]\nmod tests;\n",
+                ENFORCED_FILE.with_name("tests.rs"): (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_path_attribute_test_module_bound_is_inventoried_without_gating(self) -> None:
+        result = run_checker_tree(
+            {
+                ENFORCED_MODULE_FILE: (
+                    '#[cfg(test)]\n#[path = "scheduler_corpus_tests.rs"]\nmod corpus_tests;\n'
+                ),
+                ENFORCED_MODULE_FILE.with_name("scheduler_corpus_tests.rs"): (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
