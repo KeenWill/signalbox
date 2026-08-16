@@ -46,28 +46,33 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ### Graded approval judging
 
-The proposed graded-judge design is recorded in
-[`docs/proposals/graded-approval-judging.md`](proposals/graded-approval-judging.md).
-Its score contract, threshold semantics, audit shape, and shadow-first sequence
-are proposed decisions; these choices still require an owner ruling:
+Whether execution-approval judging should replace its direct recommendation with
+separate risk and brief-alignment grades remains undecided. Any such change must
+define the grade contract, trusted outcome derivation and safety ceilings, input
+evidence, durable audit shape, operator presentation, evaluation method, and
+shadow-to-live promotion path in an owner-accepted specification and implementing
+stack. The following related questions also require owner rulings:
 
 - **Corpus location and governance.** Whether recorded approval cases live in a
   repository file, a project-owned artifact, evaluation rows, or another
   admitted store remains deliberately undecided, together with access,
-  redaction, retention, and deletion rules. The proposal fixes only the logical
-  case shape needed by either judge subject.
+  redaction, retention, deletion, and reproducibility rules.
 
 - **Promotion bounds.** The maximum false-allow rate, minimum acceptable
   improvement, minimum labeled case count, required slices, and statistical
-  treatment for promotion from shadow to live graded authority remain open.
+  treatment for promotion from shadow to live graded authority remain open. A
+  promotion comparison must define each metric's denominator and its treatment
+  of parks, failed calls, and repeated trials.
 
 - **Label semantics.** Whether an ordinary user allow or deny is the final
   quality label, or evaluation needs a separate “judge correct” ruling and an
-  approval rationale, remains open.
+  approval rationale, remains open. Execution rulings are observations rather
+  than correctness labels until this is decided.
 
 - **Unparked sampling.** Whether and how operators may provide post-hoc labels
   for automatically allowed or denied requests remains open. Without it, the
-  recorded corpus is selected toward parked requests.
+  recorded corpus is selected toward parked requests and cannot support
+  whole-population promotion claims.
 
 - **Shadow budget.** The graded shadow sampling fraction, provider-cost ceiling,
   concurrency, and retention duration remain open. They block production shadow
