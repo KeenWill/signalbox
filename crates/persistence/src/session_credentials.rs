@@ -168,6 +168,19 @@ impl ModelCredentialFamilyCatalog {
             .and_then(|route| route.migration_fallback_family.as_deref())
     }
 
+    /// Resolves the target that actually serves a call under this fast mode.
+    ///
+    /// Credential-pool selection needs the same target the credential family
+    /// resolves from: a fast alternate target can carry its own family and its
+    /// own pool, and the selectable base target names neither.
+    pub fn serving_target_for_call(
+        &self,
+        selected: ResolvedProviderTarget,
+        fast_mode: FastMode,
+    ) -> ResolvedProviderTarget {
+        self.serving_target(selected, fast_mode)
+    }
+
     fn serving_target(
         &self,
         selected: ResolvedProviderTarget,
