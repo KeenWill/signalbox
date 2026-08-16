@@ -31,14 +31,14 @@ const RECURSIVE_REASON: &str = "recursive_container";
 const SPECIAL_ENTRY_REASON: &str = "special_entry";
 const SOURCE_SIZE_REASON: &str = "source_size_limit";
 const UNSUPPORTED_COMPRESSION_REASON: &str = "unsupported_compression_method";
-const PROBE_BYTES: u64 = 512;
+const PROBE_BYTES: u64 = 1_024;
 const SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_ENTRIES: usize = 1_000;
 const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_NAME_BYTES: usize = 512;
 const OUTPUT_BYTES: usize = 768 * 1024;
-const PREFIX_BYTES: usize = 512;
+const PREFIX_BYTES: usize = 1_024;
 
 /// ZIP, TAR, GZIP, and Zstandard provider for the isolated worker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -95,16 +95,19 @@ impl FileMediaProvider for ArchiveProvider {
             if request.media_type.as_str() != kind.media_type() {
                 return Err(ProcessorFailure::Protocol);
             }
+            if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
+                let length = source.byte_length().get().min(PROBE_BYTES);
+                let prefix = read_range(source, 0, length).await?;
+                require_active(cancellation)?;
+                if !kind.matches_probe(&prefix) {
+                    return Ok(ProcessorValidationOutput::NoMatch);
+                }
+            }
             if source.byte_length().get() > SOURCE_BYTES {
                 return Ok(malformed_validation(kind, SOURCE_SIZE_REASON));
             }
             let bytes = read_all(source).await?;
             require_active(cancellation)?;
-            if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
-                && !kind.matches_probe(&bytes)
-            {
-                return Ok(ProcessorValidationOutput::NoMatch);
-            }
             match enumerate(kind, &bytes) {
                 Ok(summary) => validated_output(kind, request.evidence, &summary),
                 Err(ArchiveIssue::Encrypted) => Ok(ProcessorValidationOutput::EncryptedOrLocked {
@@ -173,7 +176,13 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
     .into_iter()
     .map(|kind| reader_declaration(&provider, kind))
     .collect::<Result<Vec<_>, _>>()?;
-    Ok(FileMediaProviderDeclaration::try_new(provider, readers)?)
+    Ok(
+        FileMediaProviderDeclaration::try_new_with_container_entries(
+            provider,
+            readers,
+            Some(u64::try_from(MAX_ENTRIES)?),
+        )?,
+    )
 }
 
 fn reader_declaration(
@@ -251,7 +260,7 @@ impl ArchiveKind {
 
     fn matches_probe(self, bytes: &[u8]) -> bool {
         match self {
-            Self::Zip => bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06"),
+            Self::Zip => zip_header(bytes),
             Self::Tar => tar_header(bytes),
             Self::Gzip => bytes.starts_with(b"\x1f\x8b\x08"),
             Self::Zstd => zstd_header(bytes),
@@ -326,7 +335,7 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             CompressionMethod::Stored | CompressionMethod::Deflated => {}
             _ => return Err(ArchiveIssue::UnsupportedCompression),
         }
-        let name = checked_name(file.name_raw())?;
+        let name = checked_name(file.name().as_bytes())?;
         if is_link(file.unix_mode()) {
             return Err(ArchiveIssue::Link);
         }
@@ -396,6 +405,9 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         let declared_size = entry.size();
         if declared_size > MAX_ENTRY_BYTES {
             return Err(ArchiveIssue::Expansion);
+        }
+        if entry_type.is_dir() && declared_size != 0 {
+            return Err(ArchiveIssue::Special);
         }
         let kind = if entry_type.is_dir() {
             "directory"
@@ -515,11 +527,16 @@ fn recursive_name(name: &str) -> bool {
 }
 
 fn recursive_bytes(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"PK\x03\x04")
-        || bytes.starts_with(b"PK\x05\x06")
+    zip_header(bytes)
         || bytes.starts_with(b"\x1f\x8b\x08")
         || zstd_header(bytes)
         || tar_header(bytes)
+}
+
+fn zip_header(bytes: &[u8]) -> bool {
+    bytes
+        .windows(4)
+        .any(|window| window == b"PK\x03\x04" || window == b"PK\x05\x06")
 }
 
 fn zstd_header(bytes: &[u8]) -> bool {
@@ -531,7 +548,13 @@ fn zstd_header(bytes: &[u8]) -> bool {
 }
 
 fn tar_header(bytes: &[u8]) -> bool {
-    bytes.get(257..262) == Some(b"ustar") || valid_tar_checksum(bytes)
+    empty_tar(bytes) || bytes.get(257..262) == Some(b"ustar") || valid_tar_checksum(bytes)
+}
+
+fn empty_tar(bytes: &[u8]) -> bool {
+    bytes
+        .get(..1_024)
+        .is_some_and(|blocks| blocks.iter().all(|byte| *byte == 0))
 }
 
 fn valid_tar_checksum(bytes: &[u8]) -> bool {

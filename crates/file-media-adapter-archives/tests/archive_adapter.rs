@@ -7,10 +7,10 @@ use signalbox_file_media_adapter_archives::{ArchiveProvider, declaration};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
-    InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
-    VerifiedBlobSource,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileMediaRegistryConstructionError,
+    FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled, ProcessorIsolation,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation,
+    ReadViewName, ReaderIdentity, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -63,6 +63,27 @@ fn declaration_registers_four_archive_formats_under_available_isolation()
 
     assert_eq!(registry.providers(), &[declaration()?]);
     assert_eq!(declaration()?.readers().len(), 4);
+    assert_eq!(declaration()?.observed_container_entries(), Some(1_000));
+    Ok(())
+}
+
+#[test]
+fn declaration_rejects_an_effective_entry_ceiling_below_its_bound() -> Result<(), Box<dyn Error>> {
+    let ceilings = FileMediaCeilings {
+        observed_container_entries: 999,
+        ..FileMediaCeilings::version_one()
+    };
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    );
+
+    assert_eq!(
+        outcome.unwrap_err(),
+        FileMediaRegistryConstructionError::ContainerBounds
+    );
     Ok(())
 }
 
@@ -75,6 +96,27 @@ async fn generated_zip_validates_and_enumerates() -> Result<(), Box<dyn Error>> 
 #[tokio::test]
 async fn generated_tar_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(valid_inventory(ArchiveFixture::tar()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zip_with_preamble_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(valid_inventory(ArchiveFixture::zip_with_preamble()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_zip_filename_is_decoded_before_validation() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(valid_inventory(ArchiveFixture::legacy_named_zip()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_tar_validates() -> Result<(), Box<dyn Error>> {
+    let source = ArchiveFixture::empty_tar().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     Ok(())
 }
 
@@ -189,6 +231,15 @@ async fn tar_symlink_is_rejected_without_following() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
+async fn data_bearing_tar_directory_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::data_bearing_tar_directory()?).await?,
+        "special_entry",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn hostile_gzip_filename_is_rejected_as_untrusted_input() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::hostile_gzip_name()?).await?,
@@ -228,6 +279,15 @@ async fn disguised_empty_zip_payload_is_rejected() -> Result<(), Box<dyn Error>>
 async fn disguised_v7_tar_payload_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::disguised_v7_tar()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn disguised_empty_tar_payload_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::disguised_empty_tar()?).await?,
         "recursive_container",
     );
     Ok(())
@@ -299,6 +359,15 @@ async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn
 #[tokio::test]
 async fn unrecognized_declared_archive_remains_unknown() -> Result<(), Box<dyn Error>> {
     let source = ArchiveFixture::mislabeled_zip()?.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_unrecognized_declared_archive_remains_unknown() -> Result<(), Box<dyn Error>> {
+    let source = ArchiveFixture::oversized_mislabeled_zip()?.into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);

@@ -27,6 +27,32 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zip_with_preamble() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = b"bounded self-extractor preamble".to_vec();
+        bytes.extend_from_slice(&zip_bytes(&[(
+            "docs/readme.txt",
+            PAYLOAD,
+            ZipEntryKind::File,
+        )])?);
+        Ok(Self {
+            bytes,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "docs/readme.txt",
+        })
+    }
+
+    pub fn legacy_named_zip() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = zip_bytes(&[("cafe.txt", PAYLOAD, ZipEntryKind::File)])?;
+        set_legacy_filename(&mut bytes, b"caf\x82.txt")?;
+        Ok(Self {
+            bytes,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "café.txt",
+        })
+    }
+
     pub fn unsupported_compression_zip() -> Result<Self, Box<dyn Error>> {
         let mut fixture = Self::zip()?;
         set_compression_method(&mut fixture.bytes, 12)?;
@@ -39,6 +65,33 @@ impl ArchiveFixture {
             media_type: "application/x-tar",
             expected_format: "tar",
             expected_name: "docs/readme.txt",
+        })
+    }
+
+    pub fn empty_tar() -> Self {
+        Self {
+            bytes: vec![0; 1_024],
+            media_type: "application/x-tar",
+            expected_format: "tar",
+            expected_name: "",
+        }
+    }
+
+    pub fn data_bearing_tar_directory() -> Result<Self, Box<dyn Error>> {
+        let mut header = Header::new_gnu();
+        header.set_path("payload/")?;
+        header.set_entry_type(EntryType::Directory);
+        header.set_size(u64::try_from(PAYLOAD.len())?);
+        header.set_mode(0o755);
+        header.set_cksum();
+        let mut bytes = header.as_bytes().to_vec();
+        bytes.extend_from_slice(PAYLOAD);
+        bytes.resize(2_048, 0);
+        Ok(Self {
+            bytes,
+            media_type: "application/x-tar",
+            expected_format: "tar",
+            expected_name: "payload/",
         })
     }
 
@@ -192,9 +245,27 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn disguised_empty_tar() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &[0; 1_024], ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
     pub fn mislabeled_zip() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: b"not an archive".to_vec(),
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn oversized_mislabeled_zip() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            bytes: vec![b'x'; 256 * 1_024 + 1],
             media_type: "application/zip",
             expected_format: "zip",
             expected_name: "payload.bin",
@@ -366,6 +437,37 @@ fn set_compression_method(bytes: &mut [u8], method: u16) -> Result<(), Box<dyn E
         .get_mut(central + 10..central + 12)
         .ok_or("ZIP central compression method absent")?
         .copy_from_slice(&method.to_le_bytes());
+    Ok(())
+}
+
+fn set_legacy_filename(bytes: &mut [u8], name: &[u8]) -> Result<(), Box<dyn Error>> {
+    let local = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x03\x04")
+        .ok_or("ZIP fixture omitted local header")?;
+    let central = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .ok_or("ZIP fixture omitted central header")?;
+    clear_utf8_flag(bytes, local + 6)?;
+    clear_utf8_flag(bytes, central + 8)?;
+    bytes
+        .get_mut(local + 30..local + 30 + name.len())
+        .ok_or("ZIP local filename absent")?
+        .copy_from_slice(name);
+    bytes
+        .get_mut(central + 46..central + 46 + name.len())
+        .ok_or("ZIP central filename absent")?
+        .copy_from_slice(name);
+    Ok(())
+}
+
+fn clear_utf8_flag(bytes: &mut [u8], offset: usize) -> Result<(), Box<dyn Error>> {
+    let flags = bytes
+        .get_mut(offset..offset + 2)
+        .ok_or("ZIP flag offset absent")?;
+    let value = u16::from_le_bytes([flags[0], flags[1]]) & !(1 << 11);
+    flags.copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
 
