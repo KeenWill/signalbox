@@ -197,8 +197,8 @@ impl RepositoryWatchRuntime {
             let mut webhook_nudge = None;
             let webhook_work = repository.webhook().map(|_| {
                 let (sender, receiver) = watch::channel(());
-                // Shared rather than cloned: a `watch` sender is single-owner,
-                // and both the listener and the worker publish to this wake.
+                // Shared rather than cloned: a `watch` sender cannot be
+                // cloned, and both the listener and the worker publish here.
                 let sender = Arc::new(sender);
                 webhook_workers.insert(repository.repository().clone(), Arc::clone(&sender));
                 // The worker keeps a wake of its own so a bounded drain can hand
