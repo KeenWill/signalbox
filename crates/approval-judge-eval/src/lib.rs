@@ -6,6 +6,7 @@
 //! daemon's durable decision path.
 
 use std::{
+    collections::HashSet,
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
@@ -114,6 +115,14 @@ pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadErro
             observed: corpus.format_version,
         });
     }
+    let mut case_ids = HashSet::with_capacity(corpus.cases.len());
+    for case in &corpus.cases {
+        if !case_ids.insert(case.id.as_str()) {
+            return Err(CorpusLoadError::DuplicateCaseId {
+                id: case.id.clone(),
+            });
+        }
+    }
     Ok(corpus)
 }
 
@@ -134,6 +143,11 @@ pub enum CorpusLoadError {
         /// Version found in the document.
         observed: u32,
     },
+    /// More than one case uses the same stable logical identity.
+    DuplicateCaseId {
+        /// Repeated case identity.
+        id: String,
+    },
 }
 
 impl fmt::Display for CorpusLoadError {
@@ -151,6 +165,9 @@ impl fmt::Display for CorpusLoadError {
                 formatter,
                 "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
             ),
+            Self::DuplicateCaseId { id } => {
+                write!(formatter, "corpus case id {id} appears more than once")
+            }
         }
     }
 }
@@ -160,7 +177,7 @@ impl Error for CorpusLoadError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Json(source) => Some(source),
-            Self::UnsupportedFormatVersion { .. } => None,
+            Self::UnsupportedFormatVersion { .. } | Self::DuplicateCaseId { .. } => None,
         }
     }
 }
@@ -376,14 +393,20 @@ mod tests {
         let decoded = decode_corpus(&encoded).expect("the serialized corpus remains admitted");
 
         assert_eq!(decoded, corpus);
-        assert_eq!(decoded.format_version, CORPUS_FORMAT_VERSION);
-        assert_eq!(decoded.cases.len(), corpus.cases.len());
-        assert_eq!(decoded.cases[0].expected, ApprovalDisposition::Approve);
-        assert_eq!(decoded.cases[1].expected, ApprovalDisposition::Deny);
-        assert_eq!(
-            decoded.cases[2].expected,
-            ApprovalDisposition::EscalateToHuman
-        );
+    }
+
+    #[test]
+    fn duplicate_corpus_case_ids_fail_closed() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let duplicate_id = corpus.cases[0].id.clone();
+        corpus.cases[1].id = duplicate_id.clone();
+        let encoded = serde_json::to_vec(&corpus).expect("the duplicate fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("a duplicate case id is rejected");
+
+        assert!(error.to_string().contains(&duplicate_id));
+        assert!(error.to_string().contains("appears more than once"));
     }
 
     #[tokio::test]
