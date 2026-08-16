@@ -1583,8 +1583,16 @@ where
             )
             .await;
         match (failure, classification) {
-            (UntrustedExecutorFailure::Executor(error), Ok(_)) => {
-                Err(ToolExecutionServiceError::Executor(error))
+            (UntrustedExecutorFailure::Executor(_), Ok(outcome)) => {
+                tracing::warn!(
+                    session_id = %correlation.session().as_uuid(),
+                    turn_id = %correlation.turn().as_uuid(),
+                    tool_attempt_id = %correlation.attempt().as_uuid(),
+                    "tool executor failed after dispatch; durable crash classification contains the failure"
+                );
+                Ok(ToolExecutionServiceOutcome::CrashClassified(Box::new(
+                    outcome,
+                )))
             }
             (UntrustedExecutorFailure::CorrelationMismatch, Ok(_)) => {
                 Err(ToolExecutionServiceError::ExecutorCorrelationMismatch)
@@ -3277,7 +3285,8 @@ mod tests {
     }
 
     /// INV-011 / INV-024 / INV-037: an executor operator failure cannot release
-    /// the interrupt gate while its durable attempt remains in flight.
+    /// the interrupt gate while its durable attempt remains in flight, and its
+    /// committed crash classification contains the failure for this turn.
     #[tokio::test]
     async fn inv011_inv024_inv037_executor_failure_classifies_before_gate_release() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
@@ -3318,8 +3327,11 @@ mod tests {
         );
 
         assert!(matches!(
-            service.execute(batch.session(), batch.turn()).await,
-            Err(ToolExecutionServiceError::Executor(FakeError::Ordinary))
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("committed crash classification contains the executor failure"),
+            ToolExecutionServiceOutcome::CrashClassified(_)
         ));
         assert!(service.retained_state().is_none());
         let _released = tokio::time::timeout(
