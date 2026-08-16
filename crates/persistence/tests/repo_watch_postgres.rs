@@ -388,6 +388,14 @@ async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), 
     Ok(())
 }
 
+/// The durable identity columns the content-identity migrations write.
+#[derive(sqlx::FromRow)]
+struct MigratedEventIdentityRow {
+    content_identity_version: i16,
+    content_identity: Vec<u8>,
+    producer: String,
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn content_identity_migration_carries_existing_cursor_and_event_to_version_one()
@@ -410,7 +418,7 @@ async fn content_identity_migration_carries_existing_cursor_and_event_to_version
     .bind(REPOSITORY)
     .fetch_one(&pool)
     .await?;
-    let event_identity: (i16, Vec<u8>, String) = sqlx::query_as(
+    let event_identity = sqlx::query_as::<_, MigratedEventIdentityRow>(
         "SELECT content_identity_version, content_identity, producer
            FROM repo_watch_event
           WHERE event_id = $1",
@@ -430,9 +438,9 @@ async fn content_identity_migration_carries_existing_cursor_and_event_to_version
 
     assert_eq!(cursor_version, 2);
     assert_eq!(frontier, serde_json::json!([]));
-    assert_eq!(event_identity.0, 1);
-    assert_eq!(event_identity.1.len(), 32);
-    assert_eq!(event_identity.2, "poll");
+    assert_eq!(event_identity.content_identity_version, 1);
+    assert_eq!(event_identity.content_identity.len(), 32);
+    assert_eq!(event_identity.producer, "poll");
     assert_eq!(
         loaded_cursor
             .candidate()
@@ -2152,6 +2160,7 @@ async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_even
     )?;
     assert_eq!(recorded.len(), 1);
     let identity = recorded[0].content_identity();
+    let recorded_event_id = recorded[0].event().id();
     let present_candidate =
         RepoWatchCursorCandidate::with_event_identity_frontier(present, frontier);
     let second = committed_generation(
@@ -2197,10 +2206,9 @@ async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_even
     )?;
     assert_eq!(reemitted.len(), 1);
     assert_eq!(reemitted[0].content_identity(), identity);
-    assert_ne!(
-        reemitted[0].event().id(),
-        RepoWatchEventId::from_uuid(Uuid::from_u128(1))
-    );
+    // A fresh candidate id on an equal occurrence is exactly the case commit
+    // coalescing has to recognize.
+    assert_ne!(reemitted[0].event().id(), recorded_event_id);
     let returned_candidate =
         RepoWatchCursorCandidate::with_event_identity_frontier(returned, frontier);
 

@@ -1004,8 +1004,18 @@ impl RepositoryWatchAttemptError {
         }
     }
 
+    /// Whether retrying this repository can no longer change the outcome.
+    ///
+    /// An exhausted identity frontier qualifies: the frontier is restored from
+    /// the durable cursor on every attempt and derivation fails before commit,
+    /// so nothing between attempts can move it. Retrying would spend GitHub
+    /// request quota and repeat one error log forever, so the task stops and
+    /// leaves the recorded cause code as the operator's signal.
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
+        matches!(
+            self,
+            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity | Self::IdentityFrontier
+        )
     }
 }
 
