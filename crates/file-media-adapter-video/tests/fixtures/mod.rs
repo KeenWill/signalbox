@@ -5,7 +5,7 @@ use signalbox_file_media_runtime::{
     VerifiedBlobSource,
 };
 
-const SOURCE_BYTES: usize = 256 * 1024;
+const METADATA_BYTES: usize = 256 * 1024;
 const MP4_TIMESCALE: u32 = 1_000;
 const MP4_DURATION_UNITS: u32 = 5_500;
 const WEBM_DURATION_TIMECODE_UNITS: f64 = 5_500.0;
@@ -50,6 +50,7 @@ impl FixtureKind {
 pub struct VideoFixture {
     kind: FixtureKind,
     bytes: Vec<u8>,
+    reported_byte_length: Option<u64>,
 }
 
 impl VideoFixture {
@@ -80,9 +81,10 @@ impl VideoFixture {
     }
 
     pub fn encrypted_mp4() -> Self {
-        let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
-        bytes.extend_from_slice(&mp4_extended_box(*b"sinf", &[]));
-        Self::new(FixtureKind::Mp4, bytes)
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, mp4_box(*b"encv", &[])),
+        )
     }
 
     pub fn encrypted_webm() -> Self {
@@ -134,16 +136,61 @@ impl VideoFixture {
         )
     }
 
-    pub fn oversized_mp4() -> Self {
+    pub fn ordinary_large_mp4() -> Self {
         let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
-        bytes.resize(SOURCE_BYTES + 1, 0);
+        let source_bytes = METADATA_BYTES + 1024;
+        let remaining_box_bytes = source_bytes - bytes.len();
+        let remaining_box_bytes = u32::try_from(remaining_box_bytes).unwrap_or(u32::MAX);
+        bytes.extend_from_slice(&remaining_box_bytes.to_be_bytes());
+        bytes.extend_from_slice(b"mdat");
+        bytes.resize(METADATA_BYTES, 0);
+        Self::new(FixtureKind::Mp4, bytes)
+            .with_reported_byte_length(u64::try_from(source_bytes).unwrap_or(u64::MAX))
+    }
+
+    pub fn unsupported_brand_mp4() -> Self {
+        Self::new(FixtureKind::Mp4, mp4_box(*b"ftyp", b"avif\0\0\0\0avif"))
+    }
+
+    pub fn matroska_ebml() -> Self {
+        let doc_type = ebml_element(&[0x42, 0x82], b"matroska");
+        let header = ebml_element(&[0x1a, 0x45, 0xdf, 0xa3], &doc_type);
+        Self::new(FixtureKind::Webm, header)
+    }
+
+    pub fn clear_mp4_with_encryption_like_payload_bytes() -> Self {
+        let payload = [0_u32.to_be_bytes().as_slice(), b"sinf"].concat();
+        let bytes = [
+            mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS),
+            mp4_box(*b"free", &payload),
+        ]
+        .concat();
         Self::new(FixtureKind::Mp4, bytes)
     }
 
-    pub fn oversized_webm() -> Self {
-        let mut bytes = webm_bytes(WEBM_DURATION_TIMECODE_UNITS, ContentProtection::Clear);
-        bytes.resize(SOURCE_BYTES + 1, 0);
-        Self::new(FixtureKind::Webm, bytes)
+    pub fn truncated_mvhd_mp4() -> Self {
+        let mut movie_header = vec![0_u8; 20];
+        movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+        movie_header[16..20].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+        let movie = mp4_box(*b"moov", &mp4_box(*b"mvhd", &movie_header));
+        Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
+    pub fn duplicate_timestamp_scale_webm() -> Self {
+        let scale = ebml_element(&[0x2a, 0xd7, 0xb1], &[0x0f, 0x42, 0x40]);
+        let duration = ebml_element(
+            &[0x44, 0x89],
+            &WEBM_DURATION_TIMECODE_UNITS.to_bits().to_be_bytes(),
+        );
+        let info = ebml_element(
+            &[0x15, 0x49, 0xa9, 0x66],
+            &[scale.clone(), scale, duration].concat(),
+        );
+        let track_type = ebml_element(&[0x83], &[1]);
+        let track_entry = ebml_element(&[0xae], &track_type);
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
     pub const fn expected_duration_milliseconds(&self) -> u64 {
@@ -163,21 +210,46 @@ impl VideoFixture {
     }
 
     pub fn into_source(self) -> Result<MemorySource, Box<dyn Error>> {
-        MemorySource::new(self.bytes, self.kind.media_type())
+        MemorySource::new_with_reported_length(
+            self.bytes,
+            self.kind.media_type(),
+            self.reported_byte_length,
+        )
     }
 
     fn new(kind: FixtureKind, bytes: Vec<u8>) -> Self {
-        Self { kind, bytes }
+        Self {
+            kind,
+            bytes,
+            reported_byte_length: None,
+        }
+    }
+
+    fn with_reported_byte_length(mut self, byte_length: u64) -> Self {
+        self.reported_byte_length = Some(byte_length);
+        self
     }
 }
 
 fn mp4_bytes(timescale: u32, duration: u32) -> Vec<u8> {
-    let mut movie_header = vec![0_u8; 20];
+    mp4_bytes_with_sample_entry(timescale, duration, mp4_box(*b"avc1", &[]))
+}
+
+fn mp4_bytes_with_sample_entry(timescale: u32, duration: u32, sample_entry: Vec<u8>) -> Vec<u8> {
+    let mut movie_header = vec![0_u8; 100];
     movie_header[12..16].copy_from_slice(&timescale.to_be_bytes());
     movie_header[16..20].copy_from_slice(&duration.to_be_bytes());
-    let mut handler = vec![0_u8; 12];
+    let mut handler = vec![0_u8; 24];
     handler[8..12].copy_from_slice(b"vide");
-    let media = mp4_box(*b"mdia", &mp4_box(*b"hdlr", &handler));
+    let mut sample_description = vec![0_u8; 8];
+    sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+    sample_description.extend_from_slice(&sample_entry);
+    let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+    let media_information = mp4_box(*b"minf", &sample_table);
+    let media = mp4_box(
+        *b"mdia",
+        &[mp4_box(*b"hdlr", &handler), media_information].concat(),
+    );
     let track = mp4_box(*b"trak", &media);
     let movie = mp4_box(
         *b"moov",
@@ -195,16 +267,6 @@ fn mp4_box(box_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(payload.len() + 8);
     bytes.extend_from_slice(&size.to_be_bytes());
     bytes.extend_from_slice(&box_type);
-    bytes.extend_from_slice(payload);
-    bytes
-}
-
-fn mp4_extended_box(box_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
-    let size = u64::try_from(payload.len() + 16).unwrap_or(u64::MAX);
-    let mut bytes = Vec::with_capacity(payload.len() + 16);
-    bytes.extend_from_slice(&1_u32.to_be_bytes());
-    bytes.extend_from_slice(&box_type);
-    bytes.extend_from_slice(&size.to_be_bytes());
     bytes.extend_from_slice(payload);
     bytes
 }
@@ -267,8 +329,17 @@ pub struct MemorySource {
 
 impl MemorySource {
     pub fn new(bytes: Vec<u8>, media_type: &'static str) -> Result<Self, Box<dyn Error>> {
-        let byte_length = NonZeroU64::new(u64::try_from(bytes.len())?)
-            .ok_or("fixture source must be nonempty")?;
+        Self::new_with_reported_length(bytes, media_type, None)
+    }
+
+    fn new_with_reported_length(
+        bytes: Vec<u8>,
+        media_type: &'static str,
+        reported_byte_length: Option<u64>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let byte_length =
+            NonZeroU64::new(reported_byte_length.unwrap_or(u64::try_from(bytes.len())?))
+                .ok_or("fixture source must be nonempty")?;
         Ok(Self {
             bytes,
             byte_length,

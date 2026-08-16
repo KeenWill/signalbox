@@ -115,12 +115,36 @@ fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), 
 
 #[tokio::test]
 async fn generated_mp4_validates_and_reports_metadata() -> Result<(), Box<dyn Error>> {
-    assert_valid_metadata(VideoFixture::ordinary_mp4()).await
+    let fixture = VideoFixture::ordinary_mp4();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let expected_tracks = fixture.expected_video_tracks();
+    let expected_container = fixture.expected_container();
+    let expected_profile = fixture.expected_profile();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    assert_eq!(body["video_tracks"], expected_tracks);
+    assert_eq!(body["container"], expected_container);
+    assert_eq!(body["profile"], expected_profile);
+    Ok(())
 }
 
 #[tokio::test]
 async fn generated_webm_validates_and_reports_metadata() -> Result<(), Box<dyn Error>> {
-    assert_valid_metadata(VideoFixture::ordinary_webm()).await
+    let fixture = VideoFixture::ordinary_webm();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let expected_tracks = fixture.expected_video_tracks();
+    let expected_container = fixture.expected_container();
+    let expected_profile = fixture.expected_profile();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    assert_eq!(body["video_tracks"], expected_tracks);
+    assert_eq!(body["container"], expected_container);
+    assert_eq!(body["profile"], expected_profile);
+    Ok(())
 }
 
 #[tokio::test]
@@ -174,16 +198,6 @@ async fn nonfinite_webm_duration_is_rejected_before_output() -> Result<(), Box<d
 }
 
 #[tokio::test]
-async fn oversized_mp4_is_a_typed_validation_limit() -> Result<(), Box<dyn Error>> {
-    assert_malformed(VideoFixture::oversized_mp4(), "source_size_limit").await
-}
-
-#[tokio::test]
-async fn oversized_webm_is_a_typed_validation_limit() -> Result<(), Box<dyn Error>> {
-    assert_malformed(VideoFixture::oversized_webm(), "source_size_limit").await
-}
-
-#[tokio::test]
 async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::unknown(b"not video".to_vec())?;
     let inspection =
@@ -191,6 +205,68 @@ async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
     Ok(())
+}
+
+#[tokio::test]
+async fn declared_video_type_with_unrecognized_bytes_remains_unknown() -> Result<(), Box<dyn Error>>
+{
+    let source = MemorySource::unknown(b"not video".to_vec())?;
+    let inspection = inspect_as(&DirectProcessor::new(), &source, "video/mp4").await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_large_mp4_validates_from_the_bounded_metadata_prefix()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::ordinary_large_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_iso_bmff_brand_is_not_claimed_as_mp4() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::unsupported_brand_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn matroska_doctype_is_not_claimed_as_webm() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::matroska_ebml().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn encryption_like_bytes_inside_clear_mp4_payload_are_not_locked()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::clear_mp4_with_encryption_like_payload_bytes().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn truncated_mandatory_mp4_movie_header_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::truncated_mvhd_mp4(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn duplicate_webm_timestamp_scale_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::duplicate_timestamp_scale_webm(),
+        "malformed_video",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -224,11 +300,9 @@ async fn adversarial_decoder_output_kind_is_rejected_by_registry_sanitization()
     Ok(())
 }
 
-async fn assert_valid_metadata(fixture: VideoFixture) -> Result<(), Box<dyn Error>> {
-    let expected_duration = fixture.expected_duration_milliseconds();
-    let expected_tracks = fixture.expected_video_tracks();
-    let expected_container = fixture.expected_container();
-    let expected_profile = fixture.expected_profile();
+async fn inspect_and_read_metadata(
+    fixture: VideoFixture,
+) -> Result<(FileInspection, serde_json::Value), Box<dyn Error>> {
     let source = fixture.into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
     let result = read(
@@ -239,13 +313,7 @@ async fn assert_valid_metadata(fixture: VideoFixture) -> Result<(), Box<dyn Erro
     )
     .await?;
     let body = complete_structure(result)?;
-
-    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
-    assert_eq!(body["duration_milliseconds"], expected_duration);
-    assert_eq!(body["video_tracks"], expected_tracks);
-    assert_eq!(body["container"], expected_container);
-    assert_eq!(body["profile"], expected_profile);
-    Ok(())
+    Ok((inspection, body))
 }
 
 async fn assert_locked(fixture: VideoFixture) -> Result<(), Box<dyn Error>> {
