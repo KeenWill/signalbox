@@ -52,21 +52,26 @@ Object.defineProperty(globalThis, "Atomics", {
 // into a request diverges the moment it restarts on a host configured
 // differently, so the closed isolate removes them rather than pinning a locale
 // an artifact could not observe it had been given.
-const typedArrayPrototype = Object.getPrototypeOf(Int8Array.prototype);
-const localeSensitiveMethods = [
-  [Object.prototype, "toLocaleString"],
-  [Number.prototype, "toLocaleString"],
-  [BigInt.prototype, "toLocaleString"],
-  [Array.prototype, "toLocaleString"],
-  [typedArrayPrototype, "toLocaleString"],
-  [String.prototype, "localeCompare"],
-  [String.prototype, "toLocaleLowerCase"],
-  [String.prototype, "toLocaleUpperCase"],
-];
-for (const [holder, name] of localeSensitiveMethods) {
-  Object.defineProperty(holder, name, {
-    value: undefined,
-    writable: false,
-    configurable: false,
-  });
-}
+// The bootstrap runs as a classic script, so a top-level `const` here would
+// become a global lexical binding the artifact could read. Nothing this file
+// needs to name belongs to the isolate it hands over.
+(() => {
+  const typedArrayPrototype = Object.getPrototypeOf(Int8Array.prototype);
+  const localeSensitiveMethods = [
+    [Object.prototype, "toLocaleString"],
+    [Number.prototype, "toLocaleString"],
+    [BigInt.prototype, "toLocaleString"],
+    [Array.prototype, "toLocaleString"],
+    [typedArrayPrototype, "toLocaleString"],
+    [String.prototype, "localeCompare"],
+    [String.prototype, "toLocaleLowerCase"],
+    [String.prototype, "toLocaleUpperCase"],
+  ];
+  for (const [holder, name] of localeSensitiveMethods) {
+    Object.defineProperty(holder, name, {
+      value: undefined,
+      writable: false,
+      configurable: false,
+    });
+  }
+})();

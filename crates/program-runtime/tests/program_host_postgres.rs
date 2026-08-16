@@ -475,6 +475,8 @@ Object.getPrototypeOf(Int8Array.prototype).toLocaleString === undefined || (() =
 String.prototype.localeCompare === undefined || (() => { throw new Error("String.prototype.localeCompare reached the artifact"); })();
 String.prototype.toLocaleLowerCase === undefined || (() => { throw new Error("String.prototype.toLocaleLowerCase reached the artifact"); })();
 String.prototype.toLocaleUpperCase === undefined || (() => { throw new Error("String.prototype.toLocaleUpperCase reached the artifact"); })();
+typeof typedArrayPrototype === "undefined" || (() => { throw new Error("a bootstrap binding reached the artifact"); })();
+typeof localeSensitiveMethods === "undefined" || (() => { throw new Error("a bootstrap binding reached the artifact"); })();
 "#,
     );
     let host = ProgramHost::new(repository);
