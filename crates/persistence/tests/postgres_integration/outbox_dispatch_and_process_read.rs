@@ -156,19 +156,36 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// S24: session summaries are one complete repeatable-read projection in
-/// stable session-identity order, including the selected defaults row.
+/// S24: one summary page batches distinct placement projections while retaining
+/// stable session-identity order and each selected defaults row.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_process_session_summary_sequence_matches_repeatable_projection()
+async fn s24_process_session_summary_page_batches_placement_projection()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let earlier_selection = outbox_session_fixture_model_selection(0xe31);
     let earlier_session = insert_outbox_session_fixture(&pool, 0xe31).await?;
+    let earlier_placement = SessionPlacement::pathless();
     let later_session = Uuid::from_u128(0xe32);
     let alias = ModelAlias::from_uuid(Uuid::from_u128(0xae32));
+    let later_placement = SessionPlacement::scoped(
+        SessionPlacementPath::try_new("projects.later".to_owned())
+            .expect("the later fixture path is valid"),
+    )
+    .expect("the later fixture path is non-root");
+    let later_creation = CreateSession::new_with_placement(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x4e32)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Alias(alias)),
+        later_placement.clone(),
+    )
+    .prepare(SessionId::from_uuid(later_session))
+    .expect("the placed user-initiated fixture is preparable");
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(0x4e32, 0xe32, ModelSelectionRequest::Alias(alias)))
+        .handle(later_creation)
         .await?;
 
     let mut summaries = ProcessReadRepository::new(pool.clone())
@@ -191,9 +208,50 @@ async fn s24_process_session_summary_sequence_matches_repeatable_projection()
         earlier.model_selection(),
         ProcessModelSelection::Direct(earlier_selection)
     );
+    assert_eq!(earlier.placement().placement(), &earlier_placement);
     assert_eq!(later.session().into_uuid(), later_session);
     assert_eq!(later.defaults_version(), 1);
     assert_eq!(later.model_selection(), ProcessModelSelection::Alias(alias));
+    assert_eq!(later.placement().placement(), &later_placement);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Inserts exactly one full 64-session summary page plus one continuation row,
+/// returning their identities in the order the summary cursor must yield them.
+async fn insert_session_summary_page_boundary_fixture(
+    pool: &PgPool,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut sessions = Vec::with_capacity(65);
+    for session_seed in 0xf000..=0xf040 {
+        sessions.push(insert_outbox_session_fixture(pool, session_seed).await?);
+    }
+    Ok(sessions)
+}
+
+/// S24: a summary catalog one row beyond the 64-session safety ceiling
+/// continues onto a second page without skipping or duplicating an identity.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_process_session_summary_page_continues_after_64_sessions() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let expected_sessions = insert_session_summary_page_boundary_fixture(&pool).await?;
+
+    let summaries = ProcessReadRepository::new(pool.clone())
+        .list_sessions()
+        .await?;
+    let actual_sessions = summaries
+        .iter()
+        .map(|summary| summary.session().into_uuid())
+        .collect::<Vec<_>>();
+
+    assert_eq!(summaries.len(), 65);
+    assert_eq!(actual_sessions, expected_sessions);
+    assert_eq!(summaries[63].session().into_uuid(), expected_sessions[63]);
+    assert_eq!(summaries[64].session().into_uuid(), expected_sessions[64]);
 
     pool.close().await;
     drop(container);
@@ -3253,6 +3311,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let counted_operation = model_calls
         .preview_activation_operation(preview.prepared(), counted_call)
         .await?
+        .expect("an admitted credential previews the activation operation")
         .render(Box::new([]))?;
     let counted_entries = counted_operation
         .request()
