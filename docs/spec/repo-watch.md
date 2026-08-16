@@ -695,7 +695,7 @@ keeps the exact bytes. An equal replay returns the same success without new
 work. Reuse of that identity with a different digest returns conflict and cannot
 replace the first body. Every new admission and equal durable replay publishes a
 coalescing in-memory wake after commit; the listener returns success only while
-that repository's drain owner remains available to receive it. The wake is an
+that repository's drain task remains available to receive it. The wake is an
 accelerator over durable state, not a work inventory: the repository task drains
 durable pending deliveries on startup, after every full poll, and when woken,
 and a wake arriving during a drain remains observable for a follow-up attempt. A
@@ -707,15 +707,15 @@ as an intake failure.
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at error level with the delivery
 identity and a closed cause; failed deliveries remain pending while successful
-page peers reach terminal state. The owner schedules a new drain attempt after
-five seconds without waiting for a full poll, another delivery, or a restart.
-The retry repeats after further failures. An independent per-repository observer
-checks durable pending work every thirty seconds; once the oldest delivery has
-remained undispositioned for one minute it emits an error-level stall signal
-with the repository, delivery identity, receipt sequence, pending age, and
-closed stall cause. Because the observer is not the serialized drain owner, an
-owner wedged in polling, projection, disposition, or dispatch cannot silence
-that signal.
+page peers reach terminal state. The repository task schedules a new drain
+attempt after five seconds without waiting for a full poll, another delivery, or
+a restart. The retry repeats after further failures. An independent
+per-repository observer checks durable pending work every thirty seconds; once
+the oldest delivery has remained undispositioned for one minute it emits an
+error-level stall signal with the repository, delivery identity, receipt
+sequence, pending age, and closed stall cause. Because the observer is not the
+serialized drain task, a task wedged in polling, projection, disposition, or
+dispatch cannot silence that signal.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.

@@ -96,11 +96,11 @@ const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
     NonZeroU16::new(100).expect("webhook pending page size is positive");
 const WEBHOOK_DRAIN_RETRY_DELAY: Duration = Duration::from_secs(5);
 // A separate task inspects durable pending work at this cadence, so a wedged
-// serialized repository owner cannot also silence the observer meant to
+// serialized repository task cannot also silence the observer meant to
 // expose it.
 const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 // Pending webhook work ordinarily drains in seconds. One minute leaves ample
-// room for an in-flight bounded provider request while ensuring an owner wedge
+// room for an in-flight bounded provider request while ensuring a task wedge
 // becomes an operator-visible error well before the next full poll.
 const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 
@@ -5608,7 +5608,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn admission_during_a_concurrent_drain_is_drained_by_the_same_owner_run()
+    async fn admission_during_a_concurrent_drain_is_drained_by_the_same_task_run()
     -> Result<(), Box<dyn Error>> {
         let (_container, pool) = migrated_postgres().await?;
         let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
@@ -5632,7 +5632,7 @@ mod tests {
             .await?;
         drain
             .await?
-            .expect("the concurrent owner run drains both deliveries");
+            .expect("the concurrent task run drains both deliveries");
 
         assert!(unlocked, "the fixture releases its deliberate drain wedge");
         assert!(webhook_disposition_exists(&pool, first.key()).await?);

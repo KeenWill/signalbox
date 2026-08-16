@@ -312,8 +312,8 @@ async fn admit_webhook(
                         hook_id = headers.hook_id().get(),
                         delivery_id = %headers.delivery_id(),
                         receipt_sequence = receipt.sequence().get(),
-                        cause_code = "webhook_drain_owner_unavailable",
-                        "durable webhook delivery could not wake its repository owner"
+                        cause_code = "webhook_drain_task_unavailable",
+                        "durable webhook delivery could not wake its repository task"
                     );
                     StatusCode::SERVICE_UNAVAILABLE
                 }
@@ -900,7 +900,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn durable_http_admission_directly_wakes_the_repository_owner()
+    async fn durable_http_admission_directly_wakes_the_repository_task()
     -> Result<(), Box<dyn Error>> {
         let (_container, pool) = migrated_postgres().await?;
         let (_directory, state, mut receiver) = fixture_state_with_pool(pool);
@@ -915,7 +915,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn equal_durable_replay_rewakes_the_repository_owner() -> Result<(), Box<dyn Error>> {
+    async fn equal_durable_replay_rewakes_the_repository_task() -> Result<(), Box<dyn Error>> {
         let (_container, pool) = migrated_postgres().await?;
         let (_directory, state, mut receiver) = fixture_state_with_pool(pool);
         let first = fixture_request(FIXTURE_BODY.to_vec(), FIXTURE_BODY);
