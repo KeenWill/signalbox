@@ -640,16 +640,23 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         }
     }
 
-    /// Composes the ports with an explicit nonzero in-flight pass bound.
+    /// Composes the ports with an explicit nonzero in-flight pass bound capped
+    /// at the hard admission ceiling.
     pub const fn with_max_in_flight(
         work_source: WorkSource,
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self {
+        let requested = max_in_flight_passes.get();
+        let max_in_flight_passes = if requested > SCHEDULER_PASS_ADMISSION_HARD_CEILING {
+            SCHEDULER_PASS_ADMISSION_HARD_CEILING
+        } else {
+            requested
+        };
         Self {
             work_source,
             pass,
-            max_in_flight_passes: max_in_flight_passes.get(),
+            max_in_flight_passes,
         }
     }
 
@@ -930,8 +937,8 @@ mod tests {
         ClassifyOperatorFailure, EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass,
         EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
         GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
-        InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
-        SchedulerLoopExit,
+        InvalidReconciliationSweepInterval, ReconciliationSweepInterval,
+        SCHEDULER_PASS_ADMISSION_HARD_CEILING, SchedulerLoop, SchedulerLoopExit,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1628,6 +1635,18 @@ mod tests {
                 .is_empty()
         );
         drop(pass_shutdown_receiver);
+    }
+
+    #[test]
+    fn inv007_explicit_scheduler_bound_is_capped_at_hard_ceiling() {
+        let requested = NonZeroUsize::new(SCHEDULER_PASS_ADMISSION_HARD_CEILING + 1)
+            .expect("the fixture exceeds a positive ceiling");
+        let scheduler = SchedulerLoop::with_max_in_flight((), (), requested);
+
+        assert_eq!(
+            scheduler.max_in_flight_passes,
+            SCHEDULER_PASS_ADMISSION_HARD_CEILING
+        );
     }
 
     #[tokio::test]
