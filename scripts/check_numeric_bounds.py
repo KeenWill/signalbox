@@ -46,14 +46,18 @@ see, whose classification may differ from the same-named local one, so the
 escape is unavailable and the constant declares its own kind.
 
 The source name resolves in the Rust scope that declares it: the innermost
-inline module containing the derived constant, then outward through enclosing
-modules to the file. A sibling module's declaration is never in scope, so a
-derivation whose initializer really reads an imported constant cannot be
-validated against an unrelated same-named constant elsewhere in the file, and a
-nearer declaration shadows a farther one exactly as Rust resolves it. What this
-lexical scan cannot follow, it refuses: a name reachable only through a `use`
-from outside the file leaves the escape unproven and the declaration is
-rejected.
+brace-delimited block containing the derived constant — a module, a function
+body, an ``impl``, any block at all — then outward to the file. A declaration in
+a sibling module or another function is never in scope, so a derivation whose
+initializer really reads an imported constant cannot be validated against an
+unrelated same-named constant elsewhere in the file, and a nearer declaration
+shadows a farther one as Rust resolves it. What this lexical scan cannot follow,
+it refuses: a name reachable only through a ``use`` from outside the file leaves
+the escape unproven and the declaration is rejected.
+
+Every other bound the initializer names must carry the inherited kind too. A
+value assembled from a ceiling and a tunable inherits no single rationale, so
+the escape is unavailable to it and it declares its own kind.
 
 Because discovery is deliberately lexical, a fixed representation fact whose
 name contains a boundary token may declare ``not-a-bound`` with a one-line
@@ -121,7 +125,7 @@ DERIVED_DECLARATION = re.compile(
     r"^\s*// numeric-bound: derived (?P<kind>ceiling|tunable) from "
     r"(?P<source>[A-Z][A-Z0-9_]*)\s*$"
 )
-MODULE_BLOCK = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
+REFERENCED_BOUND = re.compile(r"(?<![\w:])(?P<name>[A-Z][A-Z0-9_]*)\b")
 ATTRIBUTED_MODULE = re.compile(
     r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)+)"
     r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<form>[{;])",
@@ -279,16 +283,26 @@ def test_ranges(code: str) -> list[tuple[int, int]]:
     return ranges
 
 
-def module_ranges(code: str) -> list[tuple[int, int]]:
-    """Report the span of every inline `mod name { ... }` block in one file."""
+def block_ranges(code: str) -> list[tuple[int, int]]:
+    """Report the span of every brace-delimited block in one file.
+
+    A Rust `const` is visible in the block that declares it and in the blocks
+    nested inside it, so every brace pair is a scope boundary — a module, a
+    function body, an `impl`, a bare block. Unbalanced braces cannot occur in
+    code that compiles, and a stray close is dropped rather than trusted.
+    """
     ranges = []
-    for match in MODULE_BLOCK.finditer(code):
-        ranges.append((match.start(), matching_brace(code, match.end() - 1)))
+    opened: list[int] = []
+    for position, character in enumerate(code):
+        if character == "{":
+            opened.append(position)
+        elif character == "}" and opened:
+            ranges.append((opened.pop(), position))
     return ranges
 
 
 def innermost_scope(offset: int, ranges: list[tuple[int, int]]) -> tuple[int, int] | None:
-    """Report the narrowest module block containing ``offset``, or the file."""
+    """Report the narrowest block containing ``offset``, or the file."""
     enclosing = [span for span in ranges if span[0] <= offset <= span[1]]
     return max(enclosing, default=None)
 
@@ -361,15 +375,22 @@ def inventory(root: Path) -> list[Bound]:
     bounds = []
     for path, text in sources.items():
         code = blanked[path]
+        # Scanning brace pairs costs a pass over the file, so it is paid only
+        # where a boundary-named constant actually needs a scope.
+        matches = [
+            match
+            for match in CONSTANT.finditer(code)
+            if is_boundary_name(match.group("name"))
+        ]
+        if not matches:
+            continue
         ranges = test_ranges(code)
-        modules = module_ranges(code)
+        blocks = block_ranges(code)
         external = in_test_sources(path, test_sources)
         lines = text.splitlines()
         relative = path.relative_to(root)
-        for match in CONSTANT.finditer(code):
+        for match in matches:
             name = match.group("name")
-            if not is_boundary_name(name):
-                continue
             line = text.count("\n", 0, match.start()) + 1
             end = initializer_end(code, match.end())
             annotation = lines[line - 2] if line > 1 else ""
@@ -379,7 +400,7 @@ def inventory(root: Path) -> list[Bound]:
                     name=name,
                     line=line,
                     offset=match.start(),
-                    scope=innermost_scope(match.start(), modules),
+                    scope=innermost_scope(match.start(), blocks),
                     initializer=code[match.end() : end],
                     annotation=annotation,
                     test_only=external or in_ranges(match.start(), ranges),
@@ -447,7 +468,29 @@ def validate(bounds: list[Bound]) -> list[str]:
         if source in seen or re.search(bare, bound.initializer) is None:
             return False
         owner = visible_owner(bound, source)
-        return owner is not None and resolves_to_direct(owner, kind, seen | {source})
+        if owner is None or not resolves_to_direct(owner, kind, seen | {source}):
+            return False
+        return all(
+            resolves_to_direct(contributor, kind, seen | {source, name})
+            for name, contributor in contributors(bound, source)
+        )
+
+    def contributors(bound: Bound, source: str) -> list[tuple[str, Bound]]:
+        """Report the other in-scope bounds the initializer reads.
+
+        A derivation inherits one rationale, so every bound feeding the value
+        has to carry the kind being inherited. Names that resolve to no
+        enforced bound contribute nothing to inherit and are left alone.
+        """
+        found = []
+        for match in REFERENCED_BOUND.finditer(bound.initializer):
+            name = match.group("name")
+            if name in {source, bound.name}:
+                continue
+            contributor = visible_owner(bound, name)
+            if contributor is not None:
+                found.append((name, contributor))
+        return found
 
     for bound in enforced:
         parsed = declaration(bound)

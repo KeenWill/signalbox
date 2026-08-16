@@ -168,6 +168,38 @@ class NumericBoundCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_derived_escape_fails_when_another_referenced_bound_differs_in_kind(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: ceiling - protects against oversized responses\n"
+            "const MAX_RESPONSE_BYTES: usize = 1024;\n"
+            "// numeric-bound: tunable - controls retained preview detail\n"
+            "const MAX_PREVIEW_BYTES: usize = 64;\n"
+            "// numeric-bound: derived ceiling from MAX_RESPONSE_BYTES\n"
+            "const MAX_TOTAL_BYTES: usize = MAX_RESPONSE_BYTES + MAX_PREVIEW_BYTES;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_TOTAL_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
+    def test_derived_escape_fails_when_the_source_is_in_another_function(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "fn first() {\n"
+            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
+            "}\n"
+            "fn second() {\n"
+            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    const MAX_BASE: usize = 1024;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DERIVED_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
     def test_derived_escape_fails_on_a_path_qualified_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,

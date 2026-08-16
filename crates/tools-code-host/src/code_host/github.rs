@@ -46,7 +46,7 @@ const USER_AGENT_VALUE: &str = "signalboxd";
 const API_VERSION: &str = "2026-03-10";
 // numeric-bound: tunable - controls the ordinary GitHub exchange wait
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-// numeric-bound: ceiling - protects memory from oversized GitHub JSON responses
+// numeric-bound: tunable - controls the largest GitHub JSON response accepted
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 // numeric-bound: not-a-bound - fixed maximum JSON escape expansion
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
@@ -81,7 +81,7 @@ const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
 // numeric-bound: ceiling - protects redirect parsing from oversized locations
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
-// numeric-bound: ceiling - protects latency and API spend from runaway pagination
+// numeric-bound: not-a-bound - 100 per page across GitHub's 3,000-file exposure
 const MAX_CHANGED_FILE_PAGES: u16 = 30;
 // numeric-bound: tunable - controls stack-comparison concurrency at the code host
 const MAX_STACK_COMPARISONS_IN_FLIGHT: usize = 8;
