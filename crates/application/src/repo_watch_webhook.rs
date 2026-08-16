@@ -5,9 +5,9 @@ use std::{error::Error, fmt, num::NonZeroU64};
 use serde_json::{Map, Value};
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, CommitSha, GitHubObjectId, LabelName,
-    PullRequestBody, PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber,
-    PullRequestTitle, RepoWatchAuthorLogin, RepoWatchWorkflowRunAttempt, RepositorySlug,
-    ReviewState, ReviewThreadId, WorkflowName,
+    MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 use uuid::Uuid;
 
@@ -122,6 +122,84 @@ pub enum RepoWatchPullRequestMissingPolicyV1 {
     RefreshInstead,
 }
 
+/// Field-labeled pull-request context decoded from one delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchWebhookPullRequestContextV1Input {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: Option<RepositorySlug>,
+    pub base_branch: BranchName,
+    pub head_branch: BranchName,
+    pub title: PullRequestTitle,
+    pub body: PullRequestBody,
+    pub labels: Vec<LabelName>,
+    pub draft: bool,
+    pub author: Option<RepoWatchAuthorLogin>,
+}
+
+/// One delivery's pull-request context, with the head repository GitHub omits
+/// once a tracked fork is deleted resolved during application rather than
+/// required at decode time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchWebhookPullRequestContextV1 {
+    input: RepoWatchWebhookPullRequestContextV1Input,
+}
+
+impl RepoWatchWebhookPullRequestContextV1 {
+    pub fn new(input: RepoWatchWebhookPullRequestContextV1Input) -> Self {
+        Self { input }
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.input.number
+    }
+
+    pub const fn head_sha(&self) -> &CommitSha {
+        &self.input.head_sha
+    }
+
+    pub fn head_repository(&self) -> Option<&RepositorySlug> {
+        self.input.head_repository.as_ref()
+    }
+
+    /// The canonical context when the delivery itself named a head repository.
+    pub fn delivered(&self) -> Option<PullRequestEventContext> {
+        self.input
+            .head_repository
+            .clone()
+            .map(|head_repository| self.canonical(head_repository))
+    }
+
+    /// The canonical context, reusing `retained` exactly when the delivery
+    /// omitted the head repository of a deleted fork.
+    pub fn with_retained_head_repository(
+        &self,
+        retained: &RepositorySlug,
+    ) -> PullRequestEventContext {
+        self.canonical(
+            self.input
+                .head_repository
+                .clone()
+                .unwrap_or_else(|| retained.clone()),
+        )
+    }
+
+    fn canonical(&self, head_repository: RepositorySlug) -> PullRequestEventContext {
+        PullRequestEventContext::new(PullRequestEventContextInput {
+            number: self.input.number,
+            head_sha: self.input.head_sha.clone(),
+            head_repository,
+            base_branch: self.input.base_branch.clone(),
+            head_branch: self.input.head_branch.clone(),
+            title: self.input.title.clone(),
+            body: self.input.body.clone(),
+            labels: self.input.labels.clone(),
+            draft: self.input.draft,
+            author: self.input.author.clone(),
+        })
+    }
+}
+
 /// Guard applied before replacing pull-request context from one delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchPullRequestHeadGuardV1 {
@@ -133,7 +211,7 @@ pub enum RepoWatchPullRequestHeadGuardV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchObservationChangeV1 {
     PullRequestContext {
-        context: PullRequestEventContext,
+        context: RepoWatchWebhookPullRequestContextV1,
         lifecycle: Option<RepoWatchPullRequestLifecycle>,
         head_guard: RepoWatchPullRequestHeadGuardV1,
         missing: RepoWatchPullRequestMissingPolicyV1,
@@ -357,25 +435,21 @@ fn apply_observation_change(
 
 fn apply_pull_request_context(
     state: &mut RepoWatchRepositoryStateInput,
-    context: &PullRequestEventContext,
+    context: &RepoWatchWebhookPullRequestContextV1,
     lifecycle: Option<RepoWatchPullRequestLifecycle>,
     head_guard: &RepoWatchPullRequestHeadGuardV1,
     missing: RepoWatchPullRequestMissingPolicyV1,
 ) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
     let Some(index) = pull_request_index(state, context.number()) else {
-        let refresh = match missing {
-            RepoWatchPullRequestMissingPolicyV1::HydrateBeforeApplying
-            | RepoWatchPullRequestMissingPolicyV1::RefreshInstead => {
-                RepoWatchTargetedRefreshV1::PullRequestHydration {
-                    pull_request: context.number(),
-                }
-            }
-        };
-        return Ok(ChangeApplyDispositionV1::NeedsRefresh(refresh));
+        return apply_missing_pull_request_context(state, context, lifecycle, missing);
     };
     let previous = &state.pull_requests[index];
+    // GitHub represents `pull_request.head.repo` as null once a tracked fork is
+    // deleted, which the poll normalizer answers by retaining the canonical head
+    // repository rather than dropping the observation.
+    let delivered = context.with_retained_head_repository(previous.context().head_repository());
     let resulting_lifecycle = lifecycle.unwrap_or(previous.lifecycle());
-    if previous.context() == context && previous.lifecycle() == resulting_lifecycle {
+    if previous.context() == &delivered && previous.lifecycle() == resulting_lifecycle {
         return Ok(ChangeApplyDispositionV1::Duplicate);
     }
     let guard_matches = match head_guard {
@@ -389,12 +463,49 @@ fn apply_pull_request_context(
     }
     state.pull_requests[index] = rebuild_pull_request(
         previous,
-        context.clone(),
+        delivered,
         resulting_lifecycle,
         previous.completed_check_runs().to_vec(),
         previous.reviews().to_vec(),
         previous.threads().to_vec(),
     )?;
+    Ok(ChangeApplyDispositionV1::Applied)
+}
+
+/// Applies a pull-request context change that has no canonical baseline yet.
+///
+/// A `HydrateBeforeApplying` delivery carries the pull request's complete opened
+/// context, so the patch inserts it instead of leaving the observation unchanged
+/// and projecting only a targeted query; the mapper's hydration refresh still
+/// reconciles the canonical cursor. A delivery with neither a delivered head
+/// repository nor a retained baseline has nothing to resolve one from and stays
+/// refresh-only.
+fn apply_missing_pull_request_context(
+    state: &mut RepoWatchRepositoryStateInput,
+    context: &RepoWatchWebhookPullRequestContextV1,
+    lifecycle: Option<RepoWatchPullRequestLifecycle>,
+    missing: RepoWatchPullRequestMissingPolicyV1,
+) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
+    let (
+        RepoWatchPullRequestMissingPolicyV1::HydrateBeforeApplying,
+        Some(lifecycle),
+        Some(delivered),
+    ) = (missing, lifecycle, context.delivered())
+    else {
+        return Ok(missing_pull_request_refresh(context.number()));
+    };
+    state.pull_requests.push(RepoWatchPullRequestState::try_new(
+        RepoWatchPullRequestStateInput {
+            context: delivered,
+            lifecycle,
+            mergeable_state: MergeableState::Unknown,
+            completed_check_suites: Vec::new(),
+            completed_check_runs: Vec::new(),
+            reviews: Vec::new(),
+            threads: Vec::new(),
+            reactions: Vec::new(),
+        },
+    )?);
     Ok(ChangeApplyDispositionV1::Applied)
 }
 
@@ -482,23 +593,27 @@ fn apply_check_run_union(
         return Ok(missing_pull_request_refresh(number));
     };
     let previous = &state.pull_requests[index];
-    if let Some(retained) = previous
+    // A completed run can be rerequested under the same provider identity with a
+    // later completion generation or a different conclusion, and the differ
+    // treats either as a new observable completion, so the retained run is
+    // replaced under the same head guard instead of failing the patch.
+    let retained_index = previous
         .completed_check_runs()
         .iter()
-        .find(|item| item.id() == check_run.id())
+        .position(|item| item.id() == check_run.id());
+    if retained_index
+        .is_some_and(|position| &previous.completed_check_runs()[position] == check_run)
     {
-        if retained == check_run {
-            return Ok(ChangeApplyDispositionV1::Duplicate);
-        }
-        return Err(RepoWatchWebhookApplyError::ConflictingImmutableFact(
-            "check-run identity",
-        ));
+        return Ok(ChangeApplyDispositionV1::Duplicate);
     }
     if previous.context().head_sha() != expected_head {
         return Ok(ChangeApplyDispositionV1::Superseded);
     }
     let mut check_runs = previous.completed_check_runs().to_vec();
-    check_runs.push(check_run.clone());
+    match retained_index {
+        Some(position) => check_runs[position] = check_run.clone(),
+        None => check_runs.push(check_run.clone()),
+    }
     state.pull_requests[index] = rebuild_pull_request(
         previous,
         previous.context().clone(),
@@ -1010,7 +1125,7 @@ fn map_push(
 
 fn pull_request_context(
     root: &Map<String, Value>,
-) -> Result<PullRequestEventContext, RepoWatchWebhookMappingError> {
+) -> Result<RepoWatchWebhookPullRequestContextV1, RepoWatchWebhookMappingError> {
     let pull_request = object_at(root, &["pull_request"], "pull_request")?;
     let labels = array_at(pull_request, &["labels"], "pull_request.labels")?
         .iter()
@@ -1028,30 +1143,32 @@ fn pull_request_context(
                 .map_err(|_| RepoWatchWebhookMappingError::InvalidField("pull_request.user.login"))
         })
         .transpose()?;
-    Ok(PullRequestEventContext::new(PullRequestEventContextInput {
-        number: pull_request_number(root)?,
-        head_sha: commit_at(pull_request, &["head", "sha"], "pull_request.head.sha")?,
-        head_repository: repository_at(
-            pull_request,
-            &["head", "repo", "full_name"],
-            "pull_request.head.repo.full_name",
-        )?,
-        base_branch: branch_at(pull_request, &["base", "ref"], "pull_request.base.ref")?,
-        head_branch: branch_at(pull_request, &["head", "ref"], "pull_request.head.ref")?,
-        title: PullRequestTitle::try_new(
-            string_at(pull_request, &["title"], "pull_request.title")?.to_owned(),
-        )
-        .map_err(|_| RepoWatchWebhookMappingError::InvalidField("pull_request.title"))?,
-        body: PullRequestBody::try_new(
-            nullable_string_at(pull_request, &["body"], "pull_request.body")?
-                .unwrap_or_default()
-                .to_owned(),
-        )
-        .map_err(|_| RepoWatchWebhookMappingError::InvalidField("pull_request.body"))?,
-        labels,
-        draft: bool_at(pull_request, &["draft"], "pull_request.draft")?,
-        author,
-    }))
+    Ok(RepoWatchWebhookPullRequestContextV1::new(
+        RepoWatchWebhookPullRequestContextV1Input {
+            number: pull_request_number(root)?,
+            head_sha: commit_at(pull_request, &["head", "sha"], "pull_request.head.sha")?,
+            head_repository: optional_repository_at(
+                pull_request,
+                &["head", "repo", "full_name"],
+                "pull_request.head.repo.full_name",
+            )?,
+            base_branch: branch_at(pull_request, &["base", "ref"], "pull_request.base.ref")?,
+            head_branch: branch_at(pull_request, &["head", "ref"], "pull_request.head.ref")?,
+            title: PullRequestTitle::try_new(
+                string_at(pull_request, &["title"], "pull_request.title")?.to_owned(),
+            )
+            .map_err(|_| RepoWatchWebhookMappingError::InvalidField("pull_request.title"))?,
+            body: PullRequestBody::try_new(
+                nullable_string_at(pull_request, &["body"], "pull_request.body")?
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+            .map_err(|_| RepoWatchWebhookMappingError::InvalidField("pull_request.body"))?,
+            labels,
+            draft: bool_at(pull_request, &["draft"], "pull_request.draft")?,
+            author,
+        },
+    ))
 }
 
 fn pull_request_number(
@@ -1228,6 +1345,34 @@ fn repository_at(
         .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
 }
 
+/// Reads a repository slug GitHub may omit or null at any step of `path`, as it
+/// does for `pull_request.head.repo` once a tracked fork is deleted.
+fn optional_repository_at(
+    root: &Map<String, Value>,
+    path: &[&str],
+    field: &'static str,
+) -> Result<Option<RepositorySlug>, RepoWatchWebhookMappingError> {
+    let mut value = root.get(path[0]);
+    for member in &path[1..] {
+        let Some(current) = value.filter(|current| !current.is_null()) else {
+            return Ok(None);
+        };
+        value = current
+            .as_object()
+            .ok_or(RepoWatchWebhookMappingError::InvalidField(field))?
+            .get(*member);
+    }
+    let Some(current) = value.filter(|current| !current.is_null()) else {
+        return Ok(None);
+    };
+    let slug = current
+        .as_str()
+        .ok_or(RepoWatchWebhookMappingError::InvalidField(field))?;
+    RepositorySlug::try_new(slug.to_owned())
+        .map(Some)
+        .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
+}
+
 fn login_at(
     root: &Map<String, Value>,
     path: &[&str],
@@ -1373,7 +1518,10 @@ mod tests {
         let payload = pull_request_payload("opened", "");
         let payload: Value = serde_json::from_str(&payload).expect("fixture JSON is valid");
         let root = object(&payload, "payload").expect("fixture root is an object");
-        let context = pull_request_context(root).expect("fixture context is valid");
+        let context = pull_request_context(root)
+            .expect("fixture context is valid")
+            .delivered()
+            .expect("fixture names its head repository");
         let reviewer = RepoWatchAuthorLogin::try_new(String::from(SIGNAL_REVIEWER))
             .expect("fixture reviewer is valid");
         let context = PullRequestEventContext::new(PullRequestEventContextInput {
@@ -1895,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_pull_request_application_requires_hydration() {
+    fn missing_opened_pull_request_applies_before_hydrating() {
         let previous = RepoWatchObservation::new(
             Vec::new(),
             RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
@@ -1904,6 +2052,34 @@ mod tests {
         let payload = pull_request_payload("opened", "");
         let patch = mapped_patch("pull_request", Some("opened"), &payload);
         let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("missing PR applies its delivered context");
+
+        let RepoWatchObservationApplyV1::NeedsTargetedRefresh {
+            observation,
+            refreshes,
+        } = outcome
+        else {
+            panic!("an opened PR must still request hydration")
+        };
+        let [applied] = observation.state().pull_requests() else {
+            panic!("the delivered pull request must be applied")
+        };
+        assert_eq!(applied.context().number().get(), PULL_REQUEST);
+        assert_eq!(applied.context().head_sha().as_str(), CURRENT_HEAD);
+        assert_eq!(applied.lifecycle(), RepoWatchPullRequestLifecycle::Open);
+        assert_eq!(refreshes.as_ref(), patch.targeted_refreshes());
+    }
+
+    #[test]
+    fn missing_closed_pull_request_stays_refresh_only() {
+        let previous = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
+                .expect("empty repository state is canonical"),
+        );
+        let payload = pull_request_payload("closed", "");
+        let patch = mapped_patch("pull_request", Some("closed"), &payload);
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
             .expect("missing PR maps to hydration");
 
         let RepoWatchObservationApplyV1::NeedsTargetedRefresh {
@@ -1911,10 +2087,79 @@ mod tests {
             refreshes,
         } = outcome
         else {
-            panic!("missing PR must await hydration")
+            panic!("a closed delivery without a baseline must await hydration")
         };
         assert!(observation.state().pull_requests().is_empty());
-        assert_eq!(refreshes.as_ref(), patch.targeted_refreshes());
+        assert_eq!(
+            refreshes.as_ref(),
+            [RepoWatchTargetedRefreshV1::PullRequestHydration {
+                pull_request: PullRequestNumber::new(
+                    NonZeroU64::new(PULL_REQUEST).expect("fixture PR is positive")
+                )
+            }]
+        );
+    }
+
+    #[test]
+    fn deleted_fork_pull_request_retains_the_canonical_head_repository() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let payload = pull_request_payload("closed", "").replace(
+            &format!(r#""repo":{{"full_name":"{OTHER_REPOSITORY}"}}"#),
+            r#""repo":null"#,
+        );
+        let patch = mapped_patch("pull_request", Some("closed"), &payload);
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a deleted fork is a provider shape, not a mapping failure");
+
+        let RepoWatchObservationApplyV1::Applied(observation) = outcome else {
+            panic!("a closed delivery for a retained PR must apply")
+        };
+        let [applied] = observation.state().pull_requests() else {
+            panic!("the retained pull request must remain")
+        };
+        assert_eq!(
+            applied.context().head_repository().as_str(),
+            OTHER_REPOSITORY
+        );
+        assert_eq!(applied.lifecycle(), RepoWatchPullRequestLifecycle::Closed);
+    }
+
+    #[test]
+    fn rerequested_check_run_replaces_the_retained_completion() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let payload = format!(
+            r#"{{
+                "action":"completed",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "check_run":{{
+                    "id":{RETAINED_CHECK_RUN},
+                    "head_sha":"{CURRENT_HEAD}",
+                    "completed_at":"2026-08-15T14:00:00Z",
+                    "name":"retained-check",
+                    "conclusion":"failure",
+                    "pull_requests":[{{
+                        "number":{PULL_REQUEST},
+                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                    }}]
+                }}
+            }}"#
+        );
+        let patch = mapped_patch("check_run", Some("completed"), &payload);
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a rerequested run is a new completion, not an immutable conflict");
+
+        let RepoWatchObservationApplyV1::NeedsTargetedRefresh { observation, .. } = outcome else {
+            panic!("check run must retain its aggregate-rollup query")
+        };
+        let [replaced] = observation.state().pull_requests()[0].completed_check_runs() else {
+            panic!("the retained run identity must not be duplicated")
+        };
+        assert_eq!(replaced.id().get(), RETAINED_CHECK_RUN);
+        assert_eq!(replaced.conclusion(), CheckConclusion::Failure);
+        assert_eq!(
+            replaced.completion_generation().as_str(),
+            "2026-08-15T14:00:00Z"
+        );
     }
 
     #[test]

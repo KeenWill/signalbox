@@ -45,6 +45,25 @@ const REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-content-identity/v1";
 const REPO_WATCH_EVENT_STREAM_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-stream-identity/v1";
+/// Largest number of recurring occurrence streams one repository's frontier may
+/// carry.
+///
+/// A stream is created by the first occurrence of a recurring event on a
+/// distinct subject: a pull request's own transitions, each of its labels, each
+/// review thread, each base branch it advances onto, and each distinct
+/// reaction. Every entry costs a 32-byte stream identity and an 8-byte
+/// sequence, so this ceiling bounds one repository's frontier at roughly 40 MB
+/// of resident state and a durable frontier of the same order. That is the
+/// point at which a single watched repository's identity state, rather than its
+/// event history, becomes the dominant cost of watching it, and it is far above
+/// what any real repository reaches: GitHub's largest public repositories have
+/// produced fewer than a million pull requests in their lifetimes, and each
+/// contributes streams only for the subjects it actually touches.
+///
+/// Refusing here is the safe direction. The alternative to refusing is reusing
+/// an occurrence number, which mints a content identity that collides with an
+/// already-durable one, so the differ stops rather than emit an identity that
+/// does not identify its occurrence.
 const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 
 /// A source-independent SHA-256 identity for one normalized event occurrence.
@@ -168,6 +187,15 @@ pub struct RepoWatchEventOccurrenceV1 {
 }
 
 impl RepoWatchEventOccurrenceV1 {
+    /// Pairs an event with an identity that is not derived from it.
+    ///
+    /// Production occurrences are built only by the differ, which computes the
+    /// identity from the occurrence's own evidence; nothing downstream can
+    /// recompute an identity to check it, so a wrong value here would become a
+    /// durable row whose advertised identity does not identify its content.
+    /// Fixtures that need a well-formed occurrence without running the differ
+    /// use this under `test-support`, which no production build enables.
+    #[cfg(feature = "test-support")]
     pub const fn from_parts(
         event: RepoWatchEvent,
         content_identity: RepoWatchEventContentIdentityV1,
@@ -996,11 +1024,19 @@ fn derive_pull_request_events(
             ids,
             events,
         )?;
-        if previous.is_none() {
-            return Ok(());
-        }
     }
     let Some(previous) = previous else {
+        if let Some(previous_repository) = repository_comparison.previous {
+            derive_base_advanced_event(
+                repository,
+                previous_repository,
+                repository_comparison.current,
+                current,
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
         return Ok(());
     };
     if previous.context().head_sha() != context.head_sha() {
@@ -3419,6 +3455,42 @@ mod tests {
     }
 
     #[test]
+    fn newly_observed_pull_request_emits_base_advance() -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            Vec::new(),
+            vec![branch_head(INITIAL_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+        let current_pull_request = pull_request(PullRequestFacts::matching(PULL_REQUEST_NUMBER))?;
+        let expected_branch = current_pull_request.context().base_branch().clone();
+        let current = observation(
+            vec![current_pull_request],
+            Vec::new(),
+            vec![branch_head(CHANGED_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind(), &RepoWatchEventKindV1::PullRequestOpened);
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Mergeable,
+            }
+        );
+        assert_eq!(
+            events[2].kind(),
+            &RepoWatchEventKindV1::BaseAdvanced {
+                branch: expected_branch,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn reaction_changes_emit_current_context_facts() -> Result<(), Box<dyn Error>> {
         let previous_reaction = reaction()?;
         let previous = observation(
@@ -3904,6 +3976,60 @@ mod tests {
                 223, 185, 48, 253, 187, 59, 190, 103, 33, 168, 251, 14, 111, 116, 146, 49, 83, 238,
                 232, 90, 92, 56, 217, 66, 135, 45, 24, 220, 226, 228, 105, 30,
             ]
+        );
+        Ok(())
+    }
+
+    fn stream_identity_for(index: usize) -> [u8; 32] {
+        let mut identity = [0_u8; 32];
+        identity[..8].copy_from_slice(&(index as u64).to_be_bytes());
+        identity
+    }
+
+    fn distinct_frontier_entries(count: usize) -> Vec<RepoWatchEventIdentityFrontierEntryV1> {
+        (0..count)
+            .map(|index| {
+                RepoWatchEventIdentityFrontierEntryV1::new(
+                    stream_identity_for(index),
+                    NonZeroU64::MIN,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn identity_frontier_holds_exactly_the_stream_ceiling() -> Result<(), Box<dyn Error>> {
+        let mut frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(
+            distinct_frontier_entries(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+        )?;
+
+        assert_eq!(
+            frontier.entries().len(),
+            MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS
+        );
+        assert_eq!(frontier.advance(stream_identity_for(0))?.get(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn identity_frontier_rejects_one_stream_past_the_ceiling() {
+        let entries = distinct_frontier_entries(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS + 1);
+
+        assert_eq!(
+            RepoWatchEventIdentityFrontierV1::try_from_entries(entries),
+            Err(RepoWatchEventIdentityFrontierError::StreamLimit)
+        );
+    }
+
+    #[test]
+    fn identity_frontier_at_the_ceiling_refuses_an_unknown_stream() -> Result<(), Box<dyn Error>> {
+        let mut frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(
+            distinct_frontier_entries(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+        )?;
+
+        assert_eq!(
+            frontier.advance(stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS)),
+            Err(RepoWatchEventIdentityFrontierError::StreamLimit)
         );
         Ok(())
     }

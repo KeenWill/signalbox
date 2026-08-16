@@ -94,7 +94,8 @@ pub use repo_watch_webhook::{
     RepoWatchPullRequestMissingPolicyV1, RepoWatchTargetedRefreshV1, RepoWatchWebhookApplyError,
     RepoWatchWebhookBodyReferenceV1, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
     RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
-    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, apply_repo_watch_observation_patch_v1,
+    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWebhookPullRequestContextV1,
+    RepoWatchWebhookPullRequestContextV1Input, apply_repo_watch_observation_patch_v1,
     map_repo_watch_webhook_delivery_v1,
 };
 pub use review_orchestration::{
