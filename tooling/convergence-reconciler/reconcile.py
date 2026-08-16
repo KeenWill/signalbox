@@ -64,6 +64,12 @@ query($ids: [ID!]!) {
         nodes { isResolved }
         pageInfo { hasNextPage endCursor }
       }
+      reviews(last: 100) {
+        nodes {
+          commit { oid }
+          comments(first: 1) { totalCount }
+        }
+      }
       commits(last: 1) {
         nodes {
           commit {
@@ -96,6 +102,14 @@ query($tracked: [ID!]!) {
 
 GREEN_CHECK_RUN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 GREEN_STATUS_CONTEXT_STATES = frozenset({"SUCCESS"})
+NON_GATING_CHECK_NAMES = frozenset(
+    {
+        "coderabbit",
+        "codecov/patch",
+        "codecov/project",
+        "comment the coverage report",
+    }
+)
 STATE_VERSION = 1
 PAGINATION_BATCH_SIZE = 20
 DETAIL_BATCH_SIZE = 20
@@ -207,7 +221,7 @@ class GitHubGraphQL:
             for node in open_pull_requests
             if node["id"] in tracked_ids
             or (
-                head_repository(node) == self.repository
+                same_repository(head_repository(node), self.repository)
                 and fnmatch.fnmatchcase(node.get("headRefName") or "", head_pattern)
             )
         ]
@@ -267,6 +281,10 @@ def head_repository(node: dict[str, Any]) -> str | None:
     return repository.get("nameWithOwner") if isinstance(repository, dict) else None
 
 
+def same_repository(left: str | None, right: str) -> bool:
+    return left is not None and left.casefold() == right.casefold()
+
+
 def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
     commit_nodes = node["commits"]["nodes"]
     commit = commit_nodes[0]["commit"] if commit_nodes else None
@@ -287,6 +305,11 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "mergeable": node["mergeable"],
         "checked_head_oid": commit["oid"] if commit else None,
         "review_threads": list(threads["nodes"]),
+        "quiet_review_head_oids": [
+            review["commit"]["oid"]
+            for review in node["reviews"]["nodes"]
+            if review.get("commit") and review["comments"]["totalCount"] == 0
+        ],
         "checks": list(contexts["nodes"]),
         "_thread_page": threads["pageInfo"],
         "_check_page": contexts["pageInfo"],
@@ -343,7 +366,7 @@ def check_name(check: dict[str, Any]) -> str:
 
 def is_non_gating_check(check: dict[str, Any]) -> bool:
     name = check_name(check)
-    return name.endswith("(report only)") or name.casefold() == "coderabbit"
+    return name.endswith("(report only)") or name.casefold() in NON_GATING_CHECK_NAMES
 
 
 def check_is_green(check: dict[str, Any]) -> bool:
@@ -370,6 +393,8 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     if unresolved_threads:
         reasons.append(f"unresolved-review-threads:{unresolved_threads}")
+    if pull_request["head_oid"] not in pull_request["quiet_review_head_oids"]:
+        reasons.append("quiet-review-not-completed-for-current-head")
     if pull_request["checked_head_oid"] != pull_request["head_oid"]:
         reasons.append("checks-not-for-current-head")
     for check in gating_checks:
@@ -548,7 +573,7 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
     )
     if not valid_shape:
         raise ValueError(f"unsupported or malformed state file: {path}")
-    if state.get("repository") != repository:
+    if not same_repository(state.get("repository"), repository):
         raise ValueError(f"state file belongs to another repository: {path}")
     return state
 
@@ -849,7 +874,7 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
     now = time.time()
     summaries = record_terminal_pull_requests(config, logger, state, tracked, now)
     for pull_request in pull_requests:
-        authorized = pull_request["head_repository"] == config.repository
+        authorized = same_repository(pull_request["head_repository"], config.repository)
         watched = authorized and fnmatch.fnmatchcase(
             pull_request["head_ref"], config.head_pattern
         )

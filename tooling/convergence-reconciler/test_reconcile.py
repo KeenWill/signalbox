@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import dataclasses
-import json
 import math
 from pathlib import Path
 import subprocess
@@ -24,65 +22,239 @@ from reconcile import (
 )
 
 
-FIXTURES = Path(__file__).with_name("fixtures")
-
-
-def fixture(filename: str, case: str) -> dict[str, object]:
-    with (FIXTURES / filename).open(encoding="utf-8") as stream:
-        cases = json.load(stream)
-    return cases[case]
-
-
 class ConvergencePredicateTests(unittest.TestCase):
     def test_green_checks_resolved_threads_and_mergeable_base_converge(self) -> None:
-        case = fixture("convergence.json", "converged_with_non_gating_failures")
-        self.assertEqual(evaluate_convergence(case["pull_request"]), case["expected"])
+        pull_request = {
+            "checked_head_oid": "head-green",
+            "head_oid": "head-green",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-green"],
+            "review_threads": [{"isResolved": True}],
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "Comment the coverage report",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "codecov/patch",
+                    "state": "PENDING",
+                },
+            ],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertTrue(computed["converged"])
+        self.assertEqual(computed["reasons"], [])
+        self.assertEqual(
+            computed["gating_checks"],
+            [{"name": "required build", "state": "SUCCESS"}],
+        )
+        self.assertEqual(
+            computed["non_gating_checks"],
+            [
+                {"name": "Comment the coverage report", "state": "FAILURE"},
+                {"name": "codecov/patch", "state": "PENDING"},
+            ],
+        )
 
     def test_unresolved_review_thread_blocks_convergence(self) -> None:
-        case = fixture("convergence.json", "unresolved_thread_blocks")
-        self.assertEqual(evaluate_convergence(case["pull_request"]), case["expected"])
+        pull_request = {
+            "checked_head_oid": "head-thread",
+            "checks": [],
+            "head_oid": "head-thread",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-thread"],
+            "review_threads": [{"isResolved": False}],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(computed["reasons"], ["unresolved-review-threads:1"])
 
     def test_pending_gating_check_blocks_convergence(self) -> None:
-        case = fixture("convergence.json", "pending_check_blocks")
-        self.assertEqual(evaluate_convergence(case["pull_request"]), case["expected"])
+        pull_request = {
+            "checked_head_oid": "head-pending",
+            "head_oid": "head-pending",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-pending"],
+            "review_threads": [],
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required test",
+                    "status": "IN_PROGRESS",
+                    "conclusion": None,
+                }
+            ],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            ["check-not-green:required test:IN_PROGRESS"],
+        )
 
     def test_check_snapshot_for_an_older_head_blocks_convergence(self) -> None:
-        case = fixture("convergence.json", "stale_check_snapshot_blocks")
-        self.assertEqual(evaluate_convergence(case["pull_request"]), case["expected"])
+        pull_request = {
+            "checked_head_oid": "older-head",
+            "checks": [],
+            "head_oid": "current-head",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["current-head"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(computed["reasons"], ["checks-not-for-current-head"])
 
     def test_base_conflict_blocks_convergence(self) -> None:
-        case = fixture("convergence.json", "conflict_blocks")
-        self.assertEqual(evaluate_convergence(case["pull_request"]), case["expected"])
+        pull_request = {
+            "checked_head_oid": "head-conflict",
+            "checks": [],
+            "head_oid": "head-conflict",
+            "mergeable": "CONFLICTING",
+            "quiet_review_head_oids": ["head-conflict"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(computed["reasons"], ["base-conflict"])
 
     def test_unknown_mergeability_blocks_convergence(self) -> None:
-        case = fixture("convergence.json", "unknown_mergeability_blocks")
-        self.assertEqual(evaluate_convergence(case["pull_request"]), case["expected"])
+        pull_request = {
+            "checked_head_oid": "head-unknown",
+            "checks": [],
+            "head_oid": "head-unknown",
+            "mergeable": "UNKNOWN",
+            "quiet_review_head_oids": ["head-unknown"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(computed["reasons"], ["mergeability-unknown"])
+
+    def test_missing_quiet_review_for_current_head_blocks_convergence(self) -> None:
+        pull_request = {
+            "checked_head_oid": "current-head",
+            "checks": [],
+            "head_oid": "current-head",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["older-head"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            ["quiet-review-not-completed-for-current-head"],
+        )
 
 
 class DecisionTests(unittest.TestCase):
     def test_converged_pull_request_is_merge_ready(self) -> None:
-        case = fixture("decisions.json", "converged")
-        self.assertEqual(dataclasses.asdict(choose_decision(**case["input"])), case["expected"])
+        decision = choose_decision(
+            converged=True,
+            now=1000,
+            last_dispatched_at=None,
+            cool_off_seconds=300,
+            active_work=None,
+            dry_run=False,
+            dispatch_configured=True,
+        )
+
+        self.assertEqual(decision.name, "merge-ready")
+        self.assertEqual(decision.reason, "convergence-predicate-satisfied")
 
     def test_recent_dispatch_is_in_cool_off(self) -> None:
-        case = fixture("decisions.json", "cooling_off")
-        self.assertEqual(dataclasses.asdict(choose_decision(**case["input"])), case["expected"])
+        decision = choose_decision(
+            converged=False,
+            now=1000,
+            last_dispatched_at=900,
+            cool_off_seconds=300,
+            active_work=None,
+            dry_run=False,
+            dispatch_configured=True,
+        )
+
+        self.assertEqual(decision.name, "cooling-off")
+        self.assertEqual(decision.reason, "dispatch-cool-off:200s-remaining")
 
     def test_active_work_prevents_dispatch(self) -> None:
-        case = fixture("decisions.json", "active_work")
-        self.assertEqual(dataclasses.asdict(choose_decision(**case["input"])), case["expected"])
+        decision = choose_decision(
+            converged=False,
+            now=1000,
+            last_dispatched_at=None,
+            cool_off_seconds=300,
+            active_work=True,
+            dry_run=False,
+            dispatch_configured=True,
+        )
+
+        self.assertEqual(decision.name, "already-active")
+        self.assertEqual(decision.reason, "operator-command-reported-active-work")
 
     def test_dry_run_reports_the_dispatch_it_would_make(self) -> None:
-        case = fixture("decisions.json", "dry_run")
-        self.assertEqual(dataclasses.asdict(choose_decision(**case["input"])), case["expected"])
+        decision = choose_decision(
+            converged=False,
+            now=1000,
+            last_dispatched_at=None,
+            cool_off_seconds=300,
+            active_work=False,
+            dry_run=True,
+            dispatch_configured=False,
+        )
+
+        self.assertEqual(decision.name, "would-dispatch")
+        self.assertEqual(decision.reason, "dry-run-and-no-active-work")
 
     def test_inactive_work_dispatches_outside_cool_off(self) -> None:
-        case = fixture("decisions.json", "dispatch")
-        self.assertEqual(dataclasses.asdict(choose_decision(**case["input"])), case["expected"])
+        decision = choose_decision(
+            converged=False,
+            now=1000,
+            last_dispatched_at=600,
+            cool_off_seconds=300,
+            active_work=False,
+            dry_run=False,
+            dispatch_configured=True,
+        )
+
+        self.assertEqual(decision.name, "dispatch")
+        self.assertEqual(decision.reason, "no-active-work-and-outside-cool-off")
 
     def test_missing_dispatch_command_skips_mutation(self) -> None:
-        case = fixture("decisions.json", "missing_dispatch_command")
-        self.assertEqual(dataclasses.asdict(choose_decision(**case["input"])), case["expected"])
+        decision = choose_decision(
+            converged=False,
+            now=1000,
+            last_dispatched_at=None,
+            cool_off_seconds=300,
+            active_work=False,
+            dry_run=False,
+            dispatch_configured=False,
+        )
+
+        self.assertEqual(decision.name, "skipped")
+        self.assertEqual(decision.reason, "dispatch-command-not-configured")
 
 
 class InputValidationTests(unittest.TestCase):
@@ -169,6 +341,43 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_requests, [])
         self.assertEqual(tracked, terminal["nodes"])
 
+    def test_repository_identity_matching_ignores_case(self) -> None:
+        client = GitHubGraphQL("owner/repository", 12)
+        listing = {
+            "repository": {
+                "pullRequests": {
+                    "nodes": [
+                        {
+                            "id": "same-repository-node",
+                            "headRefName": "agent/work",
+                            "headRepository": {"nameWithOwner": "OWNER/REPOSITORY"},
+                        }
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            },
+            "tracked": [],
+        }
+        terminal = {
+            "nodes": [
+                {
+                    "id": "same-repository-node",
+                    "number": 17,
+                    "state": "MERGED",
+                    "mergedAt": "2026-08-16T00:00:00Z",
+                    "closedAt": None,
+                    "headRefName": "agent/work",
+                    "headRefOid": "abc123",
+                }
+            ]
+        }
+        with mock.patch.object(client, "execute", side_effect=[listing, terminal]) as execute:
+            pull_requests, tracked = client.snapshot([], "agent/*")
+
+        self.assertEqual(pull_requests, [])
+        self.assertEqual(tracked, terminal["nodes"])
+        self.assertEqual(execute.call_count, 2)
+
 
 class DispatchFenceTests(unittest.TestCase):
     def test_nonzero_dispatch_exit_retains_cool_off_fence(self) -> None:
@@ -204,6 +413,7 @@ class DispatchFenceTests(unittest.TestCase):
                 "head_oid": "head",
                 "checked_head_oid": "head",
                 "mergeable": "MERGEABLE",
+                "quiet_review_head_oids": ["head"],
                 "review_threads": [{"isResolved": False}],
                 "checks": [],
             }

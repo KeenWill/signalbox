@@ -41,13 +41,14 @@ file and atomic replacement.
 
 ## Convergence predicate
 
-An open, watched pull request is converged exactly when all three facts hold on
+An open, watched pull request is converged exactly when all four facts hold on
 one GraphQL snapshot:
 
 1. Every review thread is resolved.
-2. Every gating check on the commit whose OID equals the current head OID is
+2. A completed quiet review exists for the current head OID.
+3. Every gating check on the commit whose OID equals the current head OID is
    green.
-3. GitHub reports the pull request `MERGEABLE` against its current base.
+4. GitHub reports the pull request `MERGEABLE` against its current base.
 
 A completed check run is green when its conclusion is `SUCCESS`, `NEUTRAL`, or
 `SKIPPED`; a commit status is green only when it is `SUCCESS`. Queued, pending,
@@ -56,9 +57,10 @@ block convergence. An absent set of gating checks is green. A mismatched commit
 OID blocks convergence even when every returned check is successful.
 
 Check names ending with the exact, case-sensitive suffix `(report only)` are
-non-gating. The status context whose name case-insensitively equals `CodeRabbit`
-is also non-gating. These results are still included in the computed state
-passed to operator commands. No other name is excluded.
+non-gating. The case-insensitive names `CodeRabbit`, `codecov/project`,
+`codecov/patch`, and `Comment the coverage report` are also non-gating, matching
+the repository's declared informational coverage posture. These results are
+still included in the computed state passed to operator commands.
 
 `CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft status is
 reported but is not an extra convergence condition: the commissioned predicate
@@ -176,9 +178,8 @@ service supervision owns that singleton policy.
 
 ## Tests
 
-The unit tests consume synthetic JSON fixtures and call only the pure
-convergence and decision functions. They never invoke `gh` or an operator
-command:
+The unit tests use explicit synthetic inputs and expectations and never invoke
+`gh` or an operator command:
 
 ```console
 python3 tooling/convergence-reconciler/test_reconcile.py
