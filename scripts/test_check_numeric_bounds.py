@@ -118,7 +118,7 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("invalid derived declaration", result.stdout)
 
-    def test_derived_escape_fails_when_the_source_name_is_ambiguous(self) -> None:
+    def test_derived_escape_resolves_the_source_in_its_own_module(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
             "mod first {\n"
@@ -135,7 +135,38 @@ class NumericBoundCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("MAX_DERIVED_BYTES", result.stdout)
-        self.assertIn("declares more than once", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
+    def test_derived_escape_fails_when_the_source_is_only_in_a_sibling_module(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "mod first {\n"
+            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
+            "}\n"
+            "mod second {\n"
+            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    const MAX_BASE: usize = 1024;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DERIVED_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
+    def test_derived_escape_resolves_a_source_from_an_enclosing_scope(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: ceiling - protects against oversized text\n"
+            "const MAX_BASE: usize = 1024;\n"
+            "mod inner {\n"
+            "    use super::MAX_BASE;\n"
+            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_test_module_bound_is_inventoried_without_gating(self) -> None:
         result = run_checker(

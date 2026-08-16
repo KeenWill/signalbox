@@ -34,12 +34,19 @@ A mechanically derived bound may use the narrow escape
     // numeric-bound: derived ceiling from MAX_SOURCE_CHARACTERS
 
 only when its initializer actually references the named, same-file bound and
-that name resolves unambiguously to a direct declaration of the same kind. This
-keeps self-evident byte/unit translations from repeating rationale while
-preventing an unexplained independent cap from hiding behind the escape. A
-source name that two modules in one file both declare resolves to neither: the
-scan is lexical and cannot tell which declaration the initializer sees, so it
-reports the ambiguity rather than guessing.
+that name resolves to a direct declaration of the same kind. This keeps
+self-evident byte/unit translations from repeating rationale while preventing
+an unexplained independent cap from hiding behind the escape.
+
+The source name resolves in the Rust scope that declares it: the innermost
+inline module containing the derived constant, then outward through enclosing
+modules to the file. A sibling module's declaration is never in scope, so a
+derivation whose initializer really reads an imported constant cannot be
+validated against an unrelated same-named constant elsewhere in the file, and a
+nearer declaration shadows a farther one exactly as Rust resolves it. What this
+lexical scan cannot follow, it refuses: a name reachable only through a `use`
+from outside the file leaves the escape unproven and the declaration is
+rejected.
 
 Because discovery is deliberately lexical, a fixed representation fact whose
 name contains a boundary token may declare ``not-a-bound`` with a one-line
@@ -112,6 +119,7 @@ TEST_MODULE = re.compile(
     r"(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
     re.MULTILINE,
 )
+MODULE_BLOCK = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
 EXTERNAL_MODULE = re.compile(
     r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)+)"
     r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
@@ -127,6 +135,8 @@ class Bound:
     path: Path
     name: str
     line: int
+    offset: int
+    scope: tuple[int, int] | None
     initializer: str
     annotation: str
     test_only: bool
@@ -220,6 +230,20 @@ def test_ranges(code: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def module_ranges(code: str) -> list[tuple[int, int]]:
+    """Report the span of every inline `mod name { ... }` block in one file."""
+    ranges = []
+    for match in MODULE_BLOCK.finditer(code):
+        ranges.append((match.start(), matching_brace(code, match.end() - 1)))
+    return ranges
+
+
+def innermost_scope(offset: int, ranges: list[tuple[int, int]]) -> tuple[int, int] | None:
+    """Report the narrowest module block containing ``offset``, or the file."""
+    enclosing = [span for span in ranges if span[0] <= offset <= span[1]]
+    return max(enclosing, default=None)
+
+
 def external_test_sources(path: Path, text: str, code: str) -> set[Path]:
     """Report the sources a `#[cfg(test)] mod name;` in ``path`` owns.
 
@@ -289,6 +313,7 @@ def inventory(root: Path) -> list[Bound]:
     for path, text in sources.items():
         code = blanked[path]
         ranges = test_ranges(code)
+        modules = module_ranges(code)
         external = in_test_sources(path, test_sources)
         lines = text.splitlines()
         relative = path.relative_to(root)
@@ -304,6 +329,8 @@ def inventory(root: Path) -> list[Bound]:
                     path=relative,
                     name=name,
                     line=line,
+                    offset=match.start(),
+                    scope=innermost_scope(match.start(), modules),
                     initializer=code[match.end() : end],
                     annotation=annotation,
                     test_only=external or in_ranges(match.start(), ranges),
@@ -332,13 +359,33 @@ def declaration(bound: Bound) -> tuple[str, str, str | None] | None:
 def validate(bounds: list[Bound]) -> list[str]:
     failures = []
     enforced = [bound for bound in bounds if is_enforced(bound)]
-    by_file_and_name: dict[tuple[Path, str], Bound] = {}
-    ambiguous: set[tuple[Path, str]] = set()
+    declarations: dict[tuple[Path, str], list[Bound]] = {}
     for bound in enforced:
-        key = (bound.path, bound.name)
-        if key in by_file_and_name:
-            ambiguous.add(key)
-        by_file_and_name[key] = bound
+        declarations.setdefault((bound.path, bound.name), []).append(bound)
+
+    def depth(candidate: Bound) -> int:
+        return -1 if candidate.scope is None else candidate.scope[0]
+
+    def visible_owner(bound: Bound, source: str) -> Bound | None:
+        """Resolve ``source`` as the Rust scope around ``bound`` would.
+
+        A file-level declaration is visible everywhere in its file and an inline
+        module's declaration only within that module, so a sibling module never
+        supplies an owner. The nearest enclosing declaration shadows the rest;
+        two at the same depth would not compile, and resolve to neither here.
+        """
+        visible = [
+            candidate
+            for candidate in declarations.get((bound.path, source), ())
+            if candidate.scope is None
+            or candidate.scope[0] <= bound.offset <= candidate.scope[1]
+        ]
+        if not visible:
+            return None
+        nearest = [
+            candidate for candidate in visible if depth(candidate) == max(map(depth, visible))
+        ]
+        return nearest[0] if len(nearest) == 1 else None
 
     def resolves_to_direct(bound: Bound, kind: str, seen: set[str]) -> bool:
         parsed = declaration(bound)
@@ -349,10 +396,7 @@ def validate(bounds: list[Bound]) -> list[str]:
             return bool(parsed[1].strip())
         if source in seen or re.search(rf"\b{re.escape(source)}\b", bound.initializer) is None:
             return False
-        key = (bound.path, source)
-        if key in ambiguous:
-            return False
-        owner = by_file_and_name.get(key)
+        owner = visible_owner(bound, source)
         return owner is not None and resolves_to_direct(owner, kind, seen | {source})
 
     for bound in enforced:
@@ -364,11 +408,6 @@ def validate(bounds: list[Bound]) -> list[str]:
         kind, rationale, source = parsed
         if source is None and not rationale.strip():
             failures.append(f"{location} has an empty rationale")
-        elif source is not None and (bound.path, source) in ambiguous:
-            failures.append(
-                f"{location} derives from {source}, which the file declares "
-                "more than once"
-            )
         elif source is not None and not resolves_to_direct(bound, kind, {bound.name}):
             failures.append(
                 f"{location} has an invalid derived declaration from {source}"

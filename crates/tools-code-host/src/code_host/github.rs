@@ -60,7 +60,7 @@ const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
 const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
 // numeric-bound: ceiling - protects response memory from oversized submodule URLs
 const MAX_REPOSITORY_SUBMODULE_URL_BYTES: usize = 8 * 1024;
-// numeric-bound: not-a-bound - fixed per-entry response-budget allowance
+// numeric-bound: ceiling - budgets per-entry JSON overhead in the response ceiling
 const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
 // numeric-bound: ceiling - protects memory while listing oversized directories
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
