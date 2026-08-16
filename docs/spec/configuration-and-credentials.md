@@ -589,17 +589,46 @@ unavailable directory masquerading as an empty successful scan. The catalog is
 read once at daemon startup; changing it requires a restart and never rewrites
 an earlier discovery snapshot.
 
-**Committed unimplemented functionality — configured-root selector identity.**
-Template eligibility will give every configured root a stable
-`ConfiguredInstructionRootId`. Its value is SHA-256 over literal UTF-8
-`signalbox-configured-instruction-root-v1`, followed by the canonical path as an
-unsigned 64-bit big-endian byte length and that many exact UTF-8 bytes. It is
-displayed as 64 lowercase hexadecimal characters. The identifier lets a template
-distinguish two configured roots with the same root-relative bundle path without
-placing an absolute daemon path in the template selector. No present
-configuration, template, or runtime surface materializes this identifier; the
-eligibility slice that adds selectors must derive it from the validated path by
-this algorithm.
+**Committed unimplemented functionality — configured-root identities.** A
+configured root carries two distinct identities, because one value cannot serve
+both purposes without leaking.
+
+`ConfiguredInstructionRootId` is the template-selector identity. Its value is
+SHA-256 over literal UTF-8 `signalbox-configured-instruction-root-v1`, followed
+by the canonical path as an unsigned 64-bit big-endian byte length and that many
+exact UTF-8 bytes, displayed as 64 lowercase hexadecimal characters. Deriving it
+from the path is what lets a template distinguish two configured roots with the
+same root-relative bundle path without placing an absolute daemon path in the
+selector, and what keeps a template's content digest reproducible from
+configuration alone. It is daemon- and template-side only and never reaches a
+model or a provider.
+
+The provider-safe root reference is the identity a model may see, and it is
+therefore not derived from the path. A public unkeyed path hash is not
+provider-safe at all: a reader who guesses a conventional home or checkout
+directory can hash candidates and compare them against the reference exposed by
+`instructions.list` and every configured-root wrapper, recovering usernames and
+repository layout the reference was supposed to withhold. It is therefore
+operator-assigned. The slice extends `[workspace_instructions]` so that an entry
+of `registered_roots` may be written as a table with exactly `path`, validated
+as the string form is today, and `provider_reference`: exactly 64 lowercase
+hexadecimal characters naming 32 opaque bytes, which the operator generates
+randomly once and then keeps stable, since provider-visible ordering and
+rendered wrapper bytes depend on it. Startup rejects a missing reference, a
+duplicate across roots, and one equal to any root's
+`ConfiguredInstructionRootId`, which would reintroduce the derivation it exists
+to avoid. Randomness is not verifiable, so those rejections catch the
+distinguishable mistakes and the grammar states the requirement plainly for the
+rest. No present parser admits the table form; the bare-string form above is
+what this build accepts, and a root without a reference cannot become
+provider-visible.
+
+No present configuration, template, or runtime surface materializes either
+identity. Both belong to the registration slice rather than to the later
+eligibility slice, because registration's alias records already carry a root's
+provider-safe reference: a registration child that could not materialize these
+would have to emit alias records without their authority reference and backfill
+them later.
 
 Each `[[models]]` record declares its capability surface with
 `reasoning_levels`, `fast_mode`, `service_tiers`, and `input_modalities`.
@@ -2243,11 +2272,23 @@ path bytes, kind (`agent_document` first), then source-hash bytes. The immutable
 resolved template bundle retains that ordered sequence, and session creation
 copies it unchanged as unresolved eligibility input.
 
-Selector-bearing bundles use content-digest version three. It retains the
-version-two frames below except that its first frame is
-`signalbox/session-template/content-digest/v3`; after the model-settings digest
-it writes the selector count as eight unsigned big-endian bytes, then each
-canonical selector record. Every variable-length field in a record is
+Content-digest version three is selected by the template's parsed shape, not by
+whether its selector sequence turned out to be nonempty. A template whose
+`instruction_selectors` key is present uses version three, including when the
+array is explicitly empty, in which case it writes a selector count of zero and
+no records. A template with no `instruction_selectors` key keeps version two
+unchanged, which is what stops every existing selector-free template from
+changing digest. Generated review templates carry no such key and therefore stay
+on version two; their earlier description as carrying an empty sequence
+described the resolved bundle, not the digest input. Absent and explicitly empty
+are thus deliberately different digests for the same effective eligibility,
+because the digest authenticates what the template document said rather than
+what it amounted to.
+
+Version three retains the version-two frames below except that its first frame
+is `signalbox/session-template/content-digest/v3`; after the model-settings
+digest it writes the selector count as eight unsigned big-endian bytes, then
+each canonical selector record. Every variable-length field in a record is
 length-framed, and the fixed-width ones are written raw, so the record is
 uniquely decodable and two implementations cannot hash one selector differently.
 In order: the length-framed root spelling; for `configured` only, the 32 raw
@@ -2257,10 +2298,11 @@ frame is eight unsigned big-endian bytes followed by exactly that many bytes,
 matching the selector count above and the frames version two already uses; raw
 concatenation is not an admissible reading of any of the three variable-length
 fields. Thus templates that differ only in selectors have different provenance.
-Generated review templates carry the empty sequence. No present parser admits
-`instruction_selectors`, no resolved bundle retains it, and the implemented
-version-two digest and stable vector below remain unchanged until that child
-lands.
+Generated review templates carry the empty resolved sequence and no
+`instruction_selectors` key, so they keep the version-two digest. No present
+parser admits `instruction_selectors`, no resolved bundle retains it, and the
+implemented version-two digest and stable vector below remain unchanged until
+that child lands.
 
 An inline prompt is the exact TOML string value. A prompt-file reference is
 either a relative path resolved from the template document's parent directory,
