@@ -162,11 +162,11 @@ use signalbox_process_protocol::{
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_BLOB_READ_BYTES,
-    MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
-    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-    ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
-    ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
-    ModelSettingsOverlay as WireModelSettingsOverlay,
+    MAX_CONCURRENT_SNAPSHOT_READERS, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
+    ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost, ModelCallState,
+    ModelCallTokenUsage, ModelCapabilities as WireModelCapabilities,
+    ModelChangeAdjustment as WireModelChangeAdjustment, ModelSelection as WireModelSelection,
+    ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
     ModelSettingsSnapshot as WireModelSettingsSnapshot, PositiveCanonicalU64, ProtocolVersion,
     ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
@@ -246,10 +246,6 @@ const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
-// Tunable effective ceiling: preserving the prior eight-reader admission bound
-// prevents enlarged pools from letting connection-holding snapshot reads
-// consume the headroom reserved for active turns and other runtime work.
-const SNAPSHOT_READER_EFFECTIVE_CEILING: usize = 8;
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -1309,7 +1305,7 @@ fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     }
     usize::try_from(available)
         .ok()
-        .map(|available| available.min(SNAPSHOT_READER_EFFECTIVE_CEILING))
+        .map(|available| available.min(MAX_CONCURRENT_SNAPSHOT_READERS))
 }
 
 const fn is_review_mutation(request: &ClientRequest) -> bool {
@@ -14923,12 +14919,12 @@ mod tests {
         ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
-        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError,
-        PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
-        ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
-        SNAPSHOT_READER_EFFECTIVE_CEILING, SnapshotReaderAdmission, SnapshotSpoolError,
+        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_CONCURRENT_SNAPSHOT_READERS,
+        MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES,
+        OperationalImportError, PendingConversationImport, ProcessConnectionError,
+        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
+        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
         SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
@@ -15963,14 +15959,14 @@ mod tests {
 
     #[test]
     fn enlarged_pool_preserves_the_snapshot_reader_effective_ceiling() {
-        let enlarged_pool_connections = u32::try_from(SNAPSHOT_READER_EFFECTIVE_CEILING)
+        let enlarged_pool_connections = u32::try_from(MAX_CONCURRENT_SNAPSHOT_READERS)
             .expect("the effective ceiling fits PostgreSQL pool capacity")
             + RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS
             + 1;
 
         assert_eq!(
             snapshot_reader_capacity(enlarged_pool_connections),
-            Some(SNAPSHOT_READER_EFFECTIVE_CEILING)
+            Some(MAX_CONCURRENT_SNAPSHOT_READERS)
         );
     }
 
