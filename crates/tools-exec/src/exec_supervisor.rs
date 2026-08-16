@@ -17,6 +17,8 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use crate::MAX_HTTPS_PROXY_TUNNELS;
+
     use std::{
         collections::{BTreeMap, BTreeSet},
         ffi::OsString,
@@ -51,7 +53,6 @@ mod linux {
     const DISPATCH_HTTPS_PROXY_MODE: &str = "--dispatch-with-https-proxy";
     const HTTPS_PROXY_PORT: u16 = 18_080;
     const HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
-    const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
     const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
     const LAUNCH_MODE: &str = "--launch";
     const OUTER_MODE: &str = "--outer";
