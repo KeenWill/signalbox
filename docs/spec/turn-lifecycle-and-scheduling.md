@@ -2,7 +2,9 @@
 
 The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
-(`agent/runner-awaiting-recovery-persistence`).
+(`agent/runner-awaiting-recovery-persistence`). The atomic persistence
+transition into runner recovery was verified against this PR
+(`agent/runner-loss-session-transaction`).
 
 The active-tail predecessor-steering correction was verified against this PR
 (`agent/daemon-ops-overnight`).
@@ -633,21 +635,22 @@ connection epoch, and stale epochs cannot write after that commit. Transport
 closure and protocol failure reach the same terminal connection state; clean
 shutdown remains a distinct durable state.
 
-**Committed unimplemented functionality.** No present runner execution or
-placement surface propagates connection loss into sessions. Future bounded
-per-session propagation marks a pinned placement `RunnerLost` or an unpinned
-placement whose exact-identity selector names the lost runner
-`RunnerLostBeforePin { runner }`, preserves exact tool-attempt ambiguity, and
-appends one durable runner state event. An active turn already at a runner
-boundary moves to `AwaitingRunnerRecovery`. A daemon-local model operation that
-was physically authorized before loss retains its ordinary completion or
-ambiguity law; its observation may complete the turn, but any returned
-runner-only proposal parks before authorization because the frozen runner locus
-is now lost. No provider call is repeated merely to project runner loss. A
-queued turn remains queued and cannot activate while its placement is lost. An
-unpinned capability-class request names no selected runner and is unaffected
-until a live registration can satisfy it. Locking, page bounds, and crash
-recovery are owned by [persistence-protocol](persistence-protocol.md).
+The persistence adapter applies bounded per-session connection-loss propagation.
+It marks a pinned placement `RunnerLost` or an unpinned placement whose
+exact-identity selector names the lost runner `RunnerLostBeforePin { runner }`,
+preserves exact tool-attempt ambiguity, and appends one durable runner state
+event. An active turn already at a runner boundary moves to
+`AwaitingRunnerRecovery`. A daemon-local model operation that was physically
+authorized before loss retains its ordinary completion or ambiguity law; its
+observation may complete the turn, but any returned runner-only proposal parks
+before authorization because the frozen runner locus is now lost. No provider
+call is repeated merely to project runner loss. A queued turn remains queued and
+cannot activate while its placement is lost. An unpinned capability-class
+request names no selected runner and is unaffected until a live registration can
+satisfy it. Locking, page bounds, and crash recovery are owned by
+[persistence-protocol](persistence-protocol.md). **Committed unimplemented
+functionality.** No present daemon service pages pending losses or invokes that
+adapter, and no runner execution surface yet depends on the projected state.
 
 Only two user commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
