@@ -1362,7 +1362,7 @@ impl HubModelConfiguration {
                 let members = members
                     .into_iter()
                     .map(|member| {
-                        CredentialPoolRuntimeMember::new(member.profile(), member.priority().get())
+                        CredentialPoolRuntimeMember::new(member.profile(), member.priority())
                     })
                     .collect::<Vec<_>>();
                 Some((

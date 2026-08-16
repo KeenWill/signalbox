@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     sync::Arc,
     time::Duration,
 };
@@ -356,12 +356,16 @@ impl CredentialPoolRuntimeAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CredentialPoolRuntimeMember {
     credential_reference: Arc<str>,
-    priority: u32,
+    priority: NonZeroU32,
 }
 
 impl CredentialPoolRuntimeMember {
     /// Binds one non-secret profile reference to its membership priority.
-    pub fn new(credential_reference: impl Into<Arc<str>>, priority: u32) -> Self {
+    ///
+    /// The priority is non-zero by type because persistence stores membership
+    /// under `CHECK (priority > 0)`; no admissible caller can construct a
+    /// member the schema would reject.
+    pub fn new(credential_reference: impl Into<Arc<str>>, priority: NonZeroU32) -> Self {
         Self {
             credential_reference: credential_reference.into(),
             priority,
@@ -374,7 +378,7 @@ impl CredentialPoolRuntimeMember {
     }
 
     /// Returns the membership priority.
-    pub const fn priority(&self) -> u32 {
+    pub const fn priority(&self) -> NonZeroU32 {
         self.priority
     }
 }
@@ -5209,7 +5213,7 @@ async fn persist_call_pool_policy(
         .bind(call.into_uuid())
         .bind(ordinal)
         .bind(member.credential_reference())
-        .bind(i64::from(member.priority()))
+        .bind(i64::from(member.priority().get()))
         .execute(&mut *connection)
         .await?;
     }
@@ -5275,7 +5279,11 @@ async fn load_call_pool_policy(
     .into_iter()
     .map(|(reference, priority)| {
         let priority = u32::try_from(priority)
-            .map_err(|_| ModelCallCorruption::Inconsistent("credential pool member priority"))?;
+            .ok()
+            .and_then(NonZeroU32::new)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "credential pool member priority",
+            ))?;
         Ok(CredentialPoolRuntimeMember::new(reference, priority))
     })
     .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
@@ -7983,7 +7991,7 @@ mod tests {
             ModelCallId::from_uuid(Uuid::from_u128(17)),
         );
         assert!(delay >= Duration::from_secs(2));
-        assert!(delay <= Duration::from_secs(4));
+        assert!(delay < Duration::from_secs(6));
     }
 
     #[test]

@@ -4,9 +4,21 @@ CREATE TABLE model_call_credential_pool_policy (
     model_call_id uuid PRIMARY KEY REFERENCES model_call(model_call_id),
     pool_name text NOT NULL,
     on_pool_exhausted text NOT NULL CHECK (on_pool_exhausted IN ('park', 'fail')),
-    on_quota_exhausted text NOT NULL,
-    on_rate_limited text NOT NULL,
-    on_overloaded text NOT NULL
+    on_quota_exhausted text NOT NULL CHECK (
+        on_quota_exhausted IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
+    ),
+    on_rate_limited text NOT NULL CHECK (
+        on_rate_limited IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
+    ),
+    on_overloaded text NOT NULL CHECK (
+        on_overloaded IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
+    )
 );
 
 CREATE TABLE model_call_credential_pool_member (

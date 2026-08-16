@@ -1,8 +1,13 @@
 //! Model call execution transactions, startup scan classification, and steering reclassification after restart.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU32};
 
 use crate::*;
+
+/// Binds a fixture membership priority under the non-zero schema constraint.
+fn nonzero_priority(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).expect("fixture membership priority is non-zero")
+}
 
 /// Reproduces #771: a quota failure on member A with `switch_now` must commit
 /// a distinct successor on member B; exhausting B is a typed pool cause.
@@ -57,8 +62,8 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
     let policy = CredentialPoolRuntimePolicy::new(
         pool_name_fixture,
         vec![
-            CredentialPoolRuntimeMember::new(first_member_fixture, 1),
-            CredentialPoolRuntimeMember::new(second_member_fixture, 2),
+            CredentialPoolRuntimeMember::new(first_member_fixture, nonzero_priority(1)),
+            CredentialPoolRuntimeMember::new(second_member_fixture, nonzero_priority(2)),
         ],
         signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
         CredentialPoolRuntimeAction::SwitchNow,
@@ -247,6 +252,7 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_rotation, (2, 1));
+    pool.close().await;
     drop(container);
     Ok(())
 }
