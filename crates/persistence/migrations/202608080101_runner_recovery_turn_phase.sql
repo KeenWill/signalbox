@@ -12,6 +12,57 @@ ALTER TABLE runner_session_placement_record
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
+-- A live lease remains bound to the pinned placement event that admitted it.
+-- Profile replacement may advance the placement revision before runner loss,
+-- so authenticate that revision through an uninterrupted profile-only chain.
+CREATE FUNCTION runner_lease_placement_reaches_loss_revision(
+    checked_session_id uuid,
+    leased_event_ordinal numeric,
+    checked_loss_revision numeric,
+    checked_runner_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM runner_session_placement_record AS leased_placement
+          JOIN runner_session_placement_record AS loss_placement
+            ON loss_placement.session_id = leased_placement.session_id
+           AND loss_placement.event_kind = 'runner_lost'
+           AND loss_placement.state_kind = 'runner_lost'
+           AND loss_placement.lost_runner_id = checked_runner_id
+           AND loss_placement.placement_revision = checked_loss_revision
+           AND loss_placement.event_ordinal > leased_placement.event_ordinal
+         WHERE leased_placement.session_id = checked_session_id
+           AND leased_placement.event_ordinal = leased_event_ordinal
+           AND leased_placement.state_kind = 'pinned'
+           AND leased_placement.pinned_runner_id = checked_runner_id
+           AND (
+                leased_placement.placement_revision = checked_loss_revision
+                OR (
+                    leased_placement.placement_revision < checked_loss_revision
+                    AND EXISTS (
+                        SELECT 1
+                          FROM runner_session_placement_record AS successor
+                         WHERE successor.session_id = checked_session_id
+                           AND successor.event_ordinal > leased_event_ordinal
+                           AND successor.event_ordinal < loss_placement.event_ordinal
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM runner_session_placement_record AS successor
+                         WHERE successor.session_id = checked_session_id
+                           AND successor.event_ordinal > leased_event_ordinal
+                           AND successor.event_ordinal < loss_placement.event_ordinal
+                           AND successor.event_kind <> 'profile_replaced'
+                    )
+                )
+           )
+    );
+$$;
+
 CREATE FUNCTION assert_runner_placement_interrupted_attempt_complete(
     checked_session_id uuid,
     checked_event_ordinal numeric
@@ -127,8 +178,12 @@ BEGIN
                )
                AND lease.runner_id = placement.lost_runner_id
                AND leased_placement.event_ordinal < placement.event_ordinal
-               AND leased_placement.placement_revision =
-                    placement.placement_revision
+               AND runner_lease_placement_reaches_loss_revision(
+                    lease.session_id,
+                    lease.placement_event_ordinal,
+                    placement.placement_revision,
+                    placement.lost_runner_id
+               )
                AND leased_placement.state_kind = 'pinned'
                AND leased_placement.pinned_runner_id =
                     placement.lost_runner_id
@@ -570,8 +625,12 @@ BEGIN
                             yielded_attempt.turn_attempt_id
                )
                AND lease.runner_id = lifecycle.runner_recovery_runner_id
-               AND leased_placement.placement_revision =
-                    lifecycle.runner_recovery_placement_revision
+               AND runner_lease_placement_reaches_loss_revision(
+                    lease.session_id,
+                    lease.placement_event_ordinal,
+                    lifecycle.runner_recovery_placement_revision,
+                    lifecycle.runner_recovery_runner_id
+               )
                AND leased_placement.state_kind = 'pinned'
                AND leased_placement.pinned_runner_id =
                     lifecycle.runner_recovery_runner_id
@@ -973,8 +1032,12 @@ BEGIN
                            AND lease.effect_class IN (
                                 'idempotent', 'side_effecting'
                            )
-                           AND leased_placement.placement_revision =
-                                effect.placement_revision
+                           AND runner_lease_placement_reaches_loss_revision(
+                                lease.session_id,
+                                lease.placement_event_ordinal,
+                                effect.placement_revision,
+                                effect.runner_id
+                           )
                            AND leased_placement.state_kind = 'pinned'
                            AND leased_placement.pinned_runner_id =
                                 effect.runner_id

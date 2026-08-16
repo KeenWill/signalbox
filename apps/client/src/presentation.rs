@@ -8,9 +8,9 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_process_protocol::{
-    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationMessageDirection,
-    DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
-    DelegationWaitMode, DescendantTerminationScope, FailedModelCallCause,
+    BoundChildAction, CanonicalBlobDigest, CanonicalUuid, CurrentModelCallState,
+    DelegationMessageDirection, DelegationOutcome, DelegationPolicy, DelegationProvenance,
+    DelegationReason, DelegationWaitMode, DescendantTerminationScope, FailedModelCallCause,
     FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
     GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
     ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
@@ -62,6 +62,11 @@ pub(crate) struct SessionMessageSentPresentation {
     pub(crate) direction: DelegationMessageDirection,
     pub(crate) ordinal: u64,
     pub(crate) delivery_sequence: u64,
+}
+
+pub(crate) enum BlobUploadPresentation {
+    AlreadyPresent,
+    Committed,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -541,6 +546,18 @@ impl<'a> Output<'a> {
         self.stdout.flush()
     }
 
+    pub(crate) fn blob_metadata(
+        &mut self,
+        digest: CanonicalBlobDigest,
+        byte_length: u64,
+        replica_count: u64,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "digest={digest} byte_length={byte_length} replica_count={replica_count}"
+        )
+    }
+
     pub(crate) fn chat_started(
         &mut self,
         session_id: CanonicalUuid,
@@ -968,6 +985,22 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "inserted imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn blob_uploaded(
+        &mut self,
+        digest: CanonicalBlobDigest,
+        byte_length: u64,
+        outcome: BlobUploadPresentation,
+    ) -> io::Result<()> {
+        let status = match outcome {
+            BlobUploadPresentation::AlreadyPresent => "already_present",
+            BlobUploadPresentation::Committed => "committed",
+        };
+        writeln!(
+            self.stdout,
+            "{status} digest={digest} byte_length={byte_length}"
         )
     }
 

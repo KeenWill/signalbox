@@ -35,12 +35,12 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Accepted-input content
 
-- **Content extensions and rendering.**
-  [sessions-and-transcript](spec/sessions-and-transcript.md) fixes the initial
-  text-only `UserContent` value, exact equality, and PostgreSQL mapping. Rich
-  content, attachments, other non-text variants, resource governance, and
-  provider/client rendering remain open. Blocks those extensions, not the first
-  `SubmitInput` slice. (S01, S03, S08)
+- **Further content variants and rendering.** Ordered multipart content with
+  content-addressed attachment parts, its replay equality, persistence, terminal
+  rendering, and model-visible stubs are decided and specified by
+  [blob storage](spec/blob-storage.md#multipart-user-content). Any non-text
+  content variant beyond attachment parts and provider-native media rendering
+  remain open. Blocks only those further extensions. (S01, S03, S08)
 
 ## Model-input projection
 
@@ -150,23 +150,6 @@ request against a quiet `main` rather than inside the compaction stack.
 Raised as a review finding and dispositioned with this condition attached:
 https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
-## Goal mode
-
-- **What a consumer does when its generation closes mid-operation.** A consumer
-  reads the authority a turn ran under, works, and commits afterwards, so a
-  generation stopped or achieved in between was open when read and closed when
-  committed. Binding the read to the commit is committed unimplemented
-  functionality in [goal mode](spec/goal-mode.md); what the consumer should then
-  do is not decided. Escalating treats the closure as a reason to ask a human,
-  which is safe but turns an ordinary stop into an interruption for work already
-  performed. Refusing treats it as withdrawn authority, which is stricter but
-  discards a decision the model already paid for. The choice is observable and
-  belongs to whichever consumer binds it first. Blocks nothing today, because no
-  consumer rechecks.
-
-Raised as a review finding on the dispatch-goal work:
-https://github.com/KeenWill/signalbox/pull/562#discussion_r3760635157
-
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
@@ -238,18 +221,18 @@ https://github.com/KeenWill/signalbox/pull/562#discussion_r3760635157
 
 ## Codex CLI image capability features
 
-- **Whether the pinned CLI's image features return once accepted input carries
-  images.** The adapter hard-disables `image_generation` and `view_image`. Each
-  adds a model-visible tool that the adapter's structured-output envelope does
-  not carry, and `view_image` — which loads a local image file into the
+- **Whether the pinned CLI's image features return once provider input carries
+  image bytes.** The adapter hard-disables `image_generation` and `view_image`.
+  Each adds a model-visible tool that the adapter's structured-output envelope
+  does not carry, and `view_image` — which loads a local image file into the
   conversation context — is enabled by default in the pinned inventory, so
   classifying it as non-capability would leave it live rather than merely
-  acknowledged. Accepted input is text-only today, so neither feature has
-  anything to act on. When the content extensions recorded under accepted-input
-  content above carry image and file content, decide whether either name is
-  re-enabled and how the bytes reach the spawned CLI. Blocks re-enabling either
-  name; it does not block the present disables, which stand on the capability
-  rule alone.
+  acknowledged. Accepted input can carry blob-backed attachment parts, but the
+  model sees only their text stubs: no present provider input carries attachment
+  bytes as image or file media. If provider-native image or file delivery is
+  added, decide whether either CLI feature is re-enabled and how the bytes reach
+  the spawned CLI. Blocks re-enabling either name; it does not block attachment
+  parts or the present disables, which stand on the capability rule alone.
 
 ## Model fallback and provenance
 
@@ -483,6 +466,13 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
+- **External approval-judge corpus adaptation.** Whether and how to adapt public
+  agent-safety datasets such as R-Judge, AgentHarm, and ToolEmu into the
+  approval-judge case schema remains undecided. A future mapping must select and
+  pin source revisions, establish each dataset's label mapping and trajectory
+  treatment, and verify license terms before redistribution; source content is
+  not vendored. Blocks only external-corpus evaluation, not the synthetic corpus
+  or eval harness.
 - **Turn-origin instructions in the approval-judge request.** The delegated
   request context carries session-scoped authority — the goal generation the
   judged turn is bound to, the template name, and the system prompt frozen for
@@ -507,7 +497,8 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never the posture the daemon composition already applies.
 - **Rich result-content variants.** Attempt content is text-only. Image and
   file/artifact arms, their resource governance, and provider/client rendering
-  remain undecided.
+  remain undecided. The byte substrate such arms would reference is owned by
+  [blob storage](spec/blob-storage.md).
 - **Large durable payload architecture.** Tool evidence is bounded by storage
   policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
   bytes of error detail, and 4,096 bytes of exact runner value, all held in
@@ -517,12 +508,13 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   crate-owned truncation and completeness evidence, or its bounded transport may
   reject an oversized response before result admission; the family contract owns
   that choice. `ResultTooLarge` remains the admission classification for an
-  admitted result that still exceeds the durable bound. Deliberately delivering
-  larger payloads — files well past 1 MiB — needs its own design: where the
-  bytes live, how a result references rather than embeds them, what the model
-  and each client see, and the abuse and denial-of-service controls a larger
-  bound requires. Recorded as a design question rather than a blocker; the
-  existing family caps remain correct until it is answered.
+  admitted result that still exceeds the durable bound. Blob storage decides
+  only where deliberately larger byte payloads live: content-addressed blobs
+  with model-visible attachment stubs and bounded explicit reads. The
+  tool-result side remains open — whether and how a family's durable admitted
+  result references a blob rather than embedding bytes, its truncation and
+  completeness evidence, and per-family adoption. The existing family caps
+  remain correct until that lands.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport
@@ -689,12 +681,45 @@ questions below remain open.
 
 ## General-purpose artifacts
 
-Artifact identity, ownership, lifecycle, content addressing, and retention have
-no accepted aggregate boundary. The reference-not-copy posture review workflows
-take today is owned by [review-workflows](spec/review-workflows.md). A future
-foundation decision must define the artifact aggregate and its authority before
-a workflow can attach one. This blocks general-purpose workflow artifacts, not
+Artifact content addressing, byte storage, and the reference-not-embed posture
+are decided and specified by [blob storage](spec/blob-storage.md): immutable
+SHA-256-addressed blobs, a durable replica catalog, class-routed named stores,
+and an append-only version one. The reference-not-copy posture review workflows
+take today is owned by [review-workflows](spec/review-workflows.md). The
+questions below remain open; they block general-purpose workflow artifacts, not
 the implemented session and external-link evidence.
+
+- **Artifact aggregate and authority.** What a named artifact is above a blob —
+  mutable aliases over changing digests, producer provenance, ownership, and
+  workflow attachment — needs its own foundation decision before a workflow can
+  attach one.
+- **Content-type read tools and their isolation mechanism.** Which
+  content-type-aware readers exist, which formats they support, and the concrete
+  sandbox mechanism remain undecided. The required strong process-isolation
+  posture and visibility contract are fixed by
+  [blob storage](spec/blob-storage.md#attachment-visibility-and-model-reads).
+- **Non-socket ingest paths.** Daemon-local file adoption and runner-produced
+  artifact ingest — moving multi-gigabyte content into the catalog without
+  base64 chunking over the local socket — remain undecided.
+- **Store lifecycle beyond append-only.** A native network-filesystem store
+  kind, replica-set routes, replica retirement, a marked-deleted state, and
+  garbage collection remain undecided. The append-only catalog is their fixed
+  constraint; mark/sweep rather than reference counting is nonbinding
+  exploration guidance only.
+
+## Program substrate and evaluations
+
+The substrate and evaluation contracts are owned by
+[program-substrate](spec/program-substrate.md) and
+[eval-system](spec/eval-system.md). Two edges remain deferred:
+
+- **Remote and out-of-process program hosts.** The frame protocol is the seam;
+  only the in-daemon host is committed. Hosting programs in a separate
+  supervised process or on remote execution infrastructure requires a future
+  transport decision. Blocks nothing committed.
+- **Evaluation exporters.** Run scalars and per-case tables toward external
+  experiment trackers are deferred; the SQL surface is the contract until a
+  concrete tracker need appears. Blocks nothing committed.
 
 ## Destination features (target model)
 
@@ -705,8 +730,12 @@ and ordering.
 - **Goal identity and lifecycle.** Durable persistent-objective identity and
   lifecycle require a future foundation decision. Blocks platform goal mode.
 - **Standing update-subscription lifecycle.** Identity, lifetime, delivery, and
-  cancellation for standing update subscriptions require a future foundation
-  decision. Blocks the planned callback surface.
+  cancellation for client-facing standing update subscriptions require a future
+  foundation decision. Blocks the planned callback surface. Narrowed: durable
+  program event subscriptions — identity, wake delivery, and cancellation for
+  registered programs — are decided and owned by
+  [program-substrate](spec/program-substrate.md), and are no longer part of this
+  question.
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven
