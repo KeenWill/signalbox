@@ -810,9 +810,16 @@ Locks per transaction, in acquisition order:
   take the session's admitted-set head immediately after the `session_scheduler`
   row, before the `session_current_defaults` pointer row, and before any
   credential-pool action-head, capacity-, or cursor-row lock. The mode follows
-  what the transaction does to the head: `FOR SHARE` for the activation freeze,
-  which only snapshots the head and its retained rendered rows into the
-  turn-start manifest, and `FOR UPDATE` for a replacement that advances it. The
+  what the transaction does to the head, and neither of these writes it:
+  `FOR SHARE` for the activation freeze, which only snapshots the head and its
+  retained rendered rows into the turn-start manifest, and `FOR SHARE` for the
+  eligibility replacement, which reads the admitted identities to reject a
+  forbidden removal and then affects only later eligibility snapshots. An
+  eligibility replacement is neither an unload nor an admission transition, so
+  it must not advance the head: advancing it would mint an admitted-set hash
+  with no admission behind it and change the provenance later manifests
+  authenticate. `FOR UPDATE` on the head belongs to the admission that appends
+  an `InstructionAdmission`, and to nothing else in this build. The
   repository-wide order is therefore scheduler row, then admitted-set head, then
   the `session_current_defaults` pointer row, then the credential-pool objects
   below; no path may take a scheduler lock while holding an admitted-set head,

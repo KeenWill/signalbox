@@ -363,12 +363,13 @@ zeroes, and strings escaped by the canonical algorithm below. A description
 longer than 512 UTF-8 bytes is shortened at a character boundary and reports its
 full byte length plus truncation boundary. The cursor is the
 eligibility-snapshot hash plus the zero-based ordinal of the next item in
-canonical order. Each page reports the snapshot's total item count, the returned
-ordinal range, and remaining count. It first shortens descriptions and then ends
-the page before an item that would exceed the byte bound; the cursor continues
-at that unreturned item, so budgeting never drops an identity. The registration
-path bounds guarantee that one minimally encoded item fits. An absent next
-cursor proves enumeration is complete; a cursor for another snapshot is a typed
+canonical order, encoded as the exact opaque token the tool schema below fixes.
+Each page reports the snapshot's total item count, the returned ordinal range,
+and remaining count. It first shortens descriptions and then ends the page
+before an item that would exceed the byte bound; the cursor continues at that
+unreturned item, so budgeting never drops an identity. The registration path
+bounds guarantee that one minimally encoded item fits. An absent next cursor
+proves enumeration is complete; a cursor for another snapshot is a typed
 stale-cursor failure.
 
 `instructions.preview` returns bounded structure — headings for a document and
@@ -453,6 +454,49 @@ repository-controlled bytes in every later projection. `Confirm` rather than
 and the region is delivered under the subordinate-authority preamble, so this is
 not the class of effect for which automation must be refused outright. List and
 preview declare `Auto`; both are bounded reads that admit nothing.
+
+All three declare the crash classification `EffectFree`, so a daemon lost
+between authorization and result commit closes the attempt `KnownFailed` and
+fails the turn honestly rather than parking it in ambiguity recovery. List and
+preview are self-evidently free of effect. `instructions.read` is `EffectFree`
+for the reason its transition is written that way: its only durable effect is
+the `InstructionAdmission` appended inside the atomic commit-result transaction,
+so a crash before that commit provably left no admission, no receipt, and no
+advanced head. Declaring it `ExternalEffect` would park a turn for recovery over
+an effect that cannot have happened. Re-reading a workspace file observes
+daemon-local state, exactly as `blob_read` does under the same classification.
+
+Each tool advertises a closed JSON-object argument schema with no additional
+properties, and neither schema accepts a session identity — every request takes
+its session from the trusted tool-dispatch correlation.
+
+- `instructions.list` accepts one optional `cursor` string. Absent, enumeration
+  starts at ordinal zero. Present, it is the exact opaque token a previous page
+  returned: the lowercase 64-character hexadecimal eligibility-snapshot hash, a
+  single `:`, then the zero-based ordinal of the next item as a decimal integer
+  with no leading zeroes and no sign. Any other shape is `InvalidArguments`; a
+  well-formed cursor naming another snapshot is the typed stale-cursor failure,
+  which is a request outcome rather than an argument error. Success returns the
+  catalog page described above with the snapshot's total item count, the
+  returned ordinal range, the remaining count, and a next cursor that is absent
+  exactly when enumeration is complete.
+- `instructions.preview` requires exactly one `bundle_id`, the lowercase
+  hyphenated UUID of an eligible bundle. Success returns the bounded structure
+  described above. A syntactically valid identity that is not eligible for this
+  session is a typed not-eligible failure and exposes no source metadata, which
+  is what keeps the tool from being an existence oracle for bundles the session
+  may not see.
+- `instructions.read` requires exactly one `bundle_id` in that same form and
+  accepts no budget field, since version one fixes the budget. Success is one of
+  two receipt variants, tagged so a caller need not infer which occurred:
+  `admitted` carries identity, source hash, rendered hash, rendered byte length,
+  truncation evidence, and durable admission identity; `already_admitted`
+  carries the same evidence for the existing admission it names. Not-eligible,
+  stale-source, aggregate-exhaustion, and target-capability failures are typed
+  request outcomes, each naming its closed reason and none of them partial.
+
+Identity strings are the lowercase hyphenated form everywhere, and byte lengths
+and counts are canonical decimal strings, matching the surrounding catalog.
 
 **Committed unimplemented functionality — model-facing operations.** No present
 tool supplies list, preview, or read unless an implementing child explicitly
@@ -585,14 +629,24 @@ Wrapper metadata uses one canonical JSON-string escaping algorithm. Quotation
 mark becomes `\"`, reverse solidus becomes `\\`, and U+0008, U+0009, U+000A,
 U+000C, and U+000D become `\b`, `\t`, `\n`, `\f`, and `\r`. Every other scalar
 from U+0000 through U+001F becomes `\u00xx` with lowercase hexadecimal digits.
-Solidus is not escaped, and every other scalar, including non-ASCII, remains its
-literal UTF-8 encoding. Line endings shown above are LF, and there is no
-implicit leading or trailing byte. After source-budget truncation, content
-escaping replaces `&`, `<`, and `>` with `&amp;`, `&lt;`, and `&gt;` in that
-order; repository bytes therefore cannot terminate or fabricate an envelope. The
-rendered-content hash covers this complete escaped wrapper. These labels
-distinguish untrusted repository text from daemon authority and make adapter
-output byte-stable without disclosing host filesystem layout.
+Less-than, greater-than, and ampersand become the six-character escapes
+`\u003c`, `\u003e`, and `\u0026` with lowercase hexadecimal digits, which is
+what keeps the metadata line inside the envelope: `source` carries a
+repository-controlled relative path, and a path component may legally contain
+`<`, `>`, and `&`, so leaving them literal would let a crafted path spell
+`</signalbox_workspace_instruction>` and close an envelope the daemon opened.
+These three escapes are valid JSON and decode to the same string, so a reader
+recovers the exact path. Solidus is not escaped, and every other scalar,
+including non-ASCII, remains its literal UTF-8 encoding. Line endings shown
+above are LF, and there is no implicit leading or trailing byte. After
+source-budget truncation, content escaping replaces `&`, `<`, and `>` with
+`&amp;`, `&lt;`, and `&gt;` in that order. Metadata and content therefore use
+different escapes for the same three characters — JSON escapes inside the JSON
+line, XML escapes inside the content block — and between them no
+repository-controlled byte anywhere in the wrapper can terminate or fabricate an
+envelope. The rendered-content hash covers this complete escaped wrapper. These
+labels distinguish untrusted repository text from daemon authority and make
+adapter output byte-stable without disclosing host filesystem layout.
 
 The region's own bytes are equally fixed, so one manifest cannot correspond to
 several model inputs. The region is the fixed preamble followed by the ordered

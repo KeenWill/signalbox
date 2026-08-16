@@ -2354,23 +2354,31 @@ credential presence is never consulted (INV-008):
   alias catalog to the acceptance transaction. These model-selection freeze
   semantics are this page's material; the surrounding input-delivery lifecycle
   is [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope.
-  Once workspace-instruction admission exists, the same acceptance transaction
-  resolves an alias against the live immutable catalog and rejects the input
-  before freezing it when the target that will actually serve the turn lacks
-  typed-system transport or byte capacity for the session's complete retained
-  region. The subject of that check is the effective serving record the frozen
-  settings select, not the named direct model: when the frozen overlay enables
-  fast mode on a model whose `fast_mode` is `alternate_target`, the check is
-  applied to the `fast_target_id` serving record that execution will pin, and to
-  its adapter mapping. Each serving target declares transport and capacity
-  independently, so validating only the direct target would admit an input that
-  fails later, before provider spawn. Where the frozen settings leave the
-  effective record undetermined at acceptance, every record the frozen selection
-  may still pin must satisfy the check. This check runs even when no defaults
-  replacement occurred, so restart or configuration retargeting cannot strand an
-  admitted session. A direct selection receives the same check against the
-  serving record its own frozen settings select. The typed rejection accepts no
-  input, creates no turn, and changes neither defaults nor admissions.
+  Once workspace-instruction admission exists, every origin-creating acceptance
+  transaction resolves an alias against the live immutable catalog and rejects
+  the origin before freezing it when the target that will actually serve the
+  turn lacks typed-system transport or byte capacity for the session's complete
+  retained region. The check belongs to origin acceptance as such, not to
+  `SubmitInput`: goal attach, goal resume, and scheduler continuation mint
+  accepted origins without a `SubmitInput` call, and an origin minted by any of
+  them would otherwise freeze an incapable target and fail before provider spawn
+  — precisely the restart-after-retargeting case this check exists to prevent.
+  That is also what
+  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+  already promises for every later origin, and the two now agree. The subject of
+  that check is the effective serving record the frozen settings select, not the
+  named direct model: when the frozen overlay enables fast mode on a model whose
+  `fast_mode` is `alternate_target`, the check is applied to the
+  `fast_target_id` serving record that execution will pin, and to its adapter
+  mapping. Each serving target declares transport and capacity independently, so
+  validating only the direct target would admit an input that fails later,
+  before provider spawn. Where the frozen settings leave the effective record
+  undetermined at acceptance, every record the frozen selection may still pin
+  must satisfy the check. This check runs even when no defaults replacement
+  occurred, so restart or configuration retargeting cannot strand an admitted
+  session. A direct selection receives the same check against the serving record
+  its own frozen settings select. The typed rejection accepts no input, creates
+  no turn, and changes neither defaults nor admissions.
 - **At execution.** When the attempt pins its target, the frozen selection is
   resolved against the `ModelTargetCatalog`. An unresolvable selection fails the
   turn as a known failure before any model call exists; a credential or send
