@@ -57,27 +57,22 @@ stack. The following related questions also require owner rulings:
   repository file, a project-owned artifact, evaluation rows, or another
   admitted store remains deliberately undecided, together with access,
   redaction, retention, deletion, and reproducibility rules.
-
 - **Promotion bounds.** The maximum false-allow rate, minimum acceptable
   improvement, minimum labeled case count, required slices, and statistical
   treatment for promotion from shadow to live graded authority remain open. A
   promotion comparison must define each metric's denominator and its treatment
   of parks, failed calls, and repeated trials.
-
 - **Label semantics.** Whether an ordinary user allow or deny is the final
   quality label, or evaluation needs a separate “judge correct” ruling and an
   approval rationale, remains open. Execution rulings are observations rather
   than correctness labels until this is decided.
-
 - **Unparked sampling.** Whether and how operators may provide post-hoc labels
   for automatically allowed or denied requests remains open. Without it, the
   recorded corpus is selected toward parked requests and cannot support
   whole-population promotion claims.
-
 - **Shadow budget.** The graded shadow sampling fraction, provider-cost ceiling,
   concurrency, and retention duration remain open. They block production shadow
   traffic, not the offline dual-subject harness.
-
 - **Configuration actor audit.** Whether source-control and deployment audit are
   sufficient provenance for threshold changes, or Signalbox needs an
   authenticated configuration-change command, remains open.
