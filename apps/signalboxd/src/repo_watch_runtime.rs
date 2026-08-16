@@ -617,11 +617,7 @@ async fn inspect_webhook_drain(
             return;
         }
     };
-    let Ok(pending_for) =
-        std::time::SystemTime::now().duration_since(oldest.receipt().received_at())
-    else {
-        return;
-    };
+    let pending_for = oldest.pending_for();
     if pending_for < stall_threshold {
         return;
     }
@@ -940,11 +936,25 @@ impl RepositoryWatchTask {
         let mut first_failure: Option<RepositoryWatchAttemptError> = None;
         let mut pages = 0_usize;
         loop {
-            let deliveries = self
+            let deliveries = match self
                 .webhook_store
                 .load_pending(&self.repository, page_size)
                 .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            {
+                Ok(deliveries) => deliveries,
+                Err(error) => {
+                    // The same error-level record a per-delivery failure earns:
+                    // a page this drain could not read is a drain failure, and
+                    // the poll caller's own record is a warning about polling.
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                        cause = %error,
+                        "repository-watch webhook drain could not load its pending page"
+                    );
+                    return Err(RepositoryWatchAttemptError::Persistence);
+                }
+            };
             let mut progressed = false;
             for delivery in &deliveries {
                 if deferred.contains(&delivery.key()) {

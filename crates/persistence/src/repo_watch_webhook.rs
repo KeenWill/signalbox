@@ -7,7 +7,7 @@ use std::{
     error::Error,
     fmt,
     num::{NonZeroU16, NonZeroU64},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use rust_decimal::Decimal;
@@ -20,7 +20,10 @@ use sqlx::{
 
 use crate::{
     commit_failure_is_ambiguous,
-    mapping::{positive_u64_from_numeric, repo_watch_event_kind_to_str},
+    mapping::{
+        positive_u64_from_numeric, repo_watch_event_kind_to_str,
+        repo_watch_webhook_disposition_to_str,
+    },
 };
 
 const CONTENT_IDENTITY_VERSION_V1: i16 = 1;
@@ -265,11 +268,12 @@ pub struct PendingRepoWatchWebhookDelivery {
     body: Box<[u8]>,
 }
 
-/// One pending delivery's identity and receipt, carrying no payload.
+/// One pending delivery's identity, receipt, and age, carrying no payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PendingRepoWatchWebhookReceipt {
     key: RepoWatchWebhookDeliveryKey,
     receipt: RepoWatchWebhookReceipt,
+    pending_for: Duration,
 }
 
 impl PendingRepoWatchWebhookReceipt {
@@ -279,6 +283,17 @@ impl PendingRepoWatchWebhookReceipt {
 
     pub const fn receipt(&self) -> RepoWatchWebhookReceipt {
         self.receipt
+    }
+
+    /// How long the delivery has been pending, measured wholly on the database
+    /// clock.
+    ///
+    /// The receipt time is written by PostgreSQL, so subtracting it from a
+    /// daemon-local reading would turn clock skew between the two hosts into a
+    /// suppressed or premature stall report — the failure the reading exists to
+    /// surface. Both ends of this subtraction come from the same statement.
+    pub const fn pending_for(&self) -> Duration {
+        self.pending_for
     }
 }
 
@@ -626,7 +641,8 @@ impl PostgresRepoWatchWebhookStore {
             "SELECT delivery.hook_id,
                     delivery.delivery_id,
                     delivery.receipt_sequence,
-                    delivery.received_at
+                    delivery.received_at,
+                    transaction_timestamp() AS observed_at
                FROM repo_watch_webhook_delivery AS delivery
                LEFT JOIN repo_watch_webhook_disposition AS disposition
                  ON disposition.hook_id = delivery.hook_id
@@ -652,7 +668,7 @@ impl PostgresRepoWatchWebhookStore {
         &self,
         key: RepoWatchWebhookDeliveryKey,
     ) -> Result<Option<RecordedRepoWatchWebhookDisposition>, RepoWatchWebhookStoreError> {
-        let row = sqlx::query_as::<_, (String, Option<String>)>(
+        let row = sqlx::query_as::<_, RecordedDispositionRow>(
             "SELECT disposition, outcome_code
                FROM repo_watch_webhook_disposition
               WHERE hook_id = $1 AND delivery_id = $2",
@@ -661,12 +677,14 @@ impl PostgresRepoWatchWebhookStore {
         .bind(key.delivery_id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((disposition, outcome_code)) = row else {
+        let Some(row) = row else {
             return Ok(None);
         };
+        let disposition = crate::mapping::repo_watch_webhook_disposition_from_str(&row.disposition)
+            .ok_or(RepoWatchWebhookStorageCorruption::InvalidDisposition)?;
         Ok(Some(RecordedRepoWatchWebhookDisposition {
-            disposition: decode_disposition(&disposition)?,
-            outcome_code,
+            disposition,
+            outcome_code: row.outcome_code,
         }))
     }
 
@@ -831,7 +849,7 @@ impl PostgresRepoWatchWebhookStore {
         )
         .bind(Decimal::from(key.hook_id.get()))
         .bind(key.delivery_id)
-        .bind(encode_disposition(request.disposition()))
+        .bind(repo_watch_webhook_disposition_to_str(request.disposition()))
         .bind(request.outcome_code())
         .execute(&mut *transaction)
         .await?;
@@ -881,6 +899,14 @@ struct PendingReceiptRow {
     delivery_id: Uuid,
     receipt_sequence: i64,
     received_at: OffsetDateTime,
+    observed_at: OffsetDateTime,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(sqlx::FromRow)]
+struct RecordedDispositionRow {
+    disposition: String,
+    outcome_code: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -935,9 +961,16 @@ fn decode_pending_receipt(
         receipt_sequence: row.receipt_sequence,
         received_at: row.received_at,
     })?;
+    // A receipt time ahead of the reading is a clock the database moved
+    // backwards, not a delivery from the future; treat it as no age at all
+    // rather than reporting a stall that has not happened.
+    let pending_for = (row.observed_at - row.received_at)
+        .try_into()
+        .unwrap_or(Duration::ZERO);
     Ok(PendingRepoWatchWebhookReceipt {
         key: RepoWatchWebhookDeliveryKey::new(hook_id, row.delivery_id),
         receipt,
+        pending_for,
     })
 }
 
@@ -1066,34 +1099,6 @@ impl EncodedProjection {
                 occurrence_key: None,
             },
         }
-    }
-}
-
-/// The inverse of [`encode_disposition`].
-///
-/// Written as the exhaustive inverse rather than a lookup so that a spelling
-/// added to the encoder without a decoder arm fails to compile here.
-#[cfg(feature = "test-support")]
-fn decode_disposition(
-    disposition: &str,
-) -> Result<RepoWatchWebhookDisposition, RepoWatchWebhookStorageCorruption> {
-    match disposition {
-        "projected" => Ok(RepoWatchWebhookDisposition::Projected),
-        "duplicate_state" => Ok(RepoWatchWebhookDisposition::DuplicateState),
-        "superseded" => Ok(RepoWatchWebhookDisposition::Superseded),
-        "ignored" => Ok(RepoWatchWebhookDisposition::Ignored),
-        "quarantined" => Ok(RepoWatchWebhookDisposition::Quarantined),
-        _ => Err(RepoWatchWebhookStorageCorruption::InvalidDisposition),
-    }
-}
-
-const fn encode_disposition(disposition: RepoWatchWebhookDisposition) -> &'static str {
-    match disposition {
-        RepoWatchWebhookDisposition::Projected => "projected",
-        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
-        RepoWatchWebhookDisposition::Superseded => "superseded",
-        RepoWatchWebhookDisposition::Ignored => "ignored",
-        RepoWatchWebhookDisposition::Quarantined => "quarantined",
     }
 }
 

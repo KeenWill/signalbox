@@ -485,18 +485,45 @@ async fn oldest_pending_receipt_is_read_without_its_payload() -> Result<(), Box<
     .execute(&pool)
     .await?;
 
+    Ok(())
+}
+
+/// The monitor reads the oldest pending delivery, so a delivery reaching
+/// terminal state has to hand that position to the next one and the last one
+/// has to leave nothing pending at all.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let oldest = delivery_key(0x411);
+    let newer = delivery_key(0x412);
+    admit_fixture(&store, oldest).await?;
+    admit_fixture(&store, newer).await?;
+    assert_eq!(
+        store
+            .load_oldest_pending_receipt(&repository()?)
+            .await?
+            .map(|pending| pending.key()),
+        Some(oldest)
+    );
+
     store
         .record_terminal(oldest, &projected_request(Vec::new())?)
         .await?;
-    let after_terminal = store
-        .load_oldest_pending_receipt(&repository()?)
-        .await?
-        .expect("the newer delivery is still pending");
-    assert_eq!(after_terminal.key(), newer);
+    assert_eq!(
+        store
+            .load_oldest_pending_receipt(&repository()?)
+            .await?
+            .map(|pending| pending.key()),
+        Some(newer)
+    );
 
     store
         .record_terminal(newer, &projected_request(Vec::new())?)
         .await?;
+
     assert_eq!(
         store.load_oldest_pending_receipt(&repository()?).await?,
         None
