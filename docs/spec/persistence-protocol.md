@@ -800,28 +800,30 @@ Locks per transaction, in acquisition order:
   scheduler lock. This is the shared prefix for any path that can record a child
   result. **Committed unimplemented functionality — instruction admitted-set
   head.** No present migration or repository operation stores an admitted set,
-  so the admitted-set locks stated here and in the tool-loop bullet below are
-  the protocol their implementing child must follow. This inventory, not the
-  contract pages that name the transactions, is where their order and mode are
-  fixed. The instruction eligibility freeze that
+  so the admitted-set locks stated here, in the tool-loop bullet below, and in
+  the `ReplaceSessionDefaults` bullet below are the protocol their implementing
+  child must follow. This inventory, not the contract pages that name the
+  transactions, is where their order and mode are fixed. The instruction
+  eligibility freeze that
   [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#the-activation-transaction)
   adds to `StartEligibleTurn`, and the session-eligibility replacement command,
   take the session's admitted-set head immediately after the `session_scheduler`
-  row and before any credential-pool action-head, capacity-, or cursor-row lock.
-  The mode follows what the transaction does to the head: `FOR SHARE` for the
-  activation freeze, which only snapshots the head and its retained rendered
-  rows into the turn-start manifest, and `FOR UPDATE` for a replacement that
-  advances it. The repository-wide order is therefore scheduler row, then
-  admitted-set head, then the credential-pool objects below; no path may take a
-  scheduler lock while holding an admitted-set head, or take an admitted-set
-  head while holding an action-head, capacity-, or cursor-row lock. **Committed
-  unimplemented functionality.** No present migration or repository operation
-  stores pool state, capacity reservations, or availability waits, so the
-  credential-pool locks described in the rest of this bullet are the protocol
-  its implementing child must follow, not a guarantee this build provides. This
-  bullet is the whole of that protocol: which objects each credential-pool
-  transaction takes, in what order, and in which mode is stated here and nowhere
-  else.
+  row, before the `session_current_defaults` pointer row, and before any
+  credential-pool action-head, capacity-, or cursor-row lock. The mode follows
+  what the transaction does to the head: `FOR SHARE` for the activation freeze,
+  which only snapshots the head and its retained rendered rows into the
+  turn-start manifest, and `FOR UPDATE` for a replacement that advances it. The
+  repository-wide order is therefore scheduler row, then admitted-set head, then
+  the `session_current_defaults` pointer row, then the credential-pool objects
+  below; no path may take a scheduler lock while holding an admitted-set head,
+  or take an admitted-set head while holding a pointer row, an action-head, a
+  capacity row, or a cursor row. **Committed unimplemented functionality.** No
+  present migration or repository operation stores pool state, capacity
+  reservations, or availability waits, so the credential-pool locks described in
+  the rest of this bullet are the protocol its implementing child must follow,
+  not a guarantee this build provides. This bullet is the whole of that
+  protocol: which objects each credential-pool transaction takes, in what order,
+  and in which mode is stated here and nowhere else.
   [The credential-availability machine](credential-availability.md#the-credential-availability-machine)
   names the transaction that commits each selection ending, which is how a
   reader arrives at the right sentence below; it states no locks of its own and
@@ -978,7 +980,21 @@ Locks per transaction, in acquisition order:
   the same lock: a current expected version rolls back the command claim and
   applies nothing, while a mismatch records the typed rejection. The
   `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
-  through the non-deferrable session foreign key.
+  through the non-deferrable session foreign key. **Committed unimplemented
+  functionality — instruction-aware replacement.** The retained-region check
+  that
+  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+  adds to this command needs two further locks, and they precede the pointer row
+  rather than following it, because the established order everywhere else is
+  scheduler row before `session_current_defaults` pointer row. The complete
+  sequence is the `session_scheduler` row `FOR UPDATE`, then the session's
+  admitted-set head `FOR SHARE` — the replacement only reads the retained
+  region, and `FOR SHARE` already excludes the `FOR UPDATE` an admission takes —
+  then the `session_current_defaults` pointer row `FOR UPDATE` as above. All
+  three are held until the successor epoch commits, so an admission or an
+  activation falls wholly before or after the replacement and cannot invalidate
+  the evidence it checked. This is the same head-lock position the
+  `StartEligibleTurn` bullet fixes: immediately after the scheduler row.
 
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This

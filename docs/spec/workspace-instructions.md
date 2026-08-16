@@ -140,7 +140,10 @@ Every registered bundle carries:
 - bundle identity and closed kind;
 - canonical absolute source path and the `DiscoveryRoot` authorizing the read;
 - root-relative source path and, for an agent document, its root-relative
-  directory scope;
+  directory scope, both taken against that primary authorizing root;
+- one alias record per other root of the scan's ordered root inventory that also
+  yielded this exact source, each carrying that root's provider-safe reference
+  and the root-relative source and scope paths measured against it;
 - for a skill, its validated portable name and description;
 - source byte length; and
 - a versioned SHA-256 source-content hash, whose complete preimage is fixed
@@ -149,6 +152,19 @@ Every registered bundle carries:
 Each discovery snapshot separately retains its ordered candidate link to the
 registered identity. A registration may therefore be observed by several scans
 without losing which session and root authorized each observation.
+
+Alias records exist so that overlap does not silently strip configured
+authority. A source inside a configured root that also lies under the session
+workspace takes the workspace as its primary authorizing root, because workspace
+roots sort first; without an alias the single registered identity would be
+workspace-rooted, and a later session's configured-root selector — which is the
+sharing authority for configured bundles — would have nothing to match. A
+selector naming any root in that set therefore resolves to this one identity
+through the record for that root, and no bundle is duplicated to carry a second
+authority. An alias is authorization evidence only: catalog results, wrappers,
+projection order, and manifest rows continue to report the primary authorizing
+root and its relative paths, so rendered bytes and their hashes do not depend on
+which selector reached the bundle.
 
 For an agent document, source content is the file's exact bytes. For a skill,
 version-one source content is the exact `SKILL.md` bytes. Supporting resources
@@ -315,7 +331,10 @@ hash, or disappearance is typed `stale_source` evidence; hashing never requires
 reading beyond that bound. It neither returns the full body nor admits content.
 
 Version one splits the revalidated UTF-8 source on LF and removes one terminal
-CR from each line only when the registered document consistently uses CRLF. It
+CR from every line that has one. Normalization is per line and unconditional
+because registration rejects mixed line endings only inside skill frontmatter,
+so a valid `AGENTS.md` or skill body may still mix them; deciding per document
+would leave U+000D inside heading text and defeat fence-close recognition. It
 recognizes only ATX headings: zero through three leading ASCII spaces, one
 through six `#` bytes, then end of line or one ASCII space or tab. The returned
 heading records are in source order and contain the one-based line number,
@@ -407,17 +426,23 @@ admission, places it beside the context-frontier projection for a call, and
 records the exact result in the manifest below. Instruction text never advances
 a `ContextFrontier`, changes ancestry, or becomes user-role conversation.
 
-Prepared model input contains exactly one typed `WorkspaceInstructionRegion`,
+Prepared model input carries at most one typed `WorkspaceInstructionRegion`,
 after the frozen daemon/session system prompt and before the ordered sequence of
-actor-authored and tool-result frontier messages. Adapters serialize that region
-as instruction/system input supported by their provider; they may not
-reinterpret it as a user or tool message or invoke a native file loader. The
-frozen session system prompt and explicit user request remain higher priority
-than this repository-supplied region. When a provider exposes only a
-system-instruction transport, the daemon wrapper states that subordinate
-authority before the repository bytes rather than pretending they are daemon
-policy. The provider-neutral prepared-operation field and adapter bridge are
-owned by [model-call execution](model-call-execution.md) and
+actor-authored and tool-result frontier messages. A nonempty admitted set
+produces exactly one; an empty admitted set produces none, and the optional
+field owned by [model-call execution](model-call-execution.md) and
+[runtime substrate](runtime-substrate.md) is absent rather than present and
+empty. A present region is therefore always nonempty, which is what those pages
+validate, and the first slice's guaranteed-empty projection needs no
+workspace-capable target. Adapters serialize that region as instruction/system
+input supported by their provider; they may not reinterpret it as a user or tool
+message or invoke a native file loader. The frozen session system prompt and
+explicit user request remain higher priority than this repository-supplied
+region. When a provider exposes only a system-instruction transport, the daemon
+wrapper states that subordinate authority before the repository bytes rather
+than pretending they are daemon policy. The provider-neutral prepared-operation
+field and adapter bridge are owned by
+[model-call execution](model-call-execution.md) and
 [runtime substrate](runtime-substrate.md); this page owns the region's bytes and
 authority, not a competing operation shape.
 
@@ -453,12 +478,13 @@ The region's own bytes are equally fixed, so one manifest cannot correspond to
 several model inputs. The region is the ordered per-bundle wrappers concatenated
 with exactly one LF between each consecutive pair, and with no leading byte
 before the first wrapper and no trailing byte after the last — neither direct
-concatenation nor a blank-line separator. An empty admitted set renders a
-zero-byte region. The region's byte count, which the aggregate budget and every
-declared transport capacity below are measured against, therefore counts those
-separator bytes as well as the wrappers, and it is a function of the admitted
-set alone: replaying one manifest's rendered rows in projection order
-reconstructs the exact bytes the provider received.
+concatenation nor a blank-line separator. Since one wrapper is never empty, so
+constructed a region is never empty either; an empty admitted set builds no
+region at all, as stated above. The region's byte count, which the aggregate
+budget and every declared transport capacity below are measured against,
+therefore counts those separator bytes as well as the wrappers, and it is a
+function of the admitted set alone: replaying one manifest's rendered rows in
+projection order reconstructs the exact bytes the provider received.
 
 Two designs were considered:
 
