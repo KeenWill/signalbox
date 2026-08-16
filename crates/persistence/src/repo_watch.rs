@@ -34,18 +34,20 @@ use sqlx::{
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
-        RepoWatchEventTargetStorageKind, RepoWatchReactionSubjectStorageKind,
-        positive_u64_from_numeric, repo_watch_check_conclusion_from_str,
-        repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
-        repo_watch_event_kind_to_str, repo_watch_event_target_from_str,
-        repo_watch_event_target_to_str, repo_watch_mergeable_state_from_str,
-        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
-        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_reaction_subject_kind_from_str,
-        repo_watch_reaction_subject_kind_to_str, repo_watch_reaction_subject_to_storage,
-        repo_watch_review_state_from_str, repo_watch_review_state_to_str,
-        repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
+        RepoWatchEventProducerStorageKind, RepoWatchEventTargetStorageKind,
+        RepoWatchReactionSubjectStorageKind, positive_u64_from_numeric,
+        repo_watch_check_conclusion_from_str, repo_watch_check_conclusion_to_str,
+        repo_watch_checks_outcome_from_str, repo_watch_checks_outcome_to_str,
+        repo_watch_event_kind_from_str, repo_watch_event_kind_to_str,
+        repo_watch_event_producer_from_str, repo_watch_event_producer_to_str,
+        repo_watch_event_target_from_str, repo_watch_event_target_to_str,
+        repo_watch_mergeable_state_from_str, repo_watch_mergeable_state_to_str,
+        repo_watch_pull_request_lifecycle_from_str, repo_watch_pull_request_lifecycle_to_str,
+        repo_watch_reaction_change_from_str, repo_watch_reaction_change_to_str,
+        repo_watch_reaction_subject_kind_from_str, repo_watch_reaction_subject_kind_to_str,
+        repo_watch_reaction_subject_to_storage, repo_watch_review_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_thread_state_to_str,
     },
 };
 
@@ -1458,7 +1460,9 @@ async fn insert_events(
         .bind(encoded.event_version)
         .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
         .bind(occurrence.content_identity().as_bytes().as_slice())
-        .bind("poll")
+        .bind(repo_watch_event_producer_to_str(
+            RepoWatchEventProducerStorageKind::Poll,
+        ))
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -1657,17 +1661,15 @@ fn decode_positioned_event(
     if row.event_version != EVENT_VERSION_V1 {
         return Err(RepoWatchPersistenceCorruption::UnsupportedEventVersion.into());
     }
-    if !matches!(
-        row.content_identity_version,
-        0 | EVENT_CONTENT_IDENTITY_VERSION_V1
-    ) {
+    if row.content_identity_version != EVENT_CONTENT_IDENTITY_VERSION_V1 {
         return Err(RepoWatchPersistenceCorruption::UnsupportedEventContentIdentityVersion.into());
     }
     if row.content_identity.len() != 32 {
         return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
     }
-    if row.producer != "poll" {
-        return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into());
+    match repo_watch_event_producer_from_str(&row.producer) {
+        Some(RepoWatchEventProducerStorageKind::Poll) => {}
+        None => return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into()),
     }
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(
         RepoWatchPersistenceCorruption::UnknownEventDiscriminator("target_kind"),

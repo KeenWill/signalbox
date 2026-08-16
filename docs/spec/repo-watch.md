@@ -26,9 +26,10 @@ against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, and terminal-target cutoff are also verified against this
 PR. The provider members the poller adopts as check-suite and check-run
 completion generations are verified against PR #541
-(`fix/check-run-updated-at`). The source-independent event occurrence identity,
-its durable frontier, and the one-time storage migration are verified against
-this PR (`agent/repo-watch-content-identity`).
+(`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
+PR #886 (`agent/eager-merge-forward`). The source-independent event occurrence
+identity, its durable frontier, and the one-time storage migration are verified
+against this PR (`agent/repo-watch-content-identity`).
 
 ## Configuration and credential boundary
 
@@ -161,19 +162,25 @@ runtime lifecycle defect.
 normalized repository state, exact signal-reviewer set, and the last positive
 occurrence sequence for each recurring source-independent event stream. The
 frontier is canonical by its 32-byte stream identities, rejects duplicates and
-zero sequences, and admits at most 1,000,000 streams. Sequence exhaustion fails
-the comparison rather than wrapping. Provider-keyed immutable facts use sequence
-one without occupying frontier space. The cursor does not retain resource keys,
-ETags, accepted transport responses, raw provider payloads, or credentials. A
-per-repository atomic commit accepts an expected generation, one complete cursor
-candidate, and its ordered event-occurrence batch. It serializes competing
-commits, appends the cursor and every event together, rolls back the whole batch
-on failure, reports a stale generation as conflict, and recognizes only an exact
-candidate-and-occurrence replay. An unchanged candidate with no events does not
-advance the cursor; an unchanged candidate carrying events is rejected. The
-relational event table admits an event row only in the database transaction that
-inserts its referenced cursor generation, preventing later maintenance or future
-writers from changing an already-committed batch.
+zero sequences, and admits at most 1,000,000 streams. That ceiling is where one
+repository's identity state, rather than its event history, becomes the dominant
+cost of watching it: each entry costs a 32-byte stream identity and an 8-byte
+sequence, so the limit bounds one frontier near 40 MB. Exceeding it fails the
+comparison, because the alternative is reusing an occurrence number and minting
+a content identity that collides with an already-durable one. Sequence
+exhaustion fails the comparison rather than wrapping. Provider-keyed immutable
+facts use sequence one without occupying frontier space. The cursor does not
+retain resource keys, ETags, accepted transport responses, raw provider
+payloads, or credentials. A per-repository atomic commit accepts an expected
+generation, one complete cursor candidate, and its ordered event-occurrence
+batch. It serializes competing commits, appends the cursor and every event
+together, rolls back the whole batch on failure, reports a stale generation as
+conflict, and recognizes only an exact candidate-and-occurrence replay. An
+unchanged candidate with no events does not advance the cursor; an unchanged
+candidate carrying events is rejected. The relational event table admits an
+event row only in the database transaction that inserts its referenced cursor
+generation, preventing later maintenance or future writers from changing an
+already-committed batch.
 
 **Implemented behavior.** `RepoWatchEventContentIdentityV1` is the exact shared
 content identity for a normalized event occurrence. It is a 32-byte SHA-256
@@ -211,12 +218,16 @@ repository.
 **Implemented behavior.** The content-identity migration rewrites every durable
 cursor to storage version two with an empty occurrence frontier, then all later
 poll commits carry and advance that frontier. Existing event rows cannot be
-reconstructed as version-one content occurrences because their durable shape
-lacks every provider identity used by the differ. The migration therefore marks
-them as content-identity version zero using a one-time domain-separated digest
-of their immutable UUID, while every post-migration event uses version one. Both
-versions remain readable event history; only version-one occurrences can
-participate in exact commit replay or cross-producer content deduplication.
+reconstructed as the content occurrences the differ would emit, because their
+durable shape lacks every provider identity the differ uses and the frontier
+reset discards the sequence state their identities derive from. Dispatch rows
+reference those events under `ON DELETE RESTRICT`, so the migration carries them
+rather than discarding them: it assigns each a version-one identity under a hash
+domain reserved for the migration itself and disjoint from the differ's, so a
+carried row can never claim an identity a producer would also derive, and never
+matches one. Exactly one content-identity version is readable afterwards. The
+durable constraint and the decoder both admit version one alone, so no earlier
+event shape survives for a reader to accept.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
@@ -628,14 +639,18 @@ singleton. After this transaction, the mapped rule is a subscription;
 subscription identity, delivery, continuation cursor inheritance, and
 cancellation follow the [program substrate](program-substrate.md).
 
-## First live rule
+## Live merge-forward rule
 
-**Foundation contract.** The first deployed rule is `merge-forward-on-conflict`.
-It matches `MergeableStateChanged` with
-`mergeable_state.any_of = ["conflicting"]`, uses pull-request singleton scope,
-and dispatches the merge-forward session template configured with the approved
-cheap model and pull-request context. The rule does not match transitions back
-to `mergeable` or `unknown`.
+**Foundation contract.** The live merge-forward rule is
+`merge-forward-on-base-advance`. It matches `BaseAdvanced` for pull requests
+whose head branch matches `^agent/.+$`, uses pull-request singleton scope, and
+dispatches the merge-forward session template configured with the approved cheap
+model and pull-request context. Because each `BaseAdvanced` fact targets an open
+pull request based on the branch that advanced, the rule dispatches for each
+immediate dependent when a stacked parent branch advances and for each matching
+main-based pull request when `main` advances. It does not wait for a workflow
+conclusion or a `MergeableStateChanged` conflict fact, and a parent's own
+`HeadChanged` fact does not dispatch the parent.
 
 ## Designed-for version-two poll-cache persistence
 
