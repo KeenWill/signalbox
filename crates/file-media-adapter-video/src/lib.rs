@@ -434,7 +434,8 @@ fn parse_mp4_boxes(
         let (box_type, payload, consumed) = match mp4_box_at(bytes, cursor) {
             Ok(parsed) => parsed,
             Err(VideoIssue::Malformed)
-                if allow_truncated_tail && mp4_box_extends_beyond(bytes, cursor) =>
+                if allow_truncated_tail
+                    && (bytes.len() - cursor < 8 || mp4_box_extends_beyond(bytes, cursor)) =>
             {
                 break;
             }
@@ -695,7 +696,7 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
     let entry_count = usize::try_from(read_u32(payload, 4)?).map_err(|_| VideoIssue::Structure)?;
     let mut cursor = 8_usize;
     for _ in 0..entry_count {
-        let (box_type, _, consumed) = mp4_box_at(payload, cursor)?;
+        let (box_type, entry_payload, consumed) = mp4_box_at(payload, cursor)?;
         state.nodes = state.nodes.checked_add(1).ok_or(VideoIssue::Structure)?;
         if state.nodes > MAX_NODES {
             return Err(VideoIssue::Structure);
@@ -703,9 +704,44 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
         if box_type == *b"encv" || box_type == *b"enca" {
             return Err(VideoIssue::Encrypted);
         }
+        if box_type == *b"avc1" {
+            parse_avc1_sample_entry(entry_payload, state)?;
+        }
         cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
     }
     if cursor != payload.len() {
+        return Err(VideoIssue::Malformed);
+    }
+    Ok(())
+}
+
+fn parse_avc1_sample_entry(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
+    const VISUAL_SAMPLE_ENTRY_BYTES: usize = 78;
+    const AVC_CONFIGURATION_BYTES: usize = 7;
+
+    let children = payload
+        .get(VISUAL_SAMPLE_ENTRY_BYTES..)
+        .ok_or(VideoIssue::Malformed)?;
+    let mut cursor = 0_usize;
+    let mut configuration_seen = false;
+    while cursor < children.len() {
+        let (box_type, configuration, consumed) = mp4_box_at(children, cursor)?;
+        state.nodes = state.nodes.checked_add(1).ok_or(VideoIssue::Structure)?;
+        if state.nodes > MAX_NODES {
+            return Err(VideoIssue::Structure);
+        }
+        if box_type == *b"avcC" {
+            if configuration_seen
+                || configuration.len() < AVC_CONFIGURATION_BYTES
+                || configuration.first() != Some(&1)
+            {
+                return Err(VideoIssue::Malformed);
+            }
+            configuration_seen = true;
+        }
+        cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
+    }
+    if !configuration_seen {
         return Err(VideoIssue::Malformed);
     }
     Ok(())
@@ -740,6 +776,7 @@ struct EbmlState {
     timecode_scale: u64,
     duration: Option<f64>,
     video_tracks: u64,
+    track_numbers: Vec<u64>,
 }
 
 impl Default for EbmlState {
@@ -754,6 +791,7 @@ impl Default for EbmlState {
             timecode_scale: 1_000_000,
             duration: None,
             video_tracks: 0,
+            track_numbers: Vec::new(),
         }
     }
 }
@@ -916,10 +954,15 @@ fn parse_ebml_scope(
                 video_track.include(parse_ebml_track_type(payload)?);
             }
             (EBML_TRACK_NUMBER, EbmlScope::TrackEntry) => {
-                if track_number_seen || parse_ebml_uint(payload)? == 0 {
+                let track_number = parse_ebml_uint(payload)?;
+                if track_number_seen
+                    || track_number == 0
+                    || state.track_numbers.contains(&track_number)
+                {
                     return Err(VideoIssue::Malformed);
                 }
                 track_number_seen = true;
+                state.track_numbers.push(track_number);
             }
             (EBML_CODEC_ID, EbmlScope::TrackEntry) => {
                 if codec_id_seen || payload.is_empty() || !payload.is_ascii() {

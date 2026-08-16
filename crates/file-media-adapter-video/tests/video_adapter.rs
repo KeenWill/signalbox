@@ -228,6 +228,21 @@ async fn ordinary_large_mp4_validates_from_the_bounded_metadata_prefix()
 }
 
 #[tokio::test]
+async fn partial_mp4_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_mp4_with_partial_header_at_metadata_cutoff().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn header_only_avc1_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::header_only_avc1_mp4(), "malformed_video").await
+}
+
+#[tokio::test]
 async fn unsupported_iso_bmff_brand_is_not_claimed_as_mp4() -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::unsupported_brand_mp4().into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
@@ -282,6 +297,15 @@ async fn iso6_mp4_brand_validates() -> Result<(), Box<dyn Error>> {
 async fn webm_track_without_mandatory_fields_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_track_missing_number_and_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_webm_track_numbers_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_track_numbers(),
         "malformed_video",
     )
     .await

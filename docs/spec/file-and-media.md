@@ -69,8 +69,8 @@ body, JSON tree, continuation, and bound before admitting it.
 
 ## Implemented adapter coverage
 
-| Family | Exact types               | Views      | Decoder and enforced exclusions                                                                                                                                                                                                                                                 |
-| ------ | ------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Family | Exact types               | Views      | Decoder and enforced exclusions                                                                                                                                                                                                                                                          |
+| ------ | ------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Video  | `video/mp4`, `video/webm` | `metadata` | In-worker ISO BMFF and EBML parsing from a bounded 256 KiB metadata prefix, with no codec library; frame/audio decoding, rendering, frame extraction, thumbnails, OCR, transcription, subtitles, external resources, recursive containers, and metadata outside that prefix are excluded |
 
 ## Detection and validation
@@ -127,10 +127,10 @@ truncated result.
 these tools because the concrete rendered-frontier attachment resolver is not
 yet on `main`; the video adapter and its worker exist, but no daemon catalog
 registers them, so the empty registry recognizes no format. The compatibility
-constraint is that daemon composition supplies the
-existing visibility proof to `FileUseResolver`, not a weaker catalog-presence
-check. Format adapters are separate follow-on changes and add no MIME branch to
-the executor, bridge, or daemon.
+constraint is that daemon composition supplies the existing visibility proof to
+`FileUseResolver`, not a weaker catalog-presence check. Format adapters are
+separate follow-on changes and add no MIME branch to the executor, bridge, or
+daemon.
 
 ## Processor and durable media boundary
 

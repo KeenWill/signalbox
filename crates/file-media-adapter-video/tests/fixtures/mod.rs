@@ -155,6 +155,22 @@ impl VideoFixture {
             .with_reported_byte_length(u64::try_from(source_bytes).unwrap_or(u64::MAX))
     }
 
+    pub fn large_mp4_with_partial_header_at_metadata_cutoff() -> Self {
+        let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let filler_payload_bytes = METADATA_BYTES - bytes.len() - 8 - 4;
+        bytes.extend_from_slice(&mp4_box(*b"free", &vec![0_u8; filler_payload_bytes]));
+        bytes.extend_from_slice(&12_u32.to_be_bytes());
+        Self::new(FixtureKind::Mp4, bytes)
+            .with_reported_byte_length(u64::try_from(METADATA_BYTES + 8).unwrap_or(u64::MAX))
+    }
+
+    pub fn header_only_avc1_mp4() -> Self {
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, mp4_box(*b"avc1", &[])),
+        )
+    }
+
     pub fn unsupported_brand_mp4() -> Self {
         Self::new(FixtureKind::Mp4, mp4_box(*b"ftyp", b"avif\0\0\0\0avif"))
     }
@@ -231,6 +247,18 @@ impl VideoFixture {
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
+    pub fn webm_with_duplicate_track_numbers() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let first_track = webm_track_entry(ContentProtection::Clear);
+        let second_track = webm_track_entry(ContentProtection::Clear);
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &[first_track, second_track].concat(),
+        );
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
     pub fn webm_with_unknown_sized_final_cluster() -> Self {
         let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
         let tracks = ebml_element(
@@ -281,7 +309,19 @@ impl VideoFixture {
 }
 
 fn mp4_bytes(timescale: u32, duration: u32) -> Vec<u8> {
-    mp4_bytes_with_sample_entry(timescale, duration, mp4_box(*b"avc1", &[]))
+    mp4_bytes_with_sample_entry(timescale, duration, avc1_sample_entry())
+}
+
+fn avc1_sample_entry() -> Vec<u8> {
+    let mut payload = vec![0_u8; 78];
+    payload[6..8].copy_from_slice(&1_u16.to_be_bytes());
+    payload[24..26].copy_from_slice(&1920_u16.to_be_bytes());
+    payload[26..28].copy_from_slice(&1080_u16.to_be_bytes());
+    payload[40..42].copy_from_slice(&1_u16.to_be_bytes());
+    payload[74..76].copy_from_slice(&24_u16.to_be_bytes());
+    payload[76..78].copy_from_slice(&u16::MAX.to_be_bytes());
+    payload.extend_from_slice(&mp4_box(*b"avcC", &[1, 0x64, 0, 0x1f, 0xff, 0xe0, 0]));
+    mp4_box(*b"avc1", &payload)
 }
 
 fn mp4_bytes_with_sample_entry(timescale: u32, duration: u32, sample_entry: Vec<u8>) -> Vec<u8> {
