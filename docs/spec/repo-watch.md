@@ -31,8 +31,8 @@ its durable frontier, and the one-time storage migration are verified against
 this PR (`agent/repo-watch-content-identity`). The authenticated webhook intake,
 shadow projection, parity view, and targeted refresh behavior are verified
 against this PR (`agent/repo-watch-webhook-receiver`). The projection coverage
-enumeration and pull-request issue-comment behavior below are verified against
-this PR (`agent/webhook-event-mapping`).
+enumeration, pull-request issue-comment behavior, and per-page hydration
+coalescing below are verified against this PR (`agent/webhook-event-mapping`).
 
 ## Configuration and credential boundary
 
@@ -750,8 +750,18 @@ missing pull-request baseline, current mergeability, or a check rollup records a
 targeted-query projection and immediately reuses the repository poller's
 credential, client, conditional cache, normalization, and request bounds to
 fetch only the affected pull requests. Those observations commit through the
-ordinary poll producer and dispatch path. Full polling continues unchanged as
-the slow complete reconciliation sweep and remains authoritative for missed
+ordinary poll producer and dispatch path. Whole-pull-request hydrations coalesce
+per pull request across one drained page of pending deliveries: the whole page
+is durably admitted before it is read, so one hydration already observes every
+delivery on it, and repeating the hydration would only re-read the same state at
+the shared credential's expense. Anyone who may comment on a watched pull
+request would otherwise pace that hydration — detail, check suites, check runs,
+reviews, threads, and one request per comment for its reactions — with repeated
+comment deliveries. Coalescing is scoped to the page and never to a whole drain,
+because a later page may carry deliveries admitted after the earlier hydration
+ran. Head-guarded mergeability and check-rollup queries name a specific commit
+and do not coalesce against a hydration. Full polling continues unchanged as the
+slow complete reconciliation sweep and remains authoritative for missed
 deliveries, reactions, and every provider fact outside the mapped set. Poll
 frequency does not drop in shadow mode; any later write mode or slower cadence
 requires a separately reviewed ruling after parity over a real workday.

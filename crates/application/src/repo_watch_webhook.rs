@@ -1,6 +1,6 @@
 //! Transport-independent GitHub webhook payload projection for repository watch.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64};
 
 use serde_json::{Map, Value};
 use signalbox_domain::{
@@ -190,6 +190,58 @@ pub enum RepoWatchTargetedRefreshV1 {
     CheckRollupForCommit {
         head: CommitSha,
     },
+}
+
+/// Whole-pull-request hydrations one drained delivery page has already issued.
+///
+/// Every delivery on a page is durably admitted before the page is read, so the
+/// provider state each one reports is already in place when the page issues its
+/// first refresh, and one hydration observes all of them. Repeating that
+/// hydration per delivery re-reads the same state on the shared polling
+/// credential: pull-request detail, check suites, check runs, reviews, threads,
+/// and one request per comment for that comment's reactions. Pull-request
+/// comment deliveries put the repetition under an untrusted commenter's
+/// control, since signature verification, delivery deduplication, and GitHub's
+/// per-hook rate limit all admit repeated comment creation, edit, and deletion
+/// as distinct legitimate deliveries.
+///
+/// Only whole-pull-request hydration coalesces. A mergeability or check-rollup
+/// refresh names the commit it expects and an earlier hydration carries no
+/// evidence about that commit, so those reach the poller with their guards
+/// intact. The scope is one page and never a whole drain: a later page may hold
+/// deliveries admitted after this page's hydration ran, reporting state that
+/// hydration cannot have observed.
+#[derive(Debug)]
+pub struct RepoWatchTargetedRefreshCoalescerV1 {
+    hydrated: BTreeSet<PullRequestNumber>,
+}
+
+impl RepoWatchTargetedRefreshCoalescerV1 {
+    /// Opens the coalescing scope that one drained delivery page owns.
+    pub fn for_delivery_page() -> Self {
+        Self {
+            hydrated: BTreeSet::new(),
+        }
+    }
+
+    /// Retains the refreshes this page has not already issued.
+    pub fn admit(
+        &mut self,
+        refreshes: &[RepoWatchTargetedRefreshV1],
+    ) -> Vec<RepoWatchTargetedRefreshV1> {
+        refreshes
+            .iter()
+            .filter(|refresh| match refresh {
+                RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+                    self.hydrated.insert(*pull_request)
+                }
+                RepoWatchTargetedRefreshV1::Mergeability { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollup { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => true,
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 /// Closed patch produced from one mapped delivery.
@@ -1314,6 +1366,8 @@ fn check_conclusion(value: &str) -> Result<CheckConclusion, RepoWatchWebhookMapp
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use crate::RepoWatchReactionObservation;
     use signalbox_domain::{
         MergeableState, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
@@ -1329,6 +1383,7 @@ mod tests {
     const HOOK_ID: NonZeroU64 = NonZeroU64::new(7).expect("hook fixture is positive");
     const RECEIPT_SEQUENCE: NonZeroU64 = NonZeroU64::new(11).expect("receipt fixture is positive");
     const PULL_REQUEST: u64 = 17;
+    const OTHER_PULL_REQUEST: u64 = 23;
     const RETAINED_CHECK_RUN: u64 = 801;
     const RETAINED_REVIEW: u64 = 802;
     const RETAINED_WORKFLOW_RUN: u64 = 803;
@@ -1418,6 +1473,16 @@ mod tests {
         PullRequestNumber::new(
             NonZeroU64::new(PULL_REQUEST).expect("fixture pull-request number is positive"),
         )
+    }
+
+    fn other_pull_request_number() -> PullRequestNumber {
+        PullRequestNumber::new(
+            NonZeroU64::new(OTHER_PULL_REQUEST).expect("fixture pull-request number is positive"),
+        )
+    }
+
+    fn hydration(pull_request: PullRequestNumber) -> RepoWatchTargetedRefreshV1 {
+        RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }
     }
 
     fn canonical_observation(head: &str) -> RepoWatchObservation {
@@ -1612,6 +1677,74 @@ mod tests {
             mapping,
             RepoWatchWebhookMappingV1::Ignored(RepoWatchWebhookIgnoredReasonV1::UnmappedEvent)
         );
+    }
+
+    #[test]
+    fn one_delivery_page_hydrates_a_pull_request_once() {
+        let refresh = hydration(pull_request_number());
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+
+        let first = page.admit(slice::from_ref(&refresh));
+        let repeat = page.admit(slice::from_ref(&refresh));
+
+        assert_eq!(first, vec![hydration(pull_request_number())]);
+        assert!(repeat.is_empty());
+    }
+
+    #[test]
+    fn one_delivery_page_hydrates_each_pull_request_it_names() {
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.admit(&[hydration(pull_request_number())]);
+
+        let other = page.admit(&[hydration(other_pull_request_number())]);
+
+        assert_eq!(other, vec![hydration(other_pull_request_number())]);
+    }
+
+    #[test]
+    fn coalesced_hydration_leaves_head_guarded_refreshes_alone() {
+        let pull_request = pull_request_number();
+        let expected_head =
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid");
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.admit(&[hydration(pull_request)]);
+
+        let guarded = page.admit(&[
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head: expected_head.clone(),
+            },
+            RepoWatchTargetedRefreshV1::CheckRollup {
+                pull_request,
+                expected_head: expected_head.clone(),
+            },
+        ]);
+
+        assert_eq!(
+            guarded,
+            vec![
+                RepoWatchTargetedRefreshV1::Mergeability {
+                    pull_request,
+                    expected_head: expected_head.clone(),
+                },
+                RepoWatchTargetedRefreshV1::CheckRollup {
+                    pull_request,
+                    expected_head,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_later_delivery_page_hydrates_again() {
+        let refresh = hydration(pull_request_number());
+        let mut drained = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        drained.admit(slice::from_ref(&refresh));
+        let mut next = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+
+        let admitted = next.admit(slice::from_ref(&refresh));
+
+        assert_eq!(admitted, vec![hydration(pull_request_number())]);
     }
 
     #[test]

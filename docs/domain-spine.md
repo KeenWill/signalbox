@@ -7156,6 +7156,12 @@ pub enum RepoWatchTargetedRefreshV1 {
     CheckRollupForCommit { head: CommitSha },
 }
 
+pub struct RepoWatchTargetedRefreshCoalescerV1 { /* private */ }
+impl RepoWatchTargetedRefreshCoalescerV1 {
+    pub fn for_delivery_page() -> Self;
+    pub fn admit(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]) -> Vec<RepoWatchTargetedRefreshV1>;
+}
+
 pub struct RepoWatchObservationPatchV1 { /* private */ }
 impl RepoWatchObservationPatchV1 {
     // accessors: changes(), targeted_refreshes()
@@ -10524,7 +10530,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
 | application: repo_watch                            | 38 (incl. 4 traits)   |
-| application: repo_watch_webhook                    | 15 (+2 free fn)       |
+| application: repo_watch_webhook                    | 16 (+2 free fn)       |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10535,4 +10541,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **269 (+3 free fn)**  |
+| **signalbox-application total**                    | **270 (+3 free fn)**  |

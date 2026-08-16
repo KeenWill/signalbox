@@ -26,9 +26,9 @@ use signalbox_application::{
     RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshV1,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWebhookDeliveryV1,
-    RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
     RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
     RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
@@ -541,8 +541,9 @@ impl RepositoryWatchTask {
             if deliveries.is_empty() {
                 return Ok(());
             }
+            let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
             for delivery in deliveries {
-                self.process_webhook_delivery(&delivery).await?;
+                self.process_webhook_delivery(&delivery, &mut page).await?;
             }
         }
     }
@@ -550,6 +551,7 @@ impl RepositoryWatchTask {
     async fn process_webhook_delivery(
         &mut self,
         pending: &PendingRepoWatchWebhookDelivery,
+        page: &mut RepoWatchTargetedRefreshCoalescerV1,
     ) -> Result<(), RepositoryWatchAttemptError> {
         let delivery = RepoWatchWebhookDeliveryV1::new(RepoWatchWebhookDeliveryV1Input {
             repository: pending.repository().clone(),
@@ -661,13 +663,17 @@ impl RepositoryWatchTask {
                     } => {
                         let mut projections =
                             shadow_event_projections(&self.repository, &cursor, &observation)?;
+                        // Every delivery projects the query it needs, so parity
+                        // accounting stays per delivery. Coalescing decides only
+                        // how many times the page asks the provider for it.
                         projections.extend(
                             refreshes
                                 .iter()
                                 .map(targeted_query_projection)
                                 .collect::<Result<Vec<_>, _>>()?,
                         );
-                        self.targeted_refresh_and_commit(&refreshes).await?;
+                        self.targeted_refresh_and_commit(&page.admit(&refreshes))
+                            .await?;
                         self.process_dispatches().await?;
                         self.record_webhook_terminal(
                             pending,
@@ -706,6 +712,9 @@ impl RepositoryWatchTask {
         &mut self,
         refreshes: &[RepoWatchTargetedRefreshV1],
     ) -> Result<(), RepositoryWatchAttemptError> {
+        if refreshes.is_empty() {
+            return Ok(());
+        }
         let cursor = self
             .store
             .load_cursor(&self.repository)
