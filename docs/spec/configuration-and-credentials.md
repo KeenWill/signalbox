@@ -94,11 +94,10 @@ durable trigger actions and chain exclusions, and the availability successor
 calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
 together with durable per-call pool-policy snapshots, are verified against this
-PR (`agent/multi-account-pools`). Codex `codex_home` delivery is verified only
-with its implementing child PR; Codex `file` and `oauth`, capacity reservations,
-and legacy family-to-reference migration remain committed unimplemented
-functionality as labeled below. Every other paragraph on this page describes
-behavior verified against the references above.
+PR (`agent/multi-account-pools`). Codex `codex_home`, `file`, and `oauth`,
+capacity reservations, and legacy family-to-reference migration remain committed
+unimplemented functionality as labeled below. Every other paragraph on this page
+describes behavior verified against the references above.
 
 ## Process configuration
 
@@ -1102,10 +1101,12 @@ owns, and rejects every other key as unknown
 (`apps/signalboxd/src/credential_pools.rs:54`). Which adapter a profile
 authenticates is the profile's own `adapter`, and the secret reaches the
 provider through the delivery this section describes rather than through a
-process environment variable. Codex and Claude receive their complete
-adapter-scoped profile catalogs and resolve each operation's selected reference;
-the direct HTTP adapters resolve theirs from the same catalog. Different model
-families may therefore prefer different profiles for one adapter.
+process environment variable. Claude and the direct HTTP adapters receive their
+complete adapter-scoped profile catalogs and resolve each operation's selected
+reference from them, so two model families of one of those adapters may prefer
+different profiles. Codex still carries a single retained reference into its
+runtime, so two `codex_cli` families preferring different profiles are a typed
+startup failure rather than an admitted pair.
 
 A profile's closed `delivery` states how its secret reaches the provider. Four
 are admitted. Which of them a given adapter accepts is **not** a table stated
@@ -1325,12 +1326,15 @@ failure, and an empty directory are distinct typed per-profile startup failures.
 Error display and debug output carry the profile reference and closed cause but
 never the path.
 
-The daemon treats the directory only as a path reference. It never opens,
-copies, parses, serializes, or logs authentication material inside it. For each
-Codex CLI spawn, the selected pool member replaces the child's inherited
-`CODEX_HOME` with that member's admitted path; every other member's path remains
-absent from that process environment. The CLI itself owns every read and write
-beneath the selected home.
+The daemon treats the directory only as a path reference: it never opens,
+copies, parses, serializes, or logs authentication material inside it. Delivery
+is the unimplemented part — no present composition sets `CODEX_HOME` for a Codex
+CLI spawn, because a `codex_home` profile is rejected as
+`UndeliveredCredentialDelivery` at startup before any spawn can select it. The
+child that delivers it replaces each Codex CLI child's inherited `CODEX_HOME`
+with the selected pool member's admitted path and leaves every other member's
+path absent from that process environment; the CLI itself owns every read and
+write beneath the selected home.
 
 Two `codex_home` profiles for Codex must name different normalized paths, and a
 Codex document may not combine an `ambient` profile with any `codex_home`
@@ -2381,14 +2385,15 @@ reader can take an entry's position for its tier.
   be migrated, and blocks scheduling rather than being guessed at or dropped —
   the same failure the freeze rule above produces, for the same reason.
 
-- **CLI login channels.** `codex_home` is implemented as a validated path
-  reference delivered through per-process `CODEX_HOME`; the daemon never reads,
-  copies, or logs its authentication material. `oauth` remains reserved and is
-  rejected as `UndeliveredCredentialDelivery`. The child that admits `oauth`
-  must invert the home-owned boundary: it must hold the rotating authorization
-  itself and hand each process a scratch home carrying everything that home
-  requires except the refresh token, which is the one value it must never place
-  there. The complete contents are stated once by
+- **CLI login channels.** Both `codex_home` and `oauth` remain reserved and are
+  rejected as `UndeliveredCredentialDelivery`. The child that delivers
+  `codex_home` supplies a validated path reference through a per-process
+  `CODEX_HOME`, with the daemon still never reading, copying, or logging the
+  authentication material beneath it. The child that admits `oauth` must invert
+  the home-owned boundary: it must hold the rotating authorization itself and
+  hand each process a scratch home carrying everything that home requires except
+  the refresh token, which is the one value it must never place there. The
+  complete contents are stated once by
   [the `oauth` delivery](#the-oauth-delivery) and are not enumerated again here.
 
 - **Codex file resolution.** No present composition or runtime delivers a Codex
