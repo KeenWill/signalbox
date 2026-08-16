@@ -168,6 +168,19 @@ class NumericBoundCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_derived_escape_fails_on_a_path_qualified_source(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: ceiling - protects against oversized text\n"
+            "const MAX_BASE: usize = 1024;\n"
+            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "const MAX_DERIVED_BYTES: usize = other_crate::MAX_BASE * 4;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DERIVED_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
     def test_test_module_bound_is_inventoried_without_gating(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
@@ -176,6 +189,43 @@ class NumericBoundCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("1 test-only", result.stdout)
+
+    def test_compound_cfg_test_module_bound_is_inventoried_without_gating(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "#[cfg(all(test, unix))]\n"
+            "mod tests {\n"
+            "    const MAX_FIXTURE_BYTES: usize = 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_attributed_cfg_test_module_bound_is_inventoried_without_gating(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "#[cfg(test)]\n"
+            "#[allow(clippy::items_after_statements)]\n"
+            "mod tests {\n"
+            "    const MAX_FIXTURE_BYTES: usize = 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_optionally_configured_test_module_bound_still_gates(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            '#[cfg(any(test, feature = "fixtures"))]\n'
+            "mod tests {\n"
+            "    const MAX_FIXTURE_BYTES: usize = 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_FIXTURE_BYTES", result.stdout)
 
     def test_external_test_module_bound_is_inventoried_without_gating(self) -> None:
         result = run_checker_tree(

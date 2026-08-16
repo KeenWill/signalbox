@@ -12,6 +12,10 @@ Test-only modules are inventoried but do not gate because their constants
 describe fixtures, not runtime safety. A module written ``#[cfg(test)] mod
 tests;`` is test-only across the separate file it names, whether that file is
 found by Rust's directory rule or named outright by a ``#[path]`` attribute.
+The whole attribute run is read, so an intervening attribute and a compound
+``cfg(all(test, unix))`` both still count; ``cfg(any(test, ...))`` and
+``cfg(not(test))`` do not, because those modules also compile without ``test``
+and their constants really are production.
 
 The blocking scope is deliberately smaller than the inventory: production
 constants in application orchestration, provider-neutral model runtime,
@@ -33,10 +37,13 @@ A mechanically derived bound may use the narrow escape
 
     // numeric-bound: derived ceiling from MAX_SOURCE_CHARACTERS
 
-only when its initializer actually references the named, same-file bound and
-that name resolves to a direct declaration of the same kind. This keeps
-self-evident byte/unit translations from repeating rationale while preventing
-an unexplained independent cap from hiding behind the escape.
+only when its initializer references the named bound by its bare name and that
+name resolves to a direct declaration of the same kind. This keeps self-evident
+byte/unit translations from repeating rationale while preventing an unexplained
+independent cap from hiding behind the escape. A path-qualified reference such
+as ``other_crate::MAX_BASE`` does not count: it names an item this scan cannot
+see, whose classification may differ from the same-named local one, so the
+escape is unavailable and the constant declares its own kind.
 
 The source name resolves in the Rust scope that declares it: the innermost
 inline module containing the derived constant, then outward through enclosing
@@ -114,18 +121,15 @@ DERIVED_DECLARATION = re.compile(
     r"^\s*// numeric-bound: derived (?P<kind>ceiling|tunable) from "
     r"(?P<source>[A-Z][A-Z0-9_]*)\s*$"
 )
-TEST_MODULE = re.compile(
-    r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
-    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
-    re.MULTILINE,
-)
 MODULE_BLOCK = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
-EXTERNAL_MODULE = re.compile(
+ATTRIBUTED_MODULE = re.compile(
     r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)+)"
-    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
+    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<form>[{;])",
     re.MULTILINE,
 )
-CFG_TEST_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+CFG_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\((?P<predicate>[^\]]*)\)\s*\]")
+TEST_CONFIGURATION = re.compile(r"\btest\b")
+OPTIONAL_CONFIGURATION = re.compile(r"\b(?:any|not)\s*\(")
 PATH_ATTRIBUTE = re.compile(r"#\s*\[\s*path\s*=\s*\"(?P<path>[^\"]+)\"\s*\]")
 MODULE_ROOTS = frozenset({"lib.rs", "main.rs", "mod.rs"})
 
@@ -222,11 +226,30 @@ def matching_brace(code: str, opening: int) -> int:
     return len(code)
 
 
+def requires_test(attributes: str) -> bool:
+    """Report whether an attribute run compiles only under `cfg(test)`.
+
+    `cfg(test)` qualifies and so does a compound `cfg(all(test, unix))`, since
+    neither builds without `test`. `cfg(any(test, ...))` and `cfg(not(test))`
+    do not: those modules also compile in a production build, so their
+    constants gate. Predicates are read rather than evaluated, which is why
+    `any` and `not` disqualify the whole predicate instead of being resolved.
+    """
+    for match in CFG_ATTRIBUTE.finditer(attributes):
+        predicate = match.group("predicate")
+        if TEST_CONFIGURATION.search(predicate) and not OPTIONAL_CONFIGURATION.search(
+            predicate
+        ):
+            return True
+    return False
+
+
 def test_ranges(code: str) -> list[tuple[int, int]]:
     ranges = []
-    for match in TEST_MODULE.finditer(code):
-        opening = code.find("{", match.start(), match.end())
-        ranges.append((match.start(), matching_brace(code, opening)))
+    for match in ATTRIBUTED_MODULE.finditer(code):
+        if match.group("form") != "{" or not requires_test(match.group("attributes")):
+            continue
+        ranges.append((match.start(), matching_brace(code, match.end() - 1)))
     return ranges
 
 
@@ -256,8 +279,8 @@ def external_test_sources(path: Path, text: str, code: str) -> set[Path]:
     """
     directory = path.parent if path.name in MODULE_ROOTS else path.with_suffix("")
     owned: set[Path] = set()
-    for match in EXTERNAL_MODULE.finditer(code):
-        if CFG_TEST_ATTRIBUTE.search(match.group("attributes")) is None:
+    for match in ATTRIBUTED_MODULE.finditer(code):
+        if match.group("form") != ";" or not requires_test(match.group("attributes")):
             continue
         attributes = text[match.start("attributes") : match.end("attributes")]
         explicit = PATH_ATTRIBUTE.search(attributes)
@@ -394,7 +417,8 @@ def validate(bounds: list[Bound]) -> list[str]:
         source = parsed[2]
         if source is None:
             return bool(parsed[1].strip())
-        if source in seen or re.search(rf"\b{re.escape(source)}\b", bound.initializer) is None:
+        bare = rf"(?<![\w:]){re.escape(source)}\b"
+        if source in seen or re.search(bare, bound.initializer) is None:
             return False
         owner = visible_owner(bound, source)
         return owner is not None and resolves_to_direct(owner, kind, seen | {source})

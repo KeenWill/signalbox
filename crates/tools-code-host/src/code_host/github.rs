@@ -72,7 +72,7 @@ const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_EN
         + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
-// numeric-bound: ceiling - protects memory from a malformed SHA response body
+// numeric-bound: not-a-bound - a 40-character commit SHA plus one optional newline
 const MAX_COMMIT_SHA_RESPONSE_BYTES: usize = 41;
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
@@ -83,7 +83,7 @@ const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
 // numeric-bound: ceiling - protects latency and API spend from runaway pagination
 const MAX_CHANGED_FILE_PAGES: u16 = 30;
-// numeric-bound: ceiling - protects API concurrency during stack comparison
+// numeric-bound: tunable - controls stack-comparison concurrency at the code host
 const MAX_STACK_COMPARISONS_IN_FLIGHT: usize = 8;
 
 const REVIEW_THREADS_QUERY: &str = r#"

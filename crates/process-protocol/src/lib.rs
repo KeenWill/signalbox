@@ -138,7 +138,7 @@ pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum canonical decimal USD amount text.
-// numeric-bound: ceiling - protects decimal parsing and wire-field memory
+// numeric-bound: not-a-bound - the longest canonical rust_decimal spelling
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
 /// Maximum UTF-8 bytes in one deployment-owned billing rate version.
