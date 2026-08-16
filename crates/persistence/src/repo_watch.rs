@@ -629,11 +629,11 @@ impl PostgresRepoWatchStore {
                              WHERE repository = $1
                                AND pull_request_number = $2
                                AND head_sha = $3
+                               AND base_revision = $4
                              ORDER BY recorded_at DESC, assessment_id DESC
                              LIMIT 1
                            ) AS current
-                     WHERE current.base_revision = $4
-                       AND current.base_branch = $5
+                     WHERE current.base_branch = $5
                        AND current.mergeable_state = $6
                        AND current.review_decision = $7
                        AND current.unresolved_threads = $8

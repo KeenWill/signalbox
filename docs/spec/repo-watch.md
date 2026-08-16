@@ -570,13 +570,15 @@ without treating a new revision as already finished.
 **Implemented behavior.** Repository watch records one convergence cutoff only
 when a seal's head and base revision are the latest assessed identity. Stale
 seals remain pending and become eligible if their identity becomes current
-again. The cutoff applies the ordinary parent-only stop to every generation-one
-goal repository watch commissioned for the pull request, with the same
-provenance limits as a lifecycle cutoff. Dispatch admission rechecks the seal
-under the repository lock: a stale match or collapsed obligation settles as
-`target_converged` only when its head is the latest assessed identity and that
-identity's head and base revision are sealed. An older identity cannot stop
-current work.
+again. Each transition that makes a sealed identity current records its own
+cutoff application, so work commissioned while another identity was current is
+also stopped when the sealed identity returns. The cutoff applies the ordinary
+parent-only stop to every generation-one goal repository watch commissioned for
+the pull request, with the same provenance limits as a lifecycle cutoff.
+Dispatch admission rechecks the seal under the repository lock: a stale match or
+collapsed obligation settles as `target_converged` only when its head is the
+latest assessed identity and that identity's head and base revision are sealed.
+An older identity cannot stop current work.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,

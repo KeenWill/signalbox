@@ -113,6 +113,13 @@ fn repository() -> Result<RepositorySlug, Box<dyn Error>> {
 }
 
 fn observation(head: Option<&str>) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    observation_at_base(head, BASE_REVISION)
+}
+
+fn observation_at_base(
+    head: Option<&str>,
+    base_revision: &str,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
     let pull_requests = head.map(pull_request).transpose()?.into_iter().collect();
     Ok(RepoWatchObservation::new(
         Vec::new(),
@@ -121,7 +128,7 @@ fn observation(head: Option<&str>) -> Result<RepoWatchObservation, Box<dyn Error
             workflow_runs: Vec::new(),
             branch_heads: vec![RepoWatchBranchHead::new(
                 BranchName::try_new(BASE_BRANCH.to_owned())?,
-                CommitSha::try_new(BASE_REVISION.to_owned())?,
+                CommitSha::try_new(base_revision.to_owned())?,
             )],
         })?,
     ))
@@ -724,6 +731,85 @@ async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
     assert_eq!(assessment_count, 2);
     assert_eq!(first_head_assessment_count, 1);
     assert_eq!(current_head, INITIAL_HEAD);
+    assert_eq!(identity_count, 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn evidence_replay_after_a_base_round_trip_uses_the_candidate_base()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let second_base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let first =
+        RepoWatchCursorCandidate::new(observation_at_base(Some(INITIAL_HEAD), BASE_REVISION)?);
+    let second =
+        RepoWatchCursorCandidate::new(observation_at_base(Some(INITIAL_HEAD), second_base)?);
+    let first_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, first.clone(), Vec::new()),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let mut ids = FixedEventIds::default();
+    let second_events = derive_repo_watch_events(
+        &repository,
+        Some(first.observation()),
+        second.observation(),
+        &mut ids,
+    )?;
+    let second_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first_generation), second.clone(), second_events),
+                &[merge_ready_assessment(INITIAL_HEAD, second_base)?],
+            )
+            .await?,
+    );
+    let restored_events = derive_repo_watch_events(
+        &repository,
+        Some(second.observation()),
+        first.observation(),
+        &mut ids,
+    )?;
+
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(second_generation), first, restored_events),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+    let first_base_assessment_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE base_revision = $1",
+    )
+    .bind(BASE_REVISION)
+    .fetch_one(&pool)
+    .await?;
+    let current_base: String =
+        sqlx::query_scalar("SELECT base_revision FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+    let identity_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_identity")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(assessment_count, 2);
+    assert_eq!(first_base_assessment_count, 1);
+    assert_eq!(current_base, BASE_REVISION);
     assert_eq!(identity_count, 3);
     Ok(())
 }
