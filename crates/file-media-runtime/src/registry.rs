@@ -5,8 +5,8 @@ use crate::{
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
     ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadViewBounds, ReaderDeclaration, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
+    ReadAccessPattern, ReadContinuation, ReadViewBounds, ReaderDeclaration, ReaderIdentity,
+    ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 
 const MAX_REGISTRY_PROVIDERS: usize = 256;
@@ -26,12 +26,21 @@ pub struct FileMediaRegistry {
     ceilings: FileMediaCeilings,
 }
 
+/// Whether the daemon can launch the required processor isolation boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessorIsolation {
+    /// The accepted isolation boundary is available.
+    Available,
+    /// No accepted isolation boundary is available.
+    Unavailable,
+}
+
 impl FileMediaRegistry {
     /// Builds one deterministic registry and rejects every static conflict.
     pub fn try_new(
         mut providers: Vec<FileMediaProviderDeclaration>,
         ceilings: FileMediaCeilings,
-        isolation_available: bool,
+        isolation: ProcessorIsolation,
     ) -> Result<Self, FileMediaRegistryConstructionError> {
         if !FileMediaCeilings::version_one().admits(ceilings) {
             return Err(FileMediaRegistryConstructionError::Ceilings);
@@ -39,7 +48,7 @@ impl FileMediaRegistry {
         if providers.len() > MAX_REGISTRY_PROVIDERS {
             return Err(FileMediaRegistryConstructionError::Inventory);
         }
-        if !providers.is_empty() && !isolation_available {
+        if !providers.is_empty() && isolation == ProcessorIsolation::Unavailable {
             return Err(FileMediaRegistryConstructionError::IsolationUnavailable);
         }
         providers.sort_by(|left, right| left.provider().cmp(right.provider()));
@@ -550,15 +559,11 @@ fn sanitize_read(
             if body.len() > output_bytes
                 || body.len() > ceilings.text_or_json_bytes
                 || body.contains('\0')
-                || !valid_cursor(truncated, cursor.as_deref())
             {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
-            Ok(FileReadResult::Text {
-                body,
-                truncated,
-                cursor,
-            })
+            let continuation = sanitize_continuation(truncated, cursor)?;
+            Ok(FileReadResult::Text { body, continuation })
         }
         ProcessorReadOutput::Structured {
             body_json,
@@ -578,10 +583,10 @@ fn sanitize_read(
             if body_json.len() > output_bytes
                 || body_json.len() > ceilings.text_or_json_bytes
                 || body_json.contains('\0')
-                || !valid_cursor(truncated, cursor.as_deref())
             {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
+            let continuation = sanitize_continuation(truncated, cursor)?;
             let body: serde_json::Value =
                 serde_json::from_str(&body_json).map_err(|_| FileMediaFailure::ProcessorFailed)?;
             let mut observed = ObservedJson::default();
@@ -594,11 +599,7 @@ fn sanitize_read(
             {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
-            Ok(FileReadResult::Structured {
-                body,
-                truncated,
-                cursor,
-            })
+            Ok(FileReadResult::Structured { body, continuation })
         }
         ProcessorReadOutput::InvalidViewArguments => Err(FileMediaFailure::InvalidViewArguments),
         ProcessorReadOutput::UnsupportedView => Err(FileMediaFailure::UnsupportedView),
@@ -666,16 +667,23 @@ fn observe_json(
     Ok(())
 }
 
-fn valid_cursor(truncated: bool, cursor: Option<&str>) -> bool {
+fn sanitize_continuation(
+    truncated: bool,
+    cursor: Option<String>,
+) -> Result<ReadContinuation, FileMediaFailure> {
     match (truncated, cursor) {
-        (false, None) => true,
+        (false, None) => Ok(ReadContinuation::Complete),
         (true, Some(cursor)) => {
-            !cursor.is_empty()
-                && cursor.len() <= MAX_CURSOR_BYTES
-                && !cursor.contains('\0')
-                && !cursor.chars().any(char::is_control)
+            if cursor.is_empty()
+                || cursor.len() > MAX_CURSOR_BYTES
+                || cursor.contains('\0')
+                || cursor.chars().any(char::is_control)
+            {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Ok(ReadContinuation::More { cursor })
         }
-        (false, Some(_)) | (true, None) => false,
+        (false, Some(_)) | (true, None) => Err(FileMediaFailure::ProcessorFailed),
     }
 }
 

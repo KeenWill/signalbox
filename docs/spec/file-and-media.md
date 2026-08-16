@@ -1,9 +1,10 @@
 # File and media interpretation
 
-The provider-neutral type model, declaration and registry checks, detection and
-validation algorithm, untrusted processor-response boundary, stable agent tool
-contracts, and visibility-authorizing application bridge are verified against PR
-#898 (`agent/file-media-core`).
+The first provider-neutral core is verified against PR #898
+(`agent/file-media-core`). It includes the type model, declaration and registry
+checks, detection and validation algorithm, untrusted processor-response
+boundary, stable agent tool contracts, and visibility-authorizing application
+bridge.
 
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and

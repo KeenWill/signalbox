@@ -20,7 +20,8 @@ pub use detection::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaFailure, FileMediaProcessor,
     FileMediaProcessorFuture, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
     ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    SourceReadError, SourceReadFuture, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
+    ReadContinuation, SourceReadError, SourceReadFuture, ValidatedFile, ValidationEvidence,
+    VerifiedBlobSource,
 };
 pub use limits::{
     FileMediaCeilings, MAX_AUDIO_CHANNELS, MAX_AUDIO_CLIP_SECONDS, MAX_AUDIO_SAMPLE_RATE_HZ,
@@ -29,7 +30,7 @@ pub use limits::{
     MAX_PROBE_RANGES, MAX_PROBE_SUFFIX_BYTES, MAX_PROCESSOR_FRAME_BYTES, MAX_STRUCTURED_DEPTH,
     MAX_STRUCTURED_NODES, MAX_TEXT_OR_JSON_BYTES,
 };
-pub use registry::{FileMediaRegistry, FileMediaRegistryConstructionError};
+pub use registry::{FileMediaRegistry, FileMediaRegistryConstructionError, ProcessorIsolation};
 pub use value::{
     AttachmentKind, BoundedMetadata, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, DisplayFilename, FileDigest, FileReaderName, FileReaderProviderName,

@@ -428,26 +428,27 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
 
 fn read_evidence(result: FileReadResult) -> ToolExecutorEvidence {
     match result {
-        FileReadResult::Text {
-            body,
-            truncated,
-            cursor,
-        } => completed_json(json!({
+        FileReadResult::Text { body, continuation } => completed_json(json!({
             "status": "text",
             "body": body,
-            "truncated": truncated,
-            "cursor": cursor,
+            "truncated": matches!(&continuation, signalbox_file_media_runtime::ReadContinuation::More { .. }),
+            "cursor": continuation_cursor(continuation),
         })),
-        FileReadResult::Structured {
-            body,
-            truncated,
-            cursor,
-        } => completed_json(json!({
+        FileReadResult::Structured { body, continuation } => completed_json(json!({
             "status": "structured",
             "body": body,
-            "truncated": truncated,
-            "cursor": cursor,
+            "truncated": matches!(&continuation, signalbox_file_media_runtime::ReadContinuation::More { .. }),
+            "cursor": continuation_cursor(continuation),
         })),
+    }
+}
+
+fn continuation_cursor(
+    continuation: signalbox_file_media_runtime::ReadContinuation,
+) -> Option<String> {
+    match continuation {
+        signalbox_file_media_runtime::ReadContinuation::Complete => None,
+        signalbox_file_media_runtime::ReadContinuation::More { cursor } => Some(cursor),
     }
 }
 

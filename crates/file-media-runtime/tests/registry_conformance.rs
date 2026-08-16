@@ -13,10 +13,10 @@ use signalbox_file_media_runtime::{
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileMediaRegistry,
     FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision, FileUse,
     InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeStrength, ProcessorFailure,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback,
-    ValidationEvidence, VerifiedBlobSource,
+    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+    ReaderDeclarationInput, ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture,
+    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 
 const SYNTHETIC_MEDIA_TYPE: &str = "application/x-signalbox-synthetic";
@@ -79,6 +79,7 @@ enum ReadBehavior {
     Text,
     OversizedText,
     MalformedStructured,
+    ContradictoryContinuation,
 }
 
 struct SyntheticProcessor {
@@ -167,6 +168,11 @@ impl FileMediaProcessor for SyntheticProcessor {
                     truncated: false,
                     cursor: None,
                 },
+                ReadBehavior::ContradictoryContinuation => ProcessorReadOutput::Text {
+                    body: String::from("synthetic admitted text"),
+                    truncated: true,
+                    cursor: None,
+                },
             })
         })
     }
@@ -234,8 +240,12 @@ fn registry_with_view(view: ReadViewDeclaration) -> FileMediaRegistry {
     .expect("fixture reader declaration is nonempty");
     let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
         .expect("fixture provider owns its reader");
-    FileMediaRegistry::try_new(vec![declaration], FileMediaCeilings::version_one(), true)
-        .expect("fixture registry is conflict-free")
+    FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )
+    .expect("fixture registry is conflict-free")
 }
 
 fn inspection_request(source: &MemorySource, declared: &str) -> InspectionRequest {
@@ -384,6 +394,27 @@ fn inv065_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
+/// INV-065: contradictory continuation facts from a processor do not enter the
+/// sanitized read-result type.
+#[test]
+fn inv065_contradictory_processor_continuation_is_sanitized_to_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::ContradictoryContinuation,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        options: serde_json::json!({}),
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
 #[test]
 fn duplicate_static_media_ownership_is_rejected() {
     let first_provider = provider_declaration("first", SYNTHETIC_MEDIA_TYPE);
@@ -392,7 +423,7 @@ fn duplicate_static_media_ownership_is_rejected() {
     let outcome = FileMediaRegistry::try_new(
         vec![first_provider, second_provider],
         FileMediaCeilings::version_one(),
-        true,
+        ProcessorIsolation::Available,
     );
 
     assert!(outcome.is_err());
@@ -423,7 +454,7 @@ fn distinct_static_media_ownership_is_admitted() {
     let registry = FileMediaRegistry::try_new(
         vec![second_provider, first_provider],
         FileMediaCeilings::version_one(),
-        true,
+        ProcessorIsolation::Available,
     )
     .expect("distinct ownership is conflict-free");
 

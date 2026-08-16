@@ -248,6 +248,18 @@ pub struct FileReadRequest {
     pub options: serde_json::Value,
 }
 
+/// Sanitized continuation state for one typed read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReadContinuation {
+    /// The returned body is complete.
+    Complete,
+    /// More complete semantic units remain.
+    More {
+        /// Opaque restart-ephemeral continuation.
+        cursor: String,
+    },
+}
+
 /// Bounded typed-read result currently representable without durable media references.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileReadResult {
@@ -255,19 +267,15 @@ pub enum FileReadResult {
     Text {
         /// Complete bounded body.
         body: String,
-        /// Whether more semantic units remain.
-        truncated: bool,
-        /// Opaque restart-ephemeral continuation, when truncated.
-        cursor: Option<String>,
+        /// Sanitized completeness or continuation evidence.
+        continuation: ReadContinuation,
     },
     /// Admitted structured value.
     Structured {
         /// Parsed bounded JSON body.
         body: serde_json::Value,
-        /// Whether more semantic units remain.
-        truncated: bool,
-        /// Opaque restart-ephemeral continuation, when truncated.
-        cursor: Option<String>,
+        /// Sanitized completeness or continuation evidence.
+        continuation: ReadContinuation,
     },
 }
 
