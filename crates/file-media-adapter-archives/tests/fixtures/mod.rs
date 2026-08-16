@@ -27,6 +27,12 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn unsupported_compression_zip() -> Result<Self, Box<dyn Error>> {
+        let mut fixture = Self::zip()?;
+        set_compression_method(&mut fixture.bytes, 12)?;
+        Ok(fixture)
+    }
+
     pub fn tar() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: tar_file("docs/readme.txt", PAYLOAD)?,
@@ -48,6 +54,18 @@ impl ArchiveFixture {
     pub fn zstd() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: zstd::stream::encode_all(PAYLOAD, 1)?,
+            media_type: "application/zstd",
+            expected_format: "zstd",
+            expected_name: "content",
+        })
+    }
+
+    pub fn zstd_with_skippable_frame() -> Result<Self, Box<dyn Error>> {
+        let compressed = zstd::stream::encode_all(PAYLOAD, 1)?;
+        let mut bytes = b"\x50\x2a\x4d\x18\x00\x00\x00\x00".to_vec();
+        bytes.extend_from_slice(&compressed);
+        Ok(Self {
+            bytes,
             media_type: "application/zstd",
             expected_format: "zstd",
             expected_name: "content",
@@ -130,6 +148,17 @@ impl ArchiveFixture {
     pub fn disguised_recursive_zip() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: zip_bytes(&[("payload.bin", b"\x1f\x8b\x08nested", ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn disguised_empty_zip() -> Result<Self, Box<dyn Error>> {
+        let writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let empty_zip = writer.finish()?.into_inner();
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &empty_zip, ZipEntryKind::File)])?,
             media_type: "application/zip",
             expected_format: "zip",
             expected_name: "payload.bin",
@@ -281,6 +310,26 @@ fn set_encryption_flags(bytes: &mut [u8]) -> Result<(), Box<dyn Error>> {
         .ok_or("ZIP fixture omitted central header")?;
     set_flag(bytes, local + 6)?;
     set_flag(bytes, central + 8)?;
+    Ok(())
+}
+
+fn set_compression_method(bytes: &mut [u8], method: u16) -> Result<(), Box<dyn Error>> {
+    let local = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x03\x04")
+        .ok_or("ZIP fixture omitted local header")?;
+    let central = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .ok_or("ZIP fixture omitted central header")?;
+    bytes
+        .get_mut(local + 8..local + 10)
+        .ok_or("ZIP local compression method absent")?
+        .copy_from_slice(&method.to_le_bytes());
+    bytes
+        .get_mut(central + 10..central + 12)
+        .ok_or("ZIP central compression method absent")?
+        .copy_from_slice(&method.to_le_bytes());
     Ok(())
 }
 

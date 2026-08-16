@@ -17,7 +17,7 @@ use signalbox_file_media_runtime::{
     ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
     StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
-use zip::ZipArchive;
+use zip::{CompressionMethod, ZipArchive};
 
 const PROVIDER_NAME: &str = "archives";
 const READER_REVISION: &str = "zip8-tar04-gz1-zstd013-v1";
@@ -30,6 +30,7 @@ const LINK_ENTRY_REASON: &str = "link_entry";
 const RECURSIVE_REASON: &str = "recursive_container";
 const SPECIAL_ENTRY_REASON: &str = "special_entry";
 const SOURCE_SIZE_REASON: &str = "source_size_limit";
+const UNSUPPORTED_COMPRESSION_REASON: &str = "unsupported_compression_method";
 const PROBE_BYTES: u64 = 512;
 const SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_ENTRIES: usize = 1_000;
@@ -140,7 +141,16 @@ impl FileMediaProvider for ArchiveProvider {
                 Err(ArchiveIssue::Expansion) => Ok(ProcessorReadOutput::ExpansionLimitExceeded {
                     limit_kind: String::from(EXPANDED_SIZE_REASON),
                 }),
-                Err(_) => Err(ProcessorFailure::Failed),
+                Err(
+                    ArchiveIssue::Malformed
+                    | ArchiveIssue::Encrypted
+                    | ArchiveIssue::EntryCount
+                    | ArchiveIssue::HostileName
+                    | ArchiveIssue::Link
+                    | ArchiveIssue::Recursive
+                    | ArchiveIssue::Special
+                    | ArchiveIssue::UnsupportedCompression,
+                ) => Err(ProcessorFailure::Failed),
             }
         })
     }
@@ -194,6 +204,7 @@ fn reader_declaration(
             ReasonCode::try_new(RECURSIVE_REASON)?,
             ReasonCode::try_new(SPECIAL_ENTRY_REASON)?,
             ReasonCode::try_new(SOURCE_SIZE_REASON)?,
+            ReasonCode::try_new(UNSUPPORTED_COMPRESSION_REASON)?,
         ],
         streaming_text_fallback: StreamingTextFallback::Disabled,
     })?)
@@ -238,7 +249,7 @@ impl ArchiveKind {
             Self::Zip => bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06"),
             Self::Tar => tar_header(bytes),
             Self::Gzip => bytes.starts_with(b"\x1f\x8b\x08"),
-            Self::Zstd => bytes.starts_with(b"\x28\xb5\x2f\xfd"),
+            Self::Zstd => zstd_header(bytes),
         }
     }
 }
@@ -266,6 +277,7 @@ enum ArchiveIssue {
     Link,
     Recursive,
     Special,
+    UnsupportedCompression,
 }
 
 impl ArchiveIssue {
@@ -278,6 +290,7 @@ impl ArchiveIssue {
             Self::Link => LINK_ENTRY_REASON,
             Self::Recursive => RECURSIVE_REASON,
             Self::Special => SPECIAL_ENTRY_REASON,
+            Self::UnsupportedCompression => UNSUPPORTED_COMPRESSION_REASON,
         }
     }
 }
@@ -303,6 +316,10 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             .map_err(|_| ArchiveIssue::Malformed)?;
         if file.encrypted() {
             return Err(ArchiveIssue::Encrypted);
+        }
+        match file.compression() {
+            CompressionMethod::Stored | CompressionMethod::Deflated => {}
+            _ => return Err(ArchiveIssue::UnsupportedCompression),
         }
         let name = checked_name(file.name_raw())?;
         if is_link(file.unix_mode()) {
@@ -491,9 +508,18 @@ fn recursive_name(name: &str) -> bool {
 
 fn recursive_bytes(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK\x03\x04")
+        || bytes.starts_with(b"PK\x05\x06")
         || bytes.starts_with(b"\x1f\x8b\x08")
-        || bytes.starts_with(b"\x28\xb5\x2f\xfd")
+        || zstd_header(bytes)
         || tar_header(bytes)
+}
+
+fn zstd_header(bytes: &[u8]) -> bool {
+    let Some(magic) = bytes.get(..4) else {
+        return false;
+    };
+    let magic = u32::from_le_bytes([magic[0], magic[1], magic[2], magic[3]]);
+    magic == 0xfd2f_b528 || (0x184d_2a50..=0x184d_2a5f).contains(&magic)
 }
 
 fn tar_header(bytes: &[u8]) -> bool {
