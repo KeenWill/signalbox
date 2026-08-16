@@ -1333,6 +1333,14 @@ where
             ));
         }
         let usage = provider_reported_token_usage(&report.evidence);
+        let retry_after = match &report.evidence {
+            TerminalEvidence::ProviderError(error) => error.exchange.retry_after,
+            _ => None,
+        };
+        let non_acceptance_proven = match &report.evidence {
+            TerminalEvidence::ProviderError(error) => error.non_acceptance_proven,
+            _ => false,
+        };
         let classified = classify_terminal(
             report.evidence,
             &observations.observations,
@@ -1345,7 +1353,12 @@ where
         let correlation = authorized.observation_correlation();
         Ok(match classified.cause {
             ModelCallCauseCode::ProviderError(kind) => correlation
-                .bind_provider_failure_observation_with_usage(provider_failure_cause(kind), usage),
+                .bind_provider_failure_observation_with_retry_after(
+                    provider_failure_cause(kind),
+                    usage,
+                    retry_after,
+                    non_acceptance_proven,
+                ),
             _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
     }
@@ -2729,6 +2742,7 @@ mod tests {
                     exchange: exchange.clone(),
                     reported_model: None,
                     kind: ProviderErrorKind::RateLimited,
+                    non_acceptance_proven: false,
                     native: NativeErrorFacts::default(),
                     usage: TokenUsage::unreported(),
                 }),
@@ -3259,6 +3273,7 @@ mod tests {
                     exchange: ExchangeFacts::default(),
                     reported_model: None,
                     kind: ProviderErrorKind::CredentialRejected,
+                    non_acceptance_proven: false,
                     native: NativeErrorFacts::default(),
                     usage: TokenUsage::unreported(),
                 }),

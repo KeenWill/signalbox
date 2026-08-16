@@ -1,5 +1,7 @@
 //! Conservative classification of Codex CLI failure messages.
 
+use std::time::Duration;
+
 use signalbox_model_runtime::ProviderErrorKind;
 
 /// Classifies the CLI's rendered error surface.
@@ -106,11 +108,35 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
+/// Extracts the CLI's bounded rendered retry hint without retaining the text.
+pub(crate) fn retry_after(message: &str) -> Option<Duration> {
+    let normalized = message.to_ascii_lowercase();
+    let marker = ["retry after ", "try again in "]
+        .into_iter()
+        .find_map(|marker| normalized.find(marker).map(|index| (marker, index)))?;
+    let remainder = &normalized[marker.1 + marker.0.len()..];
+    let mut parts = remainder.split_whitespace();
+    let rendered_amount = parts.next()?;
+    if rendered_amount.starts_with('-') || rendered_amount.starts_with('+') {
+        return None;
+    }
+    let amount = rendered_amount.trim_matches(|character: char| !character.is_ascii_digit());
+    let amount = amount.parse::<u64>().ok()?;
+    let unit = parts
+        .next()?
+        .trim_matches(|character: char| !character.is_ascii_alphabetic());
+    match unit {
+        "second" | "seconds" => Some(Duration::from_secs(amount)),
+        "minute" | "minutes" => amount.checked_mul(60).map(Duration::from_secs),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::ProviderErrorKind;
 
-    use super::classify_error;
+    use super::{classify_error, retry_after};
 
     #[test]
     fn every_provider_error_kind_has_an_explicit_cli_message_mapping() {
@@ -201,6 +227,21 @@ mod tests {
             classify_error("refresh token request timed out"),
             ProviderErrorKind::Unrecognized
         );
+    }
+
+    #[test]
+    fn rendered_retry_hint_is_typed_and_bounded_to_known_units() {
+        assert_eq!(
+            retry_after("rate limit exceeded; retry after 17 seconds"),
+            Some(std::time::Duration::from_secs(17))
+        );
+        assert_eq!(
+            retry_after("at capacity, try again in 2 minutes"),
+            Some(std::time::Duration::from_secs(120))
+        );
+        assert_eq!(retry_after("retry later"), None);
+        assert_eq!(retry_after("retry after -1 seconds"), None);
+        assert_eq!(retry_after("retry after +1 seconds"), None);
     }
 
     #[test]
