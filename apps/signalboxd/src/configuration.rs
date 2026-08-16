@@ -5,7 +5,7 @@ use std::{
     error::Error,
     fmt, fs, io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -84,6 +84,7 @@ pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
+const MAX_SCHEDULER_IN_FLIGHT_PASSES: usize = 1_024;
 
 /// One provider-availability cause a pool trigger can react to.
 ///
@@ -650,6 +651,7 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    scheduler_max_in_flight_passes: Option<NonZeroUsize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -693,6 +695,7 @@ impl HubModelConfiguration {
                 "approval_judge",
                 "repository_watch",
                 "blob_storage",
+                "scheduler",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -741,6 +744,8 @@ impl HubModelConfiguration {
         let blob_storage =
             BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
                 .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
+        let scheduler_max_in_flight_passes =
+            parse_scheduler_max_in_flight_passes(document.get("scheduler"))?;
         let web_fetch_egress_policy = document
             .get("web_fetch")
             .map(|item| {
@@ -1300,6 +1305,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             repository_watch,
             blob_storage,
+            scheduler_max_in_flight_passes,
         })
     }
 
@@ -1658,6 +1664,11 @@ impl HubModelConfiguration {
     /// Returns the complete watch configuration, or absence when no task starts.
     pub const fn repository_watch(&self) -> Option<&RepositoryWatchConfiguration> {
         self.repository_watch.as_ref()
+    }
+
+    /// Returns the deployment override for concurrent scheduler passes.
+    pub const fn scheduler_max_in_flight_passes(&self) -> Option<NonZeroUsize> {
+        self.scheduler_max_in_flight_passes
     }
 
     /// Resolves one configured alias to the immutable definition frozen at
@@ -2594,6 +2605,27 @@ fn parse_daemon_tool_settings(
     Ok(Some(executable))
 }
 
+fn parse_scheduler_max_in_flight_passes(
+    item: Option<&Item>,
+) -> Result<Option<NonZeroUsize>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    reject_unknown_fields(table, &["max_in_flight_passes"])
+        .map_err(|_| HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    let limit = table
+        .get("max_in_flight_passes")
+        .and_then(Item::as_integer)
+        .and_then(|value| usize::try_from(value).ok())
+        .and_then(NonZeroUsize::new)
+        .filter(|value| value.get() <= MAX_SCHEDULER_IN_FLIGHT_PASSES)
+        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    Ok(Some(limit))
+}
+
 fn parse_git_identity(
     item: Option<&Item>,
 ) -> Result<Option<GitIdentity>, HubModelConfigurationError> {
@@ -3298,6 +3330,8 @@ pub enum HubModelConfigurationError {
     InvalidConversationImportLimit,
     /// The optional blob-store registry or its routes were malformed.
     InvalidBlobStorageConfiguration,
+    /// The optional scheduler pass-admission table was malformed or unsafe.
+    InvalidSchedulerConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
@@ -3485,6 +3519,9 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidBlobStorageConfiguration => {
                 "model configuration contains invalid blob-storage settings"
             }
+            Self::InvalidSchedulerConfiguration => {
+                "model configuration contains invalid scheduler settings"
+            }
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
             }
@@ -3663,7 +3700,7 @@ mod tests {
     use std::{
         collections::HashSet,
         net::SocketAddr,
-        num::NonZeroU64,
+        num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         sync::Arc,
         time::Duration,
@@ -5184,6 +5221,53 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::InvalidConversationImportLimit)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_is_optional_and_accepts_a_bounded_override() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 4\n\n[compaction]",
+        );
+        let default = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the fixture configuration is valid");
+        let overridden = HubModelConfiguration::parse(&configured)
+            .expect("the bounded scheduler override is valid");
+
+        assert_eq!(default.scheduler_max_in_flight_passes(), None);
+        assert_eq!(
+            overridden.scheduler_max_in_flight_passes(),
+            NonZeroUsize::new(4)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_rejects_values_outside_its_closed_table() {
+        let zero = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 0\n\n[compaction]",
+        );
+        let excessive = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 1025\n\n[compaction]",
+        );
+        let unknown = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 4\nextra = 1\n\n[compaction]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&zero).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&excessive).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
         );
     }
 
