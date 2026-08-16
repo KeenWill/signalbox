@@ -1,7 +1,7 @@
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    VerifiedBlobSource,
+    ValidationEvidence, VerifiedBlobSource,
 };
 
 use crate::{MAX_TEXT_FAMILY_BYTES, TEXT_MEDIA_TYPE, options_are_empty, source};
@@ -26,10 +26,7 @@ pub(crate) async fn inspect(
         return Err(ProcessorFailure::Protocol);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
-        return Ok(ProcessorValidationOutput::Malformed {
-            media_type: String::from(TEXT_MEDIA_TYPE),
-            reason_code: String::from("source_too_large"),
-        });
+        return Ok(validation_failure(&request, "source_too_large"));
     };
     match source::checked_utf8(bytes) {
         Ok(text) => Ok(ProcessorValidationOutput::Validated {
@@ -37,10 +34,21 @@ pub(crate) async fn inspect(
             evidence: request.evidence,
             metadata_json: serde_json::json!({"bytes": text.len()}).to_string(),
         }),
-        Err(reason) => Ok(ProcessorValidationOutput::Malformed {
+        Err(reason) => Ok(validation_failure(&request, reason)),
+    }
+}
+
+fn validation_failure(
+    request: &FileMediaProviderValidationRequest,
+    reason: &str,
+) -> ProcessorValidationOutput {
+    if request.evidence == ValidationEvidence::StreamingTextValidation {
+        ProcessorValidationOutput::NoMatch
+    } else {
+        ProcessorValidationOutput::Malformed {
             media_type: String::from(TEXT_MEDIA_TYPE),
             reason_code: String::from(reason),
-        }),
+        }
     }
 }
 

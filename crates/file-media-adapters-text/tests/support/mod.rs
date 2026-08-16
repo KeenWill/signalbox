@@ -197,6 +197,11 @@ pub(crate) fn assert_malformed_reason(inspection: FileInspection, expected: &str
 }
 
 #[track_caller]
+pub(crate) fn assert_unknown(inspection: FileInspection) {
+    assert!(matches!(inspection, FileInspection::Unknown { .. }));
+}
+
+#[track_caller]
 pub(crate) fn assert_text(result: FileReadResult, expected: &str) {
     assert!(matches!(result, FileReadResult::Text { .. }));
     if let FileReadResult::Text { body, .. } = result {

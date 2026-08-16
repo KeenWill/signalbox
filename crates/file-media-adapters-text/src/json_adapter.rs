@@ -13,11 +13,7 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, ProcessorFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    let candidate = prefix
-        .iter()
-        .copied()
-        .find(|byte| !byte.is_ascii_whitespace())
-        .is_some_and(|byte| matches!(byte, b'{' | b'['));
+    let candidate = has_json_structure(&prefix);
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(JSON_MEDIA_TYPE),
@@ -25,6 +21,21 @@ pub(crate) async fn probe(
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)
+    }
+}
+
+fn has_json_structure(prefix: &[u8]) -> bool {
+    let mut bytes = prefix
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace());
+    match (bytes.next(), bytes.next()) {
+        (Some(b'{'), Some(next)) => matches!(next, b'}' | b'"'),
+        (Some(b'['), Some(next)) => matches!(
+            next,
+            b']' | b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n'
+        ),
+        _ => false,
     }
 }
 

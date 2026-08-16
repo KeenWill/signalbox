@@ -85,6 +85,24 @@ async fn pretty_json_is_not_ambiguous_with_csv() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn bracket_prefixed_prose_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::bracket_prefixed_prose());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_utf8_streaming_text_candidate_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::truncated_utf8());
+
+    let inspection = support::inspect(&source, "application/octet-stream").await?;
+    support::assert_unknown(inspection);
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_read_reports_the_declared_depth_limit() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::json_beyond_structured_depth());
     let expected = ReasonCode::try_new("depth_limit_exceeded")?;

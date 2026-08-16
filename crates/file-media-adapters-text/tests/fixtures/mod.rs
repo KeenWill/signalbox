@@ -22,6 +22,10 @@ pub(crate) fn pretty_json_document() -> Vec<u8> {
     b"{\n  \"name\": \"fixture\",\n  \"values\": [1, 2, 3]\n}\n".to_vec()
 }
 
+pub(crate) fn bracket_prefixed_prose() -> Vec<u8> {
+    b"[section]\nbody".to_vec()
+}
+
 pub(crate) fn json_beyond_structured_depth() -> Vec<u8> {
     format!("{}0{}", "[".repeat(64), "]".repeat(64)).into_bytes()
 }
