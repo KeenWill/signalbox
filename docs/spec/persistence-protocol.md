@@ -999,9 +999,8 @@ Locks per transaction, in acquisition order:
   owed remains a daemon-orchestration responsibility outside this persistence
   transaction; this adapter commits the session projection and advances its
   cursor without retiring that release. A crash resumes at the first uncommitted
-  session, while every
-  not-yet-projected placement is already effectively lost through the epoch
-  fence.
+  session, while every not-yet-projected placement is already effectively lost
+  through the epoch fence.
 
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
   its durable-command claim and terminalizes in one transaction. An unseen
