@@ -246,6 +246,10 @@ const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
+// Tunable effective ceiling: preserving the prior eight-reader admission bound
+// prevents enlarged pools from letting connection-holding snapshot reads
+// consume the headroom reserved for active turns and other runtime work.
+const SNAPSHOT_READER_EFFECTIVE_CEILING: usize = 8;
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -1303,7 +1307,9 @@ fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     if available == 0 {
         return None;
     }
-    usize::try_from(available).ok()
+    usize::try_from(available)
+        .ok()
+        .map(|available| available.min(SNAPSHOT_READER_EFFECTIVE_CEILING))
 }
 
 const fn is_review_mutation(request: &ClientRequest) -> bool {
@@ -14922,12 +14928,12 @@ mod tests {
         PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
         ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
-        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
-        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
-        admit_snapshot_reader, admitted_user_content, blob_read_budget,
-        blob_upload_begin_preflight, canonical_review_request_digest,
+        SNAPSHOT_READER_EFFECTIVE_CEILING, SnapshotReaderAdmission, SnapshotSpoolError,
+        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
+        blob_read_budget, blob_upload_begin_preflight, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         foreground_peer_activity, handle_append_conversation_import,
@@ -15953,6 +15959,19 @@ mod tests {
                 .is_none()
         );
         Ok(())
+    }
+
+    #[test]
+    fn enlarged_pool_preserves_the_snapshot_reader_effective_ceiling() {
+        let enlarged_pool_connections = u32::try_from(SNAPSHOT_READER_EFFECTIVE_CEILING)
+            .expect("the effective ceiling fits PostgreSQL pool capacity")
+            + RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS
+            + 1;
+
+        assert_eq!(
+            snapshot_reader_capacity(enlarged_pool_connections),
+            Some(SNAPSHOT_READER_EFFECTIVE_CEILING)
+        );
     }
 
     /// The wire vocabulary as text. The review read verbs are enumerated from
