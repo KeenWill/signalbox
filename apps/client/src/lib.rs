@@ -17,9 +17,10 @@ use arguments::{
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{
-    BlobUploadPresentation, ChildResultPresentation, ConversationRow, ImportedEntryRow, Output,
-    SessionAwaitRegisteredPresentation, SessionMessageSentPresentation, SessionMetadataRow,
-    SessionSpawnedPresentation, SnapshotSelection,
+    BlobUploadPresentation, ChildResultPresentation, ConversationRow, ImportedEntryRow,
+    OperatorStatusPresentationCounts, Output, SessionAwaitRegisteredPresentation,
+    SessionMessageSentPresentation, SessionMetadataRow, SessionSpawnedPresentation,
+    SnapshotSelection,
 };
 use rustix::{
     fd::OwnedFd,
@@ -4866,12 +4867,12 @@ async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(
         phase = item_phase;
         spool.write_all(&encode_server_line(&frame)?)?;
     }
-    output.operator_status_counts(
-        counts.held_slots,
-        counts.queued_obligations,
-        counts.pull_request_convergences,
-        counts.pending_stale_review_clearances,
-    )?;
+    output.operator_status_counts(OperatorStatusPresentationCounts {
+        held_slots: counts.held_slots,
+        queued_obligations: counts.queued_obligations,
+        pull_request_convergences: counts.pull_request_convergences,
+        pending_stale_review_clearances: counts.pending_stale_review_clearances,
+    })?;
     spool.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(spool);
     let mut line = Vec::new();
