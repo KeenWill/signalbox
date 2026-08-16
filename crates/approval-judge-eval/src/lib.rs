@@ -18,6 +18,16 @@ use signalboxd::approval_judge_eval::{
     ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case,
 };
 
+mod database;
+pub mod manifest;
+pub mod store;
+
+pub use database::DatabaseCorpusStore;
+pub use store::{
+    CorpusKey, CorpusRegistration, CorpusSourceDescriptor, CorpusStore, CorpusStoreError,
+    CorpusStoreFuture, DigestParseError, DiskCorpusStore, Sha256Digest,
+};
+
 /// The only corpus format this pre-alpha harness currently accepts.
 pub const CORPUS_FORMAT_VERSION: u32 = 1;
 

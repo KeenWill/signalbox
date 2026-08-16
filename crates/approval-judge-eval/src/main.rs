@@ -2,7 +2,7 @@ use std::{env, error::Error, fs, io};
 
 use serde::Deserialize;
 use signalbox_approval_judge_eval::{
-    ApprovalDisposition, CORPUS_FORMAT_VERSION, load_corpus, score_corpus,
+    ApprovalDisposition, CORPUS_FORMAT_VERSION, CorpusStore, DiskCorpusStore, score_corpus,
 };
 use signalbox_domain::{
     DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget,
@@ -37,13 +37,18 @@ struct OfflineResponse {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
-    let corpus_path = arguments.next().ok_or_else(usage_error)?;
+    let manifest_path = arguments.next().ok_or_else(usage_error)?;
     let responses_path = arguments.next().ok_or_else(usage_error)?;
     if arguments.next().is_some() {
         return Err(usage_error().into());
     }
 
-    let corpus = load_corpus(corpus_path)?;
+    let store = DiskCorpusStore::open(manifest_path)?;
+    let registrations = store.enumerate().await?;
+    let registration = registrations
+        .first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "disk corpus store is empty"))?;
+    let corpus = store.load(&registration.key).await?;
     let response_bytes = fs::read(responses_path)?;
     let responses: OfflineResponseFile = serde_json::from_slice(&response_bytes)?;
     validate_responses(&corpus, &responses)?;
@@ -58,7 +63,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 fn usage_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: signalbox-approval-judge-eval <corpus.json> <offline-responses.json>",
+        "usage: signalbox-approval-judge-eval <corpus-manifest.json> <offline-responses.json>",
     )
 }
 
