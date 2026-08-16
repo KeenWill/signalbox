@@ -50,7 +50,6 @@ const OTHER_DIGEST: [u8; 32] = [0x22; 32];
 const MATCHED_IDENTITY: [u8; 32] = [0x31; 32];
 const WEBHOOK_ONLY_IDENTITY: [u8; 32] = [0x32; 32];
 const POLL_ONLY_IDENTITY: [u8; 32] = [0x33; 32];
-const LEGACY_IDENTITY: [u8; 32] = [0x34; 32];
 const HISTORICAL_IDENTITY: [u8; 32] = [0x35; 32];
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -182,7 +181,6 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         &mut transaction,
         Uuid::from_u128(0x901),
         1,
-        1,
         MATCHED_IDENTITY,
         None,
     )
@@ -191,17 +189,7 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         &mut transaction,
         Uuid::from_u128(0x902),
         2,
-        1,
         POLL_ONLY_IDENTITY,
-        None,
-    )
-    .await?;
-    insert_poll_event(
-        &mut transaction,
-        Uuid::from_u128(0x903),
-        3,
-        0,
-        LEGACY_IDENTITY,
         None,
     )
     .await?;
@@ -209,7 +197,6 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         &mut transaction,
         Uuid::from_u128(0x904),
         4,
-        1,
         HISTORICAL_IDENTITY,
         Some(OffsetDateTime::UNIX_EPOCH),
     )
@@ -218,11 +205,12 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Seeds one poll-produced event. Exactly one content-identity version is
+/// storable, so the version the parity view filters on is not a fixture axis.
 async fn insert_poll_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event_id: Uuid,
     ordinal: i32,
-    content_identity_version: i16,
     identity: [u8; 32],
     recorded_at: Option<OffsetDateTime>,
 ) -> Result<(), Box<dyn Error>> {
@@ -233,15 +221,14 @@ async fn insert_poll_event(
             producer, target_kind, event_kind, conclusion,
             workflow_branch, workflow_name, recorded_at
          ) VALUES (
-            $1, $2, 1, $3, 1, $4, $5, 'poll', 'branch',
+            $1, $2, 1, $3, 1, 1, $4, 'poll', 'branch',
             'branch_workflow_run_completed', 'success', 'main', 'checks',
-            COALESCE($6, transaction_timestamp())
+            COALESCE($5, transaction_timestamp())
          )",
     )
     .bind(event_id)
     .bind(REPOSITORY)
     .bind(ordinal)
-    .bind(content_identity_version)
     .bind(identity.as_slice())
     .bind(recorded_at)
     .execute(&mut **transaction)

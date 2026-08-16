@@ -4,15 +4,16 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt,
+    future::Future,
     net::TcpListener as StdTcpListener,
     num::NonZeroU64,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::{Body, Bytes, to_bytes},
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, Request, StatusCode},
     routing::post,
@@ -30,6 +31,7 @@ use sqlx::PgPool;
 use tokio::{
     net::TcpListener,
     sync::{Semaphore, mpsc, watch},
+    time::timeout,
 };
 use uuid::Uuid;
 
@@ -57,10 +59,27 @@ const MAX_WEBHOOK_SECRET_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_WEBHOOK_BODY_BYTES: usize = 25 * 1024 * 1024;
 /// Hard safety ceiling protecting the daemon from concurrent body retention.
 pub(crate) const MAX_WEBHOOK_IN_FLIGHT: usize = 64;
+/// Hard safety ceiling on what every in-flight body may retain together. The
+/// per-request and concurrency ceilings alone would admit 1.5 GiB of buffered
+/// request bodies from peers that have not yet proved the shared secret.
+pub(crate) const MAX_WEBHOOK_IN_FLIGHT_BYTES: usize = 128 * 1024 * 1024;
 /// Hard safety ceiling protecting one hook from sustained authenticated floods.
 pub(crate) const MAX_WEBHOOK_DELIVERIES_PER_MINUTE: u32 = 3_000;
+/// Hard safety ceiling on what one hook may present before proving the shared
+/// secret. It is a separate allowance so a forged flood cannot spend what real
+/// GitHub deliveries draw on.
+pub(crate) const MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE: u32 = 3_000;
+/// Hard safety deadline for reading one request body. A peer that opens a
+/// request and then stalls its body would otherwise hold a concurrency permit
+/// and its share of the memory budget indefinitely.
+pub(crate) const WEBHOOK_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 const RATE_WINDOW: Duration = Duration::from_secs(60);
+/// Granularity of the shared body-memory budget, so one request reserves close
+/// to what it may actually buffer instead of one indivisible slot.
+const WEBHOOK_BODY_BUDGET_GRANULE_BYTES: usize = 64 * 1024;
+const WEBHOOK_BODY_BUDGET_GRANULES: usize =
+    MAX_WEBHOOK_IN_FLIGHT_BYTES / WEBHOOK_BODY_BUDGET_GRANULE_BYTES;
 
 /// Why the configured webhook listener could not be constructed.
 #[derive(Debug)]
@@ -159,6 +178,8 @@ impl RepoWatchWebhookRuntime {
                 hooks: Arc::new(hooks),
                 store: PostgresRepoWatchWebhookStore::new(pool),
                 in_flight: Arc::new(Semaphore::new(MAX_WEBHOOK_IN_FLIGHT)),
+                body_budget: Arc::new(Semaphore::new(WEBHOOK_BODY_BUDGET_GRANULES)),
+                body_read_timeout: WEBHOOK_BODY_READ_TIMEOUT,
                 rate_limiter: Arc::new(WebhookRateLimiter::new()),
             },
         }))
@@ -211,6 +232,8 @@ struct WebhookHttpState {
     hooks: Arc<HashMap<NonZeroU64, WebhookHookBinding>>,
     store: PostgresRepoWatchWebhookStore,
     in_flight: Arc<Semaphore>,
+    body_budget: Arc<Semaphore>,
+    body_read_timeout: Duration,
     rate_limiter: Arc<WebhookRateLimiter>,
 }
 
@@ -247,12 +270,31 @@ async fn admit_webhook(
     let Some(hook) = state.hooks.get(&headers.hook_id()).cloned() else {
         return StatusCode::UNAUTHORIZED;
     };
-    if !state.rate_limiter.admit(headers.hook_id()) {
+    // Charged before the body is read, against an allowance separate from the
+    // authenticated one, so an unauthenticated flood bounds its own cost without
+    // spending what signature-valid deliveries for this hook draw on.
+    if !state.rate_limiter.admit_unverified(headers.hook_id()) {
         return StatusCode::TOO_MANY_REQUESTS;
     }
-    let body = match to_bytes(request.into_body(), MAX_WEBHOOK_BODY_BYTES).await {
+    // An undeclared length may buffer up to the per-request ceiling, so it
+    // reserves that much of the shared budget until the body is read.
+    let read_limit = headers
+        .declared_body_bytes()
+        .unwrap_or(MAX_WEBHOOK_BODY_BYTES);
+    let Ok(_budget) =
+        Arc::clone(&state.body_budget).try_acquire_many_owned(body_budget_granules(read_limit))
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let body = match read_body_within_deadline(
+        to_bytes(request.into_body(), read_limit),
+        state.body_read_timeout,
+    )
+    .await
+    {
         Ok(body) => body,
-        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE,
+        Err(WebhookBodyRejection::TooLarge) => return StatusCode::PAYLOAD_TOO_LARGE,
+        Err(WebhookBodyRejection::Deadline) => return StatusCode::REQUEST_TIMEOUT,
     };
     if headers
         .declared_body_bytes()
@@ -271,6 +313,11 @@ async fn admit_webhook(
     };
     if verify_github_signature(secret.expose_bytes(), &body, headers.signature()).is_err() {
         return StatusCode::UNAUTHORIZED;
+    }
+    // Only a delivery that proved the shared secret spends the authenticated
+    // allowance, which is what this ceiling exists to bound.
+    if !state.rate_limiter.admit_verified(headers.hook_id()) {
+        return StatusCode::TOO_MANY_REQUESTS;
     }
     let envelope: WebhookEnvelope = match serde_json::from_slice(&body) {
         Ok(envelope) => envelope,
@@ -327,6 +374,35 @@ async fn admit_webhook(
         }
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,
     }
+}
+
+/// Why an admitted request never produced exact body bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WebhookBodyRejection {
+    Deadline,
+    TooLarge,
+}
+
+/// Reads the exact request body under the per-request deadline, so a peer that
+/// stalls its body releases its concurrency permit and memory reservation
+/// instead of holding both until it disconnects.
+pub(crate) async fn read_body_within_deadline<Read, Failure>(
+    read: Read,
+    deadline: Duration,
+) -> Result<Bytes, WebhookBodyRejection>
+where
+    Read: Future<Output = Result<Bytes, Failure>>,
+{
+    match timeout(deadline, read).await {
+        Ok(Ok(body)) => Ok(body),
+        Ok(Err(_)) => Err(WebhookBodyRejection::TooLarge),
+        Err(_) => Err(WebhookBodyRejection::Deadline),
+    }
+}
+
+/// How much of the shared body-memory budget one request must reserve.
+fn body_budget_granules(bytes: usize) -> u32 {
+    u32::try_from(bytes.div_ceil(WEBHOOK_BODY_BUDGET_GRANULE_BYTES).max(1)).unwrap_or(u32::MAX)
 }
 
 const fn rejected_http_status(error: WebhookHttpRejection) -> StatusCode {
@@ -557,9 +633,12 @@ pub(crate) fn verify_github_signature(
         .map_err(|_| WebhookHttpRejection::InvalidSignature)
 }
 
+/// Per-hook admission windows, kept separate for requests that have proved the
+/// shared secret and those that have not.
 #[derive(Debug)]
 pub(crate) struct WebhookRateLimiter {
-    windows: Mutex<HashMap<NonZeroU64, HookRateWindow>>,
+    unverified: Mutex<HashMap<NonZeroU64, HookRateWindow>>,
+    verified: Mutex<HashMap<NonZeroU64, HookRateWindow>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -571,16 +650,36 @@ struct HookRateWindow {
 impl WebhookRateLimiter {
     pub(crate) fn new() -> Self {
         Self {
-            windows: Mutex::new(HashMap::new()),
+            unverified: Mutex::new(HashMap::new()),
+            verified: Mutex::new(HashMap::new()),
         }
     }
 
-    pub(crate) fn admit(&self, hook_id: NonZeroU64) -> bool {
-        self.admit_at(hook_id, Instant::now())
+    pub(crate) fn admit_unverified(&self, hook_id: NonZeroU64) -> bool {
+        Self::admit_at(
+            &self.unverified,
+            hook_id,
+            Instant::now(),
+            MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE,
+        )
     }
 
-    fn admit_at(&self, hook_id: NonZeroU64, now: Instant) -> bool {
-        let mut windows = self.windows();
+    pub(crate) fn admit_verified(&self, hook_id: NonZeroU64) -> bool {
+        Self::admit_at(
+            &self.verified,
+            hook_id,
+            Instant::now(),
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
+        )
+    }
+
+    fn admit_at(
+        windows: &Mutex<HashMap<NonZeroU64, HookRateWindow>>,
+        hook_id: NonZeroU64,
+        now: Instant,
+        ceiling: u32,
+    ) -> bool {
+        let mut windows = windows.lock().unwrap_or_else(PoisonError::into_inner);
         let window = windows.entry(hook_id).or_insert(HookRateWindow {
             started: now,
             admitted: 0,
@@ -591,15 +690,30 @@ impl WebhookRateLimiter {
                 admitted: 0,
             };
         }
-        if window.admitted >= MAX_WEBHOOK_DELIVERIES_PER_MINUTE {
+        if window.admitted >= ceiling {
             return false;
         }
         window.admitted += 1;
         true
     }
 
-    fn windows(&self) -> MutexGuard<'_, HashMap<NonZeroU64, HookRateWindow>> {
-        self.windows.lock().unwrap_or_else(PoisonError::into_inner)
+    #[cfg(test)]
+    fn saturate(
+        windows: &Mutex<HashMap<NonZeroU64, HookRateWindow>>,
+        hook_id: NonZeroU64,
+        started: Instant,
+        ceiling: u32,
+    ) {
+        windows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                hook_id,
+                HookRateWindow {
+                    started,
+                    admitted: ceiling,
+                },
+            );
     }
 }
 
@@ -624,8 +738,10 @@ mod tests {
     use super::{
         FileCredentialAccess, GitHubWebhookHeadersV1, MAX_WEBHOOK_BODY_BYTES,
         MAX_WEBHOOK_DELIVERIES_PER_MINUTE, MAX_WEBHOOK_IN_FLIGHT, MAX_WEBHOOK_SECRET_BYTES,
-        WebhookHookBinding, WebhookHttpRejection, WebhookHttpState, WebhookRateLimiter,
-        admit_webhook, parse_github_headers, verify_github_signature,
+        MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE, WEBHOOK_BODY_BUDGET_GRANULES,
+        WEBHOOK_BODY_READ_TIMEOUT, WebhookBodyRejection, WebhookHookBinding, WebhookHttpRejection,
+        WebhookHttpState, WebhookRateLimiter, admit_webhook, body_budget_granules,
+        parse_github_headers, read_body_within_deadline, verify_github_signature,
     };
 
     const FIXTURE_HOOK_ID: NonZeroU64 = NonZeroU64::new(4_242).expect("fixture is positive");
@@ -708,6 +824,8 @@ mod tests {
                 hooks: std::sync::Arc::new(hooks),
                 store: PostgresRepoWatchWebhookStore::new(pool),
                 in_flight: std::sync::Arc::new(Semaphore::new(MAX_WEBHOOK_IN_FLIGHT)),
+                body_budget: std::sync::Arc::new(Semaphore::new(WEBHOOK_BODY_BUDGET_GRANULES)),
+                body_read_timeout: WEBHOOK_BODY_READ_TIMEOUT,
                 rate_limiter: std::sync::Arc::new(WebhookRateLimiter::new()),
             },
         )
@@ -858,33 +976,81 @@ mod tests {
     fn per_hook_rate_ceiling_rejects_the_next_delivery() {
         let limiter = WebhookRateLimiter::new();
         let started = std::time::Instant::now();
-        let mut windows = limiter.windows();
-        windows.insert(
+        WebhookRateLimiter::saturate(
+            &limiter.verified,
             FIXTURE_HOOK_ID,
-            super::HookRateWindow {
-                started,
-                admitted: MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
-            },
+            started,
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
         );
-        drop(windows);
 
-        assert!(!limiter.admit_at(FIXTURE_HOOK_ID, started));
+        assert!(!WebhookRateLimiter::admit_at(
+            &limiter.verified,
+            FIXTURE_HOOK_ID,
+            started,
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE
+        ));
     }
 
     #[test]
     fn per_hook_rate_window_reopens_at_one_minute() {
         let limiter = WebhookRateLimiter::new();
         let started = std::time::Instant::now();
-        let mut windows = limiter.windows();
-        windows.insert(
+        WebhookRateLimiter::saturate(
+            &limiter.verified,
             FIXTURE_HOOK_ID,
-            super::HookRateWindow {
-                started,
-                admitted: MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
-            },
+            started,
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
         );
-        drop(windows);
 
-        assert!(limiter.admit_at(FIXTURE_HOOK_ID, started + Duration::from_secs(60)));
+        assert!(WebhookRateLimiter::admit_at(
+            &limiter.verified,
+            FIXTURE_HOOK_ID,
+            started + Duration::from_secs(60),
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE
+        ));
+    }
+
+    #[test]
+    fn an_unverified_flood_leaves_the_authenticated_allowance_intact() {
+        let limiter = WebhookRateLimiter::new();
+        let started = std::time::Instant::now();
+        WebhookRateLimiter::saturate(
+            &limiter.unverified,
+            FIXTURE_HOOK_ID,
+            started,
+            MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE,
+        );
+
+        assert!(!limiter.admit_unverified(FIXTURE_HOOK_ID));
+        assert!(limiter.admit_verified(FIXTURE_HOOK_ID));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_body_read_rejects_at_the_deadline() {
+        let stalled = std::future::pending::<Result<axum::body::Bytes, std::convert::Infallible>>();
+
+        let rejection = read_body_within_deadline(stalled, WEBHOOK_BODY_READ_TIMEOUT)
+            .await
+            .expect_err("a body that never completes must not hold its permit");
+
+        assert_eq!(rejection, WebhookBodyRejection::Deadline);
+    }
+
+    #[test]
+    fn body_budget_reserves_one_granule_per_declared_chunk() {
+        assert_eq!(body_budget_granules(0), 1);
+        assert_eq!(body_budget_granules(1), 1);
+        assert_eq!(body_budget_granules(64 * 1024), 1);
+        assert_eq!(body_budget_granules(64 * 1024 + 1), 2);
+    }
+
+    #[test]
+    fn undeclared_bodies_cannot_all_reserve_the_whole_budget() {
+        let reserved = u64::from(body_budget_granules(MAX_WEBHOOK_BODY_BYTES));
+        let concurrent =
+            u64::try_from(WEBHOOK_BODY_BUDGET_GRANULES).expect("budget fits in u64") / reserved;
+
+        assert!(concurrent >= 1);
+        assert!(concurrent < u64::try_from(MAX_WEBHOOK_IN_FLIGHT).expect("ceiling fits in u64"));
     }
 }
