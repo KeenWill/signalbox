@@ -578,6 +578,7 @@ pub struct RunnerConnection<S> {
     io: BufReader<S>,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
+    pending_ready_registration: Option<(PositiveU64, Digest)>,
     outcome: EnrollmentOutcome,
     connection_epoch: PositiveU64,
     heartbeat: Option<HeartbeatExchange>,
@@ -604,92 +605,105 @@ where
         let digest = advertisement_digest(advertisement)
             .map_err(RunnerConnectionError::InvalidLocalFrame)?;
         let mut io = BufReader::new(stream);
-        let (receipt, outcome, connection_epoch) = match state.state().clone() {
-            RunnerState::Pristine { request_id } => {
-                send_message(
-                    &mut io,
-                    Message::Enroll(Enroll {
-                        request_id,
-                        digest_version: DIGEST_VERSION,
-                        advertisement: advertisement.clone(),
-                    }),
-                )
-                .await?;
-                let message = receive_message(&mut io).await?;
-                let (receipt, outcome, connection_epoch) =
-                    accept_enrollment(message, request_id, digest)?;
-                state.record_receipt(receipt.clone())?;
-                (receipt, outcome, connection_epoch)
-            }
-            RunnerState::Enrolled { receipt } => {
-                let inventory = state.reconnect_inventory().clone();
-                send_message(
-                    &mut io,
-                    Message::Resume(Box::new(Resume {
-                        request_id: receipt.request_id(),
-                        digest_version: DIGEST_VERSION,
-                        enrollment_id: receipt.enrollment_id(),
-                        runner_id: receipt.runner_id(),
-                        authentication_id: receipt.authentication_id(),
-                        advertisement: advertisement.clone(),
-                        prior_registration_revision: receipt.registration_revision(),
-                        inventory: inventory.clone(),
-                    })),
-                )
-                .await?;
-                let message = receive_message(&mut io).await?;
-                let resumed = match message {
-                    Message::Resumed(resumed) => resumed,
-                    Message::Rejected(rejected) => return Err(rejected_error(rejected)),
-                    other => {
-                        return Err(unexpected(MessageKind::Resumed, &other));
-                    }
-                };
-                resumed
-                    .directives
-                    .validate_against(&inventory)
-                    .map_err(|_| {
-                        RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
-                    })?;
-                if resumed.registration_revision < receipt.registration_revision() {
-                    return Err(RunnerConnectionError::Violation(
-                        ProtocolViolation::RegistrationRevisionRegressed {
-                            prior: receipt.registration_revision(),
-                            observed: resumed.registration_revision,
-                        },
-                    ));
+        let (receipt, pending_ready_registration, outcome, connection_epoch) =
+            match state.state().clone() {
+                RunnerState::Pristine { request_id } => {
+                    send_message(
+                        &mut io,
+                        Message::Enroll(Enroll {
+                            request_id,
+                            digest_version: DIGEST_VERSION,
+                            advertisement: advertisement.clone(),
+                        }),
+                    )
+                    .await?;
+                    let message = receive_message(&mut io).await?;
+                    let (receipt, outcome, connection_epoch) =
+                        accept_enrollment(message, request_id, digest)?;
+                    state.record_receipt(receipt.clone())?;
+                    (receipt, None, outcome, connection_epoch)
                 }
-                if resumed.registration_revision == receipt.registration_revision()
-                    && digest != *receipt.advertisement_digest()
-                {
-                    return Err(RunnerConnectionError::Violation(
-                        ProtocolViolation::ResumeAdvertisementChangedWithoutRevision {
-                            revision: resumed.registration_revision,
-                        },
-                    ));
-                }
-                let replay = apply_resume_directives(state, &inventory, &resumed.directives)?;
-                if let Some(replay) = replay {
-                    let message = match replay {
-                        ResumeReplay::OperationFailure(failure) => {
-                            Message::OperationFailed(OperationFailed { failure })
+                RunnerState::Enrolled { receipt } => {
+                    let inventory = state.reconnect_inventory().clone();
+                    send_message(
+                        &mut io,
+                        Message::Resume(Box::new(Resume {
+                            request_id: receipt.request_id(),
+                            digest_version: DIGEST_VERSION,
+                            enrollment_id: receipt.enrollment_id(),
+                            runner_id: receipt.runner_id(),
+                            authentication_id: receipt.authentication_id(),
+                            advertisement: advertisement.clone(),
+                            prior_registration_revision: receipt.registration_revision(),
+                            inventory: inventory.clone(),
+                        })),
+                    )
+                    .await?;
+                    let message = receive_message(&mut io).await?;
+                    let resumed = match message {
+                        Message::Resumed(resumed) => resumed,
+                        Message::Rejected(rejected) => return Err(rejected_error(rejected)),
+                        other => {
+                            return Err(unexpected(MessageKind::Resumed, &other));
                         }
-                        ResumeReplay::WorkspaceReady(ready) => Message::WorkspaceReady(ready),
                     };
-                    send_message(&mut io, message).await?;
+                    resumed
+                        .directives
+                        .validate_against(&inventory)
+                        .map_err(|_| {
+                            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+                        })?;
+                    if resumed.registration_revision < receipt.registration_revision() {
+                        return Err(RunnerConnectionError::Violation(
+                            ProtocolViolation::RegistrationRevisionRegressed {
+                                prior: receipt.registration_revision(),
+                                observed: resumed.registration_revision,
+                            },
+                        ));
+                    }
+                    if resumed.registration_revision == receipt.registration_revision()
+                        && digest != *receipt.advertisement_digest()
+                    {
+                        return Err(RunnerConnectionError::Violation(
+                            ProtocolViolation::ResumeAdvertisementChangedWithoutRevision {
+                                revision: resumed.registration_revision,
+                            },
+                        ));
+                    }
+                    let replay = apply_resume_directives(state, &inventory, &resumed.directives)?;
+                    let defer_registration =
+                        matches!(&replay, Some(ResumeReplay::WorkspaceReady(_)))
+                            && resumed.registration_revision > receipt.registration_revision();
+                    if let Some(replay) = replay {
+                        let message = match replay {
+                            ResumeReplay::OperationFailure(failure) => {
+                                Message::OperationFailed(OperationFailed { failure })
+                            }
+                            ResumeReplay::WorkspaceReady(ready) => Message::WorkspaceReady(ready),
+                        };
+                        send_message(&mut io, message).await?;
+                    }
+                    let (receipt, pending_ready_registration) = if defer_registration {
+                        (receipt, Some((resumed.registration_revision, digest)))
+                    } else {
+                        (
+                            state.record_registration(resumed.registration_revision, digest)?,
+                            None,
+                        )
+                    };
+                    (
+                        receipt,
+                        pending_ready_registration,
+                        EnrollmentOutcome::Resumed,
+                        resumed.connection_epoch,
+                    )
                 }
-                let receipt = state.record_registration(resumed.registration_revision, digest)?;
-                (
-                    receipt,
-                    EnrollmentOutcome::Resumed,
-                    resumed.connection_epoch,
-                )
-            }
-        };
+            };
         Ok(Self {
             io,
             receipt,
             advertisement: advertisement.clone(),
+            pending_ready_registration,
             outcome,
             connection_epoch,
             heartbeat: None,
@@ -1031,6 +1045,15 @@ where
                         }
                         other => RunnerConnectionError::State(other),
                     })?;
+                if let Some((registration_revision, advertisement_digest)) =
+                    self.pending_ready_registration.as_ref()
+                {
+                    self.receipt = state.record_registration(
+                        *registration_revision,
+                        advertisement_digest.clone(),
+                    )?;
+                    self.pending_ready_registration = None;
+                }
                 Ok(None)
             }
             Message::WorkspaceReleaseRecorded(recorded) => {
@@ -3218,6 +3241,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn s32_resume_disconnect_before_ready_ack_preserves_registration_and_payload() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_workspace_ready(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let expected_ready = workspace_ready();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("the ready replay is written before acknowledgement");
+            connection.serve_one(&mut state).await
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION + 1),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_workspace_directives(DirectiveAction::Resend),
+                })),
+            )
+            .await;
+            let ready = receive_hub_message(&mut hub_io).await;
+            drop(hub_io);
+            ready
+        };
+        let (failed, ready) = tokio::join!(runner, hub);
+        let failed = failed.expect_err("disconnect before acknowledgement is reconnectable");
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture remains enrolled");
+
+        assert!(matches!(failed, RunnerConnectionError::PeerClosed));
+        assert_eq!(ready, Message::WorkspaceReady(expected_ready.clone()));
+        assert_eq!(
+            receipt.registration_revision(),
+            positive(INITIAL_REGISTRATION_REVISION)
+        );
+        assert_eq!(state.reconnect_inventory(), &retained);
+        assert_eq!(state.retained_workspace_ready(), Some(&expected_ready));
+    }
+
+    #[tokio::test]
     async fn s32_workspace_recorded_acknowledgement_retires_resumed_ready_payload() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_with_workspace_ready(&parent);
@@ -3239,7 +3310,7 @@ mod tests {
             send_hub_message(
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
-                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION + 1),
                     connection_epoch: positive(CONNECTION_EPOCH),
                     directives: retained_workspace_directives(DirectiveAction::Resend),
                 })),
@@ -3259,6 +3330,14 @@ mod tests {
         assert_eq!(ready, Message::WorkspaceReady(workspace_ready()));
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
         assert_eq!(state.retained_workspace_ready(), None);
+        assert_eq!(
+            state
+                .state()
+                .receipt()
+                .expect("the acknowledged registration remains enrolled")
+                .registration_revision(),
+            positive(INITIAL_REGISTRATION_REVISION + 1)
+        );
     }
 
     #[tokio::test]
