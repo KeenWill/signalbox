@@ -198,13 +198,14 @@ CREATE INDEX repo_watch_convergence_identity_current_idx
 
 CREATE TABLE repo_watch_convergence_cutoff (
     assessment_id uuid NOT NULL,
+    identity_assessment_id uuid NOT NULL,
     cursor_generation bigint NOT NULL,
     processed_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
     PRIMARY KEY (assessment_id, cursor_generation),
     FOREIGN KEY (assessment_id)
         REFERENCES repo_watch_pull_request_convergence(assessment_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
-    FOREIGN KEY (assessment_id, cursor_generation)
+    FOREIGN KEY (identity_assessment_id, cursor_generation)
         REFERENCES repo_watch_pull_request_convergence_identity(
             assessment_id, cursor_generation
         )

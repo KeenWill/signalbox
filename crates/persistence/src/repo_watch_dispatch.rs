@@ -305,12 +305,13 @@ impl PostgresRepoWatchDispatchStore {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, repository.as_str()).await?;
         let candidate = sqlx::query(
-            "SELECT convergence.assessment_id, current.cursor_generation,
-                    convergence.pull_request_number
+            "SELECT convergence.assessment_id,
+                    current.assessment_id AS identity_assessment_id,
+                    current.cursor_generation, convergence.pull_request_number
                FROM repo_watch_pull_request_convergence AS convergence
                JOIN LATERAL (
-                    SELECT identity.cursor_generation, assessment.head_sha,
-                           assessment.base_revision
+                    SELECT identity.assessment_id, identity.cursor_generation,
+                           assessment.head_sha, assessment.base_revision
                       FROM repo_watch_pull_request_convergence_identity AS identity
                       JOIN repo_watch_pull_request_convergence_assessment AS assessment
                         ON assessment.assessment_id = identity.assessment_id
@@ -339,14 +340,16 @@ impl PostgresRepoWatchDispatchStore {
             return Ok(false);
         };
         let assessment_id: Uuid = candidate.try_get("assessment_id")?;
+        let identity_assessment_id: Uuid = candidate.try_get("identity_assessment_id")?;
         let cursor_generation: i64 = candidate.try_get("cursor_generation")?;
         let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
         sqlx::query(
             "INSERT INTO repo_watch_convergence_cutoff
-                (assessment_id, cursor_generation)
-             VALUES ($1, $2)",
+                (assessment_id, identity_assessment_id, cursor_generation)
+             VALUES ($1, $2, $3)",
         )
         .bind(assessment_id)
+        .bind(identity_assessment_id)
         .bind(cursor_generation)
         .execute(&mut *transaction)
         .await?;

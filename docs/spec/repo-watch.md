@@ -561,12 +561,11 @@ A→B→A return reuses A's unchanged evidence, while an exact replay superseded
 a later generation cannot append evidence or advance that identity.
 `repo_watch_current_pull_request_convergence` exposes the current identity's
 evidence, derived verdict, and any exact-head seal. The first passing assessment
-also
-creates one monotonic seal for the repository, pull request, exact head SHA, and
-exact base revision. Later checks or reviews on the same sealed identity remain
-visible as newer assessment evidence but cannot reopen dispatch, so a session
-does not revisit threads it already resolved on that unchanged identity. A
-different head SHA or base revision has no inherited seal and is assessed and
+also creates one monotonic seal for the repository, pull request, exact head SHA,
+and exact base revision. Later checks or reviews on the same sealed identity
+remain visible as newer assessment evidence but cannot reopen dispatch, so a
+session does not revisit threads it already resolved on that unchanged identity.
+A different head SHA or base revision has no inherited seal and is assessed and
 dispatched afresh; convergence therefore terminates unchanged-head review cycles
 without treating a new revision as already finished.
 
