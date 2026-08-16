@@ -919,7 +919,6 @@ mod tests {
             Arc, Mutex, OnceLock,
             atomic::{AtomicUsize, Ordering},
         },
-        task::Poll,
         time::Duration,
     };
 
@@ -1603,7 +1602,7 @@ mod tests {
         assert!(observed.contains(&second));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
         let selected = session(50);
         let (unused_pass_shutdown, pass_shutdown_receiver) = oneshot::channel();
@@ -1615,18 +1614,17 @@ mod tests {
             },
             pass,
         );
-        let mut shutdown_polls = VecDeque::from([Poll::Pending, Poll::Ready(())]);
-        let shutdown = std::future::poll_fn(move |context| {
-            context.waker().wake_by_ref();
-            shutdown_polls
-                .pop_front()
-                .expect("the shutdown fixture is polled only until ready")
-        });
+        let outcome = timeout(
+            Duration::from_secs(1),
+            scheduler.run_until(async {
+                pass_shutdown_receiver
+                    .await
+                    .expect("an admitted fake pass signals shutdown");
+            }),
+        )
+        .await;
 
-        assert_eq!(
-            scheduler.run_until(shutdown).await,
-            SchedulerLoopExit::Shutdown
-        );
+        assert!(outcome.is_err());
         assert!(
             observed
                 .lock()
@@ -1634,7 +1632,6 @@ mod tests {
                 .observed
                 .is_empty()
         );
-        drop(pass_shutdown_receiver);
     }
 
     #[test]
