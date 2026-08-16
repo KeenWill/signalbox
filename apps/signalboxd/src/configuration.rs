@@ -3518,9 +3518,10 @@ mod tests {
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
-        MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
-        ModelCallInputUsage, UnknownSessionModel, absolute_search_entries, credential_bytes,
-        resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
+        MAX_COMPACTION_PROMPT_UTF8_BYTES, MAX_SCHEDULER_IN_FLIGHT_PASSES,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
+        absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
+        validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -4605,28 +4606,33 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 
     #[test]
     fn scheduler_pass_limit_accepts_a_bounded_override() {
+        let configured_limit = MAX_SCHEDULER_IN_FLIGHT_PASSES;
         let configured = CONFIGURATION.replace(
             "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 16\n\n[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
         );
         let configuration = HubModelConfiguration::parse(&configured)
             .expect("the bounded scheduler override is valid");
 
-        assert_eq!(configuration.scheduler_max_in_flight_passes(), Some(16));
+        assert_eq!(
+            configuration.scheduler_max_in_flight_passes(),
+            Some(configured_limit)
+        );
     }
 
     #[test]
     fn scheduler_pass_limit_accepts_zero_as_an_explicit_pause() {
+        let configured_limit = 0;
         let paused = CONFIGURATION.replace(
             "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 0\n\n[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
         );
 
         assert_eq!(
             HubModelConfiguration::parse(&paused)
                 .expect("the paused scheduler setting is valid")
                 .scheduler_max_in_flight_passes(),
-            Some(0)
+            Some(configured_limit)
         );
     }
 
