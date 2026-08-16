@@ -899,10 +899,16 @@ polling can never produce, and projecting it would leave a webhook-only parity
 row nothing can ever match and, under a later write mode, a dispatch target that
 no longer exists. It is ignored rather than turned into a targeted query for the
 same reason — there is nothing to reconcile toward, so the delivery is terminal
-`ignored` and records no projection. The workflow-run generation guard is
-unchanged for a branch that is still present. Guards otherwise make stale head,
-lifecycle, branch, workflow-attempt, and immutable-provider facts superseded or
-duplicate rather than allowing regression.
+`ignored` and records no projection. The branch set that decides this is the one
+every earlier delivery has already been applied to, and deliveries drain in
+receipt order, so a branch the stream itself announced carries into every later
+run on it; a branch the stream never announced, because it was created outside
+the mapped set or before intake began, leaves its runs ignored until the next
+complete poll, and the poll-only row that follows is an accurate report that the
+webhook stream could not have projected them. The workflow-run generation guard
+is unchanged for a branch that is still present. Guards otherwise make stale
+head, lifecycle, branch, workflow-attempt, and immutable-provider facts
+superseded or duplicate rather than allowing regression.
 
 A rerequested check run replaces the retained completion only when its provider
 completion generation is no older, so a delayed original completion is

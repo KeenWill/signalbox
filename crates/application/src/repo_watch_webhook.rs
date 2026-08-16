@@ -748,6 +748,13 @@ fn apply_check_run_union(
 // observation that no reconciliation can ever match, and under a later write
 // mode a dispatch target that no longer exists. The delivery is therefore
 // ignored rather than queried: there is nothing to reconcile toward.
+//
+// The branch set read here is the one every earlier delivery has already been
+// applied to, and deliveries are drained in receipt order, so a branch this
+// stream itself created carries into every later run on it. What stays absent
+// is a branch the stream never announced — created outside the mapped set, or
+// before intake began — and for those the stream genuinely cannot project the
+// run, which is what the poll-only parity row then reports.
 fn apply_workflow_run(
     state: &mut RepoWatchRepositoryStateInput,
     run: &RepoWatchWorkflowRunObservation,
