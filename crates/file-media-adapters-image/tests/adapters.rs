@@ -99,6 +99,7 @@ async fn assert_hostile(format: FixtureFormat) -> Result<(), Box<dyn Error>> {
     let malformed = MemorySource::new(fixtures::malformed(format));
     let oversized = MemorySource::new(fixtures::oversized(format)?);
     let dimension_bomb = MemorySource::new(fixtures::dimension_bomb(format)?);
+    let pixel_bomb = MemorySource::new(fixtures::pixel_bomb(format)?);
 
     let truncated_result = support::inspect(&truncated, format.media_type()).await?;
     support::assert_malformed_reason(truncated_result, "malformed_image");
@@ -108,5 +109,7 @@ async fn assert_hostile(format: FixtureFormat) -> Result<(), Box<dyn Error>> {
     support::assert_malformed_reason(oversized_result, "source_too_large");
     let bomb_result = support::inspect(&dimension_bomb, format.media_type()).await?;
     support::assert_malformed_reason(bomb_result, "dimension_limit_exceeded");
+    let pixel_result = support::inspect(&pixel_bomb, format.media_type()).await?;
+    support::assert_malformed_reason(pixel_result, "pixel_limit_exceeded");
     Ok(())
 }

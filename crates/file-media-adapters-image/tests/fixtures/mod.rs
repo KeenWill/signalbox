@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::{error::Error, io::Cursor};
 
 use image::{DynamicImage, ImageBuffer, ImageError, ImageFormat, Rgba};
 
@@ -72,6 +72,47 @@ pub(crate) fn dimension_bomb(format: FixtureFormat) -> Result<Vec<u8>, ImageErro
         signalbox_file_media_adapters_image::MAX_IMAGE_AXIS + 1,
         1,
     )
+}
+
+pub(crate) fn pixel_bomb(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Error>> {
+    const BOMB_AXIS: u32 = 4_097;
+    match format {
+        FixtureFormat::Png => {
+            let mut bytes = valid(format)?;
+            bytes[16..20].copy_from_slice(&BOMB_AXIS.to_be_bytes());
+            bytes[20..24].copy_from_slice(&BOMB_AXIS.to_be_bytes());
+            let checksum = crc32fast::hash(&bytes[12..29]);
+            bytes[29..33].copy_from_slice(&checksum.to_be_bytes());
+            Ok(bytes)
+        }
+        FixtureFormat::Jpeg => {
+            let mut bytes = valid(format)?;
+            let marker = bytes
+                .windows(2)
+                .position(|window| window == [0xff, 0xc0])
+                .ok_or("synthetic JPEG has no baseline frame header")?;
+            bytes[marker + 5..marker + 7].copy_from_slice(&BOMB_AXIS.to_be_bytes()[2..]);
+            bytes[marker + 7..marker + 9].copy_from_slice(&BOMB_AXIS.to_be_bytes()[2..]);
+            Ok(bytes)
+        }
+        FixtureFormat::WebP => {
+            let mut bytes = valid(format)?;
+            let chunk = bytes
+                .windows(4)
+                .position(|window| window == b"VP8L")
+                .ok_or("synthetic WebP is not lossless")?;
+            let packed = (BOMB_AXIS - 1) | ((BOMB_AXIS - 1) << 14);
+            let packed_bytes = packed.to_le_bytes();
+            bytes[chunk + 9..chunk + 13].copy_from_slice(&packed_bytes);
+            Ok(bytes)
+        }
+        FixtureFormat::Gif => {
+            let mut bytes = valid(format)?;
+            bytes[6..8].copy_from_slice(&(BOMB_AXIS as u16).to_le_bytes());
+            bytes[8..10].copy_from_slice(&(BOMB_AXIS as u16).to_le_bytes());
+            Ok(bytes)
+        }
+    }
 }
 
 fn encode(format: FixtureFormat, width: u32, height: u32) -> Result<Vec<u8>, ImageError> {

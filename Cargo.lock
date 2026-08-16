@@ -3375,6 +3375,7 @@ dependencies = [
 name = "signalbox-file-media-adapters-image"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "image",
  "serde_json",
  "signalbox-file-media-processor-runtime",
