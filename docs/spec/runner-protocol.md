@@ -52,8 +52,8 @@ verified against this PR (`agent/runner-workspace-ready-admission`). Live
 established-connection routing of that frame through durable receipt admission,
 followed by exact `workspace_recorded` projection, is verified against this PR
 (`agent/daemon-runner-workspace-ready-routing`). Daemon-side authenticated
-resume classification of one retained `ready_unrecorded` workspace and its exact
-`resend` directive is verified against this PR
+resume classification of one retained `ready_unrecorded` workspace and its
+fail-closed directive is verified against this PR
 (`agent/runner-workspace-ready-resume`). Runner-local retention of the complete
 ready frame and its exact recorded/stale state transitions are verified against
 this PR (`agent/runner-workspace-ready-spool`). Established-connection routing
@@ -993,16 +993,19 @@ exact pair of an `execution_may_have_started` lease phase and matching retained
 terminal result: it authenticates and commits terminal evidence before any
 registration mutation, then directs both items to `discard_as_recorded`.
 Canonical stale terminal evidence instead receives `fail_stale` for both items.
-One otherwise-empty repository provisioning inventory at `ready_unrecorded`
-receives `resend` only when its complete correlation names the authenticated
-runner and prior registration revision; a mismatch receives `fail_stale`. The
-runner state root can retain the complete validated ready frame in the same
-atomic journal as that correlation.
+One otherwise-empty repository provisioning inventory at `ready_unrecorded` is
+structurally admitted but receives `fail_stale`: its durable provisioning
+authority names the prior connection event, and no present resume transaction
+reauthorizes the new connection to resend that payload. The runner state root can
+retain the complete validated ready frame in the same atomic journal as that
+correlation.
 
 **Committed unimplemented functionality.** No present runner protocol path
-resends that payload or consumes either directive, and no present filesystem
+resends that payload or consumes the directive, and no present filesystem
 producer creates it, so this recovery path does not yet perform provisioning.
-Every other nonempty inventory shape remains rejected. Stored identity mismatch,
+The daemon does not yet provide durable reauthorization, so this recovery arm
+does not make provisioning restartable. Every other nonempty inventory shape
+remains rejected. Stored identity mismatch,
 revocation, a future revision, or a stale revision paired with changed
 availability fails closed. Equal availability returns the current durable
 revision; changed availability at the current revision atomically appends its

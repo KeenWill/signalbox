@@ -763,16 +763,18 @@ Representation rules, all enforced in the schema:
   current connection authority, invokes this transaction, and sends the exact
   `workspace_recorded` correlation only after the commit or equal replay
   succeeds. On authenticated resume, the daemon accepts an otherwise-empty
-  repository `ready_unrecorded` inventory whose correlation names that runner
-  and prior registration, and directs the runner to resend the full ready frame;
-  a mismatch receives `fail_stale`. The same live transaction then commits or
-  exactly replays the resent payload before acknowledgement. The runner state
-  root retains the complete validated ready frame beside that correlation.
-- **Committed unimplemented functionality.** No present runner protocol path
-  resends the retained frame or consumes its directive or acknowledgement, no
-  heartbeat path reconciles provisioning progress, and no present transaction
-  maps the runner-relative manifest path into execution placement facts or
-  consumes the receipt to terminalize the repository-backed replacement.
+  repository `ready_unrecorded` inventory structurally but directs it to
+  `fail_stale`, because the immutable provisioning authorization still names the
+  prior connection event and no durable transaction reauthorizes the resumed
+  connection to admit the retained payload. The runner state root retains the
+  complete validated ready frame beside that correlation until its exact
+  recorded acknowledgement or stale retirement. **Committed unimplemented
+  functionality.** No present runner protocol path resends the retained frame or
+  consumes its directive or acknowledgement, no heartbeat path reconciles
+  provisioning progress, no resume transaction reauthorizes the retained
+  provisioning operation, and no present transaction maps the runner-relative
+  manifest path into execution placement facts or consumes the receipt to
+  terminalize the repository-backed replacement.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
