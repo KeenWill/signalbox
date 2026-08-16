@@ -504,20 +504,30 @@ the transition that makes every dispatched turn terminal or runtime-irrelevant,
 leaves no live runtime-relevant turn for its session, and leaves no pursuing
 goal. A goal-ending recheck is deferred to its transaction boundary so an active
 turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
-an achieved session whose dispatch head is no longer the pull request's latest
+an achieved session whose delivered state is no longer the pull request's latest
 durable head, opens the same latest-state obligation before release; sibling
 terminations and matching events collapse into that one obligation without
-regressing its latest event. Achievement is terminal only when the dispatch head
-still exactly equals the pull request's latest durable head. The obligation
-becomes eligible only after release and the same cooldown that would suppress a
-fresh successor; cooldown suppression without an existing obligation does not
-create one. Eligibility settles the obligation and creates its one current-state
-batch atomically. Equal recovery cannot create a second session for the same
-admitted action or obligation. A session whose current goal is pursuing remains
-nonterminal for singleton ownership across the gap between a completed goal turn
-and its durably queued continuation. Goal blocking, achievement, or user stop
-rechecks release after pursuit ends. The append-only dispatch records identify
-the sessions responsible for the PR; no mutable assignment flag replaces them.
+regressing its latest event. A batch delivers its originating event when
+admission dispatched that event, and the target's collapsed current state when
+admission settled an obligation by replaying a still-matching earlier event.
+Achievement is terminal exactly when that delivered state is still the pull
+request's latest durable head, so the successor that carried the newest head
+seals instead of owing another batch after every cooldown. A branch target
+records no durable revision, only a workflow conclusion, so achievement is its
+own seal there. Termination takes the repository and then the singleton advisory
+key, the order every event commit, rule reconciliation, and dispatch admission
+takes, so a match racing a termination joins its obligation, a racing
+deactivation settles it, and the achievement comparison cannot straddle an event
+commit. The obligation becomes eligible only after release and the same cooldown
+that would suppress a fresh successor; cooldown suppression without an existing
+obligation does not create one. Eligibility settles the obligation and creates
+its one current-state batch atomically. Equal recovery cannot create a second
+session for the same admitted action or obligation. A session whose current goal
+is pursuing remains nonterminal for singleton ownership across the gap between a
+completed goal turn and its durably queued continuation. Goal blocking,
+achievement, or user stop rechecks release after pursuit ends. The append-only
+dispatch records identify the sessions responsible for the PR; no mutable
+assignment flag replaces them.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
@@ -530,11 +540,13 @@ obligation for that pull request immediately, without waiting for singleton or
 cooldown readiness; the admission recheck is the race-closing backstop. Either
 path settles stale nonterminal work as `target_closed` without creating a
 session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
-event itself remains dispatch-eligible; the terminal event is the cutoff fact,
-not work made stale by that fact. Corruption in one commissioned goal rolls back
-that goal's stop to a savepoint but does not roll back the cutoff: the terminal
-event remains durably dispositioned, healthy commissioned goals are stopped, and
-later cutoffs remain eligible for processing.
+event itself remains dispatch-eligible, and a non-converged termination of that
+dispatch still owes its requeue while its own cutoff remains the latest one; the
+terminal event is the cutoff fact, not work made stale by that fact. Corruption
+in one commissioned goal rolls back that goal's stop to a savepoint but does not
+roll back the cutoff: the terminal event remains durably dispositioned, healthy
+commissioned goals are stopped, and later cutoffs remain eligible for
+processing.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,

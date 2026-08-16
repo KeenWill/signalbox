@@ -4,27 +4,28 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{error::Error, time::Duration};
+use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
     RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
     RepoWatchResolvedTemplate, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchTemplateResolver, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
-    BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, GoalCommandResult, GoalModelProvenance, GoalNeed,
-    GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
-    MergeableState, ModelSelectionRequest, PullRequestBody, PullRequestEventContext,
-    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchActionV1,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
-    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
-    RepoWatchSingletonScope, RepositorySlug, SessionConfigurationDefaults, SessionId,
-    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, ToolRequestId, TurnId, UserContent,
+    BranchName, CheckConclusion, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
+    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, MergeableState, ModelSelectionRequest, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1,
+    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleId, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, ToolRequestId, TurnId, UserContent,
+    WorkflowName,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
@@ -79,6 +80,20 @@ const TERMINAL_RULE_OPENED_EVENT_ID: u128 = 0x54_000;
 const TERMINAL_RULE_MERGED_EVENT_ID: u128 = 0x54_100;
 const STARTUP_DRAIN_CUTOFF_EVENT_ID: u128 = 0x57_100;
 const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
+const BRANCH_RULE: &str = "branch-workflow-follow-up";
+const WORKFLOW_NAME: &str = "rust";
+const WORKFLOW_BRANCH: &str = "main";
+const BRANCH_WORKFLOW_RUN_ID: u64 = 9_001;
+const BRANCH_WORKFLOW_ID: u64 = 9_002;
+const BRANCH_ACTIVATION_EVENT_ID: u128 = 0x58_000;
+const BRANCH_WORKFLOW_EVENT_ID: u128 = 0x58_100;
+const BRANCH_ACHIEVEMENT_REQUEST_ID: u128 = 0x58_200;
+const SUPERSEDING_HEAD_EVENT_ID: u128 = 0x50_700;
+const SUPERSEDED_ACHIEVEMENT_REQUEST_ID: u128 = 0x50_701;
+const SUCCESSOR_ACHIEVEMENT_REQUEST_ID: u128 = 0x50_702;
+const STOPPED_TERMINAL_OPENED_EVENT_ID: u128 = 0x59_000;
+const STOPPED_TERMINAL_MERGED_EVENT_ID: u128 = 0x59_100;
+const STOPPED_TERMINAL_STOP_COMMAND_ID: u128 = 0x59_200;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -338,6 +353,55 @@ fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
         RepoWatchSingletonScope::PullRequest,
         Duration::ZERO,
     )?)
+}
+
+fn branch_workflow_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    Ok(RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(BRANCH_RULE.to_owned())?,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?)
+}
+
+fn branch_workflow_event(value: u128) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::branch_workflow(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(value)),
+        repository()?,
+        BranchName::try_new(WORKFLOW_BRANCH.to_owned())?,
+        WorkflowName::try_new(WORKFLOW_NAME.to_owned())?,
+        CheckConclusion::Failure,
+    ))
+}
+
+fn branch_observation() -> Result<RepoWatchObservation, Box<dyn Error>> {
+    Ok(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: vec![RepoWatchWorkflowRunObservation::new(
+                GitHubObjectId::new(
+                    NonZeroU64::new(BRANCH_WORKFLOW_RUN_ID).expect("fixture run id is positive"),
+                ),
+                GitHubObjectId::new(
+                    NonZeroU64::new(BRANCH_WORKFLOW_ID).expect("fixture workflow id is positive"),
+                ),
+                RepoWatchWorkflowRunAttempt::new(
+                    NonZeroU64::new(1).expect("fixture attempt is positive"),
+                ),
+                BranchName::try_new(WORKFLOW_BRANCH.to_owned())?,
+                WorkflowName::try_new(WORKFLOW_NAME.to_owned())?,
+                CheckConclusion::Failure,
+            )],
+            branch_heads: Vec::new(),
+        })?,
+    ))
 }
 
 fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
@@ -632,23 +696,38 @@ async fn declare_dispatched_goal_achieved(
     action_ordinal: usize,
     request_seed: u128,
 ) -> Result<(), Box<dyn Error>> {
-    let session = fixture.session(action_ordinal);
+    declare_session_goal_achieved(&fixture.pool, fixture.session(action_ordinal), request_seed)
+        .await
+}
+
+/// Declares the goal of one dispatched session achieved.
+///
+/// A dispatched session owns exactly one admitted action, so its delivered turn
+/// is recoverable from the session alone — including for a successor batch this
+/// test module never named a dispatch identifier for.
+async fn declare_session_goal_achieved(
+    pool: &PgPool,
+    session: SessionId,
+    request_seed: u128,
+) -> Result<(), Box<dyn Error>> {
     let turn = TurnId::from_uuid(
         sqlx::query_scalar::<_, Uuid>(
-            "SELECT turn_id
-               FROM repo_watch_dispatch_delivery
-              WHERE dispatch_id = $1 AND action_ordinal = $2",
+            "SELECT delivery.turn_id
+               FROM repo_watch_dispatch_delivery AS delivery
+               JOIN repo_watch_dispatch_action AS action
+                 ON action.dispatch_id = delivery.dispatch_id
+                AND action.action_ordinal = delivery.action_ordinal
+              WHERE action.session_id = $1",
         )
-        .bind(fixture.dispatch_id.as_uuid())
-        .bind(i32::try_from(action_ordinal + 1)?)
-        .fetch_one(&fixture.pool)
+        .bind(session.as_uuid())
+        .fetch_one(pool)
         .await?,
     );
     let request = ToolRequestId::from_uuid(Uuid::from_u128(request_seed));
     let report = String::from("the dispatched pull request is converged");
-    insert_achievement_declaration_request(&fixture.pool, session, turn, request, &report).await?;
+    insert_achievement_declaration_request(pool, session, turn, request, &report).await?;
     assert_applied_goal_transition(
-        GoalRepository::new(fixture.pool.clone())
+        GoalRepository::new(pool.clone())
             .declare_achieved(
                 session,
                 GoalReport::try_new(report).expect("fixture goal report is valid"),
@@ -702,6 +781,24 @@ async fn check_completed_turn_for_release(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+async fn outstanding_obligation_count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_dispatch_obligation WHERE settled_kind IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+async fn dispatched_obligation_count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind = 'dispatched'",
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn release_count(fixture: &DispatchFixture) -> Result<i64, sqlx::Error> {
@@ -1307,6 +1404,198 @@ async fn current_head_achievement_seals_without_requeue() -> Result<(), Box<dyn 
 
     assert_eq!(release_count(&fixture).await?, 1);
     assert_eq!(obligations, 0);
+    Ok(())
+}
+
+/// A merge-forward dispatch moves the head it was dispatched against, so the
+/// exact-head seal must compare the state a batch delivered rather than the
+/// event that originated it. The obligation successor replays that still-
+/// matching earlier event over collapsed current state; comparing against the
+/// stale originating head would owe another batch after every cooldown forever.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn achievement_after_a_head_change_requeues_once_and_then_seals() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let advanced = observation(context(SECOND_HEAD)?)?;
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(advanced.clone()),
+                vec![head_changed_event(
+                    SUPERSEDING_HEAD_EVENT_ID,
+                    context(SECOND_HEAD)?,
+                    FIRST_HEAD,
+                )?],
+            ),
+        )
+        .await?;
+    declare_dispatched_goal_achieved(&fixture, 0, SUPERSEDED_ACHIEVEMENT_REQUEST_ID).await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("achievement against a superseded head owes one current-state batch");
+    let (_successor, successor_sessions) =
+        dispatched(evaluate_obligation(&fixture, obligation, &advanced).await?);
+    declare_session_goal_achieved(
+        &fixture.pool,
+        successor_sessions[0],
+        SUCCESSOR_ACHIEVEMENT_REQUEST_ID,
+    )
+    .await?;
+
+    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_release")
+        .fetch_one(&fixture.pool)
+        .await?;
+
+    assert_eq!(
+        releases, 2,
+        "both the original batch and its successor release"
+    );
+    assert_eq!(dispatched_obligation_count(&fixture.pool).await?, 1);
+    assert_eq!(
+        outstanding_obligation_count(&fixture.pool).await?,
+        0,
+        "the successor already carried the current head, so its achievement seals"
+    );
+    Ok(())
+}
+
+/// A branch target records a workflow conclusion and no durable revision, so no
+/// head comparison can ever seal it. Achievement is its own seal there; the
+/// pull-request-only comparison would redeliver every successful branch
+/// dispatch after each cooldown.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn achieved_branch_dispatch_seals_without_requeue() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let rule = branch_workflow_rule()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
+                    vec![opened_event(BRANCH_ACTIVATION_EVENT_ID, INITIAL_HEAD)?],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let branch = branch_observation()?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(branch.clone()),
+                vec![branch_workflow_event(BRANCH_WORKFLOW_EVENT_ID)?],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the branch rule sees its workflow event");
+    let (_dispatch, sessions) = dispatched(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &branch,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    );
+    declare_session_goal_achieved(&pool, sessions[0], BRANCH_ACHIEVEMENT_REQUEST_ID).await?;
+    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_release")
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(releases, 1);
+    assert_eq!(outstanding_obligation_count(&pool).await?, 0);
+    Ok(())
+}
+
+/// A rule may match the close or merge event itself, and that dispatch is the
+/// cutoff fact rather than work the cutoff invalidated. Its non-converged
+/// termination therefore still owes a requeue, even though the pull request's
+/// latest lifecycle is terminal.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stopped_terminal_event_dispatch_keeps_its_requeue() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let rule = merged_event_rule()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
+                    vec![opened_event(
+                        STOPPED_TERMINAL_OPENED_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let merged =
+        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Merged)?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(merged.clone()),
+                vec![merged_event(STOPPED_TERMINAL_MERGED_EVENT_ID, SECOND_HEAD)?],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the terminal-event rule sees the merge event");
+    let (_dispatch, sessions) = dispatched(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &merged,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    );
+    withdraw_dispatched_goal(&pool, sessions[0], STOPPED_TERMINAL_STOP_COMMAND_ID).await?;
+
+    assert_eq!(outstanding_obligation_count(&pool).await?, 1);
     Ok(())
 }
 
