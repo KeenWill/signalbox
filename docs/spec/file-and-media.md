@@ -1,11 +1,12 @@
 # File and media interpretation
 
-The provider-neutral core is verified against PR #898 (`agent/file-media-core`),
-with its isolated processor implementation verified against stacked PR #900
-(`agent/file-media-worker`). It includes the type model, declaration and
-registry checks, detection and validation algorithm, untrusted
-processor-response boundary, stable agent tool contracts, visibility-authorizing
-application bridge, and fresh daemon-supervised worker runtime.
+The provider-neutral core is verified against PR #898 (`agent/file-media-core`;
+via PR #900 `agent/file-media-worker`). Its isolated processor implementation is
+verified against PR #900 (`agent/file-media-worker`). Together they include the
+type model, declaration and registry checks, detection and validation algorithm,
+untrusted processor-response boundary, stable agent tool contracts,
+visibility-authorizing application bridge, and fresh daemon-supervised worker
+runtime.
 
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
