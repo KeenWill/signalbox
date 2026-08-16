@@ -111,6 +111,10 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
         &self.stream_identity
     }
 
+    /// The last occurrence number assigned on this stream.
+    ///
+    /// Positive by construction: the first occurrence takes one, so a stored
+    /// zero is a corrupt entry rather than an empty stream.
     pub const fn sequence(&self) -> NonZeroU64 {
         self.sequence
     }
@@ -877,10 +881,15 @@ impl RepoWatchEventStreamKeyV1<'_> {
     /// identity, and the commit would coalesce the restored conclusion away
     /// instead of announcing it.
     const fn is_recurring(&self) -> bool {
-        !matches!(
-            self,
-            Self::CheckSuite { .. } | Self::Review { .. } | Self::Workflow { .. }
-        )
+        match self {
+            Self::PullRequestKind { .. }
+            | Self::Label { .. }
+            | Self::Thread { .. }
+            | Self::BaseAdvance { .. }
+            | Self::Reaction { .. }
+            | Self::CheckRun { .. } => true,
+            Self::CheckSuite { .. } | Self::Review { .. } | Self::Workflow { .. } => false,
+        }
     }
 }
 
@@ -4079,32 +4088,9 @@ mod tests {
     #[test]
     fn check_run_edited_back_to_an_earlier_conclusion_keeps_a_distinct_identity()
     -> Result<(), Box<dyn Error>> {
-        fn with_conclusion(
-            conclusion: Option<CheckConclusion>,
-        ) -> Result<RepoWatchObservation, Box<dyn Error>> {
-            let completed_check_runs = match conclusion {
-                Some(conclusion) => vec![RepoWatchCheckRunObservation::new(
-                    object_id(CHECK_RUN_ID),
-                    completion_generation(CHECK_COMPLETION_GENERATION)?,
-                    CheckRunName::try_new(String::from(CHECK_NAME))?,
-                    conclusion,
-                )],
-                None => Vec::new(),
-            };
-            Ok(observation(
-                vec![pull_request(PullRequestFacts {
-                    completed_check_runs,
-                    ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
-                })?],
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )?)
-        }
-
-        let absent = with_conclusion(None)?;
-        let failed = with_conclusion(Some(CheckConclusion::Failure))?;
-        let succeeded = with_conclusion(Some(CheckConclusion::Success))?;
+        let absent = observation_without_check_run()?;
+        let failed = observation_with_completed_check_run(CheckConclusion::Failure)?;
+        let succeeded = observation_with_completed_check_run(CheckConclusion::Success)?;
         let mut frontier = RepoWatchEventIdentityFrontierV1::default();
 
         let first = derive_occurrences(Some(&absent), &failed, &mut frontier, 1)?;
@@ -4124,6 +4110,41 @@ mod tests {
         assert_ne!(first[0].content_identity(), edited[0].content_identity());
         assert_ne!(edited[0].content_identity(), restored[0].content_identity());
         Ok(())
+    }
+
+    /// The pull request under test with no completed check run observed.
+    fn observation_without_check_run() -> Result<RepoWatchObservation, Box<dyn Error>> {
+        Ok(observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: Vec::new(),
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?)
+    }
+
+    /// The pull request under test with one completed check run at this
+    /// conclusion, keeping the run identity and completion generation fixed so
+    /// only the conclusion distinguishes the observations.
+    fn observation_with_completed_check_run(
+        conclusion: CheckConclusion,
+    ) -> Result<RepoWatchObservation, Box<dyn Error>> {
+        Ok(observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![RepoWatchCheckRunObservation::new(
+                    object_id(CHECK_RUN_ID),
+                    completion_generation(CHECK_COMPLETION_GENERATION)?,
+                    CheckRunName::try_new(String::from(CHECK_NAME))?,
+                    conclusion,
+                )],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?)
     }
 
     #[test]

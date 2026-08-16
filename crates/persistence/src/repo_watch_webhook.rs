@@ -631,11 +631,6 @@ impl PostgresRepoWatchWebhookStore {
         let mut deliveries = Vec::with_capacity(headers.len());
         let mut retained_bytes = 0_usize;
         for header in headers {
-            // The oldest delivery is always read, so one body at the admission
-            // ceiling still drains instead of wedging the queue head.
-            if !deliveries.is_empty() && retained_bytes >= MAX_PENDING_PAGE_BYTES {
-                break;
-            }
             let hook_id = header.hook_id;
             let delivery_id = header.delivery_id;
             let body = sqlx::query_scalar::<_, Vec<u8>>(
@@ -650,6 +645,15 @@ impl PostgresRepoWatchWebhookStore {
             let Some(body) = body else {
                 continue;
             };
+            // The oldest delivery is always kept, so one body at the admission
+            // ceiling still drains instead of wedging the queue head. Every
+            // later body is discarded rather than allowed to overshoot, so the
+            // page retains no more than the ceiling states.
+            if !deliveries.is_empty()
+                && retained_bytes.saturating_add(body.len()) > MAX_PENDING_PAGE_BYTES
+            {
+                break;
+            }
             retained_bytes = retained_bytes.saturating_add(body.len());
             deliveries.push(decode_pending(header, body)?);
         }
