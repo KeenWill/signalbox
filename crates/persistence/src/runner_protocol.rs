@@ -3742,7 +3742,24 @@ impl RunnerProtocolStore {
         acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
     ) -> Result<RunnerWorkspaceReleaseAcknowledgement, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
+        let release_enrollment: Uuid = sqlx::query_scalar(
+            "SELECT enrollment_id
+               FROM runner_workspace_release
+              WHERE session_id = $1 AND placement_revision = $2",
+        )
+        .bind(acknowledgement.session().into_uuid())
+        .bind(Decimal::from(acknowledgement.placement_revision().get()))
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ))?;
         lock_runner_session_scheduler(&mut transaction, acknowledgement.session()).await?;
+        sqlx::query(RUNNER_ENROLLMENT)
+            .bind(release_enrollment)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
         sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(acknowledgement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -3796,7 +3813,7 @@ impl RunnerProtocolStore {
                   WHERE enrollment_id = $1 AND connection_epoch = $2
              )",
         )
-        .bind(release.decode_column::<Uuid>("enrollment_id")?)
+        .bind(release_enrollment)
         .bind(release.decode_column::<Decimal>("connection_epoch")?)
         .fetch_one(&mut *transaction)
         .await?;
@@ -7978,9 +7995,7 @@ fn exact_workspace_release_acknowledgement_replay(
     recorded: RunnerWorkspaceReleaseAcknowledgement,
 ) -> Result<RunnerWorkspaceReleaseAcknowledgement, RunnerProtocolStoreError> {
     if supplied != recorded {
-        return Err(RunnerProtocolStoreError::Domain(
-            RunnerDomainError::CorrelationMismatch,
-        ));
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     Ok(recorded)
 }
