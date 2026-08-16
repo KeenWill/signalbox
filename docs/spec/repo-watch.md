@@ -554,9 +554,13 @@ the cursor generation or the poll fails without recording an assessment.
 **Implemented behavior.** A passing assessment for a pull request based on
 `main` is `merge_ready`. A passing assessment based on another branch is
 `internally_converged`, not merge-ready; both classifications end autonomous
-work on that exact head. Every assessment is append-only evidence, and
-`repo_watch_current_pull_request_convergence` exposes the latest evidence,
-derived verdict, and any exact-head seal. The first passing assessment also
+work on that exact head. Every assessment is append-only evidence. An
+append-only cursor-generation identity advances the current projection when an
+A→B→A return reuses A's unchanged evidence, while an exact replay superseded by
+a later generation cannot append evidence or advance that identity.
+`repo_watch_current_pull_request_convergence` exposes the current identity's
+evidence, derived verdict, and any exact-head seal. The first passing assessment
+also
 creates one monotonic seal for the repository, pull request, exact head SHA, and
 exact base revision. Later checks or reviews on the same sealed identity remain
 visible as newer assessment evidence but cannot reopen dispatch, so a session
@@ -568,13 +572,15 @@ without treating a new revision as already finished.
 **Implemented behavior.** Repository watch records one convergence cutoff only
 when a seal's head and base revision are the latest assessed identity. Stale
 seals remain pending and become eligible if their identity becomes current
-again. The cutoff applies the ordinary parent-only stop to every generation-one
-goal repository watch commissioned for the pull request, with the same
-provenance limits as a lifecycle cutoff. Dispatch admission rechecks the seal
-under the repository lock: a stale match or collapsed obligation settles as
-`target_converged` only when its head is the latest assessed identity and that
-identity's head and base revision are sealed. An older identity cannot stop
-current work.
+again. Each transition that makes a sealed identity current records its own
+cutoff application, so work commissioned while another identity was current is
+also stopped when the sealed identity returns. The cutoff applies the ordinary
+parent-only stop to every generation-one goal repository watch commissioned for
+the pull request, with the same provenance limits as a lifecycle cutoff.
+Dispatch admission rechecks the seal under the repository lock: a stale match or
+collapsed obligation settles as `target_converged` only when its head is the
+latest assessed identity and that identity's head and base revision are sealed.
+An older identity cannot stop current work.
 
 **Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
 repository watch continues delivering matching findings while that aggregate
@@ -631,9 +637,10 @@ redispatches an evaluated fact nor treats pre-activation history as a new live
 signal. An obligation is a separate collapsed delivery identity, not a request
 to reevaluate its occupied facts. Reconciliation records an append-only
 deactivation when a configured identity or its repository disappears. Guarded
-daemon startup reconciles the complete repository set before any watch task
-starts, including the empty set when the repository-watch section is absent; the
-absent section still starts no watch runtime or polling task. Configuration
+daemon startup reconciles the complete repository set and drains both pending
+lifecycle cutoffs and eligible convergence cutoffs before any watch task starts,
+including the empty set when the repository-watch section is absent; the absent
+section still starts no watch runtime or polling task. Configuration
 reconciliation and evaluation are serialized per repository: an evaluation
 already committed may replay, but an already-loaded event cannot create a
 dispatch after deactivation commits. Activation stores a digest of the complete
