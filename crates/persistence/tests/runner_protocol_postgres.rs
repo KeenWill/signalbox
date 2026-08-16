@@ -23875,7 +23875,7 @@ async fn s32_inv044_workspace_release_acknowledgement_rejects_lost_source_connec
         .store
         .record_workspace_release_acknowledgement(acknowledgement)
         .await
-        .expect_err("a durably lost cleanup owner cannot acknowledge release completion");
+        .expect_err("a durably lost cleanup connection cannot acknowledge release completion");
 
     assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
     drop(pool);
