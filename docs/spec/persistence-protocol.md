@@ -148,8 +148,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-seven files, `202607180001` through
-`202608140004` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — seventy-eight files, `202607180001` through
+`202608140100` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -717,7 +717,7 @@ live in the schema instead:
   lock between the scheduler and enrollment locks, and enrollment insertion and
   loss-cursor completion take that same identity lock before they can publish
   the competing fact; and
-- the program-journal append-sequence trigger in migration `202608140002` takes
+- the program-journal append-sequence trigger in migration `202608140004` takes
   `FOR UPDATE` on the run's sequence row before admitting the next contiguous
   global and direction-specific ordinal.
 

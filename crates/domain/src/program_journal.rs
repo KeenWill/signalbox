@@ -571,14 +571,24 @@ impl ReplayCursor {
             return Ok(ReplayedRequest::DeliveryPending);
         };
         if expected != &observed {
-            if let Some((fault_index, entry)) = self.entries.iter().enumerate().next_back()
-                && let JournalFrame::Delivery(delivery) = entry.frame()
-                && let DeliveryKind::Fault(ProgramFault::Nondeterminism {
-                    expected: persisted_expected,
-                    observed: persisted_observed,
-                }) = delivery.kind()
-                && persisted_expected == expected
-                && persisted_observed == &observed
+            if let Some((fault_index, _)) = self
+                .entries
+                .iter()
+                .enumerate()
+                .skip(self.next + 1)
+                .find(|(_, entry)| {
+                    let JournalFrame::Delivery(delivery) = entry.frame() else {
+                        return false;
+                    };
+                    let DeliveryKind::Fault(ProgramFault::Nondeterminism {
+                        expected: persisted_expected,
+                        ..
+                    }) = delivery.kind()
+                    else {
+                        return false;
+                    };
+                    persisted_expected == expected
+                })
             {
                 self.next = fault_index;
                 return Ok(ReplayedRequest::Matched);
@@ -765,5 +775,58 @@ mod tests {
         );
         assert_eq!(replay.next_instruction(), ReplayInstruction::Deliver(fault));
         assert_eq!(replay.next_instruction(), ReplayInstruction::Live);
+    }
+
+    #[test]
+    fn persisted_nondeterminism_fault_replays_before_later_frames() {
+        let expected = request(1, b"recorded");
+        let observed = request(1, b"different");
+        let fault = DeliveryFrame::new(
+            DeliveryOrdinal::try_from_u64(1).expect("fixture ordinal is positive"),
+            DeliveryKind::Fault(ProgramFault::Nondeterminism {
+                expected: expected.clone(),
+                observed: observed.clone(),
+            }),
+        );
+        let later_request = request(2, b"later");
+        let later_delivery = delivery(2, 2, b"later-answer");
+        let mut replay = ReplayCursor::new(journal(vec![
+            entry(1, JournalFrame::Request(expected)),
+            entry(2, JournalFrame::Delivery(fault.clone())),
+            entry(3, JournalFrame::Request(later_request)),
+            entry(4, JournalFrame::Delivery(later_delivery)),
+        ]));
+
+        assert_eq!(replay.next_instruction(), ReplayInstruction::AwaitRequest);
+        assert_eq!(
+            replay.submit_request(observed),
+            Ok(ReplayedRequest::Matched)
+        );
+        assert_eq!(replay.next_instruction(), ReplayInstruction::Deliver(fault));
+    }
+
+    #[test]
+    fn first_persisted_nondeterminism_fault_replays_when_observation_changes() {
+        let expected = request(1, b"recorded");
+        let first_observed = request(1, b"first-divergence");
+        let later_observed = request(1, b"later-divergence");
+        let fault = DeliveryFrame::new(
+            DeliveryOrdinal::try_from_u64(1).expect("fixture ordinal is positive"),
+            DeliveryKind::Fault(ProgramFault::Nondeterminism {
+                expected: expected.clone(),
+                observed: first_observed,
+            }),
+        );
+        let mut replay = ReplayCursor::new(journal(vec![
+            entry(1, JournalFrame::Request(expected)),
+            entry(2, JournalFrame::Delivery(fault.clone())),
+        ]));
+
+        assert_eq!(replay.next_instruction(), ReplayInstruction::AwaitRequest);
+        assert_eq!(
+            replay.submit_request(later_observed),
+            Ok(ReplayedRequest::Matched)
+        );
+        assert_eq!(replay.next_instruction(), ReplayInstruction::Deliver(fault));
     }
 }
