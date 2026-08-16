@@ -169,7 +169,11 @@ sequence, so the limit bounds one frontier near 40 MB. Exceeding it fails the
 comparison, because the alternative is reusing an occurrence number and minting
 a content identity that collides with an already-durable one. Sequence
 exhaustion fails the comparison rather than wrapping. Provider-keyed immutable
-facts use sequence one without occupying frontier space. The cursor does not
+facts use sequence one without occupying frontier space. A fact counts as
+immutable only when the differ suppresses re-emission on members its stream key
+already names, so completed check runs are not among them: their conclusion can
+change under an unchanged run identity and completion generation, and they
+advance a frontier sequence like any recurring stream. The cursor does not
 retain resource keys, ETags, accepted transport responses, raw provider
 payloads, or credentials. A per-repository atomic commit accepts an expected
 generation, one complete cursor candidate, and its ordered event-occurrence
@@ -204,8 +208,13 @@ domain-separated source-independent stream identity, and the stream's positive
 occurrence sequence. The stream identity is closed by event kind. Recurring PR
 lifecycle, mergeability, head, label, thread, branch-advance, and reaction
 streams name the PR and their kind-specific label, thread, branch, or reaction
-members. Immutable check-suite and check-run facts name their provider identity
-and completion generation; reviews name their provider review identity; workflow
+members. Check runs are recurring too, naming their provider run identity and
+completion generation: a completed run edited back to an earlier conclusion
+restates that conclusion's facts exactly, so only an advancing occurrence
+sequence keeps the restored event's identity distinct from the first, and
+without it the commit would coalesce the restored conclusion away rather than
+announce it. Immutable check-suite facts name their provider identity and
+completion generation; reviews name their provider review identity; workflow
 facts name branch, workflow identity, run identity, and attempt. The normalized
 review observation has no submitted-time member, so version one assumes the
 provider review identity alone uniquely identifies that immutable submission.
