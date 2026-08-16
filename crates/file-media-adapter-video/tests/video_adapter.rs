@@ -209,7 +209,7 @@ async fn hostile_view_arguments_are_typed_and_content_silent() -> Result<(), Box
 }
 
 #[tokio::test]
-async fn adversarial_decoder_structure_is_rejected_by_registry_sanitization()
+async fn adversarial_decoder_output_kind_is_rejected_by_registry_sanitization()
 -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::ordinary_webm().into_source()?;
     let result = read(

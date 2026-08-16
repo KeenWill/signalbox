@@ -6,6 +6,9 @@ use signalbox_file_media_runtime::{
 };
 
 const SOURCE_BYTES: usize = 256 * 1024;
+const MP4_TIMESCALE: u32 = 1_000;
+const MP4_DURATION_UNITS: u32 = 5_500;
+const WEBM_DURATION_TIMECODE_UNITS: f64 = 5_500.0;
 const EXPECTED_DURATION_MILLISECONDS: u64 = 5_500;
 const EXPECTED_VIDEO_TRACKS: u64 = 1;
 
@@ -13,6 +16,12 @@ const EXPECTED_VIDEO_TRACKS: u64 = 1;
 pub enum FixtureKind {
     Mp4,
     Webm,
+}
+
+#[derive(Clone, Copy)]
+enum ContentProtection {
+    Clear,
+    Encrypted,
 }
 
 impl FixtureKind {
@@ -45,33 +54,42 @@ pub struct VideoFixture {
 
 impl VideoFixture {
     pub fn ordinary_mp4() -> Self {
-        Self::new(FixtureKind::Mp4, mp4_bytes(1_000, 5_500))
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS),
+        )
     }
 
     pub fn ordinary_webm() -> Self {
-        Self::new(FixtureKind::Webm, webm_bytes(5_500.0, false))
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes(WEBM_DURATION_TIMECODE_UNITS, ContentProtection::Clear),
+        )
     }
 
     pub fn truncated_mp4() -> Self {
-        let mut bytes = mp4_bytes(1_000, 5_500);
+        let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
         bytes.pop();
         Self::new(FixtureKind::Mp4, bytes)
     }
 
     pub fn truncated_webm() -> Self {
-        let mut bytes = webm_bytes(5_500.0, false);
+        let mut bytes = webm_bytes(WEBM_DURATION_TIMECODE_UNITS, ContentProtection::Clear);
         bytes.pop();
         Self::new(FixtureKind::Webm, bytes)
     }
 
     pub fn encrypted_mp4() -> Self {
-        let mut bytes = mp4_bytes(1_000, 5_500);
-        bytes.extend_from_slice(&mp4_box(*b"sinf", &[]));
+        let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        bytes.extend_from_slice(&mp4_extended_box(*b"sinf", &[]));
         Self::new(FixtureKind::Mp4, bytes)
     }
 
     pub fn encrypted_webm() -> Self {
-        Self::new(FixtureKind::Webm, webm_bytes(5_500.0, true))
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes(WEBM_DURATION_TIMECODE_UNITS, ContentProtection::Encrypted),
+        )
     }
 
     pub fn recursive_mp4() -> Self {
@@ -106,21 +124,24 @@ impl VideoFixture {
     }
 
     pub fn zero_timescale_mp4() -> Self {
-        Self::new(FixtureKind::Mp4, mp4_bytes(0, 5_500))
+        Self::new(FixtureKind::Mp4, mp4_bytes(0, MP4_DURATION_UNITS))
     }
 
     pub fn nonfinite_duration_webm() -> Self {
-        Self::new(FixtureKind::Webm, webm_bytes(f64::NAN, false))
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes(f64::NAN, ContentProtection::Clear),
+        )
     }
 
     pub fn oversized_mp4() -> Self {
-        let mut bytes = mp4_bytes(1_000, 5_500);
+        let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
         bytes.resize(SOURCE_BYTES + 1, 0);
         Self::new(FixtureKind::Mp4, bytes)
     }
 
     pub fn oversized_webm() -> Self {
-        let mut bytes = webm_bytes(5_500.0, false);
+        let mut bytes = webm_bytes(WEBM_DURATION_TIMECODE_UNITS, ContentProtection::Clear);
         bytes.resize(SOURCE_BYTES + 1, 0);
         Self::new(FixtureKind::Webm, bytes)
     }
@@ -178,17 +199,28 @@ fn mp4_box(box_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn webm_bytes(duration: f64, encrypted: bool) -> Vec<u8> {
+fn mp4_extended_box(box_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
+    let size = u64::try_from(payload.len() + 16).unwrap_or(u64::MAX);
+    let mut bytes = Vec::with_capacity(payload.len() + 16);
+    bytes.extend_from_slice(&1_u32.to_be_bytes());
+    bytes.extend_from_slice(&box_type);
+    bytes.extend_from_slice(&size.to_be_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn webm_bytes(duration: f64, protection: ContentProtection) -> Vec<u8> {
     let scale = ebml_element(&[0x2a, 0xd7, 0xb1], &[0x0f, 0x42, 0x40]);
     let duration = ebml_element(&[0x44, 0x89], &duration.to_bits().to_be_bytes());
     let info = ebml_element(&[0x15, 0x49, 0xa9, 0x66], &[scale, duration].concat());
     let track_type = ebml_element(&[0x83], &[1]);
-    let encryption = if encrypted {
-        let content_encryption = ebml_element(&[0x50, 0x35], &[]);
-        let content_encoding = ebml_element(&[0x62, 0x40], &content_encryption);
-        ebml_element(&[0x6d, 0x80], &content_encoding)
-    } else {
-        Vec::new()
+    let encryption = match protection {
+        ContentProtection::Clear => Vec::new(),
+        ContentProtection::Encrypted => {
+            let content_encryption = ebml_element(&[0x50, 0x35], &[]);
+            let content_encoding = ebml_element(&[0x62, 0x40], &content_encryption);
+            ebml_element(&[0x6d, 0x80], &content_encoding)
+        }
     };
     let track_entry = ebml_element(&[0xae], &[track_type, encryption].concat());
     let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
