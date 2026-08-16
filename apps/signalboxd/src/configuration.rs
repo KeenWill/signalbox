@@ -1374,6 +1374,7 @@ impl HubModelConfiguration {
                         runtime_pool_action(pool.action(CredentialPoolTrigger::QuotaExhausted)),
                         runtime_pool_action(pool.action(CredentialPoolTrigger::RateLimited)),
                         runtime_pool_action(pool.action(CredentialPoolTrigger::Overloaded)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::CredentialRejected)),
                     ),
                 ))
             })

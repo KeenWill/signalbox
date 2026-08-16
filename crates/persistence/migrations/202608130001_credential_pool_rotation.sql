@@ -18,6 +18,11 @@ CREATE TABLE model_call_credential_pool_policy (
         on_overloaded IN (
             'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
         )
+    ),
+    on_credential_rejected text NOT NULL CHECK (
+        on_credential_rejected IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
     )
 );
 
@@ -54,8 +59,12 @@ CREATE TABLE credential_pool_member_action (
     observed_turn_id uuid NOT NULL,
     observation_model_call_id uuid NOT NULL UNIQUE REFERENCES model_call(model_call_id),
     consumed_turn_id uuid,
+    -- A rejected credential is an ordinary durable exclusion cause: it admits
+    -- every action except switch_now, which needs a substitutable successor.
     cause_kind text NOT NULL CHECK (
-        cause_kind IN ('rate_limited', 'quota_exhausted', 'overloaded')
+        cause_kind IN (
+            'rate_limited', 'quota_exhausted', 'overloaded', 'credential_rejected'
+        )
     ),
     FOREIGN KEY (observed_turn_id, observed_session_id)
         REFERENCES turn_lifecycle(turn_id, session_id),

@@ -69,6 +69,7 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
         CredentialPoolRuntimeAction::SwitchNow,
         CredentialPoolRuntimeAction::SwitchNow,
         CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
     );
     let mut repository = PostgresModelCallRepository::new(
         pool.clone(),
@@ -135,9 +136,11 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
             session,
             first_authorized
                 .observation_correlation()
-                .bind_provider_failure_observation_with_usage(
+                .bind_provider_failure_observation_with_retry_after(
                     ProviderModelCallFailureCause::QuotaExhausted,
                     ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
                 ),
             signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
                 failed: FailedModelCallTurnIdentities::new(
@@ -216,9 +219,11 @@ async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result
             session,
             second_authorized
                 .observation_correlation()
-                .bind_provider_failure_observation_with_usage(
+                .bind_provider_failure_observation_with_retry_after(
                     ProviderModelCallFailureCause::QuotaExhausted,
                     ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
                 ),
             signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
                 failed: FailedModelCallTurnIdentities::new(

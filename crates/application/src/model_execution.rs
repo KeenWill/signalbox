@@ -1788,17 +1788,23 @@ where
         loop {
             let mut identities =
                 self.next_terminal_identities(observation.observation(), &tool_approvals);
+            // Every classified pool trigger evaluates its frozen action, not
+            // only the ones that could substitute a member on this turn.
+            // `switch_next_turn`, `avoid_new_sessions`, and `quarantine`
+            // terminalize the call and persist a durable exclusion, so gating
+            // them on substitution proof silently degraded them to `stay`.
+            // Persistence still requires the proof before creating a successor.
             if matches!(
                 observation.provider_failure_cause(),
                 Some(
                     signalbox_domain::ProviderModelCallFailureCause::RateLimited
                         | signalbox_domain::ProviderModelCallFailureCause::QuotaExhausted
                         | signalbox_domain::ProviderModelCallFailureCause::Overloaded
+                        | signalbox_domain::ProviderModelCallFailureCause::CredentialRejected
                 )
-            ) && observation.non_acceptance_proven()
-                && let ModelCallTerminalIdentityCandidates::Exact(
-                    signalbox_domain::ModelCallTerminalIdentities::Failed(failed),
-                ) = identities
+            ) && let ModelCallTerminalIdentityCandidates::Exact(
+                signalbox_domain::ModelCallTerminalIdentities::Failed(failed),
+            ) = identities
             {
                 identities = ModelCallTerminalIdentityCandidates::Availability {
                     failed,

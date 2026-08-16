@@ -571,16 +571,17 @@ selectable record naming the target, supplies the serving record's adapter and
 credential pool, so nothing is inferred from the pointing model. At preparation
 the enabled call resolves that family's pinned reference from the session's
 credential history and pins it on the call exactly like any other resolved
-target; as everywhere else in this build, preparation consults no pool. A
-serving record omitting `model_family`, or naming an unmapped one, is a typed
-startup failure. Startup rejects a missing, selectable, cross-adapter, or
-otherwise conflicting alternate target. An enabled call uses that serving
-record's provider identity and output-token request limit, while the client's
-durable selection remains unchanged. Capability values are validated against the
-selected adapter's explicit mapping table during startup, so an adapter cannot
-silently drop a configured setting. Input guarding, output reservation, and
-post-response usage enforcement use the effective serving record's limits for
-that enabled call rather than the selectable source record's limits.
+target; preparation then selects from that serving family's admitted pool
+exactly as it does for any other resolved target. A serving record omitting
+`model_family`, or naming an unmapped one, is a typed startup failure. Startup
+rejects a missing, selectable, cross-adapter, or otherwise conflicting alternate
+target. An enabled call uses that serving record's provider identity and
+output-token request limit, while the client's durable selection remains
+unchanged. Capability values are validated against the selected adapter's
+explicit mapping table during startup, so an adapter cannot silently drop a
+configured setting. Input guarding, output reservation, and post-response usage
+enforcement use the effective serving record's limits for that enabled call
+rather than the selectable source record's limits.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
@@ -1966,16 +1967,27 @@ the reference the call itself pinned, whatever selection chose it, and a pool
 edited across a restart can neither broaden an existing session's admitted
 credentials nor relabel a stored call.
 
-Two consequences of that degeneracy are worth stating for this build. A
-multi-member pool behaves as its preferred member alone, since every call on
-that family authenticates as that member. And two families of one adapter may
-prefer different profiles wherever that adapter resolves the session-pinned
-reference from a complete adapter-scoped catalog — both direct HTTP adapters and
-`claude_cli` do. Only `codex_cli` still carries a single reference into its
-runtime, so two `codex_cli` families resolving to different profiles is a typed
-startup failure rather than a silent pin of whichever parsed last. A profile
-declared for another adapter is unmapped in every case, even if a later
-configuration routes the same model family through this adapter.
+What this build presently delivers differs from that record in one way worth
+stating. Preparation selects among the admitted members and a qualifying failure
+rotates the chain, so a multi-member pool no longer behaves as its preferred
+member alone. What is still missing is the interned immutable policy identity: a
+session's credential history event stores the preferred reference rather than
+the complete policy, so only an intra-chain successor reloads its predecessor
+call's frozen policy while a fresh availability chain resolves the pool from the
+current document. A pool edited across a restart can therefore still change
+which members an existing session admits, and call-free exhaustion records the
+pool name rather than the exact per-member evidence that proved it. Both gaps
+close with the `pool_policy_id` record described above and remain committed
+unimplemented functionality until then.
+
+Two families of one adapter may prefer different profiles wherever that adapter
+resolves the session-pinned reference from a complete adapter-scoped catalog —
+both direct HTTP adapters and `claude_cli` do. Only `codex_cli` still carries a
+single reference into its runtime, so two `codex_cli` families resolving to
+different profiles is a typed startup failure rather than a silent pin of
+whichever parsed last. A profile declared for another adapter is unmapped in
+every case, even if a later configuration routes the same model family through
+this adapter.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an

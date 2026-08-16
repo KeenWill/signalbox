@@ -392,6 +392,7 @@ pub struct CredentialPoolRuntimePolicy {
     quota_exhausted: CredentialPoolRuntimeAction,
     rate_limited: CredentialPoolRuntimeAction,
     overloaded: CredentialPoolRuntimeAction,
+    credential_rejected: CredentialPoolRuntimeAction,
 }
 
 impl CredentialPoolRuntimePolicy {
@@ -403,6 +404,7 @@ impl CredentialPoolRuntimePolicy {
         quota_exhausted: CredentialPoolRuntimeAction,
         rate_limited: CredentialPoolRuntimeAction,
         overloaded: CredentialPoolRuntimeAction,
+        credential_rejected: CredentialPoolRuntimeAction,
     ) -> Self {
         Self {
             name: name.into(),
@@ -411,6 +413,7 @@ impl CredentialPoolRuntimePolicy {
             quota_exhausted,
             rate_limited,
             overloaded,
+            credential_rejected,
         }
     }
 
@@ -429,8 +432,8 @@ impl CredentialPoolRuntimePolicy {
             ProviderModelCallFailureCause::QuotaExhausted => self.quota_exhausted,
             ProviderModelCallFailureCause::RateLimited => self.rate_limited,
             ProviderModelCallFailureCause::Overloaded => self.overloaded,
-            ProviderModelCallFailureCause::CredentialRejected
-            | ProviderModelCallFailureCause::PermissionDenied
+            ProviderModelCallFailureCause::CredentialRejected => self.credential_rejected,
+            ProviderModelCallFailureCause::PermissionDenied
             | ProviderModelCallFailureCause::InvalidRequest
             | ProviderModelCallFailureCause::TargetNotFound
             | ProviderModelCallFailureCause::RequestTooLarge
@@ -618,15 +621,42 @@ impl PostgresModelCallRepository {
         )
         .await?;
         let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
+        let fast_mode = request.model_settings().effective().fast_mode();
         let credential_reference = resolve_session_credential(
             &mut transaction,
             session_id,
             request.call().target(),
-            request.model_settings().effective().fast_mode(),
+            fast_mode,
             &self.credential_reference,
             self.credential_families.as_ref(),
         )
         .await?;
+        // Preview the member preparation will actually select. The caller
+        // spends an authenticated input-token count on this reference before
+        // any call exists, so previewing the session default would count
+        // against a member a pending displacement or quarantine has already
+        // excluded — and an account-wide rate limit reaches the count endpoint
+        // too, so activation would abort before selection could reach the
+        // admissible member. Selection consumes no displacement row and this
+        // transaction rolls back, so nothing durable moves.
+        let selected = select_runtime_pool_credential(
+            &mut transaction,
+            session_id,
+            execution.turn(),
+            execution.current_attempt().id(),
+            serving_pool_target(
+                self.credential_families.as_ref(),
+                request.call().target(),
+                fast_mode,
+            ),
+            credential_reference.clone(),
+            &self.credential_pools,
+        )
+        .await?;
+        // An exhausted pool has no member to preview. Preparation owns the
+        // typed exhaustion closure, so the preview keeps the session default
+        // rather than inventing a second exhaustion path here.
+        let credential_reference = selected.reference.unwrap_or(credential_reference);
         transaction.rollback().await?;
         Ok(ProspectiveModelCall {
             request,
@@ -1160,7 +1190,13 @@ impl PostgresModelCallRepository {
                         .await?,
                     )
                 };
-                if action == CredentialPoolRuntimeAction::SwitchNow {
+                // A successor reissues the request, so it needs the
+                // adapter's proof that the failed request was never accepted.
+                // Without it the call closes terminally rather than
+                // substituting a member behind an effect that may have landed.
+                let substituting = action == CredentialPoolRuntimeAction::SwitchNow
+                    && observation.non_acceptance_proven();
+                if substituting {
                     let current_reference = current_reference.as_deref().ok_or(
                         ModelCallRepositoryError::InvalidTransition(
                             "switch_now omitted the current credential reference",
@@ -1230,7 +1266,9 @@ impl PostgresModelCallRepository {
                         Some(cause),
                     )
                     .await?;
-                } else if let Some(current_reference) = current_reference {
+                } else if action != CredentialPoolRuntimeAction::SwitchNow
+                    && let Some(current_reference) = current_reference
+                {
                     persist_credential_pool_member_action(
                         &mut transaction,
                         &policy,
@@ -5394,8 +5432,9 @@ async fn persist_call_pool_policy(
     sqlx::query(
         "INSERT INTO model_call_credential_pool_policy
             (model_call_id, pool_name, on_pool_exhausted,
-             on_quota_exhausted, on_rate_limited, on_overloaded)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+             on_quota_exhausted, on_rate_limited, on_overloaded,
+             on_credential_rejected)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(call.into_uuid())
     .bind(policy.name())
@@ -5403,6 +5442,7 @@ async fn persist_call_pool_policy(
     .bind(policy.quota_exhausted.as_str())
     .bind(policy.rate_limited.as_str())
     .bind(policy.overloaded.as_str())
+    .bind(policy.credential_rejected.as_str())
     .execute(&mut *connection)
     .await?;
     for (ordinal, member) in policy.members().iter().enumerate() {
@@ -5470,7 +5510,8 @@ async fn load_call_pool_policy(
 ) -> Result<Option<CredentialPoolRuntimePolicy>, ModelCallRepositoryError> {
     let Some(row) = sqlx::query(
         "SELECT pool_name, on_pool_exhausted,
-                on_quota_exhausted, on_rate_limited, on_overloaded
+                on_quota_exhausted, on_rate_limited, on_overloaded,
+                on_credential_rejected
            FROM model_call_credential_pool_policy
           WHERE model_call_id = $1",
     )
@@ -5507,6 +5548,7 @@ async fn load_call_pool_policy(
         CredentialPoolRuntimeAction::parse(row.try_get("on_quota_exhausted")?)?,
         CredentialPoolRuntimeAction::parse(row.try_get("on_rate_limited")?)?,
         CredentialPoolRuntimeAction::parse(row.try_get("on_overloaded")?)?,
+        CredentialPoolRuntimeAction::parse(row.try_get("on_credential_rejected")?)?,
     )))
 }
 
