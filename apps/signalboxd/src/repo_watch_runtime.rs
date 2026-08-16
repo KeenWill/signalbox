@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
+    future::Future,
     num::{NonZeroU16, NonZeroU64},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -409,6 +410,41 @@ async fn receive_webhook_work(receiver: &mut Option<watch::Receiver<()>>) -> boo
     received
 }
 
+enum PollAttemptWait<T> {
+    Completed(T),
+    Continue,
+    Shutdown,
+    Webhook,
+}
+
+async fn await_poll_or_interrupt<F>(
+    poll: F,
+    shutdown: &mut watch::Receiver<bool>,
+    webhook_work: &mut Option<watch::Receiver<()>>,
+) -> PollAttemptWait<F::Output>
+where
+    F: Future,
+{
+    select! {
+        biased;
+        changed = shutdown.changed() => {
+            if changed.is_err() || *shutdown.borrow() {
+                PollAttemptWait::Shutdown
+            } else {
+                PollAttemptWait::Continue
+            }
+        }
+        admitted = receive_webhook_work(webhook_work) => {
+            if admitted {
+                PollAttemptWait::Webhook
+            } else {
+                PollAttemptWait::Continue
+            }
+        }
+        result = poll => PollAttemptWait::Completed(result),
+    }
+}
+
 #[derive(Default)]
 struct WebhookDrainRetry {
     deadline: Option<Instant>,
@@ -632,23 +668,58 @@ impl RepositoryWatchTask {
                 }
                 () = sleep_until(next_poll) => {
                     let cycle_started = Instant::now();
-                    let mut attempt_cancelled = false;
-                    let result = select! {
-                        result = self.run_attempt() => Some(result),
-                        changed = shutdown.changed() => {
-                            if changed.is_err() || *shutdown.borrow() {
-                                attempt_cancelled = true;
-                            }
-                            None
+                    let mut webhook_work = self.webhook_work.take();
+                    let outcome = await_poll_or_interrupt(
+                        self.run_attempt(),
+                        &mut shutdown,
+                        &mut webhook_work,
+                    ).await;
+                    self.webhook_work = webhook_work;
+                    let result = match outcome {
+                        PollAttemptWait::Completed(result) => result,
+                        PollAttemptWait::Shutdown => {
+                            // A cancelled full poll may own spawned PR fetches.
+                            self.poller.drain_fetches().await;
+                            self.poller.invalidate_freshness();
+                            return;
                         }
-                    };
-                    if attempt_cancelled {
-                        // A cancelled full poll may own spawned PR fetches.
-                        self.poller.drain_fetches().await;
-                        return;
-                    }
-                    let Some(result) = result else {
-                        continue;
+                        PollAttemptWait::Continue => {
+                            self.poller.drain_fetches().await;
+                            self.poller.invalidate_freshness();
+                            continue;
+                        }
+                        PollAttemptWait::Webhook => {
+                            self.poller.drain_fetches().await;
+                            self.poller.invalidate_freshness();
+                            let Some(result) = self
+                                .run_webhook_attempt_until_shutdown(&mut shutdown)
+                                .await
+                            else {
+                                return;
+                            };
+                            match &result {
+                                Ok(()) => {
+                                    webhook_retry.update_after(&result);
+                                    tracing::debug!(
+                                        repository = %self.repository.as_str(),
+                                        "repository-watch webhook work preempted a full poll"
+                                    );
+                                }
+                                Err(error) => {
+                                    webhook_retry.update_after(&result);
+                                    tracing::error!(
+                                        repository = %self.repository.as_str(),
+                                        cause_code = error.cause_code(),
+                                        retry_seconds = WEBHOOK_DRAIN_RETRY_DELAY.as_secs(),
+                                        "repository-watch preempting webhook drain failed; retry scheduled"
+                                    );
+                                }
+                            }
+                            if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+                                return;
+                            }
+                            continue;
+                        }
                     };
                     let metrics = self.poller.attempt_metrics();
                     match &result {
@@ -4764,21 +4835,23 @@ mod tests {
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
         GraphQlEnvelope, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
         MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
-        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PollCycleTiming,
-        PullRequestSettlement, PullResponse, ReactionContent, RepoWatchAuthorLogin,
-        RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
-        RepoWatchCursorGeneration, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-        RepoWatchReactionObservation, RepoWatchReviewDecision, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
-        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
-        ResourceKey, ReviewState, StaleReviewClearanceProviderResult, TargetedPullRequest, Url,
+        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
+        PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
+        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
+        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
+        RepositoryWatchRuntimeError, RepositoryWatchTask, ResourceKey, ReviewState,
+        StaleReviewClearanceProviderResult, TargetedPullRequest, Url,
         UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WebhookDrainRetry,
-        WorkflowName, WorkflowResponse, derive_repo_watch_events, dispatch_context_json,
-        initial_poll_delay, inspect_webhook_drain, isolate_stale_review_clearance_provider_result,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
-        owed_dispatch_context_json_parts, reject_graphql_errors, remaining_interval,
-        rule_activation_error, supervise_repository_tasks, targeted_pull_requests,
+        WorkflowName, WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events,
+        dispatch_context_json, initial_poll_delay, inspect_webhook_drain,
+        isolate_stale_review_clearance_provider_result, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, owed_dispatch_context_json_parts,
+        reject_graphql_errors, remaining_interval, rule_activation_error,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -6946,6 +7019,35 @@ mod tests {
         );
         tokio::time::advance(WEBHOOK_DRAIN_RETRY_DELAY).await;
         retry.due().await;
+    }
+
+    #[tokio::test]
+    async fn a_webhook_wake_preempts_an_in_flight_complete_poll() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        webhook_sender.send_replace(());
+
+        let outcome = await_poll_or_interrupt(
+            std::future::pending::<()>(),
+            &mut shutdown,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert!(matches!(outcome, PollAttemptWait::Webhook));
+    }
+
+    #[tokio::test]
+    async fn a_complete_poll_wins_without_an_interrupt() {
+        let (_webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+
+        let outcome =
+            await_poll_or_interrupt(async { 7_u8 }, &mut shutdown, &mut webhook_work).await;
+
+        assert!(matches!(outcome, PollAttemptWait::Completed(7)));
     }
 
     #[tokio::test]

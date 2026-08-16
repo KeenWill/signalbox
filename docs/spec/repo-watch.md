@@ -35,11 +35,11 @@ identity, its durable frontier, and the one-time storage migration are verified
 this PR (`agent/repo-watch-content-identity`). The authenticated webhook intake,
 shadow projection, parity view, and targeted refresh behavior are verified
 against this PR (`agent/repo-watch-webhook-receiver`). Webhook-primary commits,
-including their atomic delivery disposition and slow complete reconciliation,
-are verified against PR #854 (`agent/daemon-ops-overnight`). Webhook drain
-liveness and stall reporting are verified against PR #896
-(`agent/webhook-projection-drain`). Eager merge-forward dispatch is verified
-against PR #886 (`agent/eager-merge-forward`).
+including their atomic delivery disposition, slow complete reconciliation, and
+webhook preemption of that reconciliation are verified against PR #854
+(`agent/daemon-ops-overnight`). Webhook drain liveness and stall reporting are
+also verified against this PR. Eager merge-forward dispatch is verified against
+PR #886 (`agent/eager-merge-forward`).
 
 ## Configuration and credential boundary
 
@@ -141,9 +141,12 @@ partial, or unparseable poll submits no persistence candidate. The
 per-repository interval is measured start to start, so a cadence does not drift
 by the duration of its own attempt; attempts never overlap, and an attempt that
 reaches or exceeds the interval is followed immediately by the next. A webhook
-wake serializes with the same repository task and does not reset the full-poll
-deadline; a failed or unavailable webhook endpoint therefore loses acceleration,
-not reconciliation.
+wake serializes with the same repository task, but preempts an in-flight
+complete poll so admitted durable work cannot wait behind that slow sweep. The
+task joins the cancelled poll's spawned fetches, invalidates its partial
+pull-request freshness, drains webhook work, and resumes the still-due complete
+poll. The wake does not reset the full-poll deadline; a failed or unavailable
+webhook endpoint therefore loses acceleration, not reconciliation.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
@@ -816,8 +819,10 @@ that repository's drain task remains available to receive it. The wake is an
 accelerator over durable state, not a work inventory: the repository task drains
 durable pending deliveries on startup, after every full poll, and when woken,
 and a wake arriving during a drain remains observable for a follow-up attempt. A
-signature-valid delivery whose event or action is outside the mapped set,
-including a broadly subscribed `workflow_job`, is still acknowledged
+primary-mode wake also preempts an in-flight complete poll, without resetting
+that poll's deadline, so the durable delivery drains before reconciliation
+resumes. A signature-valid delivery whose event or action is outside the mapped
+set, including a broadly subscribed `workflow_job`, is still acknowledged
 successfully and is cheaply logged and recorded as ignored rather than treated
 as an intake failure.
 
