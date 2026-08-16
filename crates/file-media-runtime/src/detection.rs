@@ -119,29 +119,6 @@ impl ValidatedFile {
         }
     }
 
-    /// Reconstitutes registry evidence after a checked local worker boundary.
-    ///
-    /// Every component remains untrusted until the daemon-side registry
-    /// sanitizes the worker's final response; this constructor only restores
-    /// the request evidence that the registry originally supplied.
-    pub fn from_worker_request(
-        source: FileUse,
-        detected_media_type: CanonicalMediaType,
-        reader: ReaderIdentity,
-        validation: ValidationEvidence,
-        metadata: BoundedMetadata,
-        views: Vec<ReadViewDeclaration>,
-    ) -> Self {
-        Self::new(
-            source,
-            detected_media_type,
-            reader,
-            validation,
-            metadata,
-            views,
-        )
-    }
-
     /// Borrows the exact semantic use.
     pub const fn source(&self) -> &FileUse {
         &self.source
