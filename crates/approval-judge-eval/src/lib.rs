@@ -24,8 +24,8 @@ pub mod store;
 
 pub use database::DatabaseCorpusStore;
 pub use store::{
-    CorpusKey, CorpusRegistration, CorpusSourceDescriptor, CorpusStore, CorpusStoreError,
-    CorpusStoreFuture, DigestParseError, DiskCorpusStore, Sha256Digest,
+    CorpusKey, CorpusRegistration, CorpusSourceDescriptor, CorpusStore, CorpusStoreCorruption,
+    CorpusStoreError, CorpusStoreFuture, DigestParseError, DiskCorpusStore, Sha256Digest,
 };
 
 /// The only corpus format this pre-alpha harness currently accepts.

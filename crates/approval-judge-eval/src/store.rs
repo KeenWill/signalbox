@@ -232,9 +232,81 @@ pub enum CorpusStoreError {
     /// Durable database access failed.
     Database(sqlx::Error),
     /// A database row violated the store representation.
-    CorruptRegistration(String),
+    CorruptRegistration(CorpusStoreCorruption),
     /// The manifest names a blob, but this slice has no blob backend.
     BlobBackendUnavailable,
+}
+
+/// Closed corruption classifications for durable corpus rows and registrations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CorpusStoreCorruption {
+    /// An in-memory case count cannot be represented durably.
+    CaseCountOutOfRange,
+    /// An in-memory replay position cannot be represented durably.
+    CasePositionOutOfRange,
+    /// An in-memory format version cannot be represented durably.
+    FormatVersionOutOfRange,
+    /// A stored signed case count was negative.
+    NegativeCaseCount,
+    /// A stored signed format version was negative.
+    NegativeFormatVersion,
+    /// Registration and content format versions differ.
+    FormatVersionMismatch,
+    /// Registration and content case counts differ.
+    CaseCountMismatch,
+    /// Registration and content digests differ.
+    CorpusDigestMismatch,
+    /// Stored case JSON could not be decoded into the current strict shape.
+    StoredCaseJson,
+    /// The logical key already names different metadata or cases.
+    RegistrationConflict,
+    /// A durable source discriminator is unknown.
+    UnknownSourceKind(String),
+    /// A source-kind-required durable column is null.
+    MissingSourceField(&'static str),
+    /// A durable blob byte length is not an unsigned 64-bit integer.
+    InvalidBlobByteLength,
+    /// A durable digest is not exactly 32 bytes.
+    InvalidDigestLength,
+}
+
+impl fmt::Display for CorpusStoreCorruption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CaseCountOutOfRange => {
+                formatter.write_str("case count exceeds PostgreSQL bigint")
+            }
+            Self::CasePositionOutOfRange => {
+                formatter.write_str("case position exceeds PostgreSQL bigint")
+            }
+            Self::FormatVersionOutOfRange => {
+                formatter.write_str("format version exceeds PostgreSQL integer")
+            }
+            Self::NegativeCaseCount => formatter.write_str("stored case count is negative"),
+            Self::NegativeFormatVersion => formatter.write_str("stored format version is negative"),
+            Self::FormatVersionMismatch => {
+                formatter.write_str("registration and corpus format versions differ")
+            }
+            Self::CaseCountMismatch => {
+                formatter.write_str("registration and stored case counts differ")
+            }
+            Self::CorpusDigestMismatch => {
+                formatter.write_str("registration digest does not match stored cases")
+            }
+            Self::StoredCaseJson => formatter.write_str("stored case JSON is invalid"),
+            Self::RegistrationConflict => {
+                formatter.write_str("logical key already names different metadata or cases")
+            }
+            Self::UnknownSourceKind(observed) => {
+                write!(formatter, "unknown source kind {observed:?}")
+            }
+            Self::MissingSourceField(field) => {
+                write!(formatter, "required source field {field} is null")
+            }
+            Self::InvalidBlobByteLength => formatter.write_str("blob byte length is invalid"),
+            Self::InvalidDigestLength => formatter.write_str("SHA-256 digest is not 32 bytes"),
+        }
+    }
 }
 
 impl fmt::Display for CorpusStoreError {
@@ -249,8 +321,8 @@ impl fmt::Display for CorpusStoreError {
             Self::Database(source) => {
                 write!(formatter, "corpus database operation failed: {source}")
             }
-            Self::CorruptRegistration(detail) => {
-                write!(formatter, "corpus registration is corrupt: {detail}")
+            Self::CorruptRegistration(corruption) => {
+                write!(formatter, "corpus registration is corrupt: {corruption}")
             }
             Self::BlobBackendUnavailable => formatter.write_str(
                 "blob-backed corpus content cannot be loaded: no blob corpus backend is configured",

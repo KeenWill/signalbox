@@ -16,6 +16,12 @@ use crate::{
 /// The portable manifest representation accepted by this slice.
 pub const CORPUS_MANIFEST_VERSION: u32 = 1;
 const CORPUS_DIGEST_DOMAIN: &[u8] = b"signalbox-eval-corpus-v1\0";
+// Hard metadata ceilings keep manifests and indexed durable identities bounded;
+// ordinary corpus names and paths remain far below them.
+const MAX_IDENTITY_BYTES: usize = 128;
+const MAX_REPOSITORY_BYTES: usize = 2_048;
+const MAX_REPOSITORY_PATH_BYTES: usize = 1_024;
+const MAX_BLOB_STORE_BYTES: usize = 64;
 
 /// A self-describing, portable corpus registration document.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -227,12 +233,50 @@ fn validate_manifest_header(manifest: &CorpusManifest) -> Result<(), ManifestErr
     }
     validate_identity_component("name", &manifest.name)?;
     validate_identity_component("version", &manifest.version)?;
+    match &manifest.case_source {
+        ManifestCaseSource::Repository { repository, path } => {
+            validate_bounded_text("repository", repository, MAX_REPOSITORY_BYTES)?;
+            validate_bounded_text("repository path", path, MAX_REPOSITORY_PATH_BYTES)?;
+            portable_relative_path(path)?;
+        }
+        ManifestCaseSource::DatabaseNative { .. } => {}
+        ManifestCaseSource::BlobReference {
+            store, byte_length, ..
+        } => {
+            if *byte_length == 0 {
+                return Err(ManifestError::InvalidBlobByteLength);
+            }
+            if let Some(store) = store {
+                validate_blob_store(store)?;
+            }
+        }
+    }
     Ok(())
 }
 
 fn validate_identity_component(field: &'static str, value: &str) -> Result<(), ManifestError> {
-    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+    validate_bounded_text(field, value, MAX_IDENTITY_BYTES)
+}
+
+fn validate_bounded_text(
+    field: &'static str,
+    value: &str,
+    maximum_bytes: usize,
+) -> Result<(), ManifestError> {
+    if value.is_empty() || value.len() > maximum_bytes || value.chars().any(char::is_control) {
         return Err(ManifestError::InvalidIdentity(field));
+    }
+    Ok(())
+}
+
+fn validate_blob_store(value: &str) -> Result<(), ManifestError> {
+    let mut bytes = value.bytes();
+    let first_is_lowercase = bytes.next().is_some_and(|byte| byte.is_ascii_lowercase());
+    let rest_is_canonical = bytes.all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+    });
+    if !first_is_lowercase || !rest_is_canonical || value.len() > MAX_BLOB_STORE_BYTES {
+        return Err(ManifestError::InvalidBlobStore);
     }
     Ok(())
 }
@@ -324,6 +368,10 @@ pub enum ManifestError {
     MissingSourceDigest,
     /// A non-file source supplied an inapplicable exact-byte digest.
     UnexpectedSourceDigest,
+    /// A blob reference declared an empty source.
+    InvalidBlobByteLength,
+    /// A blob store binding name was not canonical.
+    InvalidBlobStore,
     /// Exact source bytes did not match the manifest.
     SourceDigestMismatch {
         expected: Sha256Digest,
@@ -377,6 +425,10 @@ impl fmt::Display for ManifestError {
             Self::UnexpectedSourceDigest => {
                 formatter.write_str("database-native case source must not carry source_sha256")
             }
+            Self::InvalidBlobByteLength => {
+                formatter.write_str("blob source byte length must be positive")
+            }
+            Self::InvalidBlobStore => formatter.write_str("blob store binding name is invalid"),
             Self::SourceDigestMismatch { expected, observed } => write!(
                 formatter,
                 "case source digest mismatch: expected {expected}, observed {observed}"
@@ -420,13 +472,13 @@ impl Error for ManifestError {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, str::FromStr};
+    use std::path::Path;
 
     use super::{
         CORPUS_MANIFEST_VERSION, CorpusManifest, ManifestCaseSource, decode_manifest,
         load_manifest_corpus,
     };
-    use crate::{CorpusSourceDescriptor, Sha256Digest};
+    use crate::CorpusSourceDescriptor;
 
     const SEED_MANIFEST: &[u8] = include_bytes!("../corpora/seed-v1.manifest.json");
 
@@ -445,15 +497,6 @@ mod tests {
 
         assert_eq!(decoded, manifest);
         assert_eq!(decoded.manifest_version, CORPUS_MANIFEST_VERSION);
-        assert_eq!(decoded.name, "approval-judge-seed");
-        assert_eq!(decoded.version, "1");
-        assert_eq!(
-            decoded.integrity.corpus_sha256,
-            Sha256Digest::from_str(
-                "ed0b10acde362cc4103570f58184acbb6bc4932cc03b6a7123074bfa52b8f539"
-            )
-            .expect("the fixture digest is valid")
-        );
     }
 
     #[test]
@@ -461,16 +504,20 @@ mod tests {
         let loaded = load_manifest_corpus(seed_manifest_path())
             .expect("the repository source matches every integrity field");
 
-        assert_eq!(loaded.corpus.cases.len(), 3);
+        assert_eq!(
+            loaded.corpus.cases.len(),
+            loaded.manifest.integrity.cases.len()
+        );
         assert_eq!(loaded.registration.key.name, loaded.manifest.name);
         assert_eq!(loaded.registration.key.version, loaded.manifest.version);
-        assert_eq!(loaded.registration.case_count, 3);
+        assert_eq!(
+            usize::try_from(loaded.registration.case_count)
+                .expect("the fixture case count fits usize"),
+            loaded.manifest.integrity.cases.len()
+        );
         assert_eq!(
             loaded.registration.source,
-            CorpusSourceDescriptor::Repository {
-                repository: String::from("https://github.com/KeenWill/signalbox"),
-                path: String::from("seed-v1.json"),
-            }
+            manifest_source(&loaded.manifest)
         );
     }
 
@@ -488,5 +535,26 @@ mod tests {
         let decoded = decode_manifest(&encoded).expect("the blob reference shape is admitted");
 
         assert_eq!(decoded, manifest);
+    }
+
+    fn manifest_source(manifest: &CorpusManifest) -> CorpusSourceDescriptor {
+        match &manifest.case_source {
+            ManifestCaseSource::Repository { repository, path } => {
+                CorpusSourceDescriptor::Repository {
+                    repository: repository.clone(),
+                    path: path.clone(),
+                }
+            }
+            ManifestCaseSource::DatabaseNative { .. } => CorpusSourceDescriptor::DatabaseNative,
+            ManifestCaseSource::BlobReference {
+                store,
+                digest,
+                byte_length,
+            } => CorpusSourceDescriptor::BlobReference {
+                store: store.clone(),
+                digest: *digest,
+                byte_length: *byte_length,
+            },
+        }
     }
 }

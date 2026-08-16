@@ -6,8 +6,8 @@ use crate::{
     ApprovalJudgeCorpus,
     manifest::{corpus_digest, load_manifest_corpus},
     store::{
-        CorpusKey, CorpusRegistration, CorpusSourceDescriptor, CorpusStore, CorpusStoreError,
-        CorpusStoreFuture, Sha256Digest,
+        CorpusKey, CorpusRegistration, CorpusSourceDescriptor, CorpusStore, CorpusStoreCorruption,
+        CorpusStoreError, CorpusStoreFuture, Sha256Digest,
     },
 };
 
@@ -45,14 +45,10 @@ impl DatabaseCorpusStore {
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         validate_registration(&registration, corpus)?;
         let case_count = i64::try_from(registration.case_count).map_err(|_| {
-            CorpusStoreError::CorruptRegistration(String::from(
-                "case count exceeds PostgreSQL bigint",
-            ))
+            CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
         })?;
         let format_version = i32::try_from(registration.format_version).map_err(|_| {
-            CorpusStoreError::CorruptRegistration(String::from(
-                "format version exceeds PostgreSQL integer",
-            ))
+            CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::FormatVersionOutOfRange)
         })?;
         let (source_kind, repository, path, blob_store, blob_digest, blob_byte_length) =
             encode_source(&registration.source);
@@ -89,20 +85,17 @@ impl DatabaseCorpusStore {
                     return Ok(existing);
                 }
             }
-            return Err(CorpusStoreError::CorruptRegistration(format!(
-                "{}/{} is already registered with different metadata or cases",
-                registration.key.name, registration.key.version
-            )));
+            return Err(CorpusStoreError::CorruptRegistration(
+                CorpusStoreCorruption::RegistrationConflict,
+            ));
         }
 
         for (position, case) in corpus.cases.iter().enumerate() {
             let position = i64::try_from(position).map_err(|_| {
-                CorpusStoreError::CorruptRegistration(String::from(
-                    "case position exceeds PostgreSQL bigint",
-                ))
+                CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CasePositionOutOfRange)
             })?;
-            let case_json = serde_json::to_string(case).map_err(|error| {
-                CorpusStoreError::CorruptRegistration(format!("case JSON failed: {error}"))
+            let case_json = serde_json::to_string(case).map_err(|_| {
+                CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::StoredCaseJson)
             })?;
             sqlx::query(
                 "INSERT INTO evaluation_corpus_case (
@@ -169,11 +162,8 @@ impl DatabaseCorpusStore {
         let mut cases = Vec::with_capacity(rows.len());
         for row in rows {
             let json: String = row.try_get("case_json")?;
-            let case = serde_json::from_str(&json).map_err(|error| {
-                CorpusStoreError::CorruptRegistration(format!(
-                    "stored case JSON for {}/{} is invalid: {error}",
-                    key.name, key.version
-                ))
+            let case = serde_json::from_str(&json).map_err(|_| {
+                CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::StoredCaseJson)
             })?;
             cases.push(case);
         }
@@ -201,24 +191,23 @@ fn validate_registration(
     corpus: &ApprovalJudgeCorpus,
 ) -> Result<(), CorpusStoreError> {
     let count = u64::try_from(corpus.cases.len()).map_err(|_| {
-        CorpusStoreError::CorruptRegistration(String::from("case count exceeds u64"))
+        CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
     })?;
     if registration.format_version != corpus.format_version {
-        return Err(CorpusStoreError::CorruptRegistration(String::from(
-            "registration and corpus format versions differ",
-        )));
+        return Err(CorpusStoreError::CorruptRegistration(
+            CorpusStoreCorruption::FormatVersionMismatch,
+        ));
     }
     if registration.case_count != count {
-        return Err(CorpusStoreError::CorruptRegistration(String::from(
-            "registration and stored case counts differ",
-        )));
+        return Err(CorpusStoreError::CorruptRegistration(
+            CorpusStoreCorruption::CaseCountMismatch,
+        ));
     }
     let observed = corpus_digest(corpus).map_err(CorpusStoreError::Manifest)?;
     if registration.corpus_sha256 != observed {
-        return Err(CorpusStoreError::CorruptRegistration(format!(
-            "registration digest {} does not match stored cases {observed}",
-            registration.corpus_sha256
-        )));
+        return Err(CorpusStoreError::CorruptRegistration(
+            CorpusStoreCorruption::CorpusDigestMismatch,
+        ));
     }
     Ok(())
 }
@@ -282,27 +271,27 @@ fn decode_registration(
                 digest: decode_digest(&digest)?,
                 byte_length: required_column::<String>(row, "source_blob_byte_length")?
                     .parse()
-                    .map_err(|error| {
-                        CorpusStoreError::CorruptRegistration(format!(
-                            "blob byte length is invalid: {error}"
-                        ))
+                    .map_err(|_| {
+                        CorpusStoreError::CorruptRegistration(
+                            CorpusStoreCorruption::InvalidBlobByteLength,
+                        )
                     })?,
             }
         }
         other => {
-            return Err(CorpusStoreError::CorruptRegistration(format!(
-                "unknown source kind {other:?}"
-            )));
+            return Err(CorpusStoreError::CorruptRegistration(
+                CorpusStoreCorruption::UnknownSourceKind(other.to_owned()),
+            ));
         }
     };
     Ok(CorpusRegistration {
         key: CorpusKey { name, version },
         format_version: u32::try_from(format_version).map_err(|_| {
-            CorpusStoreError::CorruptRegistration(String::from("negative format version"))
+            CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::NegativeFormatVersion)
         })?,
         corpus_sha256: decode_digest(&corpus_digest)?,
         case_count: u64::try_from(case_count).map_err(|_| {
-            CorpusStoreError::CorruptRegistration(String::from("negative case count"))
+            CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::NegativeCaseCount)
         })?,
         source,
     })
@@ -316,13 +305,13 @@ where
     for<'row> Value: sqlx::Decode<'row, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
     row.try_get::<Option<Value>, _>(column)?.ok_or_else(|| {
-        CorpusStoreError::CorruptRegistration(format!("required column {column} is null"))
+        CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::MissingSourceField(column))
     })
 }
 
 fn decode_digest(bytes: &[u8]) -> Result<Sha256Digest, CorpusStoreError> {
     let array: [u8; 32] = bytes.try_into().map_err(|_| {
-        CorpusStoreError::CorruptRegistration(String::from("SHA-256 digest is not 32 bytes"))
+        CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::InvalidDigestLength)
     })?;
     Ok(Sha256Digest::from_bytes(array))
 }
