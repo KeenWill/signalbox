@@ -112,6 +112,13 @@ const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 // room for an in-flight bounded provider request while ensuring a task wedge
 // becomes an operator-visible error well before the next full poll.
 const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
+// The monitor reads through the shared daemon pool, whose connections wedged
+// repositories can hold all of. An unbounded acquisition would leave the
+// observer silent during exactly the degradation it exists to expose, so the
+// inspection is bounded and expiry is itself an operator-visible signal. Well
+// under the stall threshold, so a bounded failure is reported within the
+// cadence rather than displacing the report it exists to produce.
+const WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 // One webhook drain visits at most this many pending pages before returning to
 // the scheduler. Webhook wakes accelerate reconciliation and must never crowd
 // out the full poll that performs it, so a sustained stream re-arms its own wake
@@ -468,17 +475,19 @@ async fn next_repository_wake(
     }
 }
 
-/// The deadline for the poll following one that started at `cycle_started`.
+/// The next deadline on a fixed cadence anchored at `previous`.
 ///
-/// Polling is fixed-rate while an attempt fits inside the interval. An attempt
-/// that outlasts it cannot hold that rate, and leaving the missed tick in the
-/// past would keep the poll arm perpetually ready, so an overrun starts a fresh
-/// interval from now. Every pass then reaches a real sleep, during which the
-/// webhook wake and retry arms are polled at all.
-fn next_poll_deadline(cycle_started: Instant, interval: Duration, now: Instant) -> Instant {
-    let fixed_rate = cycle_started + interval;
-    if fixed_rate > now {
-        fixed_rate
+/// The cadence holds while the work between deadlines fits inside the interval,
+/// so neither a poll attempt nor a monitor query accrues its own duration into
+/// the rate. Work that outlasts the interval cannot hold that cadence, and
+/// leaving the missed tick in the past would keep the timer ready on entry to
+/// every pass, so an overrun starts a fresh interval from now. Every pass then
+/// reaches a real sleep, which is what lets a repository task's other arms be
+/// polled at all.
+fn next_cadence_deadline(previous: Instant, interval: Duration, now: Instant) -> Instant {
+    let anchored = previous + interval;
+    if anchored > now {
+        anchored
     } else {
         now + interval
     }
@@ -515,6 +524,7 @@ async fn monitor_webhook_drain(
     store: PostgresRepoWatchWebhookStore,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let mut next_inspection = Instant::now() + WEBHOOK_DRAIN_MONITOR_INTERVAL;
     loop {
         select! {
             biased;
@@ -524,8 +534,17 @@ async fn monitor_webhook_drain(
                 }
                 continue;
             }
-            () = tokio::time::sleep(WEBHOOK_DRAIN_MONITOR_INTERVAL) => {}
+            () = sleep_until(next_inspection) => {}
         }
+        // Anchored before the inspection rather than after it. A slow query
+        // would otherwise push the cadence out by its own duration and delay
+        // the stall report precisely when the database is degraded, which is
+        // when that report matters.
+        next_inspection = next_cadence_deadline(
+            next_inspection,
+            WEBHOOK_DRAIN_MONITOR_INTERVAL,
+            Instant::now(),
+        );
         // The inspection acquires a pooled connection and queries, neither of
         // which this task bounds. Awaiting it outside shutdown would hold this
         // child while PostgreSQL was unresponsive, and the supervisor joins
@@ -552,10 +571,23 @@ async fn inspect_webhook_drain(
     // would transfer the payload — up to the 25 MiB admission ceiling — on
     // every pass, for every stalled repository at once, precisely while the
     // system is already degraded.
-    let oldest = match store.load_oldest_pending_receipt(repository).await {
-        Ok(Some(oldest)) => oldest,
-        Ok(None) => return,
-        Err(error) => {
+    let inspection = tokio::time::timeout(
+        WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT,
+        store.load_oldest_pending_receipt(repository),
+    );
+    let oldest = match inspection.await {
+        Ok(Ok(Some(oldest))) => oldest,
+        Ok(Ok(None)) => return,
+        Err(_) => {
+            tracing::error!(
+                repository = %repository.as_str(),
+                timeout_seconds = WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT.as_secs(),
+                cause_code = "webhook_drain_monitor_query_timed_out",
+                "repository-watch webhook drain monitor cannot reach durable work"
+            );
+            return;
+        }
+        Ok(Err(error)) => {
             tracing::error!(
                 repository = %repository.as_str(),
                 cause_code = "webhook_drain_monitor_query_failed",
@@ -705,7 +737,9 @@ impl RepositoryWatchTask {
                 RepositoryWatchWake::Continue => {}
                 RepositoryWatchWake::Poll => {
                     let cycle_started = Instant::now();
-                    let Some(result) = run_until_shutdown(&mut shutdown, self.run_attempt()).await
+                    let drained = !webhook_retry.is_backing_off();
+                    let Some(result) =
+                        run_until_shutdown(&mut shutdown, self.run_attempt(drained)).await
                     else {
                         // A cancelled full poll may own spawned PR fetches.
                         self.poller.drain_fetches().await;
@@ -714,7 +748,9 @@ impl RepositoryWatchTask {
                     let metrics = self.poller.attempt_metrics();
                     match &result {
                         Ok(()) => {
-                            webhook_retry.update_after(&result);
+                            if drained {
+                                webhook_retry.update_after(&result);
+                            }
                             tracing::debug!(
                                 repository = %self.repository.as_str(),
                                 "repository-watch polling attempt completed"
@@ -738,7 +774,7 @@ impl RepositoryWatchTask {
                     if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
                     }
-                    next_poll = next_poll_deadline(cycle_started, self.interval, Instant::now());
+                    next_poll = next_cadence_deadline(cycle_started, self.interval, Instant::now());
                 }
                 RepositoryWatchWake::WebhookWork => {
                     let Some(result) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await
@@ -805,7 +841,16 @@ impl RepositoryWatchTask {
         run_until_shutdown(shutdown, self.run_webhook_attempt()).await
     }
 
-    async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+    /// One full polling attempt, draining durable webhook work as part of its
+    /// own sequence unless a retry already owes that drain.
+    ///
+    /// The drain is a step of this attempt, so running it while the backoff is
+    /// owed would repeat at the poll cadence exactly the work the backoff
+    /// exists to space out. The owed retry performs it instead.
+    async fn run_attempt(
+        &mut self,
+        drain_webhooks: bool,
+    ) -> Result<(), RepositoryWatchAttemptError> {
         self.poller.begin_attempt();
         let result = async {
             if !self.rules_activated {
@@ -815,7 +860,9 @@ impl RepositoryWatchTask {
             self.process_cutoffs().await?;
             self.process_dispatches().await?;
             self.poll_and_commit().await?;
-            self.process_webhook_deliveries().await?;
+            if drain_webhooks {
+                self.process_webhook_deliveries().await?;
+            }
             self.process_cutoffs().await?;
             self.process_dispatches().await
         }
@@ -3917,7 +3964,7 @@ mod tests {
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPullRequest, Url,
         UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
         WebhookDrainRetry, WorkflowName, WorkflowResponse, derive_repo_watch_events,
-        dispatch_context_json, inspect_webhook_drain, next_poll_deadline, next_repository_wake,
+        dispatch_context_json, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         owed_dispatch_context_json_parts, rule_activation_error, run_until_shutdown,
         supervise_repository_tasks, targeted_pull_requests,
@@ -6191,6 +6238,46 @@ mod tests {
         Ok(())
     }
 
+    /// A full poll drains durable webhook work as part of its own sequence, so
+    /// leaving that step in while a retry is owed would repeat at the poll
+    /// cadence exactly the work the backoff exists to space out.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_poll_leaves_the_drain_to_a_retry_that_is_already_owed() -> Result<(), Box<dyn Error>>
+    {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        let deferring = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let mut fixture = webhook_task_against(&pool, deferring.base_url.clone()).await?;
+
+        fixture
+            .task
+            .run_attempt(false)
+            .await
+            .expect("the polling attempt itself succeeds");
+
+        deferring.finish().await;
+        assert!(
+            !webhook_disposition_exists(&pool, admission.key()).await?,
+            "a poll must leave a pending delivery to the retry that owes it"
+        );
+
+        let draining = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let mut owed_nothing = webhook_task_against(&pool, draining.base_url.clone()).await?;
+
+        owed_nothing
+            .task
+            .run_attempt(true)
+            .await
+            .expect("the polling attempt drains when no retry is owed");
+
+        draining.finish().await;
+        assert!(webhook_disposition_exists(&pool, admission.key()).await?);
+        Ok(())
+    }
+
     /// A delivery whose refresh target the provider will not serve is already
     /// terminal when that refresh runs, so the failure is reported once and the
     /// delivery is never reloaded. Without that ordering an admitted burst of
@@ -6846,7 +6933,7 @@ mod tests {
         let cycle_started = Instant::now();
         let completed = cycle_started + SHORT_CYCLE;
 
-        let next_poll = next_poll_deadline(cycle_started, POLL_INTERVAL, completed);
+        let next_poll = next_cadence_deadline(cycle_started, POLL_INTERVAL, completed);
 
         assert_eq!(next_poll, cycle_started + POLL_INTERVAL);
         assert_eq!(next_poll - completed, SHORT_CYCLE_REMAINDER);
@@ -6861,7 +6948,7 @@ mod tests {
         let completed = cycle_started + POLL_INTERVAL;
 
         assert_eq!(
-            next_poll_deadline(cycle_started, POLL_INTERVAL, completed),
+            next_cadence_deadline(cycle_started, POLL_INTERVAL, completed),
             completed + POLL_INTERVAL
         );
     }
@@ -6871,7 +6958,7 @@ mod tests {
         let cycle_started = Instant::now();
         let completed = cycle_started + OVERRUNNING_CYCLE;
 
-        let next_poll = next_poll_deadline(cycle_started, POLL_INTERVAL, completed);
+        let next_poll = next_cadence_deadline(cycle_started, POLL_INTERVAL, completed);
 
         assert_eq!(next_poll, completed + POLL_INTERVAL);
         assert!(next_poll > completed, "an elapsed deadline never sleeps");

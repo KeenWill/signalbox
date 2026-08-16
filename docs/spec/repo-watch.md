@@ -738,24 +738,29 @@ still acknowledged successfully and is cheaply logged and recorded as ignored
 rather than treated as an intake failure.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
-one delivery fails. Each failure is logged at error level with the delivery
-identity and a closed cause; failed deliveries remain pending while successful
-page peers reach terminal state. The repository task schedules a new drain
-attempt after five seconds without waiting for a full poll, another delivery, or
-a restart. Consecutive failures double that delay to a five-minute ceiling and a
+one delivery fails. Each failure is logged at warning level with the delivery
+identity and a closed cause, and the attempt's own error-level record carries
+the first such cause; failed deliveries remain pending while successful page
+peers reach terminal state. The repository task schedules a new drain attempt
+after five seconds without waiting for a full poll, another delivery, or a
+restart. Consecutive failures double that delay to a five-minute ceiling and a
 success returns it to five seconds, so a delivery that cannot be projected costs
 bounded repeated work rather than a fixed five-second loop. A failed full poll
-schedules that retry only when none is already owed, and an admission wake is
-suppressed while one is, so neither a rapidly failing poll nor an authenticated
-replay stream can defer or bypass the backoff; a suppressed wake coalesces and
-is observed by the attempt that follows the retry. An overdue retry is taken
-ahead of an overdue poll, and a full poll that outlasts its own interval
-schedules the next one a whole interval from completion; without both, a poll
-deadline that is always already elapsed would win every scheduling decision and
-starve durable webhook work for as long as polling kept failing. An independent
-per-repository observer checks durable pending work every thirty seconds,
-reading delivery identity and receipt time only and never the admitted body;
-once the oldest delivery has remained undispositioned for one minute it emits an
+schedules that retry only when none is already owed, an admission wake is
+suppressed while one is, and a full poll omits its own drain step while one is,
+so neither a rapidly failing poll nor an authenticated replay stream can defer
+or bypass the backoff; a suppressed wake coalesces and is observed by the
+attempt that follows the retry. An overdue retry is taken ahead of an overdue
+poll, and a full poll that outlasts its own interval schedules the next one a
+whole interval from completion; without both, a poll deadline that is always
+already elapsed would win every scheduling decision and starve durable webhook
+work for as long as polling kept failing. An independent per-repository observer
+checks durable pending work every thirty seconds, reading delivery identity and
+receipt time only and never the admitted body. That cadence is anchored, so a
+slow inspection does not push the next one out by its own duration, and the
+inspection is bounded at ten seconds so a connection pool exhausted by wedged
+repositories produces a closed timeout cause rather than silence; once the
+oldest delivery has remained undispositioned for one minute it emits an
 error-level stall signal with the repository, delivery identity, receipt
 sequence, pending age, and closed stall cause. Because the observer is not the
 serialized drain task, a task wedged in polling, projection, disposition, or
