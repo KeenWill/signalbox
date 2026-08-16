@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -67,7 +68,7 @@ query($ids: [ID!]!) {
           isResolved
           comments(first: 100) {
             totalCount
-            nodes { author { login } }
+            nodes { author { login } body }
           }
         }
         pageInfo { hasNextPage endCursor }
@@ -82,6 +83,10 @@ query($ids: [ID!]!) {
           commit { oid }
           comments(first: 1) { totalCount }
         }
+      }
+      files(first: 100) {
+        nodes { path changeType }
+        pageInfo { hasNextPage endCursor }
       }
       commits(last: 1) {
         nodes {
@@ -120,6 +125,13 @@ CODEX_REVIEWER_LOGIN = "chatgpt-codex-connector"
 TRUSTED_REVIEW_REQUEST_ASSOCIATIONS = frozenset(
     {"OWNER", "MEMBER", "COLLABORATOR"}
 )
+PLANNING_ONLY_BANNER = (
+    "> **Non-authoritative planning scratchpad — do not review for consistency.**"
+)
+FIX_DISPOSITION = re.compile(
+    r"^fixed in commits?\s+`?[0-9a-f]{7,40}`?", re.IGNORECASE
+)
+ESCALATION_DISPOSITION = "escalated without disposition"
 NON_GATING_CHECK_NAMES = frozenset(
     {
         "coderabbit",
@@ -253,8 +265,9 @@ class GitHubGraphQL:
                     tracked.append(node)
                     continue
                 pull_requests.append(normalize_pull_request(node))
-        self._load_base_ancestry(pull_requests)
         self._finish_paginated_connections(pull_requests)
+        self._load_base_ancestry(pull_requests)
+        self._load_planning_only_status(pull_requests)
         return pull_requests, tracked
 
     def _load_base_ancestry(
@@ -282,22 +295,107 @@ class GitHubGraphQL:
                 f"repository(owner: $owner, name: $name) "
                 f"{{ {' '.join(selections)} }} }}"
             )
-            repository = self.execute(query, variables)["repository"]
+            data = self.execute(query, variables)
+            repository = data["repository"]
+            verification_declarations: list[str] = []
+            verification_selections: list[str] = []
+            verification_variables: dict[str, Any] = {}
+            for index, pull_request in enumerate(batch):
+                variable = f"node{index}"
+                verification_declarations.append(f"${variable}: ID!")
+                verification_variables[variable] = pull_request["node_id"]
+                verification_selections.append(
+                    f"state{index}: node(id: ${variable}) {{ ... on PullRequest "
+                    "{ baseRefOid headRefOid } }"
+                )
+            verification_query = (
+                f"query({', '.join(verification_declarations)}) {{ "
+                f"{' '.join(verification_selections)} }}"
+            )
+            verification = self.execute(
+                verification_query, verification_variables
+            )
             for index, pull_request in enumerate(batch):
                 comparison = repository[f"item{index}"]
-                pull_request["base_commits_not_in_head"] = (
-                    comparison["behindBy"] if comparison is not None else None
+                current = verification[f"state{index}"]
+                snapshot_still_current = (
+                    current is not None
+                    and current["baseRefOid"] == pull_request["base_oid"]
+                    and current["headRefOid"] == pull_request["head_oid"]
                 )
+                pull_request["base_commits_not_in_head"] = (
+                    comparison["behindBy"]
+                    if comparison is not None and snapshot_still_current
+                    else None
+                )
+
+    def _load_planning_only_status(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            changed_files = pull_request["changed_files"]
+            if not changed_files:
+                pull_request["planning_only"] = False
+                continue
+            declarations = ["$owner: String!", "$name: String!"]
+            selections: list[str] = []
+            variables: dict[str, Any] = {
+                "owner": self.owner,
+                "name": self.name,
+            }
+            for index, changed_file in enumerate(changed_files):
+                head_variable = f"head{index}"
+                base_variable = f"base{index}"
+                declarations.extend(
+                    (f"${head_variable}: String!", f"${base_variable}: String!")
+                )
+                variables[head_variable] = (
+                    f"{pull_request['head_oid']}:{changed_file['path']}"
+                )
+                variables[base_variable] = (
+                    f"{pull_request['base_oid']}:{changed_file['path']}"
+                )
+                selections.extend(
+                    (
+                        f"head{index}: object(expression: ${head_variable}) "
+                        "{ ... on Blob { text } }",
+                        f"base{index}: object(expression: ${base_variable}) "
+                        "{ ... on Blob { text } }",
+                    )
+                )
+            query = (
+                f"query({', '.join(declarations)}) {{ repository("
+                f"owner: $owner, name: $name) {{ {' '.join(selections)} }} }}"
+            )
+            repository = self.execute(query, variables)["repository"]
+            planning_only = True
+            for index, changed_file in enumerate(changed_files):
+                head_has_banner = blob_has_planning_banner(
+                    repository[f"head{index}"]
+                )
+                base_has_banner = blob_has_planning_banner(
+                    repository[f"base{index}"]
+                )
+                eligible = head_has_banner and (
+                    changed_file["changeType"] == "ADDED" or base_has_banner
+                )
+                if not eligible:
+                    planning_only = False
+                    break
+            pull_request["planning_only"] = planning_only
 
     def _finish_paginated_connections(self, pull_requests: list[dict[str, Any]]) -> None:
         pending: list[PaginationTask] = []
         for pull_request in pull_requests:
             thread_page = pull_request.pop("_thread_page")
             check_page = pull_request.pop("_check_page")
+            file_page = pull_request.pop("_file_page")
             if thread_page["hasNextPage"]:
                 pending.append(PaginationTask("threads", pull_request, thread_page["endCursor"]))
             if check_page["hasNextPage"]:
                 pending.append(PaginationTask("checks", pull_request, check_page["endCursor"]))
+            if file_page["hasNextPage"]:
+                pending.append(PaginationTask("files", pull_request, file_page["endCursor"]))
         while pending:
             batch = pending[:PAGINATION_BATCH_SIZE]
             del pending[:PAGINATION_BATCH_SIZE]
@@ -312,8 +410,10 @@ class GitHubGraphQL:
                             task.pull_request["author_login"],
                         )
                     )
-                else:
+                elif task.kind == "checks":
                     task.pull_request["checks"].extend(page["nodes"])
+                else:
+                    task.pull_request["changed_files"].extend(page["nodes"])
                 if page["pageInfo"]["hasNextPage"]:
                     pending.append(
                         PaginationTask(task.kind, task.pull_request, page["pageInfo"]["endCursor"])
@@ -346,6 +446,23 @@ def author_login(node: dict[str, Any]) -> str | None:
     return author.get("login") if isinstance(author, dict) else None
 
 
+def blob_has_planning_banner(blob: dict[str, Any] | None) -> bool:
+    if not isinstance(blob, dict) or not isinstance(blob.get("text"), str):
+        return False
+    return PLANNING_ONLY_BANNER in blob["text"].splitlines()[:10]
+
+
+def disposition_kind(body: str) -> str | None:
+    stripped = body.strip()
+    if FIX_DISPOSITION.match(stripped):
+        return "fixed"
+    if stripped.casefold().startswith("declined:") and stripped[9:].strip():
+        return "declined"
+    if stripped.casefold() == ESCALATION_DISPOSITION:
+        return "escalated"
+    return None
+
+
 def is_codex_review_request(comment: dict[str, Any], head_oid: str) -> bool:
     body = comment.get("body") or ""
     requests_review = any(
@@ -366,16 +483,19 @@ def normalize_review_threads(
     normalized: list[dict[str, Any]] = []
     for thread in threads:
         comments = thread["comments"]["nodes"]
-        dispositioned = any(
-            pull_request_author is not None
+        dispositions = [
+            disposition_kind(comment.get("body") or "")
+            for comment in comments[1:]
+            if pull_request_author is not None
             and author_login(comment) is not None
             and author_login(comment).casefold() == pull_request_author.casefold()
-            for comment in comments[1:]
-        )
+        ]
+        dispositioned = any(kind is not None for kind in dispositions)
         normalized.append(
             {
                 "isResolved": thread["isResolved"],
                 "isDispositioned": dispositioned,
+                "isEscalated": "escalated" in dispositions,
             }
         )
     return normalized
@@ -387,6 +507,7 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
     rollup = commit.get("statusCheckRollup") if commit else None
     contexts = rollup["contexts"] if rollup else {"nodes": [], "pageInfo": empty_page_info()}
     threads = node["reviewThreads"]
+    files = node["files"]
     pull_request_author = author_login(node)
     review_request_times = [
         comment["createdAt"]
@@ -426,8 +547,11 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         ],
         "check_rollup_state": rollup.get("state") if rollup else None,
         "checks": list(contexts["nodes"]),
+        "changed_files": list(files["nodes"]),
+        "planning_only": False,
         "_thread_page": threads["pageInfo"],
         "_check_page": contexts["pageInfo"],
+        "_file_page": files["pageInfo"],
     }
 
 
@@ -447,16 +571,21 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
                 "nodes { isResolved comments(first: 100) { totalCount "
-                "nodes { author { login } } } } "
+                "nodes { author { login } body } } } "
                 "pageInfo { hasNextPage endCursor } }"
             )
-        else:
+        elif task.kind == "checks":
             connection = (
                 "commits(last: 1) { nodes { commit { statusCheckRollup { "
                 f"contexts(first: 100, after: $after{index}) {{ nodes {{ __typename "
                 "... on CheckRun { name status conclusion } "
                 "... on StatusContext { context state } } "
                 "pageInfo { hasNextPage endCursor } } } } } }"
+            )
+        else:
+            connection = (
+                f"files(first: 100, after: $after{index}) {{ "
+                "nodes { path changeType } pageInfo { hasNextPage endCursor } }"
             )
         selections.append(
             f"item{index}: node(id: $id{index}) {{ ... on PullRequest {{ {connection} }} }}"
@@ -470,6 +599,8 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
 def pagination_page(node: dict[str, Any], kind: str) -> dict[str, Any]:
     if kind == "threads":
         return node["reviewThreads"]
+    if kind == "files":
+        return node["files"]
     commit_nodes = node["commits"]["nodes"]
     rollup = commit_nodes[0]["commit"].get("statusCheckRollup") if commit_nodes else None
     return rollup["contexts"] if rollup else {"nodes": [], "pageInfo": empty_page_info()}
@@ -503,7 +634,14 @@ def check_observed_state(check: dict[str, Any]) -> str:
 
 def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
     unresolved_threads = sum(
-        1 for thread in pull_request["review_threads"] if not thread["isResolved"]
+        1
+        for thread in pull_request["review_threads"]
+        if not thread["isResolved"] and not thread.get("isEscalated", False)
+    )
+    escalated_threads = sum(
+        1
+        for thread in pull_request["review_threads"]
+        if thread.get("isEscalated", False)
     )
     undispositioned_threads = sum(
         1
@@ -519,17 +657,15 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
         reasons.append(
             f"undispositioned-review-threads:{undispositioned_threads}"
         )
-    if pull_request["head_oid"] not in pull_request["quiet_review_head_oids"]:
+    if (
+        not pull_request.get("planning_only", False)
+        and pull_request["head_oid"] not in pull_request["quiet_review_head_oids"]
+    ):
         reasons.append("quiet-review-not-completed-for-current-head")
     if pull_request["checked_head_oid"] != pull_request["head_oid"]:
         reasons.append("checks-not-for-current-head")
     if pull_request["check_rollup_state"] is None:
         reasons.append("check-rollup-missing")
-    elif pull_request["check_rollup_state"] != "SUCCESS":
-        reasons.append(
-            "check-rollup-not-green:"
-            f"{str(pull_request['check_rollup_state']).lower()}"
-        )
     for check in gating_checks:
         if not check_is_green(check):
             reasons.append(f"check-not-green:{check_name(check)}:{check_observed_state(check)}")
@@ -549,10 +685,12 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
         "reasons": reasons,
         "unresolved_review_threads": unresolved_threads,
         "undispositioned_review_threads": undispositioned_threads,
+        "escalated_review_threads": escalated_threads,
+        "planning_only": pull_request.get("planning_only", False),
         "check_rollup_state": pull_request["check_rollup_state"],
         "base_commits_not_in_head": pull_request["base_commits_not_in_head"],
         "checks_green": (
-            pull_request["check_rollup_state"] == "SUCCESS"
+            pull_request["check_rollup_state"] is not None
             and all(check_is_green(check) for check in gating_checks)
         ),
         "gating_checks": [
@@ -899,7 +1037,9 @@ def process_pull_request(
                 )
     if decision.name == "dispatch":
         previous_dispatch = record.get("last_dispatched_at")
+        now = time.time()
         record["last_dispatched_at"] = now
+        command_state = computed_command_state(pull_request, computed, record, now)
         save_state(config.state_file, state)
         try:
             dispatch_result = run_operator_command(
@@ -1030,7 +1170,11 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
             pull_request["head_ref"], config.head_pattern
         )
         if watched:
-            summaries.append(process_pull_request(config, logger, state, pull_request, now))
+            summaries.append(
+                process_pull_request(
+                    config, logger, state, pull_request, time.time()
+                )
+            )
             continue
         existing = state["pull_requests"].get(str(pull_request["number"]))
         if existing and not existing.get("terminal_state"):

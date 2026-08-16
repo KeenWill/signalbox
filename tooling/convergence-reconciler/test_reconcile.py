@@ -17,6 +17,7 @@ from reconcile import (
     evaluate_convergence,
     load_state,
     normalize_pull_request,
+    normalize_review_threads,
     nonnegative_number,
     positive_number,
     process_pull_request,
@@ -116,13 +117,10 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertFalse(computed["converged"])
         self.assertEqual(
             computed["reasons"],
-            [
-                "check-rollup-not-green:pending",
-                "check-not-green:required test:IN_PROGRESS",
-            ],
+            ["check-not-green:required test:IN_PROGRESS"],
         )
 
-    def test_pending_empty_check_rollup_blocks_convergence(self) -> None:
+    def test_present_empty_check_rollup_is_green(self) -> None:
         pull_request = {
             "base_commits_not_in_head": 0,
             "checked_head_oid": "head-checks",
@@ -136,11 +134,8 @@ class ConvergencePredicateTests(unittest.TestCase):
 
         computed = evaluate_convergence(pull_request)
 
-        self.assertFalse(computed["converged"])
-        self.assertEqual(
-            computed["reasons"],
-            ["check-rollup-not-green:pending"],
-        )
+        self.assertTrue(computed["converged"])
+        self.assertEqual(computed["reasons"], [])
 
     def test_check_snapshot_for_an_older_head_blocks_convergence(self) -> None:
         pull_request = {
@@ -272,6 +267,48 @@ class ConvergencePredicateTests(unittest.TestCase):
             ["base-commits-not-in-head:2"],
         )
 
+    def test_planning_only_pull_request_needs_no_review_wave(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-planning",
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "head_oid": "head-planning",
+            "mergeable": "MERGEABLE",
+            "planning_only": True,
+            "quiet_review_head_oids": [],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertTrue(computed["converged"])
+        self.assertEqual(computed["reasons"], [])
+
+    def test_open_escalation_marker_does_not_block_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-escalated",
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "head_oid": "head-escalated",
+            "mergeable": "MERGEABLE",
+            "planning_only": False,
+            "quiet_review_head_oids": ["head-escalated"],
+            "review_threads": [
+                {
+                    "isResolved": False,
+                    "isDispositioned": True,
+                    "isEscalated": True,
+                }
+            ],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertTrue(computed["converged"])
+        self.assertEqual(computed["escalated_review_threads"], 1)
+
 
 class DecisionTests(unittest.TestCase):
     def test_converged_pull_request_is_merge_ready(self) -> None:
@@ -377,6 +414,133 @@ class InputValidationTests(unittest.TestCase):
 
 
 class GitHubGraphQLTests(unittest.TestCase):
+    def test_acknowledgement_is_not_a_finding_disposition(self) -> None:
+        threads = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {"author": {"login": "reviewer"}, "body": "Finding"},
+                        {"author": {"login": "owner"}, "body": "ack"},
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertEqual(
+            normalized,
+            [
+                {
+                    "isResolved": True,
+                    "isDispositioned": False,
+                    "isEscalated": False,
+                }
+            ],
+        )
+
+    def test_fix_reply_with_commit_is_a_finding_disposition(self) -> None:
+        threads = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {"author": {"login": "reviewer"}, "body": "Finding"},
+                        {
+                            "author": {"login": "owner"},
+                            "body": "Fixed in commit `abcdef123`.",
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertEqual(
+            normalized,
+            [
+                {
+                    "isResolved": True,
+                    "isDispositioned": True,
+                    "isEscalated": False,
+                }
+            ],
+        )
+
+    def test_escalation_marker_is_a_terminal_open_disposition(self) -> None:
+        threads = [
+            {
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"author": {"login": "reviewer"}, "body": "Finding"},
+                        {
+                            "author": {"login": "owner"},
+                            "body": "Escalated without disposition",
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertEqual(
+            normalized,
+            [
+                {
+                    "isResolved": False,
+                    "isDispositioned": True,
+                    "isEscalated": True,
+                }
+            ],
+        )
+
+    def test_advanced_base_invalidates_ancestry_comparison(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "node_id": "node",
+            "base_oid": "base-old",
+            "head_oid": "head",
+        }
+        comparison = {"repository": {"item0": {"behindBy": 0}}}
+        verification = {
+            "state0": {"baseRefOid": "base-new", "headRefOid": "head"}
+        }
+        with mock.patch.object(
+            client, "execute", side_effect=[comparison, verification]
+        ) as execute:
+            client._load_base_ancestry([pull_request])
+
+        self.assertIsNone(pull_request["base_commits_not_in_head"])
+        self.assertEqual(execute.call_count, 2)
+
+    def test_existing_banners_make_modified_file_planning_only(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "base_oid": "base",
+            "head_oid": "head",
+            "changed_files": [
+                {"path": "docs/agents/backlog.md", "changeType": "MODIFIED"}
+            ],
+        }
+        banner = (
+            "# Work backlog\n\n"
+            "> **Non-authoritative planning scratchpad — do not review for consistency.**\n"
+        )
+        response = {
+            "repository": {
+                "head0": {"text": banner},
+                "base0": {"text": banner},
+            }
+        }
+        with mock.patch.object(client, "execute", return_value=response):
+            client._load_planning_only_status([pull_request])
+
+        self.assertTrue(pull_request["planning_only"])
+
     def test_quiet_review_requires_trusted_exact_head_codex_request(self) -> None:
         node = {
             "id": "node",
@@ -393,6 +557,10 @@ class GitHubGraphQLTests(unittest.TestCase):
             "headRepository": {"nameWithOwner": "OWNER/REPOSITORY"},
             "mergeable": "MERGEABLE",
             "reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+            "files": {
                 "nodes": [],
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             },
@@ -555,6 +723,59 @@ class GitHubGraphQLTests(unittest.TestCase):
 
 
 class DispatchFenceTests(unittest.TestCase):
+    def test_dispatch_fence_uses_time_immediately_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "state.json"
+            config = Config(
+                repository="OWNER/REPOSITORY",
+                head_pattern="agent/*",
+                interval_seconds=300,
+                cool_off_seconds=1800,
+                command_timeout_seconds=60,
+                state_file=state_file,
+                log_file=None,
+                active_command=("active",),
+                dispatch_command=("dispatch",),
+                summary="none",
+                dry_run=False,
+                once=True,
+            )
+            state = {
+                "version": 1,
+                "repository": config.repository,
+                "pull_requests": {},
+            }
+            pull_request = {
+                "base_commits_not_in_head": 0,
+                "node_id": "node",
+                "number": 17,
+                "title": "title",
+                "url": "https://example.invalid/pull/17",
+                "is_draft": False,
+                "base_ref": "main",
+                "head_ref": "agent/work",
+                "head_oid": "head",
+                "checked_head_oid": "head",
+                "check_rollup_state": "SUCCESS",
+                "mergeable": "MERGEABLE",
+                "quiet_review_head_oids": ["head"],
+                "review_threads": [
+                    {"isResolved": False, "isDispositioned": True}
+                ],
+                "checks": [],
+            }
+            inactive = subprocess.CompletedProcess(["active"], 1, "", "")
+            accepted = subprocess.CompletedProcess(["dispatch"], 0, "", "")
+            logger = mock.Mock()
+            with mock.patch(
+                "reconcile.run_operator_command", side_effect=[inactive, accepted]
+            ), mock.patch("reconcile.time.time", return_value=1300):
+                process_pull_request(config, logger, state, pull_request, 1000)
+
+        self.assertEqual(
+            state["pull_requests"]["17"]["last_dispatched_at"], 1300
+        )
+
     def test_state_save_fsyncs_file_and_parent_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "state.json"
@@ -614,7 +835,7 @@ class DispatchFenceTests(unittest.TestCase):
             logger = mock.Mock()
             with mock.patch(
                 "reconcile.run_operator_command", side_effect=[inactive, ambiguous]
-            ):
+            ), mock.patch("reconcile.time.time", return_value=1000):
                 result = process_pull_request(config, logger, state, pull_request, 1000)
         self.assertEqual(
             result["reason"], "dispatch-command-exited:9-cool-off-retained"

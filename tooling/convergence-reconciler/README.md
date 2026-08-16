@@ -45,9 +45,12 @@ directory before a dispatch child can start.
 An open, watched pull request is converged exactly when all five facts hold on
 one GraphQL snapshot:
 
-1. Every review thread is resolved and has an in-thread reply from the pull
-   request author.
-2. A trusted repository member explicitly requested Codex review naming the
+1. Every ordinary review thread is resolved and has a recognized in-thread fix
+   or decline disposition from the pull request author. A thread carrying the
+   exact terminal marker `Escalated without disposition` remains open and is
+   reported separately without causing another dispatch.
+2. Unless every changed file is planning-only under the repository banner rule,
+   a trusted repository member explicitly requested Codex review naming the
    current head OID, and `chatgpt-codex-connector` subsequently completed a
    comment-free review of that exact head.
 3. A check rollup exists on the commit whose OID equals the current head OID,
@@ -58,9 +61,10 @@ one GraphQL snapshot:
 A completed check run is green when its conclusion is `SUCCESS`, `NEUTRAL`, or
 `SKIPPED`; a commit status is green only when it is `SUCCESS`. Queued, pending,
 in-progress, cancelled, timed-out, stale, action-required, and failed results
-block convergence. A missing, pending, or failed check rollup blocks
-convergence; an existing successful rollup with no gating contexts is green. A
-mismatched commit OID blocks convergence even when every returned check is
+block convergence. A missing check rollup blocks convergence. Once a rollup is
+present, only the filtered gating contexts determine green status, so pending or
+failed informational contexts do not re-enter through GitHub's aggregate state.
+A mismatched commit OID blocks convergence even when every returned check is
 successful.
 
 Check names ending with the exact, case-sensitive suffix `(report only)` are
@@ -78,8 +82,10 @@ their head repositories at a time. It requires the head repository to equal the
 configured repository, then filters head branches locally with Python's
 case-sensitive shell-pattern matching. Matching and previously tracked open pull
 requests are then fetched in batches of 20, including their first 100 review
-threads and first 100 check contexts. Each current base/head OID pair is also
-compared so a cleanly mergeable but stale head cannot converge. Additional
+threads, changed files, and check contexts. Each current base/head OID pair is
+compared and then re-read in a separate request so a racing base advance cannot
+converge from stale evidence. Planning-only status requires every changed file
+to carry the banner at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
 continuations in one request. The script makes no REST requests. Previously
 watched node IDs are folded into the listing call so merged and closed pull
@@ -101,7 +107,8 @@ For each matching pull request, one of these decisions is logged:
 The active-work command runs only for an unconverged pull request outside its
 cool-off. Exit status 0 means active, 1 means inactive, and any other status is
 an error that prevents dispatch. The dispatch command runs only after an
-inactive result. Immediately before dispatch, the state file records a cool-off
+inactive result. Immediately before each dispatch, a fresh timestamp is taken
+and the state file records a cool-off
 fence. A definite start failure removes that fence. Every outcome after the
 child starts, including a nonzero exit or timeout, keeps it because dispatch may
 have happened. This prevents an ambiguous command outcome or later tick failure
