@@ -109,6 +109,8 @@ AS $$
 DECLARE
     candidate_dispatch_id uuid;
     candidate_repository text;
+    candidate_rule_id text;
+    candidate_rule_version bigint;
     candidate_singleton_key text;
     terminal_goal_kind text;
 BEGIN
@@ -125,7 +127,7 @@ BEGIN
          WHERE action.session_id = completed_session_id
          ORDER BY action.dispatch_id
     LOOP
-        SELECT origin.repository,
+        SELECT origin.repository, batch.rule_id, batch.rule_version,
                repo_watch_dispatch_singleton_lock_key(
                     batch.rule_id,
                     batch.rule_version,
@@ -134,20 +136,34 @@ BEGIN
                     batch.singleton_pull_request_number,
                     batch.singleton_stack_root_pull_request_number
                )
-          INTO candidate_repository, candidate_singleton_key
+          INTO candidate_repository, candidate_rule_id, candidate_rule_version,
+               candidate_singleton_key
           FROM repo_watch_dispatch_batch AS batch
           JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
          WHERE batch.dispatch_id = candidate_dispatch_id;
 
-        -- Repository event commit, rule reconciliation, fresh evaluation, and
-        -- obligation admission all take the repository advisory key and then the
-        -- singleton advisory key. Termination takes both in that same order,
-        -- before it reads durable state or writes an obligation. A concurrent
-        -- match therefore joins this obligation instead of aborting on the
-        -- active-singleton index, a concurrent deactivation cannot miss it, and
-        -- the achievement comparison below cannot straddle an event commit.
-        PERFORM pg_advisory_xact_lock(hashtextextended(candidate_repository, 0));
+        -- Termination runs inside the transaction that ends the goal, which
+        -- already holds that session's row. Lifecycle-cutoff processing takes
+        -- the repository advisory key and then waits for the same session row,
+        -- so taking the repository key here would invert that order and deadlock
+        -- a goal pass against a cutoff attempt. Termination therefore takes only
+        -- keys no repository-key holder waits behind a session row for.
+        --
+        -- Fresh evaluation and obligation admission take the singleton key, so a
+        -- match racing this termination waits and then joins the obligation
+        -- through its settle-guarded update, rather than aborting on the
+        -- active-singleton index. Deactivation is serialized by row: inserting
+        -- into repo_watch_rule_deactivation takes a key-share lock on the
+        -- activation row this locks exclusively, so the two cannot both pass
+        -- their checks against a snapshot predating the other's row.
         PERFORM pg_advisory_xact_lock(hashtextextended(candidate_singleton_key, 0));
+
+        PERFORM 1
+          FROM repo_watch_rule_activation AS activation
+         WHERE activation.repository = candidate_repository
+           AND activation.rule_id = candidate_rule_id
+           AND activation.rule_version = candidate_rule_version
+           FOR UPDATE;
 
         PERFORM 1
           FROM repo_watch_dispatch_batch AS locked_batch
@@ -299,6 +315,33 @@ BEGIN
                    )
            )
         ON CONFLICT DO NOTHING;
+    END LOOP;
+END;
+$$;
+
+-- Replacing the release function changes only future trigger executions, and a
+-- terminal goal event does not fire its trigger again. A dispatch that released
+-- non-converged under the superseded behavior — including the held batches
+-- 202608140100_repo_watch_dispatch_release.sql released in its own data pass —
+-- would otherwise lose exactly the work this migration exists to retain. Replay
+-- the corrected predicate over every already-released batch. The release insert
+-- is idempotent, and the active-singleton index bounds the result to one
+-- obligation per singleton.
+DO $$
+DECLARE
+    released_session_id uuid;
+BEGIN
+    FOR released_session_id IN
+        SELECT DISTINCT action.session_id
+          FROM repo_watch_dispatch_action AS action
+          JOIN repo_watch_dispatch_release AS released
+            ON released.dispatch_id = action.dispatch_id
+         ORDER BY action.session_id
+    LOOP
+        PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
+            NULL::uuid,
+            released_session_id
+        );
     END LOOP;
 END;
 $$;
