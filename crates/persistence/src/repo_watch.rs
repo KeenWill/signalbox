@@ -608,6 +608,28 @@ impl PostgresRepoWatchStore {
             .await
     }
 
+    /// Commits webhook-derived state, targeted convergence evidence, and the
+    /// terminal delivery record atomically.
+    pub async fn commit_webhook_with_convergence(
+        &self,
+        repository: &RepositorySlug,
+        request: RepoWatchCommitRequest,
+        delivery: RepoWatchWebhookDeliveryKey,
+        projections: Vec<RepoWatchWebhookProjection>,
+        assessments: &[RepoWatchConvergenceAssessment],
+    ) -> Result<RepoWatchCommitOutcome, RepoWatchStoreError> {
+        if request.producer() != RepoWatchEventProducer::Webhook {
+            return Err(RepoWatchStoreError::InvalidWebhookCommit);
+        }
+        self.commit_internal(
+            repository,
+            request,
+            Some((delivery, projections)),
+            Some(assessments),
+        )
+        .await
+    }
+
     /// Atomically commits the cursor, derived events, convergence assessments,
     /// and any seals created by those assessments.
     pub async fn commit_with_convergence(
@@ -660,6 +682,7 @@ impl PostgresRepoWatchStore {
                     repository,
                     &cursor,
                     assessments,
+                    has_webhook,
                 )
                 .await?;
             }
@@ -690,6 +713,7 @@ impl PostgresRepoWatchStore {
                         repository,
                         &cursor,
                         assessments,
+                        has_webhook,
                     )
                     .await?;
                 }
@@ -744,6 +768,7 @@ impl PostgresRepoWatchStore {
                 repository,
                 &cursor,
                 assessments,
+                has_webhook,
             )
             .await?;
         }
@@ -776,6 +801,7 @@ impl PostgresRepoWatchStore {
             repository,
             &cursor,
             assessments,
+            false,
         )
         .await?;
         commit_repo_watch_transaction(transaction).await
@@ -786,10 +812,11 @@ impl PostgresRepoWatchStore {
         repository: &RepositorySlug,
         cursor: &RepoWatchCursor,
         assessments: &[RepoWatchConvergenceAssessment],
+        partial: bool,
     ) -> Result<(), RepoWatchStoreError> {
         let state = cursor.candidate().observation().state();
         let pull_requests = state.pull_requests();
-        if pull_requests.len() != assessments.len() {
+        if !partial && pull_requests.len() != assessments.len() {
             return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
         }
         let mut assessed_pull_requests = HashSet::with_capacity(assessments.len());

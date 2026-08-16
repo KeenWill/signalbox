@@ -12,12 +12,16 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    RepoWatchBranchHead, RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1,
-    RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
+    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
 };
 use signalbox_domain::{
-    BranchName, CheckConclusion, CommitSha, PullRequestNumber, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventKindNameV1, RepositorySlug, WorkflowName,
+    BranchName, CheckConclusion, CommitSha, MergeableState, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepositorySlug, WorkflowName,
 };
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -53,6 +57,8 @@ const OTHER_EVENT_NAME: &str = "check_run";
 const ACTION_NAME: &str = "synchronize";
 const OTHER_ACTION_NAME: &str = "completed";
 const HEAD_SHA: &str = "1111111111111111111111111111111111111111";
+const OTHER_HEAD_SHA: &str = "2222222222222222222222222222222222222222";
+const BASE_REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const BODY: &[u8] = br#"{"repository":{"full_name":"signalbox/repository"}}"#;
 const OTHER_BODY: &[u8] = br#"{"repository":{"full_name":"signalbox/other"}}"#;
 const DIGEST: [u8; 32] = [0x11; 32];
@@ -91,6 +97,55 @@ fn repository() -> Result<RepositorySlug, Box<dyn Error>> {
 
 fn other_repository() -> Result<RepositorySlug, Box<dyn Error>> {
     Ok(RepositorySlug::try_new(OTHER_REPOSITORY.to_owned())?)
+}
+
+fn pull_request(
+    number: u64,
+    head_sha: &str,
+    head_branch: &str,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    Ok(RepoWatchPullRequestState::try_new(
+        RepoWatchPullRequestStateInput {
+            context: PullRequestEventContext::new(PullRequestEventContextInput {
+                number: PullRequestNumber::new(number.try_into()?),
+                head_sha: CommitSha::try_new(head_sha.to_owned())?,
+                head_repository: repository()?,
+                base_branch: BranchName::try_new("main".to_owned())?,
+                head_branch: BranchName::try_new(head_branch.to_owned())?,
+                title: PullRequestTitle::try_new(format!("Pull request {number}"))?,
+                body: PullRequestBody::try_new("Fixture body".to_owned())?,
+                labels: Vec::new(),
+                draft: false,
+                author: Some(RepoWatchAuthorLogin::try_new("fixture-author".to_owned())?),
+            }),
+            lifecycle: RepoWatchPullRequestLifecycle::Open,
+            mergeable_state: MergeableState::Mergeable,
+            completed_check_suites: Vec::new(),
+            completed_check_runs: Vec::new(),
+            reviews: Vec::new(),
+            threads: Vec::new(),
+            reactions: Vec::new(),
+        },
+    )?)
+}
+
+fn merge_ready_assessment(
+    number: u64,
+    head_sha: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(number.try_into()?),
+            head_sha: CommitSha::try_new(head_sha.to_owned())?,
+            base_branch: BranchName::try_new("main".to_owned())?,
+            base_revision: CommitSha::try_new(BASE_REVISION.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::None,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
 }
 
 fn delivery_key(value: u128) -> RepoWatchWebhookDeliveryKey {
@@ -569,6 +624,89 @@ async fn primary_commit_atomically_records_webhook_event_and_terminal_delivery()
         ("committed".to_owned(), committed.generation().get() as i64)
     );
     assert!(pending.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn primary_targeted_commit_atomically_records_partial_convergence_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let key = delivery_key(0x305);
+    admit_fixture(&webhook_store, key).await?;
+    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::default(),
+    ));
+    let RepoWatchCommitOutcome::Committed(cursor) = event_store
+        .commit(
+            &repository()?,
+            RepoWatchCommitRequest::new(None, baseline, Vec::new()),
+        )
+        .await?
+    else {
+        panic!("fixture baseline must commit")
+    };
+    let observation = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![
+                pull_request(41, HEAD_SHA, "agent/targeted")?,
+                pull_request(42, OTHER_HEAD_SHA, "agent/untouched")?,
+            ],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new("main".to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    );
+
+    let outcome = event_store
+        .commit_webhook_with_convergence(
+            &repository()?,
+            RepoWatchCommitRequest::from_webhook(
+                cursor.generation(),
+                RepoWatchCursorCandidate::new(observation),
+                Vec::new(),
+            ),
+            key,
+            Vec::new(),
+            &[merge_ready_assessment(41, HEAD_SHA)?],
+        )
+        .await?;
+    let RepoWatchCommitOutcome::Committed(committed) = outcome else {
+        panic!("targeted webhook state and convergence evidence must commit")
+    };
+    let assessments = sqlx::query_as::<_, (String, Decimal)>(
+        "SELECT head_sha, pull_request_number
+           FROM repo_watch_pull_request_convergence_assessment
+          ORDER BY pull_request_number",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let seal_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+    let disposition_generation: i64 = sqlx::query_scalar(
+        "SELECT resulting_cursor_generation
+           FROM repo_watch_webhook_disposition
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        assessments,
+        vec![(HEAD_SHA.to_owned(), Decimal::from(41_u64))]
+    );
+    assert_eq!(seal_count, 1);
+    assert_eq!(disposition_generation, committed.generation().get() as i64);
     Ok(())
 }
 

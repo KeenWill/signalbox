@@ -861,12 +861,14 @@ dispositions remain append-only.
 targeted-query decisions, but the authenticated delivery may advance the durable
 cursor and insert ordinary `repo_watch_event` rows with producer `webhook`.
 Targeted provider reads complete before the transaction begins. The resulting
-cursor, content-identity frontier, events, parity projections, and terminal
-`committed` disposition then commit in one database transaction; a provider or
-database failure leaves the delivery pending for replay. The repository task
-evaluates committed webhook events through the same dispatch path as poll
-events. An exact replay may attach the terminal disposition to state won by a
-concurrent equivalent commit, but cannot duplicate its events.
+cursor, content-identity frontier, events, affected exact-head convergence
+assessments and seals, parity projections, and terminal `committed` disposition
+then commit in one database transaction; a provider or database failure leaves
+the delivery pending for replay. This lets targeted refreshes suppress dispatch
+for newly converged heads without waiting for the next complete sweep. The
+repository task evaluates committed webhook events through the same dispatch
+path as poll events. An exact replay may attach the terminal disposition to
+state won by a concurrent equivalent commit, but cannot duplicate its events.
 
 **Implemented behavior.** The mapped set is pull-request open, reopen, close,
 synchronize, label, unlabel, edit, draft conversion, and ready-for-review;

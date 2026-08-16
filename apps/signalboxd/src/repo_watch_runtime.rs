@@ -1071,10 +1071,13 @@ impl RepositoryWatchTask {
         refreshes: &[RepoWatchTargetedRefreshV1],
     ) -> Result<(), RepositoryWatchAttemptError> {
         self.poller.invalidate_freshness();
+        let mut convergence = Vec::new();
         if !refreshes.is_empty() {
-            observation = self
+            let targeted = self
                 .resolve_targeted_webhook_observation(observation, refreshes)
                 .await?;
+            observation = targeted.observation;
+            convergence = targeted.convergence;
         }
         let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
         let events = derive_repo_watch_events(
@@ -1087,7 +1090,7 @@ impl RepositoryWatchTask {
         .map_err(|_| RepositoryWatchAttemptError::Differ)?;
         let outcome = self
             .store
-            .commit_webhook(
+            .commit_webhook_with_convergence(
                 &self.repository,
                 RepoWatchCommitRequest::from_webhook(
                     cursor.generation(),
@@ -1099,6 +1102,7 @@ impl RepositoryWatchTask {
                 ),
                 pending.key(),
                 projections,
+                &convergence,
             )
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
@@ -1119,10 +1123,13 @@ impl RepositoryWatchTask {
         &self,
         observation: RepoWatchObservation,
         refreshes: &[RepoWatchTargetedRefreshV1],
-    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+    ) -> Result<TargetedPolledRepository, RepositoryWatchAttemptError> {
         let targets = targeted_pull_requests(&observation, refreshes)?;
         if targets.is_empty() {
-            return Ok(observation);
+            return Ok(TargetedPolledRepository {
+                observation,
+                convergence: Vec::new(),
+            });
         }
         self.poller
             .poll_targeted_pull_requests_against_cursor(&observation, &targets)
@@ -1167,7 +1174,8 @@ impl RepositoryWatchTask {
         let observation = self
             .poller
             .poll_targeted_pull_requests_against_cursor(cursor.candidate().observation(), &targets)
-            .await?;
+            .await?
+            .observation;
         let events = derive_repo_watch_events(
             &self.repository,
             Some(cursor.candidate().observation()),
@@ -2196,6 +2204,11 @@ struct PolledRepository {
     stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
+struct TargetedPolledRepository {
+    observation: RepoWatchObservation,
+    convergence: Vec<RepoWatchConvergenceAssessment>,
+}
+
 #[derive(Debug)]
 struct FetchedPullRequests {
     states: Vec<RepoWatchPullRequestState>,
@@ -2309,12 +2322,13 @@ impl GitHubRepositoryPoller {
         &self,
         previous: &RepoWatchObservation,
         targets: &[TargetedPullRequest],
-    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+    ) -> Result<TargetedPolledRepository, RepositoryWatchAttemptError> {
         let mut state = RepoWatchRepositoryStateInput {
             pull_requests: previous.state().pull_requests().to_vec(),
             workflow_runs: previous.state().workflow_runs().to_vec(),
             branch_heads: previous.state().branch_heads().to_vec(),
         };
+        let mut convergence = Vec::with_capacity(targets.len());
         for target in targets {
             let retained_index = state
                 .pull_requests
@@ -2341,13 +2355,14 @@ impl GitHubRepositoryPoller {
                 Some(index) => state.pull_requests[index] = fetched.state,
                 None => state.pull_requests.push(fetched.state),
             }
+            convergence.push(fetched.convergence);
         }
         let state = RepoWatchRepositoryState::try_new(state)
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(RepoWatchObservation::new(
-            previous.signal_reviewers().to_vec(),
-            state,
-        ))
+        Ok(TargetedPolledRepository {
+            observation: RepoWatchObservation::new(previous.signal_reviewers().to_vec(), state),
+            convergence,
+        })
     }
 
     async fn poll_complete(
@@ -6949,7 +6964,9 @@ mod tests {
             .expect("targeted refresh succeeds");
 
         server.finish().await;
-        assert_eq!(refreshed, previous);
+        assert_eq!(refreshed.observation, previous);
+        assert_eq!(refreshed.convergence.len(), 1);
+        assert_eq!(refreshed.convergence[0].number().get(), PULL_NUMBER);
     }
 
     #[tokio::test]
