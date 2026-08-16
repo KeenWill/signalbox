@@ -16,6 +16,13 @@ pub const HUB_FENCE_MIGRATION_VERSION: i64 = 202607230001;
 
 const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 
+// The daemon admits up to sixteen scheduler passes concurrently, while the
+// process listener, runner, repository watch, outbox, and guard checks also
+// need database progress. SQLx's ten-connection default lets a burst of active
+// turns exhaust the pool and turn recoverable per-session database waits into
+// a hub-wide fatal execution failure.
+const FENCED_POOL_MAX_CONNECTIONS: u32 = 32;
+
 /// One positive durable hub-pool generation.
 ///
 /// A retained value cannot call the retired free pool-construction boundary:
@@ -76,7 +83,7 @@ impl AdvancedHubFence<'_> {
         self.connection.ping().await?;
         let generation = self.generation;
         let key = advisory_key(generation.get());
-        PgPoolOptions::new()
+        fenced_pool_options()
             .after_connect(move |connection, _metadata| {
                 Box::pin(async move {
                     sqlx::query("SELECT pg_advisory_lock_shared($1)")
@@ -103,6 +110,10 @@ impl AdvancedHubFence<'_> {
             .connect_with(options)
             .await
     }
+}
+
+fn fenced_pool_options() -> PgPoolOptions {
+    PgPoolOptions::new().max_connections(FENCED_POOL_MAX_CONNECTIONS)
 }
 
 /// Waits out every pooled session from the prior generation, then advances the
@@ -282,7 +293,15 @@ impl From<HubFenceCorruption> for HubFenceError {
 
 #[cfg(test)]
 mod tests {
-    use super::advisory_key;
+    use super::{FENCED_POOL_MAX_CONNECTIONS, advisory_key, fenced_pool_options};
+
+    #[test]
+    fn fenced_pool_applies_the_reserved_connection_capacity() {
+        assert_eq!(
+            fenced_pool_options().get_max_connections(),
+            FENCED_POOL_MAX_CONNECTIONS
+        );
+    }
 
     #[test]
     fn fence_advisory_key_encoding_is_stable_across_generations() {
