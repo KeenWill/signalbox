@@ -100,6 +100,11 @@ impl FileMediaProvider for ArchiveProvider {
             }
             let bytes = read_all(source).await?;
             require_active(cancellation)?;
+            if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
+                && !kind.matches_probe(&bytes)
+            {
+                return Ok(ProcessorValidationOutput::NoMatch);
+            }
             match enumerate(kind, &bytes) {
                 Ok(summary) => validated_output(kind, request.evidence, &summary),
                 Err(ArchiveIssue::Encrypted) => Ok(ProcessorValidationOutput::EncryptedOrLocked {
@@ -334,6 +339,9 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         if file.size() > MAX_ENTRY_BYTES {
             return Err(ArchiveIssue::Expansion);
         }
+        if file.is_dir() && file.size() != 0 {
+            return Err(ArchiveIssue::Special);
+        }
         let kind = if file.is_dir() { "directory" } else { "file" };
         descriptors.push((name, kind));
     }
@@ -523,7 +531,40 @@ fn zstd_header(bytes: &[u8]) -> bool {
 }
 
 fn tar_header(bytes: &[u8]) -> bool {
-    bytes.get(257..262) == Some(b"ustar")
+    bytes.get(257..262) == Some(b"ustar") || valid_tar_checksum(bytes)
+}
+
+fn valid_tar_checksum(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..512) else {
+        return false;
+    };
+    let Some(checksum_bytes) = header.get(148..156) else {
+        return false;
+    };
+    let Some(expected) = parse_tar_octal(checksum_bytes) else {
+        return false;
+    };
+    let actual = header
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                u64::from(b' ')
+            } else {
+                u64::from(*byte)
+            }
+        })
+        .sum::<u64>();
+    expected == actual
+}
+
+fn parse_tar_octal(bytes: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let digits = text.trim_matches(['\0', ' ']);
+    if digits.is_empty() || !digits.bytes().all(|byte| matches!(byte, b'0'..=b'7')) {
+        return None;
+    }
+    u64::from_str_radix(digits, 8).ok()
 }
 
 fn is_link(mode: Option<u32>) -> bool {

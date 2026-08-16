@@ -120,6 +120,15 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn data_bearing_zip_directory() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            bytes: zip_bytes(&[("payload/", PAYLOAD, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload/",
+        })
+    }
+
     pub fn tar_symlink() -> Result<Self, Box<dyn Error>> {
         let mut builder = Builder::new(Vec::new());
         let mut header = Header::new_gnu();
@@ -159,6 +168,33 @@ impl ArchiveFixture {
         let empty_zip = writer.finish()?.into_inner();
         Ok(Self {
             bytes: zip_bytes(&[("payload.bin", &empty_zip, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn disguised_v7_tar() -> Result<Self, Box<dyn Error>> {
+        let mut header = Header::new_old();
+        header.set_path("payload.txt")?;
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(u64::try_from(PAYLOAD.len())?);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut nested = header.as_bytes().to_vec();
+        nested.extend_from_slice(PAYLOAD);
+        nested.resize(1024, 0);
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn mislabeled_zip() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            bytes: b"not an archive".to_vec(),
             media_type: "application/zip",
             expected_format: "zip",
             expected_name: "payload.bin",

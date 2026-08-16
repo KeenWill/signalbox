@@ -171,6 +171,15 @@ async fn zip_symlink_is_rejected_without_following() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
+async fn data_bearing_zip_directory_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::data_bearing_zip_directory()?).await?,
+        "special_entry",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn tar_symlink_is_rejected_without_following() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::tar_symlink()?).await?,
@@ -210,6 +219,15 @@ async fn disguised_recursive_zip_payload_is_rejected() -> Result<(), Box<dyn Err
 async fn disguised_empty_zip_payload_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::disguised_empty_zip()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn disguised_v7_tar_payload_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::disguised_v7_tar()?).await?,
         "recursive_container",
     );
     Ok(())
@@ -272,6 +290,15 @@ async fn excessive_zip_entry_count_is_a_typed_bounded_failure() -> Result<(), Bo
 #[tokio::test]
 async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::unknown(b"not an archive".to_vec())?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unrecognized_declared_archive_remains_unknown() -> Result<(), Box<dyn Error>> {
+    let source = ArchiveFixture::mislabeled_zip()?.into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
