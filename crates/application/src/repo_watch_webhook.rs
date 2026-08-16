@@ -295,7 +295,14 @@ pub enum RepoWatchTargetedRefreshV1 {
 /// durable before its refresh runs, so a refresh that then fails leaves nothing
 /// to retry it but the page's remaining deliveries; recording the ask rather
 /// than the success would let one transient failure drop the whole page's
-/// hydration and leave the state to the next complete poll.
+/// hydration and leave the state to the next complete poll. Success is not
+/// enough either, which is why [`record_issued`] takes the whole submission:
+/// the runtime merges every refresh naming one pull request into a single
+/// request carrying the strictest head guard among them, and a targeted poll
+/// whose guard no longer matches the provider head discards what it fetched
+/// and still reports success.
+///
+/// [`record_issued`]: RepoWatchTargetedRefreshCoalescerV1::record_issued
 #[derive(Debug)]
 pub struct RepoWatchTargetedRefreshCoalescerV1 {
     hydrated: BTreeSet<PullRequestNumber>,
@@ -328,17 +335,41 @@ impl RepoWatchTargetedRefreshCoalescerV1 {
             .collect()
     }
 
-    /// Records the refreshes this page has now issued against the provider.
+    /// Records the hydrations one submission issued with nothing to discard
+    /// them.
+    ///
+    /// A submission asking for anything head-guarded records nothing: the
+    /// merged request carries that guard, so a head the provider has already
+    /// moved past leaves the hydration fetched and thrown away rather than
+    /// applied, and the poll reports success either way. Recording less than
+    /// was issued only costs a repeated hydration; recording more would
+    /// suppress one that never landed.
     pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]) {
+        if refreshes.iter().any(Self::carries_head_guard) {
+            return;
+        }
         self.hydrated
-            .extend(refreshes.iter().filter_map(|refresh| match refresh {
-                RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
-                    Some(*pull_request)
-                }
-                RepoWatchTargetedRefreshV1::Mergeability { .. }
-                | RepoWatchTargetedRefreshV1::CheckRollup { .. }
-                | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => None,
-            }));
+            .extend(refreshes.iter().filter_map(Self::hydrated_pull_request));
+    }
+
+    fn carries_head_guard(refresh: &RepoWatchTargetedRefreshV1) -> bool {
+        match refresh {
+            RepoWatchTargetedRefreshV1::Mergeability { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollup { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => true,
+            RepoWatchTargetedRefreshV1::PullRequestHydration { .. } => false,
+        }
+    }
+
+    fn hydrated_pull_request(refresh: &RepoWatchTargetedRefreshV1) -> Option<PullRequestNumber> {
+        match refresh {
+            RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+                Some(*pull_request)
+            }
+            RepoWatchTargetedRefreshV1::Mergeability { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollup { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => None,
+        }
     }
 }
 
@@ -1904,6 +1935,27 @@ mod tests {
         let unissued = next.unissued(slice::from_ref(&refresh));
 
         assert_eq!(unissued, vec![refresh]);
+    }
+
+    #[test]
+    fn a_hydration_merged_under_a_head_guard_is_not_recorded() {
+        let pull_request = pull_request_number();
+        let expected_head =
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid");
+        let guarded_submission = [
+            hydration(pull_request),
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head,
+            },
+        ];
+        let later = hydration(pull_request);
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(&guarded_submission);
+
+        let unissued = page.unissued(slice::from_ref(&later));
+
+        assert_eq!(unissued, vec![later]);
     }
 
     #[test]
