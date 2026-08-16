@@ -122,17 +122,21 @@ program-initiated registrations can mint a capability its root was never granted
 execution attempt in a fresh embedded `deno_core` isolate, pinned exactly by
 crate version. The isolate exposes no filesystem, network, environment, module
 source, wall clock, or unvirtualized randomness. Before artifact evaluation the
-host removes the engine's `Date`, `Math.random`, `Intl`, `WeakRef`,
-`FinalizationRegistry`, `SharedArrayBuffer`, `Atomics`, and `Deno.core` globals,
-along with the Intl-backed prototype methods that outlive `Intl` itself —
-`toLocaleString`, `localeCompare`, and the locale-aware case mappings. The
-shared buffer and its atomics go because `Atomics.wait` blocks the isolate
-thread and `Atomics.waitAsync` settles on a wall clock; the prototype methods go
-because their results follow the host's default locale and ICU data, which two
-hosts running the same run need not share. Its only admitted asynchronous
-operation is the closed request op behind the synthetic SDK module. A caller
-supplies the stripped artifact and an existing run journal; no isolate is
-retained between attempts.
+host removes the engine's `Date`, `Temporal`, `Math.random`, `Intl`, `WeakRef`,
+`FinalizationRegistry`, `SharedArrayBuffer`, `Atomics`, `WebAssembly`, and
+`Deno.core` globals, along with the Intl-backed prototype methods that outlive
+`Intl` itself — `toLocaleString`, `localeCompare`, and the locale-aware case
+mappings. Each removal closes a path the others leave open: `Temporal` is a
+second ambient clock reached without `Date`; the prototype methods return
+results that follow the host's default locale and ICU data, which two hosts
+running the same run need not share; and the shared buffer, its atomics, and
+`WebAssembly` together close the waiting primitives, since `Atomics.wait` blocks
+the isolate thread, `Atomics.waitAsync` settles on a wall clock, and
+`new WebAssembly.Memory({shared: true})` yields a shared buffer whose
+`memory.atomic.wait32` blocks even when the `SharedArrayBuffer` global is gone.
+Its only admitted asynchronous operation is the closed request op behind the
+synthetic SDK module. A caller supplies the stripped artifact and an existing
+run journal; no isolate is retained between attempts.
 
 **Committed unimplemented functionality.** No admitted run-creation surface
 invokes the host yet. The standalone `deno_core` repository is archived and the

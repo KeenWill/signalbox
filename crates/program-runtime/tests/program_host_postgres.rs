@@ -467,6 +467,8 @@ async fn isolate_closes_shared_memory_and_locale_sensitive_methods() -> Result<(
         r#"
 globalThis.SharedArrayBuffer === undefined || (() => { throw new Error("SharedArrayBuffer reached the artifact"); })();
 globalThis.Atomics === undefined || (() => { throw new Error("Atomics reached the artifact"); })();
+globalThis.Temporal === undefined || (() => { throw new Error("Temporal reached the artifact"); })();
+globalThis.WebAssembly === undefined || (() => { throw new Error("WebAssembly reached the artifact"); })();
 Object.prototype.toLocaleString === undefined || (() => { throw new Error("Object.prototype.toLocaleString reached the artifact"); })();
 Number.prototype.toLocaleString === undefined || (() => { throw new Error("Number.prototype.toLocaleString reached the artifact"); })();
 BigInt.prototype.toLocaleString === undefined || (() => { throw new Error("BigInt.prototype.toLocaleString reached the artifact"); })();

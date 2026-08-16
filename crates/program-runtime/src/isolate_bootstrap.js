@@ -20,6 +20,15 @@ Object.defineProperty(globalThis, "Intl", {
   writable: false,
   configurable: false,
 });
+// `Temporal` is a second ambient clock, independent of `Date`:
+// `Temporal.Now.instant()` reads the host clock and `Temporal.Now.timeZoneId()`
+// reads its zone. Either can reach an SDK payload and make the next durable
+// request depend on when and where the attempt ran.
+Object.defineProperty(globalThis, "Temporal", {
+  value: undefined,
+  writable: false,
+  configurable: false,
+});
 Object.defineProperty(globalThis, "WeakRef", {
   value: undefined,
   writable: false,
@@ -42,6 +51,17 @@ Object.defineProperty(globalThis, "SharedArrayBuffer", {
   configurable: false,
 });
 Object.defineProperty(globalThis, "Atomics", {
+  value: undefined,
+  writable: false,
+  configurable: false,
+});
+// Removing those two bindings does not close the wait path on its own:
+// `new WebAssembly.Memory({shared: true})` still returns a real
+// `SharedArrayBuffer`, and WebAssembly's own `memory.atomic.wait32` can then
+// block the isolate thread with no timeout, before the event loop can report
+// `Stalled`. The artifact contract is JavaScript, so the whole namespace goes
+// rather than only its shared-memory corner.
+Object.defineProperty(globalThis, "WebAssembly", {
   value: undefined,
   writable: false,
   configurable: false,
