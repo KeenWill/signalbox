@@ -1590,21 +1590,37 @@ impl RepoWatchRuleContentDigest {
 /// One configuration field whose value belongs to a durable rule identity.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RepoWatchRuleIdentityField {
+    /// The event kinds a matching fact is one of.
     MatcherEventKinds,
+    /// The repository a matching fact belongs to.
     MatcherRepository,
+    /// The base branch a matching pull request targets.
     MatcherBaseBranch,
+    /// The pattern a matching pull request's head branch satisfies.
     MatcherHeadBranchRegex,
+    /// The pattern a matching pull request's title satisfies.
     MatcherTitleRegex,
+    /// The pattern a matching pull request's body satisfies.
     MatcherBodyRegex,
+    /// The labels a matching pull request carries at least one of.
     MatcherLabelsAnyOf,
+    /// The labels a matching pull request carries all of.
     MatcherLabelsAllOf,
+    /// The labels a matching pull request carries none of.
     MatcherLabelsNoneOf,
+    /// The draft state a matching pull request is in.
     MatcherDraft,
+    /// The author a matching pull request has.
     MatcherAuthor,
+    /// The mergeable states a matching fact reports one of.
     MatcherMergeableStateAnyOf,
+    /// The check conclusions a matching fact reports one of.
     MatcherConclusionAnyOf,
+    /// The ordered actions a match dispatches.
     Actions,
+    /// The scope a dispatch holds its singleton over.
     SingletonPer,
+    /// The interval a dispatch suppresses further matches for.
     CooldownSeconds,
 }
 
