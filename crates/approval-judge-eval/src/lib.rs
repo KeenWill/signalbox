@@ -6,6 +6,7 @@
 //! daemon's durable decision path.
 
 use std::{
+    collections::HashSet,
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use signalbox_domain::DelegateApprovalRecommendation;
 use signalbox_model_provider_runtime::ApprovalJudgeModel;
 use signalboxd::approval_judge_eval::{
-    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case,
+    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case, render_eval_case,
 };
 
 mod database;
@@ -124,6 +125,17 @@ pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadErro
             observed: corpus.format_version,
         });
     }
+    if corpus.cases.is_empty() {
+        return Err(CorpusLoadError::EmptyCorpus);
+    }
+    let mut case_ids = HashSet::with_capacity(corpus.cases.len());
+    for case in &corpus.cases {
+        if !case_ids.insert(case.id.as_str()) {
+            return Err(CorpusLoadError::DuplicateCaseId {
+                id: case.id.clone(),
+            });
+        }
+    }
     Ok(corpus)
 }
 
@@ -144,6 +156,13 @@ pub enum CorpusLoadError {
         /// Version found in the document.
         observed: u32,
     },
+    /// The corpus contains no evaluation cases.
+    EmptyCorpus,
+    /// More than one case uses the same stable logical identity.
+    DuplicateCaseId {
+        /// Repeated case identity.
+        id: String,
+    },
 }
 
 impl fmt::Display for CorpusLoadError {
@@ -161,6 +180,10 @@ impl fmt::Display for CorpusLoadError {
                 formatter,
                 "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
             ),
+            Self::EmptyCorpus => write!(formatter, "corpus contains no cases"),
+            Self::DuplicateCaseId { id } => {
+                write!(formatter, "corpus case id {id} appears more than once")
+            }
         }
     }
 }
@@ -170,7 +193,9 @@ impl Error for CorpusLoadError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Json(source) => Some(source),
-            Self::UnsupportedFormatVersion { .. } => None,
+            Self::UnsupportedFormatVersion { .. }
+            | Self::EmptyCorpus
+            | Self::DuplicateCaseId { .. } => None,
         }
     }
 }
@@ -181,19 +206,36 @@ pub async fn score_corpus(
     binding: &ApprovalJudgeEvalBinding,
     corpus: &ApprovalJudgeCorpus,
 ) -> Result<ApprovalJudgeScorecard, ScoreError> {
-    let mut verdicts = Vec::with_capacity(corpus.cases.len());
+    if corpus.format_version != CORPUS_FORMAT_VERSION {
+        return Err(ScoreError::UnsupportedFormatVersion {
+            observed: corpus.format_version,
+        });
+    }
+    if corpus.cases.is_empty() {
+        return Err(ScoreError::EmptyCorpus);
+    }
+    let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
-        let eval_case = ApprovalJudgeEvalCase {
-            name: case.id.clone(),
-            tool: case.request.tool.clone(),
-            arguments: case.request.arguments.clone(),
-            goal: case.request.commissioned_goal.clone(),
-            template: case.request.session_template.clone(),
-            system_prompt: case.request.frozen_system_prompt.clone(),
-        };
-        let result = judge_eval_case(model, binding, &eval_case)
+        if !case_ids.insert(case.id.as_str()) {
+            return Err(ScoreError::DuplicateCaseId {
+                id: case.id.clone(),
+            });
+        }
+    }
+
+    let eval_cases = corpus.cases.iter().map(eval_case).collect::<Vec<_>>();
+    for (case, eval_case) in corpus.cases.iter().zip(&eval_cases) {
+        render_eval_case(eval_case).map_err(|source| ScoreError::Case {
+            case_id: case.id.clone(),
+            source: Box::new(source),
+        })?;
+    }
+
+    let mut verdicts = Vec::with_capacity(corpus.cases.len());
+    for (case, eval_case) in corpus.cases.iter().zip(&eval_cases) {
+        let result = judge_eval_case(model, binding, eval_case)
             .await
-            .map_err(|source| ScoreError {
+            .map_err(|source| ScoreError::Case {
                 case_id: case.id.clone(),
                 source,
             })?;
@@ -208,6 +250,17 @@ pub async fn score_corpus(
         });
     }
     Ok(ApprovalJudgeScorecard::from_verdicts(verdicts))
+}
+
+fn eval_case(case: &ApprovalJudgeCase) -> ApprovalJudgeEvalCase {
+    ApprovalJudgeEvalCase {
+        name: case.id.clone(),
+        tool: case.request.tool.clone(),
+        arguments: case.request.arguments.clone(),
+        goal: case.request.commissioned_goal.clone(),
+        template: case.request.session_template.clone(),
+        system_prompt: case.request.frozen_system_prompt.clone(),
+    }
 }
 
 /// One case's expected label and decoded judge decision.
@@ -321,34 +374,69 @@ impl DispositionMetrics {
     }
 }
 
-/// A case could not be replayed through the judge adapter.
+/// A corpus could not be scored through the judge adapter.
 #[derive(Debug)]
-pub struct ScoreError {
-    case_id: String,
-    source: Box<dyn Error + Send + Sync>,
+pub enum ScoreError {
+    /// The corpus names a format this scorer does not implement.
+    UnsupportedFormatVersion {
+        /// Version found in the corpus.
+        observed: u32,
+    },
+    /// The corpus contains no evaluation cases.
+    EmptyCorpus,
+    /// More than one case uses the same stable logical identity.
+    DuplicateCaseId {
+        /// Repeated case identity.
+        id: String,
+    },
+    /// One case failed admission or replay.
+    Case {
+        /// Logical identity of the failed case.
+        case_id: String,
+        /// Underlying admission or replay failure.
+        source: Box<dyn Error + Send + Sync>,
+    },
 }
 
 impl ScoreError {
-    /// Returns the logical identity of the failed case.
+    /// Returns the logical identity of the failed case, when applicable.
     #[must_use]
-    pub fn case_id(&self) -> &str {
-        &self.case_id
+    pub fn case_id(&self) -> Option<&str> {
+        match self {
+            Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus => None,
+            Self::DuplicateCaseId { id } => Some(id),
+            Self::Case { case_id, .. } => Some(case_id),
+        }
     }
 }
 
 impl fmt::Display for ScoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "approval-judge replay failed for case {}: {}",
-            self.case_id, self.source
-        )
+        match self {
+            Self::UnsupportedFormatVersion { observed } => write!(
+                formatter,
+                "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
+            ),
+            Self::EmptyCorpus => write!(formatter, "corpus contains no cases"),
+            Self::DuplicateCaseId { id } => {
+                write!(formatter, "corpus case id {id} appears more than once")
+            }
+            Self::Case { case_id, source } => write!(
+                formatter,
+                "approval-judge replay failed for case {case_id}: {source}"
+            ),
+        }
     }
 }
 
 impl Error for ScoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.source.as_ref())
+        match self {
+            Self::UnsupportedFormatVersion { .. }
+            | Self::EmptyCorpus
+            | Self::DuplicateCaseId { .. } => None,
+            Self::Case { source, .. } => Some(source.as_ref()),
+        }
     }
 }
 
@@ -386,18 +474,46 @@ mod tests {
         let decoded = decode_corpus(&encoded).expect("the serialized corpus remains admitted");
 
         assert_eq!(decoded, corpus);
-        assert_eq!(decoded.format_version, CORPUS_FORMAT_VERSION);
-        assert_eq!(decoded.cases.len(), corpus.cases.len());
-        assert_eq!(decoded.cases[0].expected, ApprovalDisposition::Approve);
-        assert_eq!(decoded.cases[1].expected, ApprovalDisposition::Deny);
-        assert_eq!(
-            decoded.cases[2].expected,
-            ApprovalDisposition::EscalateToHuman
-        );
+    }
+
+    #[test]
+    fn duplicate_corpus_case_ids_fail_closed() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let duplicate_id = corpus.cases[0].id.clone();
+        corpus.cases[1].id = duplicate_id.clone();
+        let encoded = serde_json::to_vec(&corpus).expect("the duplicate fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("a duplicate case id is rejected");
+
+        assert!(error.to_string().contains(&duplicate_id));
+        assert!(error.to_string().contains("appears more than once"));
     }
 
     #[tokio::test]
-    async fn scorer_reports_case_verdicts_and_per_disposition_precision_recall() {
+    async fn scorer_reports_case_verdicts() {
+        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let (model, binding) = fixture_model([
+            scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
+            scripted_decision(ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
+            scripted_decision(ApprovalDisposition::Deny, DENY_RATIONALE),
+        ]);
+
+        let scorecard = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect("the scripted judge scores every seed case");
+
+        assert_eq!(scorecard.verdicts.len(), corpus.cases.len());
+        assert_eq!(scorecard.verdicts[0].actual, ApprovalDisposition::Approve);
+        assert_eq!(
+            scorecard.verdicts[1].actual,
+            ApprovalDisposition::EscalateToHuman
+        );
+        assert_eq!(scorecard.verdicts[2].actual, ApprovalDisposition::Deny);
+    }
+
+    #[tokio::test]
+    async fn scorer_reports_per_disposition_precision_recall() {
         let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
         let (model, binding) = fixture_model([
             scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
@@ -410,13 +526,6 @@ mod tests {
             .expect("the scripted judge scores every seed case");
 
         assert_eq!(scorecard.accuracy, MetricRate::new(1, corpus.cases.len()));
-        assert_eq!(scorecard.verdicts.len(), corpus.cases.len());
-        assert_eq!(scorecard.verdicts[0].actual, ApprovalDisposition::Approve);
-        assert_eq!(
-            scorecard.verdicts[1].actual,
-            ApprovalDisposition::EscalateToHuman
-        );
-        assert_eq!(scorecard.verdicts[2].actual, ApprovalDisposition::Deny);
         assert_eq!(
             scorecard.dispositions[0],
             DispositionMetrics {
@@ -509,6 +618,80 @@ mod tests {
         let error = decode_corpus(&encoded).expect_err("an unknown corpus version is rejected");
 
         assert!(error.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn empty_corpus_fails_closed() {
+        let corpus = ApprovalJudgeCorpus {
+            format_version: CORPUS_FORMAT_VERSION,
+            cases: Vec::new(),
+        };
+        let encoded = serde_json::to_vec(&corpus).expect("the empty fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("an empty corpus is rejected");
+
+        assert!(error.to_string().contains("no cases"));
+    }
+
+    #[tokio::test]
+    async fn scoring_rejects_directly_constructed_unsupported_corpus() {
+        let corpus = ApprovalJudgeCorpus {
+            format_version: CORPUS_FORMAT_VERSION + 1,
+            cases: Vec::new(),
+        };
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the scoring boundary rejects an unsupported version");
+
+        assert!(error.to_string().contains("unsupported"));
+    }
+
+    #[tokio::test]
+    async fn scoring_rejects_directly_constructed_empty_corpus() {
+        let corpus = ApprovalJudgeCorpus {
+            format_version: CORPUS_FORMAT_VERSION,
+            cases: Vec::new(),
+        };
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the scoring boundary rejects an empty corpus");
+
+        assert!(error.to_string().contains("no cases"));
+    }
+
+    #[tokio::test]
+    async fn scoring_rejects_directly_constructed_duplicate_case_ids() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let duplicate_id = corpus.cases[0].id.clone();
+        corpus.cases[1].id = duplicate_id.clone();
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the scoring boundary rejects duplicate case ids");
+
+        assert!(error.to_string().contains(&duplicate_id));
+        assert!(error.to_string().contains("appears more than once"));
+    }
+
+    #[tokio::test]
+    async fn scorer_preflights_every_case_before_model_execution() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let invalid_case_id = corpus.cases[1].id.clone();
+        corpus.cases[1].request.tool = String::new();
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the later inadmissible case fails before the first model call");
+
+        assert_eq!(error.case_id(), Some(invalid_case_id.as_str()));
     }
 
     #[test]

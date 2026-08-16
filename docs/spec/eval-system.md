@@ -5,10 +5,10 @@
 corpus, expectations, trials, and stages are recorded, and how evaluation
 traffic stays unmistakably separate from production traffic. The entire surface
 below other than the explicitly implemented standalone approval-judge harness is
-committed ahead of code as Stage 0 of the substrate build, verified against PR
-#580 (`agent/program-substrate-spec`). Execution, registration, journaling, and
-replay are owned by the substrate page and not restated here; model scoring is
-ordinary session traffic owned by
+committed ahead of code as Stage 0. Stage 0 was verified through PR #580
+(`agent/program-substrate-spec`). Execution, registration, journaling, and replay
+are owned by the substrate page and not restated here; model scoring is ordinary
+session traffic owned by
 [model-call execution](model-call-execution.md); the sandboxed process boundary
 for stage executors is owned by [tool loop](tool-loop.md)'s execution surface.
 
