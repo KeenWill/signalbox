@@ -16,6 +16,13 @@ pub const HUB_FENCE_MIGRATION_VERSION: i64 = 202607230001;
 
 const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 
+// The daemon admits up to sixteen scheduler passes concurrently, while the
+// process listener, runner, repository watch, outbox, and guard checks also
+// need database progress. SQLx's ten-connection default lets a burst of active
+// turns exhaust the pool and turn recoverable per-session database waits into
+// a hub-wide fatal execution failure.
+const FENCED_POOL_MAX_CONNECTIONS: u32 = 32;
+
 /// One positive durable hub-pool generation.
 ///
 /// A retained value cannot call the retired free pool-construction boundary:
@@ -77,6 +84,7 @@ impl AdvancedHubFence<'_> {
         let generation = self.generation;
         let key = advisory_key(generation.get());
         PgPoolOptions::new()
+            .max_connections(FENCED_POOL_MAX_CONNECTIONS)
             .after_connect(move |connection, _metadata| {
                 Box::pin(async move {
                     sqlx::query("SELECT pg_advisory_lock_shared($1)")
