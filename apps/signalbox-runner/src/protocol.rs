@@ -3293,6 +3293,7 @@ mod tests {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_with_workspace_ready(&parent);
         let advertisement = empty_advertisement();
+        let resumed_revision = positive(INITIAL_REGISTRATION_REVISION + 1);
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
 
@@ -3310,7 +3311,7 @@ mod tests {
             send_hub_message(
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
-                    registration_revision: positive(INITIAL_REGISTRATION_REVISION + 1),
+                    registration_revision: resumed_revision,
                     connection_epoch: positive(CONNECTION_EPOCH),
                     directives: retained_workspace_directives(DirectiveAction::Resend),
                 })),
@@ -3336,7 +3337,7 @@ mod tests {
                 .receipt()
                 .expect("the acknowledged registration remains enrolled")
                 .registration_revision(),
-            positive(INITIAL_REGISTRATION_REVISION + 1)
+            resumed_revision
         );
     }
 
