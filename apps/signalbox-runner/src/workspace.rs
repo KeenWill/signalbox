@@ -354,25 +354,35 @@ impl RunnerWorkspaceStore {
             .sync_all()
             .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let repository_is_retained =
-            path_names_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY, &repository)
-                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let staging_is_retained = path_names_directory(&session, &staging_name, &staging)
+        validate_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY, &repository)
+            .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        if !repository_is_retained || !staging_is_retained {
-            return Err(PrepareRepositoryWorkspaceError::Storage(
-                RunnerWorkspaceError::ManifestConflict,
-            ));
-        }
-        renameat_with(
+        validate_directory(&session, &staging_name, &staging)
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let publication = renameat_with(
             &session,
             staging_name.as_str(),
             &session,
             placement_name.as_str(),
             RenameFlags::NOREPLACE,
-        )
-        .map_err(rustix_io)
-        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        );
+        if let Err(error) = publication {
+            if error != rustix::io::Errno::EXIST {
+                return Err(PrepareRepositoryWorkspaceError::Storage(rustix_io(error)));
+            }
+            remove_open_directory_tree(&session, OsStr::new(&staging_name), staging)
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+            session
+                .sync_all()
+                .map_err(RunnerWorkspaceError::CommitAmbiguous)
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+            let placement = open_directory(&session, &placement_name)
+                .map_err(RunnerWorkspaceError::Io)
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+            return read_ready_repository_workspace(&placement, request, &execution_path)
+                .map_err(PrepareRepositoryWorkspaceError::Storage);
+        }
         session
             .sync_all()
             .map_err(RunnerWorkspaceError::CommitAmbiguous)
@@ -938,7 +948,7 @@ fn rustix_io(error: rustix::io::Errno) -> RunnerWorkspaceError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
+    use std::{fs, os::unix::fs::PermissionsExt as _, sync::Arc};
 
     use signalbox_runner_wire::{
         Advertisement, CanonicalUuid, ManifestLifecycle, PositiveU64, ProfileName, Recovery,
@@ -964,8 +974,6 @@ mod tests {
     const AUTHENTICATION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e5;
     const OPEN_DIRECTORY_MODE: u32 = 0o750;
     const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
-    const EXPECTED_REPOSITORY_RELATIVE_PATH: &str =
-        "sessions/018f6f10-0000-7000-8000-0000000000e1/3/repo";
     const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
@@ -1087,10 +1095,7 @@ mod tests {
         assert_eq!(prepared.manifest.session, expected.session());
         assert_eq!(prepared.manifest.runner, expected.runner());
         assert_eq!(prepared.manifest.lifecycle, ManifestLifecycle::Ready);
-        assert_eq!(
-            prepared.manifest.relative_path,
-            EXPECTED_REPOSITORY_RELATIVE_PATH
-        );
+        assert_eq!(prepared.manifest.relative_path, expected.relative_path());
         assert_eq!(
             prepared.execution_directory.as_str(),
             expected_execution_directory
@@ -1272,6 +1277,77 @@ mod tests {
             failure,
             PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::ManifestConflict)
         ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let staging = target
+                    .path()
+                    .parent()
+                    .expect("the repository fixture has a staging parent");
+                fs::set_permissions(staging, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "e".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open staging directory cannot be published");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_concurrent_publication_replays_the_winner() {
+        let (parent, state) = fixture_root();
+        let expected = repository_request();
+        let first_store = state
+            .workspace_store()
+            .expect("the locked root forms the first workspace store");
+        let second_store = state
+            .workspace_store()
+            .expect("the locked root forms the second workspace store");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+        let first = first_store.prepare_repository_workspace(&expected, move |target| async move {
+            fs::write(target.path().join("prepared"), b"first\n")?;
+            first_barrier.wait().await;
+            Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                revision: "f".repeat(40),
+            })
+        });
+        let second =
+            second_store.prepare_repository_workspace(&expected, move |target| async move {
+                fs::write(target.path().join("prepared"), b"second\n")?;
+                second_barrier.wait().await;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "0".repeat(40),
+                })
+            });
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("the first publication reaches the ready workspace");
+        let second = second.expect("the concurrent publication replays the ready workspace");
+        let session = parent
+            .path()
+            .join("runner-state")
+            .join("sessions")
+            .join(expected.session().to_string());
+        let staging_entries: Vec<_> = fs::read_dir(session)
+            .expect("the session directory remains readable")
+            .map(|entry| entry.expect("the session entry is readable").file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".staging"))
+            .collect();
+
+        assert_eq!(second, first);
+        assert!(staging_entries.is_empty());
     }
 
     #[test]
