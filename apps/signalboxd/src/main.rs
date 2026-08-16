@@ -1418,9 +1418,9 @@ async fn run_hub(
         Some(configuration) => configuration.rules(),
         None => &[],
     };
-    let repository_watch_rule_admission = repository_watch_store
-        .reconcile_configured_rules(&configured_repositories, configured_rules);
-    match await_while_guarded(&mut database, repository_watch_rule_admission).await {
+    let repository_watch_rule_validation = repository_watch_store
+        .validate_configured_rules(&configured_repositories, configured_rules);
+    match await_while_guarded(&mut database, repository_watch_rule_validation).await {
         GuardedAwait::Completed(Ok(())) => {}
         GuardedAwait::Completed(Err(error)) => {
             let configuration_error = repository_watch_rule_configuration_error(&error);
@@ -1431,7 +1431,7 @@ async fn run_hub(
                 ),
                 None => erase_startup_cause(
                     RuntimePhase::StartupScan,
-                    SanitizedStartupCause::Static("repository_watch_rule_admission_failed"),
+                    SanitizedStartupCause::Static("repository_watch_rule_validation_failed"),
                 ),
             };
             let _ = database.close().await;
@@ -1593,6 +1593,44 @@ async fn run_hub(
         },
         None => None,
     };
+    // Every fallible construction above has succeeded, so the revisions this
+    // consumes belong to a daemon that reaches its runtime. A startup that
+    // failed earlier retired and activated nothing, leaving the previous
+    // configuration admissible.
+    let repository_watch_rule_admission = repository_watch_store
+        .reconcile_configured_rules(&configured_repositories, configured_rules);
+    match await_while_guarded(&mut database, repository_watch_rule_admission).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(error)) => {
+            let configuration_error = repository_watch_rule_configuration_error(&error);
+            let failure = match configuration_error.as_ref() {
+                Some(error) => erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::ModelConfiguration(error),
+                ),
+                None => erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("repository_watch_rule_admission_failed"),
+                ),
+            };
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,

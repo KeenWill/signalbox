@@ -1973,6 +1973,13 @@ impl RepoWatchRule {
     }
 
     /// Derives stable, field-labeled fingerprints for configuration diagnostics.
+    /// The digest of every identity-relevant field, in storage order.
+    ///
+    /// Each entry labels one configuration field with a content-free digest of
+    /// its value, so a stored fingerprint can name the exact field an operator
+    /// changed without retaining the configured value itself. The order is the
+    /// inventory order and is durable: stored fingerprints are compared
+    /// positionally against it.
     pub fn identity_field_digests(
         &self,
     ) -> Vec<(RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest)> {

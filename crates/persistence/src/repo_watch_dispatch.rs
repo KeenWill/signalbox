@@ -419,33 +419,41 @@ impl PostgresRepoWatchDispatchStore {
         commit(transaction).await
     }
 
-    /// Admits the complete configured repository set in one transaction.
+    /// Reports whether the complete configured repository set is admissible.
     ///
-    /// Startup reconciles every watched repository together, so a refusal
-    /// anywhere in the configured set leaves no deactivation and no activation
-    /// behind. A configuration that never started therefore consumes no
-    /// revision, and restoring the previous configuration is admitted rather
-    /// than refused as identity reuse.
+    /// The transaction is always discarded, so startup can refuse an
+    /// inadmissible configuration in its Configuration phase — before either
+    /// local socket binds — while leaving the durable revision history
+    /// untouched. A daemon whose later startup construction fails has then
+    /// consumed no revision, and restoring the previous configuration is still
+    /// admitted rather than refused as identity reuse.
+    pub async fn validate_configured_rules(
+        &self,
+        repositories: &[RepositorySlug],
+        configured: &[RepoWatchRule],
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
+        let admission = admit_configured_rules(&mut transaction, repositories, configured).await;
+        transaction.rollback().await?;
+        admission
+    }
+
+    /// Commits the complete configured repository set in one transaction.
+    ///
+    /// Every watched repository is admitted together, so a refusal anywhere in
+    /// the set leaves no deactivation and no activation behind. Startup calls
+    /// this only after every other fallible construction has succeeded, so the
+    /// revisions it consumes belong to a daemon that reaches its runtime.
     pub async fn reconcile_configured_rules(
         &self,
         repositories: &[RepositorySlug],
         configured: &[RepoWatchRule],
     ) -> Result<(), RepoWatchDispatchRepositoryError> {
-        let ordered = repositories
-            .iter()
-            .map(|repository| repository.as_str())
-            .collect::<BTreeSet<_>>();
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
-        for repository in &ordered {
-            if let Err(error) =
-                reconcile_repository_rules(&mut transaction, repository, configured).await
-            {
-                transaction.rollback().await?;
-                return Err(error);
-            }
-        }
-        if let Err(error) = retire_unconfigured_repositories(&mut transaction, &ordered).await {
+        if let Err(error) = admit_configured_rules(&mut transaction, repositories, configured).await
+        {
             transaction.rollback().await?;
             return Err(error);
         }
@@ -1052,6 +1060,25 @@ impl StoredSingletonKey {
                 .map_or(String::new(), |value| value.to_string())
         )
     }
+}
+
+/// Reconciles every configured repository and retires the rest.
+///
+/// The caller owns the transaction, so the same admission decision serves both
+/// the validating pass that discards it and the committing pass that keeps it.
+async fn admit_configured_rules(
+    transaction: &mut Transaction<'_, Postgres>,
+    repositories: &[RepositorySlug],
+    configured: &[RepoWatchRule],
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    let ordered = repositories
+        .iter()
+        .map(|repository| repository.as_str())
+        .collect::<BTreeSet<_>>();
+    for repository in &ordered {
+        reconcile_repository_rules(transaction, repository, configured).await?;
+    }
+    retire_unconfigured_repositories(transaction, &ordered).await
 }
 
 /// Retires every active repository absent from the configured set.

@@ -2888,6 +2888,72 @@ async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn validating_an_admissible_revision_consumes_no_revision() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    );
+    let replacement = rule_at_version(replacement_version)?;
+
+    fixture
+        .store
+        .validate_configured_rules(
+            std::slice::from_ref(&fixture.repository),
+            std::slice::from_ref(&replacement),
+        )
+        .await?;
+
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(replacement.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        revisions,
+        [(i64::try_from(fixture.rule.version().get())?, false)]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn validation_refuses_an_inadmissible_rule_before_any_write() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let changed_rule = merged_event_rule()?;
+
+    let error = fixture
+        .store
+        .validate_configured_rules(
+            std::slice::from_ref(&fixture.repository),
+            std::slice::from_ref(&changed_rule),
+        )
+        .await
+        .expect_err("an unbumped semantic change is refused during validation");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ChangedField(RepoWatchRuleIdentityField::MatcherEventKinds)
+    );
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM repo_watch_rule_deactivation WHERE repository = $1)",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_refused_repository_leaves_every_other_repository_unmutated() -> Result<(), Box<dyn Error>>
 {
     let fixture = dispatch_fixture().await?;
