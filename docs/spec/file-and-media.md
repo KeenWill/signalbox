@@ -131,9 +131,9 @@ Each listed adapter is compiled into a dedicated worker and registered there as
 one provider declaration. Inputs remain whole-source bounded; adapter output is
 untrusted until the daemon-side registry sanitizer admits it.
 
-| Family | Canonical types                                      | Detection and validation                                                               | Views                                              | Decoder choice                                                                        |
-| ------ | ---------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Image  | `image/png`, `image/jpeg`, `image/webp`, `image/gif` | Strong signatures followed by full decode with encoded, axis, pixel, and memory bounds | Bounded dimensions and channel count as `metadata` | Pure-Rust `image` with only PNG, JPEG, WebP, and GIF features; isolated in the worker |
+| Family | Canonical types                                      | Detection and validation                                                                         | Views                                              | Decoder choice                                                                        |
+| ------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Image  | `image/png`, `image/jpeg`, `image/webp`, `image/gif` | Strong signatures followed by primary-raster decode with encoded, axis, pixel, and memory bounds | Bounded dimensions and channel count as `metadata` | Pure-Rust `image` with only PNG, JPEG, WebP, and GIF features; isolated in the worker |
 
 ## Processor and durable media boundary
 

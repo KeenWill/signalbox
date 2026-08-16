@@ -166,7 +166,7 @@ fn reader(
 fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
     Ok(ReadViewDeclaration::try_new(
         ReadViewName::try_new(METADATA_VIEW_NAME)?,
-        String::from("Decodes the complete image and returns dimensions and channel count."),
+        String::from("Decodes the primary raster and returns dimensions and channel count."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
         ReadAccessPattern::Streaming,
         ReadViewBounds::Structured {
