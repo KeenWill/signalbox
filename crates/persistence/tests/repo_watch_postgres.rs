@@ -2083,19 +2083,28 @@ async fn every_reaction_subject_survives_a_commit_and_load_round_trip() -> Resul
 const REAPPEARING_WORKFLOW_RUN_ID: u64 = 71;
 const REAPPEARING_WORKFLOW_ID: u64 = 72;
 
+/// Whether the reappearing branch-workflow run is in the observation.
+enum WorkflowRunPresence {
+    /// The provider lists the completed run.
+    Listed,
+    /// The provider omits it, as it does while the branch is deleted.
+    Omitted,
+}
+
 /// An observation carrying only the reappearing branch-workflow run, or none.
-fn workflow_run_observation(present: bool) -> Result<RepoWatchObservation, Box<dyn Error>> {
-    let workflow_runs = if present {
-        vec![RepoWatchWorkflowRunObservation::new(
+fn workflow_run_observation(
+    presence: WorkflowRunPresence,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    let workflow_runs = match presence {
+        WorkflowRunPresence::Listed => vec![RepoWatchWorkflowRunObservation::new(
             GitHubObjectId::new(REAPPEARING_WORKFLOW_RUN_ID.try_into()?),
             GitHubObjectId::new(REAPPEARING_WORKFLOW_ID.try_into()?),
             RepoWatchWorkflowRunAttempt::new(NonZeroU64::MIN),
             BranchName::try_new(BASE_BRANCH.to_owned())?,
             WorkflowName::try_new(WORKFLOW_NAME.to_owned())?,
             CheckConclusion::Success,
-        )]
-    } else {
-        Vec::new()
+        )],
+        WorkflowRunPresence::Omitted => Vec::new(),
     };
     Ok(RepoWatchObservation::new(
         Vec::new(),
@@ -2120,7 +2129,8 @@ async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_even
     let store = PostgresRepoWatchStore::new(pool.clone());
     let mut ids = FixedEventIds::default();
 
-    let empty = RepoWatchCursorCandidate::new(workflow_run_observation(false)?);
+    let empty =
+        RepoWatchCursorCandidate::new(workflow_run_observation(WorkflowRunPresence::Omitted)?);
     let first = committed_generation(
         store
             .commit(
@@ -2132,7 +2142,7 @@ async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_even
 
     // The run completes and is recorded.
     let mut frontier = empty.event_identity_frontier().clone();
-    let present = workflow_run_observation(true)?;
+    let present = workflow_run_observation(WorkflowRunPresence::Listed)?;
     let recorded = derive_repo_watch_events(
         &repository,
         Some(empty.observation()),
@@ -2155,7 +2165,7 @@ async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_even
 
     // The branch is deleted, so the run leaves the observation.
     let mut frontier = present_candidate.event_identity_frontier().clone();
-    let absent = workflow_run_observation(false)?;
+    let absent = workflow_run_observation(WorkflowRunPresence::Omitted)?;
     let none_derived = derive_repo_watch_events(
         &repository,
         Some(present_candidate.observation()),
@@ -2177,7 +2187,7 @@ async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_even
     // The branch is recreated and the historical run reappears. The differ
     // re-derives the same occurrence, identity and all.
     let mut frontier = absent_candidate.event_identity_frontier().clone();
-    let returned = workflow_run_observation(true)?;
+    let returned = workflow_run_observation(WorkflowRunPresence::Listed)?;
     let reemitted = derive_repo_watch_events(
         &repository,
         Some(absent_candidate.observation()),

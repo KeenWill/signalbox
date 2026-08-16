@@ -22,12 +22,12 @@ use sha2::{Digest, Sha256};
 use signalbox_application::{
     EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchCheckSuiteObservation, RepoWatchDifferFailureKind, RepoWatchDispatchService,
+    RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
+    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshCoalescerV1,
     RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
     RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
     RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
@@ -54,8 +54,9 @@ use signalbox_persistence::repo_watch_dispatch::{
 use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObligation;
 use signalbox_persistence::repo_watch_webhook::{
     PendingRepoWatchWebhookDelivery, PostgresRepoWatchWebhookStore, RepoWatchWebhookDeliveryKey,
-    RepoWatchWebhookDisposition, RepoWatchWebhookPendingPageSize, RepoWatchWebhookProjection,
-    RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalRequest,
+    RepoWatchWebhookDisposition, RepoWatchWebhookParityCauseV1, RepoWatchWebhookPendingPageSize,
+    RepoWatchWebhookProjection, RepoWatchWebhookStoreError, RepoWatchWebhookTargetedQuery,
+    RepoWatchWebhookTerminalRequest,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -318,6 +319,7 @@ struct RepositoryWatchTask {
     webhook_work: Option<mpsc::Receiver<()>>,
     webhook_nudge: Option<mpsc::Sender<()>>,
     webhook_shadow: Option<WebhookShadowBaseline>,
+    webhook_pending_drained: bool,
     rules_activated: bool,
 }
 
@@ -375,6 +377,7 @@ impl RepositoryWatchTask {
             webhook_work,
             webhook_nudge,
             webhook_shadow: None,
+            webhook_pending_drained: true,
             rules_activated: false,
         })
     }
@@ -516,9 +519,21 @@ impl RepositoryWatchTask {
             // A poll that observes the same transition would otherwise advance
             // the cursor past them, and every one of them would then apply to
             // state that already contains it and record nothing.
-            self.process_webhook_deliveries().await?;
+            //
+            // Its failure is reported but not propagated: acceleration failing
+            // must not cancel the reconciliation sweep, or one delivery whose
+            // targeted request keeps failing would abort every scheduled poll.
+            let accelerated = self.process_webhook_deliveries().await;
+            if let Err(error) = &accelerated {
+                tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    cause_code = error.cause_code(),
+                    "repository-watch webhook pre-poll drain failed; polling continues"
+                );
+            }
             self.poll_and_commit().await?;
             self.process_webhook_deliveries().await?;
+            accelerated?;
             self.process_cutoffs().await?;
             self.process_dispatches().await
         }
@@ -563,6 +578,7 @@ impl RepositoryWatchTask {
                 .load_pending(&self.repository, page_size)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            self.webhook_pending_drained = deliveries.is_empty();
             let mut progressed = false;
             let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
             for delivery in &deliveries {
@@ -597,6 +613,9 @@ impl RepositoryWatchTask {
                 break;
             }
             if pages >= WEBHOOK_DRAIN_PAGE_LIMIT {
+                // More may remain behind this page, so the shadow this drain
+                // advanced still speaks for deliveries the next one will read.
+                self.webhook_pending_drained = false;
                 self.request_webhook_drain_continuation();
                 break;
             }
@@ -609,9 +628,13 @@ impl RepositoryWatchTask {
 
     /// Seeds the shadow baseline from the durable cursor when the repository
     /// task does not already carry one.
-    async fn seed_webhook_shadow(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+    ///
+    /// Reports whether it had to, because a delivery projected against a
+    /// freshly seeded baseline is the accepted cross-drain gap and carries that
+    /// cause on its projections.
+    async fn seed_webhook_shadow(&mut self) -> Result<bool, RepositoryWatchAttemptError> {
         if self.webhook_shadow.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let cursor = self
             .store
@@ -620,7 +643,7 @@ impl RepositoryWatchTask {
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?
             .ok_or(RepositoryWatchAttemptError::Persistence)?;
         self.webhook_shadow = Some(WebhookShadowBaseline::from_cursor(&cursor));
-        Ok(())
+        Ok(true)
     }
 
     /// Re-arms this repository's own webhook wake so a bounded drain resumes
@@ -689,7 +712,10 @@ impl RepositoryWatchTask {
                 .await
             }
             RepoWatchWebhookMappingV1::Patch(patch) => {
-                self.seed_webhook_shadow().await?;
+                let cause = self
+                    .seed_webhook_shadow()
+                    .await?
+                    .then_some(RepoWatchWebhookParityCauseV1::CrossDrainShadowGap);
                 let Some(shadow) = self.webhook_shadow.as_ref() else {
                     return Err(RepositoryWatchAttemptError::Persistence);
                 };
@@ -739,8 +765,12 @@ impl RepositoryWatchTask {
                         .await
                     }
                     RepoWatchObservationApplyV1::Applied(observation) => {
-                        let (projections, identity_frontier) =
-                            shadow_event_projections(&self.repository, shadow, &observation)?;
+                        let (projections, identity_frontier) = shadow_event_projections(
+                            &self.repository,
+                            shadow,
+                            &observation,
+                            cause,
+                        )?;
                         self.record_webhook_terminal(
                             pending,
                             projections,
@@ -761,8 +791,12 @@ impl RepositoryWatchTask {
                         observation,
                         refreshes,
                     } => {
-                        let (mut projections, identity_frontier) =
-                            shadow_event_projections(&self.repository, shadow, &observation)?;
+                        let (mut projections, identity_frontier) = shadow_event_projections(
+                            &self.repository,
+                            shadow,
+                            &observation,
+                            cause,
+                        )?;
                         // Every delivery projects the query it needs, so parity
                         // accounting stays per delivery. Coalescing decides only
                         // how many times the page asks the provider for it.
@@ -825,11 +859,24 @@ impl RepositoryWatchTask {
             outcome_code.map(str::to_owned),
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        self.webhook_store
+        match self
+            .webhook_store
             .record_terminal(pending.key(), &request)
             .await
-            .map(|_| ())
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)
+        {
+            Ok(_) => Ok(()),
+            // A commit whose result was lost in transit may already be durable,
+            // and the delivery would then never be loaded again. Re-recording
+            // the exact same request resolves which happened: it reports the
+            // row already terminal, or records it now.
+            Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => self
+                .webhook_store
+                .record_terminal(pending.key(), &request)
+                .await
+                .map(|_| ())
+                .map_err(|_| RepositoryWatchAttemptError::Persistence),
+            Err(_) => Err(RepositoryWatchAttemptError::Persistence),
+        }
     }
 
     /// Runs one delivery's targeted provider queries without writing anything.
@@ -1060,7 +1107,21 @@ impl RepositoryWatchTask {
             &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
-        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+        .map_err(|error| match error.kind() {
+            RepoWatchDifferFailureKind::EventConstruction => RepositoryWatchAttemptError::Differ,
+            // The frontier refuses on every later comparison too, so the cause
+            // code has to say the frontier stopped this repository rather than
+            // leave it indistinguishable from a one-observation differ defect.
+            RepoWatchDifferFailureKind::IdentityFrontier => {
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    cause_code = "repository_identity_frontier_exhausted",
+                    error = %error,
+                    "repository-watch identity frontier cannot assign another occurrence; every later comparison fails the same way"
+                );
+                RepositoryWatchAttemptError::IdentityFrontier
+            }
+        })?;
         let outcome = self
             .store
             .commit(
@@ -1083,8 +1144,13 @@ impl RepositoryWatchTask {
                 self.poller.publish_freshness(cursor.generation());
                 // A full poll is the complete reconciliation sweep, so the
                 // cursor it commits authoritatively replaces everything the
-                // webhook stream had accumulated in memory.
-                self.webhook_shadow = None;
+                // webhook stream had accumulated in memory — but only once
+                // nothing admitted before it is still waiting. A delivery left
+                // pending by a bounded drain would otherwise apply to state
+                // this cursor already contains and record nothing.
+                if self.webhook_pending_drained {
+                    self.webhook_shadow = None;
+                }
                 Ok(())
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
@@ -1137,6 +1203,7 @@ fn shadow_event_projections(
     repository: &RepositorySlug,
     baseline: &WebhookShadowBaseline,
     observation: &RepoWatchObservation,
+    cause: Option<RepoWatchWebhookParityCauseV1>,
 ) -> Result<
     (
         Vec<RepoWatchWebhookProjection>,
@@ -1160,6 +1227,7 @@ fn shadow_event_projections(
             content_identity,
             occurrence.event().kind().name(),
             content_identity.as_bytes().to_vec(),
+            cause,
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)
     })
@@ -1687,6 +1755,7 @@ enum RepositoryWatchAttemptError {
     Normalization,
     PullRequestFetchAbandoned,
     Differ,
+    IdentityFrontier,
     Dispatch,
     Persistence,
     RetiredRuleIdentity,
@@ -1707,6 +1776,7 @@ impl RepositoryWatchAttemptError {
             Self::Normalization => "repository_state_invalid",
             Self::PullRequestFetchAbandoned => "repository_pull_request_fetch_abandoned",
             Self::Differ => "repository_differ_failed",
+            Self::IdentityFrontier => "repository_identity_frontier_exhausted",
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
