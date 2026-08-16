@@ -1,3 +1,5 @@
+//! Generated archive fixtures for the contract in `docs/spec/file-and-media.md`.
+
 use std::{error::Error, io::Write, num::NonZeroU64};
 
 use flate2::{Compression, GzBuilder, write::GzEncoder};
@@ -104,6 +106,20 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn latin1_named_gzip() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = gzip_bytes("cafe.txt", PAYLOAD)?;
+        let filename = bytes
+            .get_mut(10..18)
+            .ok_or("GZIP fixture filename absent")?;
+        filename.copy_from_slice(b"caf\xe9.txt");
+        Ok(Self {
+            bytes,
+            media_type: "application/gzip",
+            expected_format: "gzip",
+            expected_name: "café.txt",
+        })
+    }
+
     pub fn zstd() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: zstd::stream::encode_all(PAYLOAD, 1)?,
@@ -119,6 +135,17 @@ impl ArchiveFixture {
         bytes.extend_from_slice(&compressed);
         Ok(Self {
             bytes,
+            media_type: "application/zstd",
+            expected_format: "zstd",
+            expected_name: "content",
+        })
+    }
+
+    pub fn dictionary_zstd() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            // This frame header declares dictionary ID 1. Classification occurs before
+            // dictionary-less decompression.
+            bytes: b"\x28\xb5\x2f\xfd\x21\x01\x00".to_vec(),
             media_type: "application/zstd",
             expected_format: "zstd",
             expected_name: "content",

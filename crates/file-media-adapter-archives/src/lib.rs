@@ -1,4 +1,5 @@
-//! Bounded archive enumeration inside the supervised file-media worker.
+//! Bounded archive enumeration inside the supervised file-media worker, governed by
+//! `docs/spec/file-and-media.md`.
 
 use std::{
     error::Error,
@@ -31,6 +32,7 @@ const RECURSIVE_REASON: &str = "recursive_container";
 const SPECIAL_ENTRY_REASON: &str = "special_entry";
 const SOURCE_SIZE_REASON: &str = "source_size_limit";
 const UNSUPPORTED_COMPRESSION_REASON: &str = "unsupported_compression_method";
+const UNSUPPORTED_DICTIONARY_REASON: &str = "unsupported_dictionary";
 const PROBE_BYTES: u64 = 1_024;
 const SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_ENTRIES: usize = 1_000;
@@ -157,7 +159,8 @@ impl FileMediaProvider for ArchiveProvider {
                     | ArchiveIssue::Link
                     | ArchiveIssue::Recursive
                     | ArchiveIssue::Special
-                    | ArchiveIssue::UnsupportedCompression,
+                    | ArchiveIssue::UnsupportedCompression
+                    | ArchiveIssue::UnsupportedDictionary,
                 ) => Err(ProcessorFailure::Failed),
             }
         })
@@ -219,6 +222,7 @@ fn reader_declaration(
             ReasonCode::try_new(SPECIAL_ENTRY_REASON)?,
             ReasonCode::try_new(SOURCE_SIZE_REASON)?,
             ReasonCode::try_new(UNSUPPORTED_COMPRESSION_REASON)?,
+            ReasonCode::try_new(UNSUPPORTED_DICTIONARY_REASON)?,
         ],
         streaming_text_fallback: StreamingTextFallback::Disabled,
     })?)
@@ -292,6 +296,7 @@ enum ArchiveIssue {
     Recursive,
     Special,
     UnsupportedCompression,
+    UnsupportedDictionary,
 }
 
 impl ArchiveIssue {
@@ -305,6 +310,7 @@ impl ArchiveIssue {
             Self::Recursive => RECURSIVE_REASON,
             Self::Special => SPECIAL_ENTRY_REASON,
             Self::UnsupportedCompression => UNSUPPORTED_COMPRESSION_REASON,
+            Self::UnsupportedDictionary => UNSUPPORTED_DICTIONARY_REASON,
         }
     }
 }
@@ -437,7 +443,7 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 
 fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     let name = match gzip_name(bytes)? {
-        Some(name) => checked_name(name)?,
+        Some(name) => checked_name_text(&latin1_name(name))?,
         None => String::from("content"),
     };
     if recursive_name(&name) {
@@ -452,6 +458,10 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 }
 
 fn enumerate_zstd(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
+    let frame = zstd_frame_after_skippable_frames(bytes)?;
+    if zstd::zstd_safe::get_dict_id_from_frame(frame).is_some() {
+        return Err(ArchiveIssue::UnsupportedDictionary);
+    }
     let mut decoder =
         zstd::stream::read::Decoder::new(bytes).map_err(|_| ArchiveIssue::Malformed)?;
     let (expanded, prefix) = count_reader(&mut decoder, MAX_EXPANDED_BYTES)?;
@@ -506,6 +516,10 @@ fn bounded_total(total: u64, added: u64) -> Result<u64, ArchiveIssue> {
 
 fn checked_name(bytes: &[u8]) -> Result<String, ArchiveIssue> {
     let name = std::str::from_utf8(bytes).map_err(|_| ArchiveIssue::HostileName)?;
+    checked_name_text(name)
+}
+
+fn checked_name_text(name: &str) -> Result<String, ArchiveIssue> {
     if name.is_empty()
         || name.len() > MAX_NAME_BYTES
         || name.contains('\\')
@@ -517,6 +531,10 @@ fn checked_name(bytes: &[u8]) -> Result<String, ArchiveIssue> {
         return Err(ArchiveIssue::HostileName);
     }
     Ok(String::from(name))
+}
+
+fn latin1_name(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| char::from(*byte)).collect()
 }
 
 fn recursive_name(name: &str) -> bool {
@@ -545,6 +563,23 @@ fn zstd_header(bytes: &[u8]) -> bool {
     };
     let magic = u32::from_le_bytes([magic[0], magic[1], magic[2], magic[3]]);
     magic == 0xfd2f_b528 || (0x184d_2a50..=0x184d_2a5f).contains(&magic)
+}
+
+fn zstd_frame_after_skippable_frames(mut bytes: &[u8]) -> Result<&[u8], ArchiveIssue> {
+    loop {
+        let magic = bytes.get(..4).ok_or(ArchiveIssue::Malformed)?;
+        let magic = u32::from_le_bytes([magic[0], magic[1], magic[2], magic[3]]);
+        if !(0x184d_2a50..=0x184d_2a5f).contains(&magic) {
+            return Ok(bytes);
+        }
+        let length = bytes.get(4..8).ok_or(ArchiveIssue::Malformed)?;
+        let length = usize::try_from(u32::from_le_bytes([
+            length[0], length[1], length[2], length[3],
+        ]))
+        .map_err(|_| ArchiveIssue::Malformed)?;
+        let next = 8_usize.checked_add(length).ok_or(ArchiveIssue::Malformed)?;
+        bytes = bytes.get(next..).ok_or(ArchiveIssue::Malformed)?;
+    }
 }
 
 fn tar_header(bytes: &[u8]) -> bool {
