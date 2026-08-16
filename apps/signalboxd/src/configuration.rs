@@ -4596,18 +4596,23 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn scheduler_pass_limit_is_optional_and_accepts_a_bounded_override() {
+    fn scheduler_pass_limit_is_optional() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the fixture configuration is valid");
+
+        assert_eq!(configuration.scheduler_max_in_flight_passes(), None);
+    }
+
+    #[test]
+    fn scheduler_pass_limit_accepts_a_bounded_override() {
         let configured = CONFIGURATION.replace(
             "[compaction]",
             "[scheduler]\nmax_in_flight_passes = 16\n\n[compaction]",
         );
-        let default = HubModelConfiguration::parse(CONFIGURATION)
-            .expect("the fixture configuration is valid");
-        let overridden = HubModelConfiguration::parse(&configured)
+        let configuration = HubModelConfiguration::parse(&configured)
             .expect("the bounded scheduler override is valid");
 
-        assert_eq!(default.scheduler_max_in_flight_passes(), None);
-        assert_eq!(overridden.scheduler_max_in_flight_passes(), Some(16));
+        assert_eq!(configuration.scheduler_max_in_flight_passes(), Some(16));
     }
 
     #[test]
@@ -4626,22 +4631,27 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn scheduler_pass_limit_rejects_values_outside_its_closed_table() {
-        let excessive = CONFIGURATION.replace(
+    fn scheduler_pass_limit_rejects_an_excessive_value() {
+        let configured = CONFIGURATION.replace(
             "[compaction]",
             "[scheduler]\nmax_in_flight_passes = 17\n\n[compaction]",
         );
-        let unknown = CONFIGURATION.replace(
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_rejects_an_unknown_field() {
+        let configured = CONFIGURATION.replace(
             "[compaction]",
             "[scheduler]\nmax_in_flight_passes = 4\nextra = 1\n\n[compaction]",
         );
 
         assert_eq!(
-            HubModelConfiguration::parse(&excessive).err(),
-            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
-        );
-        assert_eq!(
-            HubModelConfiguration::parse(&unknown).err(),
+            HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
         );
     }

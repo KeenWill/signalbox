@@ -13,7 +13,7 @@ The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
 
 The scheduler pass-admission override is verified against this PR
-(`agent/daemon-ops-overnight`).
+(`agent/scheduler-pass-pause`).
 
 The derivation of each session's workspace root from the configured root is
 verified against this PR (`agent/per-session-workspaces`).
@@ -542,14 +542,14 @@ fail-closed:
   text. (signalboxd erases the type before logging, as described above.)
 
 The optional `[scheduler]` table has exactly one `max_in_flight_passes` integer
-from 0 through 1,024. It replaces the scheduler's fixed 16-pass baseline for
-this daemon process. Omission keeps that baseline. A positive limit bounds
-concurrent authoritative per-session passes, not the durable queue: excess
-eligible sessions remain recorded and are admitted as passes finish. Zero pauses
+from 0 through 16. It replaces the scheduler's fixed 16-pass baseline for this
+daemon process. Omission keeps that baseline. A positive limit bounds concurrent
+authoritative per-session passes, not the durable queue: excess eligible
+sessions remain recorded and are admitted as passes finish. Zero pauses
 authoritative session execution while the scheduler task and the daemon's
 ingestion and process services remain live; durable queued work is unchanged. A
-value above 1,024, a mistyped value, or an unknown field fails startup as
-invalid scheduler settings.
+value above 16, a mistyped value, or an unknown field fails startup as invalid
+scheduler settings.
 
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`
