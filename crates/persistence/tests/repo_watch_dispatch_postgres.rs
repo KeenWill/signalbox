@@ -1976,6 +1976,36 @@ async fn active_activation_without_field_fingerprints_is_storage_corruption()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_a_removed_repository_validates_its_field_fingerprints()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await
+        .expect_err("a removed repository is retired against a validated stored shape");
+
+    assert!(storage_corruption(&error));
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_deactivation
+              WHERE repository = $1 AND rule_id = $2 AND rule_version = $3
+         )",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn retiring_an_omitted_rule_validates_its_field_fingerprints() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
     remove_field_fingerprints(&fixture).await?;
@@ -2104,7 +2134,10 @@ async fn a_refused_repository_leaves_every_other_repository_unmutated() -> Resul
     .bind(fixture.rule.id().as_str())
     .fetch_all(&fixture.pool)
     .await?;
-    assert_eq!(revisions, [(1, false)]);
+    assert_eq!(
+        revisions,
+        [(i64::try_from(fixture.rule.version().get())?, false)]
+    );
     Ok(())
 }
 
@@ -2135,7 +2168,13 @@ async fn version_bump_retires_the_old_rule_and_activates_the_replacement_after_h
     .bind(replacement.id().as_str())
     .fetch_all(&fixture.pool)
     .await?;
-    assert_eq!(revisions, [(1, true), (2, false)]);
+    assert_eq!(
+        revisions,
+        [
+            (i64::try_from(fixture.rule.version().get())?, true),
+            (i64::try_from(replacement.version().get())?, false)
+        ]
+    );
     assert_eq!(
         fixture
             .store

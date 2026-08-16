@@ -577,9 +577,9 @@ from its aggregate digest, so the one-time migration introducing fingerprints
 retires every such activation. No active activation lacks fingerprints and the
 daemon carries no path for that shape; a missing fingerprint under any
 non-deactivated activation is storage corruption, checked before reconciliation
-either compares that activation against configuration or retires it as
-unconfigured. The operator increments `version` once on that first upgraded
-boot.
+compares that activation against configuration, retires it as an unconfigured
+rule, or retires it because its whole repository left configuration. The
+operator increments `version` once on that first upgraded boot.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and

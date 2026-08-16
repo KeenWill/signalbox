@@ -1609,10 +1609,34 @@ pub enum RepoWatchRuleIdentityField {
 }
 
 impl RepoWatchRuleIdentityField {
+    /// The head of the inventory the fingerprint order follows.
     const fn first() -> Self {
         Self::MatcherEventKinds
     }
 
+    /// The inventory successor of `self`, or `None` for the tail.
+    ///
+    /// The chain is the first guard: each arm names its successor, so adding a
+    /// field makes this `match` non-exhaustive and the crate stops compiling
+    /// until the new field is slotted into it.
+    ///
+    /// Exhaustiveness alone constrains the *arms*, not reachability from the
+    /// head: a field added as `NewField => None` that no arm points at compiles
+    /// while never contributing a fingerprint chunk, which would let an
+    /// identity-relevant value change without a revision bump. The paired
+    /// `inventory_predecessor` match is the second guard, and
+    /// `every_identity_field_is_linked_into_the_inventory` checks the two are
+    /// mutual inverses, so a link written in one direction only fails rather
+    /// than silently shortening the inventory. That pairing is test-gated, so
+    /// it is named here in plain text rather than linked: a rustdoc link would
+    /// resolve only under `cfg(test)` and break the documentation build.
+    ///
+    /// The residual limit is the same one the event-kind inventory records: a
+    /// field orphaned in *both* directions cannot be detected here, because
+    /// safe Rust offers no way to enumerate an enum's variants without a
+    /// derive, and this crate deliberately takes no `strum`/`EnumIter`
+    /// dependency. Closing that last case is a dependency decision, not a code
+    /// change.
     const fn next(self) -> Option<Self> {
         match self {
             Self::MatcherEventKinds => Some(Self::MatcherRepository),
@@ -1631,6 +1655,34 @@ impl RepoWatchRuleIdentityField {
             Self::Actions => Some(Self::SingletonPer),
             Self::SingletonPer => Some(Self::CooldownSeconds),
             Self::CooldownSeconds => None,
+        }
+    }
+
+    /// The inventory predecessor of `self`, or `None` for the head.
+    ///
+    /// Paired with the successor chain so linkage is checked rather than
+    /// assumed. Exhaustive for the same reason that one is, and test-gated
+    /// because checking the pairing is its only purpose — CI always compiles
+    /// the tests, so a new field still cannot skip this match.
+    #[cfg(test)]
+    const fn inventory_predecessor(self) -> Option<Self> {
+        match self {
+            Self::MatcherEventKinds => None,
+            Self::MatcherRepository => Some(Self::MatcherEventKinds),
+            Self::MatcherBaseBranch => Some(Self::MatcherRepository),
+            Self::MatcherHeadBranchRegex => Some(Self::MatcherBaseBranch),
+            Self::MatcherTitleRegex => Some(Self::MatcherHeadBranchRegex),
+            Self::MatcherBodyRegex => Some(Self::MatcherTitleRegex),
+            Self::MatcherLabelsAnyOf => Some(Self::MatcherBodyRegex),
+            Self::MatcherLabelsAllOf => Some(Self::MatcherLabelsAnyOf),
+            Self::MatcherLabelsNoneOf => Some(Self::MatcherLabelsAllOf),
+            Self::MatcherDraft => Some(Self::MatcherLabelsNoneOf),
+            Self::MatcherAuthor => Some(Self::MatcherDraft),
+            Self::MatcherMergeableStateAnyOf => Some(Self::MatcherAuthor),
+            Self::MatcherConclusionAnyOf => Some(Self::MatcherMergeableStateAnyOf),
+            Self::Actions => Some(Self::MatcherConclusionAnyOf),
+            Self::SingletonPer => Some(Self::Actions),
+            Self::CooldownSeconds => Some(Self::SingletonPer),
         }
     }
 
@@ -2274,6 +2326,126 @@ mod tests {
             Some(RepoWatchEventKindNameV1::BaseAdvanced)
         );
     }
+
+    /// The inventory is pinned as a literal, and every edge of the successor
+    /// chain is checked against its predecessor one assertion at a time.
+    ///
+    /// Straight-line for the same reason the event-kind inventory beside it
+    /// is: each edge stays independently attributable, and the literal pins
+    /// order, membership, and count at once — adding a field fails here until
+    /// the claim is revisited, which is the point. Order is load-bearing
+    /// because it is the order stored fingerprints are compared in.
+    #[test]
+    fn every_identity_field_is_linked_into_the_inventory() {
+        let mut inventory = Vec::new();
+        let mut field = Some(RepoWatchRuleIdentityField::first());
+        while let Some(current) = field {
+            inventory.push(current);
+            field = current.next();
+        }
+
+        assert_eq!(
+            inventory,
+            vec![
+                RepoWatchRuleIdentityField::MatcherEventKinds,
+                RepoWatchRuleIdentityField::MatcherRepository,
+                RepoWatchRuleIdentityField::MatcherBaseBranch,
+                RepoWatchRuleIdentityField::MatcherHeadBranchRegex,
+                RepoWatchRuleIdentityField::MatcherTitleRegex,
+                RepoWatchRuleIdentityField::MatcherBodyRegex,
+                RepoWatchRuleIdentityField::MatcherLabelsAnyOf,
+                RepoWatchRuleIdentityField::MatcherLabelsAllOf,
+                RepoWatchRuleIdentityField::MatcherLabelsNoneOf,
+                RepoWatchRuleIdentityField::MatcherDraft,
+                RepoWatchRuleIdentityField::MatcherAuthor,
+                RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf,
+                RepoWatchRuleIdentityField::MatcherConclusionAnyOf,
+                RepoWatchRuleIdentityField::Actions,
+                RepoWatchRuleIdentityField::SingletonPer,
+                RepoWatchRuleIdentityField::CooldownSeconds,
+            ]
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherEventKinds.inventory_predecessor(),
+            None
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherRepository.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherEventKinds)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBaseBranch.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherRepository)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherHeadBranchRegex.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherBaseBranch)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherTitleRegex.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherHeadBranchRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBodyRegex.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherTitleRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAnyOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherBodyRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAllOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsNoneOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAllOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherDraft.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsNoneOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherAuthor.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherDraft)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherAuthor)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherConclusionAnyOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::Actions.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherConclusionAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::SingletonPer.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::Actions)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::CooldownSeconds.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::SingletonPer)
+        );
+    }
     use std::{error::Error, num::NonZeroU64, time::Duration};
 
     use expect_test::expect;
@@ -2288,8 +2460,8 @@ mod tests {
         RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
         RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
         RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
-        RepoWatchRuleId, RepoWatchRuleValidationError, RepoWatchRuleVersion,
-        RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+        RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleValidationError,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
         RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug,
     };
 

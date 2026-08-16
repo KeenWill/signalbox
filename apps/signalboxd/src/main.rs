@@ -496,7 +496,7 @@ fn repository_watch_rule_configuration_error(
         } => Some(HubModelConfigurationError::InvalidRepositoryWatchRule {
             rule: rule_id.as_str().to_owned(),
             reason: format!(
-                "field `version` reuses retired value {}",
+                "field `version` reuses retired value {}; increment it to a higher revision",
                 rule_version.get()
             ),
         }),

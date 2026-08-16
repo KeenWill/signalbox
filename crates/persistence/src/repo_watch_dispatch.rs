@@ -1081,6 +1081,38 @@ async fn retire_unconfigured_repositories(
             continue;
         }
         lock_text(transaction, &repository).await?;
+        // Removing a repository retires its rules through this path rather
+        // than through `reconcile_repository_rules`, so the same stored-shape
+        // validation runs here before any deactivation is appended.
+        let unfingerprinted: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM repo_watch_rule_activation AS activation
+                  WHERE activation.repository = $1
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_rule_deactivation AS deactivation
+                         WHERE deactivation.repository = activation.repository
+                           AND deactivation.rule_id = activation.rule_id
+                           AND deactivation.rule_version = activation.rule_version
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_rule_field_fingerprint AS fingerprint
+                         WHERE fingerprint.repository = activation.repository
+                           AND fingerprint.rule_id = activation.rule_id
+                           AND fingerprint.rule_version = activation.rule_version
+                    )
+             )",
+        )
+        .bind(&repository)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if unfingerprinted {
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "active repository-watch rule activation has no field fingerprints",
+            ));
+        }
         sqlx::query(
             "INSERT INTO repo_watch_rule_deactivation
                 (repository, rule_id, rule_version)
