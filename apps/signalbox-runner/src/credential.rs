@@ -1,6 +1,12 @@
 //! Dispatch-scoped runner credential resolution and output scrubbing.
 
-use std::{error::Error, fmt, fs::File, io::Read, os::unix::fs::MetadataExt as _};
+use std::{
+    error::Error,
+    fmt::{self, Write as _},
+    fs::File,
+    io::Read,
+    os::unix::fs::MetadataExt as _,
+};
 
 use rustix::{
     fs::{CWD, Mode, OFlags, openat},
@@ -26,6 +32,8 @@ pub struct ResolvedRunnerCredential {
     value: String,
     escaped_value: String,
     solidus_escaped_value: String,
+    unicode_escaped_value: String,
+    solidus_unicode_escaped_value: String,
 }
 
 impl ResolvedRunnerCredential {
@@ -59,14 +67,32 @@ impl ResolvedRunnerCredential {
         let replacement = if REDACTED.contains(&self.value)
             || REDACTED.contains(&self.escaped_value)
             || REDACTED.contains(&self.solidus_escaped_value)
+            || REDACTED.contains(&self.unicode_escaped_value)
+            || REDACTED.contains(&self.solidus_unicode_escaped_value)
         {
             ""
         } else {
             REDACTED
         };
-        text.replace(&self.solidus_escaped_value, replacement)
+        let redacted = text
+            .replace(&self.solidus_unicode_escaped_value, replacement)
+            .replace(&self.unicode_escaped_value, replacement)
+            .replace(&self.solidus_escaped_value, replacement)
             .replace(&self.escaped_value, replacement)
-            .replace(&self.value, replacement)
+            .replace(&self.value, replacement);
+        if self.contains_secret_spelling(&redacted) {
+            String::new()
+        } else {
+            redacted
+        }
+    }
+
+    fn contains_secret_spelling(&self, text: &str) -> bool {
+        text.contains(&self.value)
+            || text.contains(&self.escaped_value)
+            || text.contains(&self.solidus_escaped_value)
+            || text.contains(&self.unicode_escaped_value)
+            || text.contains(&self.solidus_unicode_escaped_value)
     }
 }
 
@@ -79,6 +105,8 @@ impl fmt::Debug for ResolvedRunnerCredential {
             .field("value", &"<redacted>")
             .field("escaped_value", &"<redacted>")
             .field("solidus_escaped_value", &"<redacted>")
+            .field("unicode_escaped_value", &"<redacted>")
+            .field("solidus_unicode_escaped_value", &"<redacted>")
             .finish()
     }
 }
@@ -164,7 +192,7 @@ pub fn resolve_runner_credential(
     let metadata = file.metadata().map_err(|_| unavailable(profile))?;
     let facts = CredentialFileFacts {
         regular: metadata.is_file(),
-        owner: metadata.uid(),
+        user_id: metadata.uid(),
         mode: metadata.mode() & 0o7777,
         bytes: metadata.len(),
     };
@@ -196,13 +224,32 @@ pub fn resolve_runner_credential(
         .ok_or_else(|| unavailable(profile))?
         .to_owned();
     let solidus_escaped_value = escaped_value.replace('/', "\\/");
+    let unicode_escaped_value = escape_json_non_ascii(&escaped_value);
+    let solidus_unicode_escaped_value = unicode_escaped_value.replace('/', "\\/");
     Ok(ResolvedRunnerCredential {
         profile: profile.clone(),
         injection_env: configured.injection_env().to_owned(),
         value,
         escaped_value,
         solidus_escaped_value,
+        unicode_escaped_value,
+        solidus_unicode_escaped_value,
     })
+}
+
+fn escape_json_non_ascii(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_ascii() {
+            escaped.push(character);
+        } else {
+            let mut units = [0; 2];
+            for unit in character.encode_utf16(&mut units) {
+                write!(escaped, "\\u{unit:04x}").expect("writing to a string cannot fail");
+            }
+        }
+    }
+    escaped
 }
 
 fn unavailable(profile: &ProfileName) -> RunnerCredentialResolutionError {
@@ -216,14 +263,14 @@ fn unavailable(profile: &ProfileName) -> RunnerCredentialResolutionError {
 #[derive(Clone, Copy)]
 struct CredentialFileFacts {
     regular: bool,
-    owner: u32,
+    user_id: u32,
     mode: u32,
     bytes: u64,
 }
 
 fn credential_file_facts_are_valid(facts: CredentialFileFacts, effective_user: u32) -> bool {
     facts.regular
-        && facts.owner == effective_user
+        && facts.user_id == effective_user
         && facts.mode == 0o600
         && facts.bytes <= MAX_CREDENTIAL_BYTES as u64
 }
@@ -275,7 +322,7 @@ injection_env = "{ENVIRONMENT}"
     fn write_credential(path: &Path, value: &[u8]) {
         fs::write(path, value).expect("the synthetic credential is written");
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .expect("the synthetic credential has exact owner-only mode");
+            .expect("the synthetic credential has exact user-only mode");
     }
 
     fn unavailable_error(path: &Path) -> RunnerCredentialResolutionError {
@@ -311,7 +358,23 @@ injection_env = "{ENVIRONMENT}"
         );
         assert_eq!(
             format!("{resolved:?}"),
-            "ResolvedRunnerCredential { profile: ProfileName(\"github-runner\"), injection_env: \"GH_TOKEN\", value: \"<redacted>\", escaped_value: \"<redacted>\", solidus_escaped_value: \"<redacted>\" }"
+            "ResolvedRunnerCredential { profile: ProfileName(\"github-runner\"), injection_env: \"GH_TOKEN\", value: \"<redacted>\", escaped_value: \"<redacted>\", solidus_escaped_value: \"<redacted>\", unicode_escaped_value: \"<redacted>\", solidus_unicode_escaped_value: \"<redacted>\" }"
+        );
+    }
+
+    /// INV-035: ASCII-only JSON Unicode escapes cannot expose the credential.
+    #[test]
+    fn inv_035_redaction_scrubs_the_unicode_escaped_json_form() {
+        let directory = TempDir::new().expect("a synthetic credential directory exists");
+        let path = directory.path().join("credential");
+        let value = "synthetic-é-😀";
+        write_credential(&path, value.as_bytes());
+        let resolved = resolve_runner_credential(&configuration(&path), &profile())
+            .expect("the synthetic credential resolves");
+
+        assert_eq!(
+            resolved.redact_text(r"json=synthetic-\u00e9-\ud83d\ude00".to_owned()),
+            "json=[redacted]"
         );
     }
 
@@ -355,6 +418,19 @@ injection_env = "{ENVIRONMENT}"
             .expect("the marker-equal synthetic credential resolves");
 
         assert_eq!(resolved.redact_text(value.to_owned()), "");
+    }
+
+    /// INV-035: overlapping matches cannot leave a credential after redaction.
+    #[test]
+    fn inv_035_redaction_rechecks_the_final_output() {
+        let directory = TempDir::new().expect("a synthetic credential directory exists");
+        let path = directory.path().join("credential");
+        let value = "red";
+        write_credential(&path, value.as_bytes());
+        let resolved = resolve_runner_credential(&configuration(&path), &profile())
+            .expect("the synthetic credential resolves");
+
+        assert_eq!(resolved.redact_text("rrrredededed".to_owned()), "");
     }
 
     /// INV-035: every physical resolution reopens the configured path so rotation is visible.
@@ -522,10 +598,10 @@ injection_env = "{ENVIRONMENT}"
     }
 
     #[test]
-    fn metadata_facts_reject_a_wrong_owner() {
+    fn metadata_facts_reject_a_wrong_user_id() {
         let facts = CredentialFileFacts {
             regular: true,
-            owner: 41,
+            user_id: 41,
             mode: 0o600,
             bytes: 32,
         };

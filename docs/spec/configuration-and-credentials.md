@@ -2812,7 +2812,7 @@ checked profile. Each call reopens that profile's configured path without
 following symlinks, requires a regular file owned by the effective user with
 exact `0600` mode, reads at most 65,536 bytes, and drops trailing `\n` and `\r`
 bytes while retaining all others. Empty, NUL-containing, unreadable, oversized,
-wrong-owner, wrong-mode, non-UTF-8, or nonregular values are one sanitized
+wrong-user-ID, wrong-mode, non-UTF-8, or nonregular values are one sanitized
 unavailable failure. The resolved carrier is non-cloneable and debug-redacted.
 It projects the value only into the reusable restricted environment channel and
 scrubs the exact value and its JSON-string-escaped form from complete captured
