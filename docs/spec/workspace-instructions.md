@@ -143,7 +143,8 @@ Every registered bundle carries:
   directory scope;
 - for a skill, its validated portable name and description;
 - source byte length; and
-- a versioned SHA-256 source-content hash.
+- a versioned SHA-256 source-content hash, whose complete preimage is fixed
+  under [canonical digest bytes](#canonical-digest-bytes).
 
 Each discovery snapshot separately retains its ordered candidate link to the
 registered identity. A registration may therefore be observed by several scans
@@ -166,11 +167,17 @@ frontmatter ends at the next line containing exactly `---`; lines may end in LF
 or CRLF, but mixed line endings are rejected. Between those delimiters every
 nonempty line is one top-level `key: value` pair. A key is ASCII letters or
 hyphen, a single ASCII space follows the colon, and a value is a nonempty
-single-line UTF-8 plain scalar with no leading or trailing whitespace, NUL,
-colon, number sign, quotation mark, reverse solidus, or YAML indicator.
-Duplicate keys, comments, quoting, escapes, tags, anchors, aliases, flow
-collections, multiline scalars, nested mappings, and sequences are rejected
-rather than delegated to a library-selected YAML revision.
+single-line UTF-8 plain scalar with no leading or trailing whitespace. The
+forbidden characters are enumerated rather than delegated to the phrase "YAML
+indicator", so that one reading is possible. A value contains no NUL, colon,
+number sign, quotation mark, apostrophe, grave accent, or reverse solidus at any
+position, and its first character is none of `-`, `?`, `,`, `[`, `]`, `{`, `}`,
+`&`, `*`, `!`, `|`, `>`, `%`, or `@`. An interior or trailing hyphen is
+therefore permitted, which is what the `name` grammar below requires of a
+hyphenated skill directory such as `my-skill`. Duplicate keys, comments,
+quoting, escapes, tags, anchors, aliases, flow collections, multiline scalars,
+nested mappings, and sequences are rejected rather than delegated to a
+library-selected YAML revision.
 
 Exactly one `name` and one `description` are required. `name` is 1 through 64
 ASCII bytes, uses only lowercase letters, digits, and single interior hyphens,
@@ -269,16 +276,21 @@ root-relative source and scope paths. The root reference is the closed
 `workspace` kind or `configured` plus `ConfiguredInstructionRootId`; neither it
 nor any other result field contains a canonical absolute path. For `AGENTS.md`,
 an empty scope means the root and a nested scope applies only to that directory
-and descendants. Catalog order is root, then increasing scope depth, then raw
-relative path. The provider-safe root comparator orders `workspace` before
-`configured`; all workspace bundles have the same root key, while configured
-roots compare by the 32 raw bytes of `ConfiguredInstructionRootId` in ascending
-lexicographic order. Canonical absolute paths never participate. This comparator
-is used wherever this page says root or projection order, including catalog
-order, projection order, admitted-set records, and manifest records. An ancestor
-document precedes a descendant document, so a deliberately admitted descendant
-is the later, more specific instruction; sibling scopes never apply to each
-other.
+and descendants. One canonical order serves the whole page, and it is total over
+both kinds: every `agent_document` precedes every `agent_skill`; documents order
+by root, then increasing scope depth, then raw relative path; and skills, which
+carry no directory scope, order among themselves by the 16 raw bytes of their
+`InstructionBundleId` in ascending lexicographic order. No implementation
+invents a scope depth or a root placement for a skill, so a snapshot has exactly
+one page ordinal and cursor sequence. The provider-safe root comparator orders
+`workspace` before `configured`; all workspace bundles have the same root key,
+while configured roots compare by the 32 raw bytes of
+`ConfiguredInstructionRootId` in ascending lexicographic order. Canonical
+absolute paths never participate. This order is used wherever this page says
+catalog order or projection order, including admitted-set records and manifest
+records. An ancestor document precedes a descendant document, so a deliberately
+admitted descendant is the later, more specific instruction; sibling scopes
+never apply to each other.
 
 Version one returns at most 32 identities and 524,288 catalog-result bytes per
 page. Those bytes are compact UTF-8 JSON with object keys sorted by raw ASCII
@@ -437,6 +449,17 @@ rendered-content hash covers this complete escaped wrapper. These labels
 distinguish untrusted repository text from daemon authority and make adapter
 output byte-stable without disclosing host filesystem layout.
 
+The region's own bytes are equally fixed, so one manifest cannot correspond to
+several model inputs. The region is the ordered per-bundle wrappers concatenated
+with exactly one LF between each consecutive pair, and with no leading byte
+before the first wrapper and no trailing byte after the last — neither direct
+concatenation nor a blank-line separator. An empty admitted set renders a
+zero-byte region. The region's byte count, which the aggregate budget and every
+declared transport capacity below are measured against, therefore counts those
+separator bytes as well as the wrappers, and it is a function of the admitted
+set alone: replaying one manifest's rendered rows in projection order
+reconstructs the exact bytes the provider received.
+
 Two designs were considered:
 
 - **Append to transcript.** Admission preserves a stable provider prompt-cache
@@ -476,6 +499,15 @@ and lengths are eight-byte big-endian values; text is an eight-byte byte length
 followed by exact UTF-8 bytes; closed variants are the length-framed lowercase
 names written on this page.
 
+The versioned source-content hash carried by every registered bundle, written
+`source_sha256` in the wrapper above, is SHA-256 over
+`signalbox-instruction-source-v1`, then the source byte length, then the exact
+registered source bytes — the file's exact bytes for an agent document and the
+exact `SKILL.md` bytes for a version-one skill. It is not the bare SHA-256 of
+those bytes, and the wrapper field name must not be read as claiming otherwise;
+a later version changes the separator rather than the field. Because
+registration rejects a non-UTF-8 source, the framed bytes are always UTF-8.
+
 The eligibility hash is SHA-256 over `signalbox-instruction-eligibility-v1`
 followed by eligible bundle UUID bytes in ascending UUID-byte order. The empty
 hash is therefore the separator alone.
@@ -488,16 +520,21 @@ all-zero eight-byte count. Including admission identity distinguishes two
 budgeted renderings of one registered bundle.
 
 The manifest hash begins with `signalbox-turn-instruction-manifest-v1`, then
-session UUID, turn UUID, the 32-byte eligibility hash, and its boundary: literal
-`turn_start`, or literal `model_call` plus model-call UUID. Rendered bundle
-records follow in projection order. Each is bundle UUID, length-framed kind,
-length-framed canonical source path, length-framed authorizing-root kind,
-length-framed root-relative source label, 32-byte source hash, 32-byte rendered
-hash, rendered byte length, length-framed admission route, then one byte `0` for
-no truncation or byte `1` plus the truncation boundary as an unsigned length.
-Fixed-width identities and digests plus length framing make the representation
-uniquely decodable. The empty turn-start vector ends immediately after literal
-`turn_start`.
+session UUID, turn UUID, the 32-byte eligibility hash, the 32-byte admitted-set
+hash of the head this manifest snapshotted, and its boundary: literal
+`turn_start`, or literal `model_call` plus model-call UUID. The admitted-set
+hash is authenticated here because it covers each admission UUID while the
+rendered rows below do not: without it, two distinct admitted-set heads whose
+rendered evidence is identical would produce the same manifest hash, and
+reconstitution could not prove which head activation actually snapshotted.
+Rendered bundle records follow in projection order. Each is bundle UUID,
+length-framed kind, length-framed canonical source path, length-framed
+authorizing-root kind, length-framed root-relative source label, 32-byte source
+hash, 32-byte rendered hash, rendered byte length, length-framed admission
+route, then one byte `0` for no truncation or byte `1` plus the truncation
+boundary as an unsigned length. Fixed-width identities and digests plus length
+framing make the representation uniquely decodable. The empty turn-start vector
+ends immediately after literal `turn_start`.
 
 ## Budgets and rendered content
 
@@ -513,17 +550,18 @@ length, source truncation boundary, and retained exact wrapper bytes are
 evidence.
 
 Version one has a fixed 65,536-byte aggregate workspace-instruction-region
-budget, including every wrapper. A provider model with a smaller instruction
-capacity or no typed system-instruction transport is not eligible for this
-capability. A successful read serializes on the admitted-set head and preflights
-the current region plus its candidate against that aggregate budget and the
-active turn's pinned model target before committing its receipt or admission.
-Concurrent and same-batch reads therefore observe one ordered predecessor and
-cannot commit a set whose instruction region alone is unrenderable. Aggregate
-exhaustion is a typed failed read and changes no durable admitted set. The
-owning model catalog declares transport support and its byte capacity for every
-selectable and serving target; no token-window conversion or adapter inference
-supplies this value.
+budget, measured over the region's exact serialized bytes and so including every
+wrapper and every separator between wrappers. A provider model with a smaller
+instruction capacity or no typed system-instruction transport is not eligible
+for this capability. A successful read serializes on the admitted-set head and
+preflights the current region plus its candidate against that aggregate budget
+and the active turn's pinned model target before committing its receipt or
+admission. Concurrent and same-batch reads therefore observe one ordered
+predecessor and cannot commit a set whose instruction region alone is
+unrenderable. Aggregate exhaustion is a typed failed read and changes no durable
+admitted set. The owning model catalog declares transport support and its byte
+capacity for every selectable and serving target; no token-window conversion or
+adapter inference supplies this value.
 
 Later session-default replacement cannot strand existing admissions. The owning
 [session-default contract](sessions-and-transcript.md#session-defaults-and-replacement)
@@ -554,7 +592,8 @@ implementation slice has no admission and stores only the turn-start manifest.
 
 Each manifest records:
 
-- session and turn identities and the eligibility-set hash;
+- session and turn identities, the eligibility-set hash, and the admitted-set
+  hash of the head it snapshotted;
 - its call boundary, or `turn_start` before a call-specific successor;
 - for each rendered bundle in projection order, bundle identity, kind, canonical
   source path, provider-visible root kind and root-relative source label,

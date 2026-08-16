@@ -477,8 +477,12 @@ the session's admitted-set head and atomically appends the
 with the receipt-only completed result. A stale head, failed read, or failed
 admission validation rolls back both effects. Replay of an already committed
 request returns the recorded receipt and admission link without appending either
-again; a conflicting receipt or link is corruption. No present tool supplies
-this effect until an implementing child advances the owning workspace contract.
+again; a conflicting receipt or link is corruption. That head lock's position in
+the repository-wide order and its mode belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which
+carries it in the same inventory as this transaction's scheduler lock; this page
+states that the lock is taken, never where or how. No present tool supplies this
+effect until an implementing child advances the owning workspace contract.
 
 The runner durably spools a terminal evidence envelope until `result_recorded`.
 A process exit, timeout, supervisor loss, or channel loss after claim is not a
