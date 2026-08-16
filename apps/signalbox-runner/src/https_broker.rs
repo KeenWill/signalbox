@@ -6,9 +6,10 @@ use std::{
     fmt,
     future::Future,
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
 };
 
+use signalbox_network_policy::is_public_destination_address;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::AllowedNetworkHost;
@@ -161,7 +162,7 @@ where
     where
         Client: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        tokio::time::timeout_at(deadline, self.tunnel_before_deadline(client))
+        tokio::time::timeout_at(deadline, self.tunnel_before_deadline(client, deadline))
             .await
             .map_err(|_| HttpsBrokerError::TimedOut)?
     }
@@ -169,6 +170,7 @@ where
     async fn tunnel_before_deadline<Client>(
         &self,
         mut client: Client,
+        deadline: tokio::time::Instant,
     ) -> Result<(), HttpsBrokerError>
     where
         Client: AsyncRead + AsyncWrite + Unpin + Send,
@@ -194,10 +196,13 @@ where
                 "host resolved outside the destination count bound",
             )));
         }
-        if addresses.iter().any(|address| !is_public(*address)) {
+        if addresses
+            .iter()
+            .any(|address| !is_public_destination_address(*address))
+        {
             return Err(HttpsBrokerError::NonPublicDestination);
         }
-        let mut upstream = connect_resolved(&self.connector, &addresses).await?;
+        let mut upstream = connect_resolved(&self.connector, &addresses, deadline).await?;
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await
@@ -223,18 +228,31 @@ where
 async fn connect_resolved<Connector>(
     connector: &Connector,
     addresses: &[IpAddr],
+    deadline: tokio::time::Instant,
 ) -> Result<Connector::Stream, HttpsBrokerError>
 where
     Connector: HttpsConnector,
 {
     let mut last_error = None;
-    for address in addresses {
-        match connector
-            .connect(SocketAddr::new(*address, HTTPS_PORT))
-            .await
+    for (index, address) in addresses.iter().enumerate() {
+        let attempts_left = addresses.len() - index;
+        let attempt_count = u32::try_from(attempts_left).unwrap_or(u32::MAX);
+        let attempt_budget =
+            deadline.saturating_duration_since(tokio::time::Instant::now()) / attempt_count;
+        match tokio::time::timeout(
+            attempt_budget,
+            connector.connect(SocketAddr::new(*address, HTTPS_PORT)),
+        )
+        .await
         {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last_error = Some(error),
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                last_error = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "resolved destination connection attempt timed out",
+                ));
+            }
         }
     }
     Err(HttpsBrokerError::Connect(last_error.unwrap_or_else(|| {
@@ -251,7 +269,13 @@ where
         if request.len() == CONNECT_HEADER_BYTES {
             return Err(HttpsBrokerError::InvalidConnect);
         }
-        let byte = client.read_u8().await.map_err(HttpsBrokerError::Io)?;
+        let byte = match client.read_u8().await {
+            Ok(byte) => byte,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(HttpsBrokerError::InvalidConnect);
+            }
+            Err(error) => return Err(HttpsBrokerError::Io(error)),
+        };
         request.push(byte);
         if request.ends_with(b"\r\n\r\n") {
             return Ok(request);
@@ -320,40 +344,6 @@ fn canonical_dns_name(hostname: &str) -> bool {
                 && !label.ends_with('-')
         })
         && hostname.parse::<IpAddr>().is_err()
-}
-
-fn is_public(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => is_public_v4(address),
-        IpAddr::V6(address) => is_public_v6(address),
-    }
-}
-
-fn is_public_v4(address: Ipv4Addr) -> bool {
-    let [first, second, third, _fourth] = address.octets();
-    !(first == 0
-        || first == 10
-        || first == 127
-        || first >= 224
-        || (first == 100 && (64..=127).contains(&second))
-        || (first == 169 && second == 254)
-        || (first == 172 && (16..=31).contains(&second))
-        || (first == 192 && second == 0 && third == 0)
-        || (first == 192 && second == 0 && third == 2)
-        || (first == 192 && second == 88 && third == 99)
-        || (first == 192 && second == 168)
-        || (first == 198 && (second == 18 || second == 19))
-        || (first == 198 && second == 51 && third == 100)
-        || (first == 203 && second == 0 && third == 113))
-}
-
-fn is_public_v6(address: Ipv6Addr) -> bool {
-    let segments = address.segments();
-    let in_global_unicast = (0x2000..=0x3fff).contains(&segments[0]);
-    let special_2001 = segments[0] == 0x2001 && (segments[1] <= 0x01ff || segments[1] == 0x0db8);
-    let transition_6to4 = segments[0] == 0x2002;
-    let documentation_3fff = segments[0] == 0x3fff && segments[1] <= 0x0fff;
-    in_global_unicast && !special_2001 && !transition_6to4 && !documentation_3fff
 }
 
 struct CapturedClientHello {
@@ -498,7 +488,11 @@ fn take_u16(input: &[u8], cursor: &mut usize) -> Result<u16, HttpsBrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        future::pending,
+        net::{Ipv4Addr, Ipv6Addr},
+        sync::{Arc, Mutex},
+    };
 
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 
@@ -621,15 +615,100 @@ mod tests {
 
     #[test]
     fn non_public_resolution_classes_fail_closed() {
-        assert!(!is_public(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert!(!is_public(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
-        assert!(!is_public(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(!is_public(IpAddr::V6(
+        assert!(!is_public_destination_address(IpAddr::V4(Ipv4Addr::new(
+            10, 0, 0, 1
+        ))));
+        assert!(!is_public_destination_address(IpAddr::V4(Ipv4Addr::new(
+            100, 64, 0, 1
+        ))));
+        assert!(!is_public_destination_address(IpAddr::V6(
+            Ipv6Addr::LOCALHOST
+        )));
+        assert!(!is_public_destination_address(IpAddr::V6(
             "2001:db8::1"
                 .parse()
                 .expect("the documentation address fixture parses")
         )));
-        assert!(is_public(PUBLIC_DESTINATION));
+        assert!(is_public_destination_address(PUBLIC_DESTINATION));
+    }
+
+    #[derive(Clone)]
+    struct BlackholeThenConnect {
+        blackhole: IpAddr,
+        stream: Arc<Mutex<Option<DuplexStream>>>,
+        destinations: Arc<Mutex<Vec<SocketAddr>>>,
+    }
+
+    impl HttpsConnector for BlackholeThenConnect {
+        type Stream = DuplexStream;
+
+        async fn connect(&self, destination: SocketAddr) -> io::Result<Self::Stream> {
+            self.destinations
+                .lock()
+                .expect("the destination fixture is available")
+                .push(destination);
+            if destination.ip() == self.blackhole {
+                pending().await
+            }
+            Ok(self
+                .stream
+                .lock()
+                .expect("the upstream fixture is available")
+                .take()
+                .expect("one upstream fixture is configured"))
+        }
+    }
+
+    #[tokio::test]
+    async fn blackholed_destination_leaves_time_for_the_next_address() {
+        let blackhole = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35));
+        let expected_blackhole = "93.184.216.35:443"
+            .parse()
+            .expect("the blackholed destination fixture parses");
+        let expected_reachable = "93.184.216.34:443"
+            .parse()
+            .expect("the reachable destination fixture parses");
+        let (broker_stream, _upstream_stream) = tokio::io::duplex(4096);
+        let destinations = Arc::new(Mutex::new(Vec::new()));
+        let connector = BlackholeThenConnect {
+            blackhole,
+            stream: Arc::new(Mutex::new(Some(broker_stream))),
+            destinations: destinations.clone(),
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
+
+        let connected =
+            connect_resolved(&connector, &[blackhole, PUBLIC_DESTINATION], deadline).await;
+        let observed = destinations
+            .lock()
+            .expect("the destination fixture is available")
+            .clone();
+
+        assert!(connected.is_ok());
+        assert_eq!(observed, vec![expected_blackhole, expected_reachable]);
+    }
+
+    #[tokio::test]
+    async fn truncated_connect_request_is_invalid_admission() {
+        let (broker, _upstream, destinations) = broker_fixture(vec![PUBLIC_DESTINATION]);
+        let (mut client, broker_client) = tokio::io::duplex(4096);
+        let client_task = async move {
+            client
+                .write_all(b"CONNECT github.com:443 HTTP/1.1\r\nHost:")
+                .await
+                .expect("the partial CONNECT request writes");
+            client.shutdown().await.expect("the partial request closes");
+        };
+        let broker_task = broker.tunnel(broker_client, tunnel_deadline());
+        let ((), rejected) = tokio::join!(client_task, broker_task);
+
+        assert!(matches!(rejected, Err(HttpsBrokerError::InvalidConnect)));
+        assert!(
+            destinations
+                .lock()
+                .expect("the destination fixture is available")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -750,16 +829,16 @@ mod tests {
             .lock()
             .expect("the destination fixture is available")
             .clone();
+        let expected_destination = "93.184.216.34:443"
+            .parse()
+            .expect("the pinned HTTPS destination fixture parses");
 
         assert_eq!(response, expected_connect_response);
         assert_eq!(reply, expected_upstream_reply);
         assert_eq!(observed_hello, expected_hello);
         assert_eq!(payload, expected_client_payload);
         assert!(tunneled.is_ok());
-        assert_eq!(
-            observed_destinations,
-            vec![SocketAddr::new(PUBLIC_DESTINATION, HTTPS_PORT)]
-        );
+        assert_eq!(observed_destinations, vec![expected_destination]);
     }
 
     #[tokio::test]
