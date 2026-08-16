@@ -258,9 +258,12 @@ BEGIN
                AND deactivation.rule_id = batch.rule_id
                AND deactivation.rule_version = batch.rule_version
        )
-       -- A later close or merge makes outstanding work stale. The cutoff
-       -- event itself is the fact a rule may match, not work invalidated by
-       -- that fact, so a dispatch of the latest cutoff keeps its requeue.
+       -- A later close or merge makes outstanding work stale. The cutoff event
+       -- itself is the fact a rule may match, not work invalidated by that
+       -- fact, so a dispatch of the latest cutoff keeps its requeue -- but only
+       -- while that cutoff is still latest. A reopen makes the close obsolete,
+       -- and requeueing it would run close automation against an open pull
+       -- request, so the opened arm admits nonterminal origins only.
        AND (
             origin.target_kind <> 'pull_request'
             OR EXISTS (
@@ -280,7 +283,13 @@ BEGIN
                                   lifecycle.event_ordinal DESC
                          LIMIT 1
                   ) AS latest_lifecycle
-                 WHERE latest_lifecycle.event_kind = 'pull_request_opened'
+                 WHERE (
+                        latest_lifecycle.event_kind = 'pull_request_opened'
+                        AND origin.event_kind NOT IN (
+                            'pull_request_closed',
+                            'pull_request_merged'
+                        )
+                 )
                     OR latest_lifecycle.event_id = origin.event_id
             )
        )

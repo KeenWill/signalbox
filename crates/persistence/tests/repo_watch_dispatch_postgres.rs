@@ -101,6 +101,10 @@ const SUCCESSOR_GOAL_STOP_COMMAND_ID: u128 = 0x59_500;
 const RELEASED_ACHIEVEMENT_REQUEST_ID: u128 = 0x59_600;
 const SUCCESSOR_GOAL_INPUT_ID: u128 = 0x59_700;
 const SUCCESSOR_GOAL_TURN_ID: u128 = 0x59_800;
+const REOPENED_CLOSE_OPENED_EVENT_ID: u128 = 0x5a_000;
+const REOPENED_CLOSE_CLOSED_EVENT_ID: u128 = 0x5a_100;
+const REOPENED_CLOSE_REOPENED_EVENT_ID: u128 = 0x5a_200;
+const REOPENED_CLOSE_STOP_COMMAND_ID: u128 = 0x5a_300;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -409,6 +413,30 @@ fn branch_observation() -> Result<RepoWatchObservation, Box<dyn Error>> {
             branch_heads: Vec::new(),
         })?,
     ))
+}
+
+fn closed_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::try_pull_request(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(value)),
+        repository()?,
+        context(head)?,
+        RepoWatchEventKindV1::PullRequestClosed,
+    )?)
+}
+
+fn closed_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    Ok(RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::PullRequestClosed],
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?)
 }
 
 fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
@@ -1603,6 +1631,78 @@ async fn achieved_branch_dispatch_seals_without_requeue() -> Result<(), Box<dyn 
         .await?;
 
     assert_eq!(releases, 1);
+    assert_eq!(outstanding_obligation_count(&pool).await?, 0);
+    Ok(())
+}
+
+/// The requeue a terminal-event dispatch owes lasts only while its own cutoff
+/// is the latest lifecycle. A reopen makes the close obsolete, and requeueing it
+/// would run close automation against an open pull request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn reopening_a_pull_request_drops_a_stopped_close_dispatch_requeue()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let rule = closed_event_rule()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
+                    vec![opened_event(REOPENED_CLOSE_OPENED_EVENT_ID, INITIAL_HEAD)?],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let closed =
+        lifecycle_observation(context(SECOND_HEAD)?, RepoWatchPullRequestLifecycle::Closed)?;
+    let second_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    Some(first_generation),
+                    RepoWatchCursorCandidate::new(closed.clone()),
+                    vec![closed_event(REOPENED_CLOSE_CLOSED_EVENT_ID, SECOND_HEAD)?],
+                ),
+            )
+            .await?,
+    );
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the close-event rule sees the close event");
+    let (_dispatch, sessions) = dispatched(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &closed,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    );
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(second_generation),
+                RepoWatchCursorCandidate::new(observation(context(THIRD_HEAD)?)?),
+                vec![opened_event(REOPENED_CLOSE_REOPENED_EVENT_ID, THIRD_HEAD)?],
+            ),
+        )
+        .await?;
+    withdraw_dispatched_goal(&pool, sessions[0], REOPENED_CLOSE_STOP_COMMAND_ID).await?;
+
     assert_eq!(outstanding_obligation_count(&pool).await?, 0);
     Ok(())
 }
