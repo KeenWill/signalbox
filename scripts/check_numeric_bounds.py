@@ -6,7 +6,10 @@ constant under ``crates/*/src`` and ``apps/*/src`` whose name contains one of
 the boundary tokens in ``BOUNDARY_TOKENS``. Ordinary Rust spellings of those
 types count: a qualified path such as ``std::time::Duration`` and the signed
 ``NonZeroI*`` family are inventoried alongside their bare and unsigned
-spellings, so no accepted spelling carries an undeclared bound past the gate.
+spellings, so no accepted spelling carries an undeclared bound past the gate. A
+trait's associated constant counts even with no initializer, because the trait
+is where that bound's contract is stated and its implementors may sit outside
+the blocking scope entirely.
 
 Test-only modules are inventoried but do not gate because their constants
 describe fixtures, not runtime safety. A module written ``#[cfg(test)] mod
@@ -123,8 +126,13 @@ NUMERIC_TYPE = (
 )
 CONSTANT = re.compile(
     rf"(?m)^(?P<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?const\s+"
-    rf"(?P<name>[A-Z][A-Z0-9_]*)\s*:\s*(?P<type>{NUMERIC_TYPE})\s*=\s*"
+    rf"(?P<name>[A-Z][A-Z0-9_]*)\s*:\s*(?P<type>{NUMERIC_TYPE})\s*(?P<form>[=;])"
 )
+USE_STATEMENT = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s[^;]*;")
+LOCAL_USE = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:self|super)\s*::")
+# Unlike a reference in an initializer, an imported name is looked for through
+# its path, so this deliberately matches the qualified spelling too.
+IMPORTED_NAME = re.compile(r"\b(?P<name>[A-Z][A-Z0-9_]*)\b")
 DIRECT_DECLARATION = re.compile(
     r"^\s*// numeric-bound: (?P<kind>ceiling|tunable|not-a-bound) - "
     r"(?P<rationale>\S.*)$"
@@ -157,6 +165,15 @@ class Bound:
     initializer: str
     annotation: str
     test_only: bool
+
+
+@dataclass(frozen=True)
+class Import:
+    """One name a `use` declaration binds, and the block it binds it in."""
+
+    path: Path
+    name: str
+    scope: tuple[int, int] | None
 
 
 def blank_non_code(text: str) -> str:
@@ -342,16 +359,21 @@ def declared_modules(
     inline `mod name { ... }` moves the declarations inside it into
     ``directory/name``; a `#[path]` names its file relative to the declaring
     file's own directory and then resolves that file's children beside it,
-    rather than beneath its stem. Attributes are matched against ``code`` so a
+    rather than beneath its stem. A declaration standing inside a `#[cfg(test)]`
+    inline module is gated by that module even with no attribute of its own.
+    Attributes are matched against ``code`` so a
     commented-out declaration cannot claim a file, then re-read from ``text``
     because blanking has emptied the ``#[path]`` string literal.
     """
     inline = inline_module_ranges(code)
+    enclosing_test_modules = test_ranges(code)
     found = []
     for match in DECLARED_MODULE.finditer(code):
         if match.group("form") != ";":
             continue
-        gated = requires_test(match.group("attributes"))
+        gated = requires_test(match.group("attributes")) or in_ranges(
+            match.start(), enclosing_test_modules
+        )
         attributes = text[match.start("attributes") : match.end("attributes")]
         explicit = PATH_ATTRIBUTE.search(attributes)
         if explicit is not None:
@@ -407,6 +429,48 @@ def initializer_end(code: str, start: int) -> int:
     return len(code)
 
 
+def preceding_attributes(lines: list[str], line: int) -> str:
+    """Join the attribute lines standing immediately above ``line``.
+
+    Read from raw source, where a line beginning `#[` is an attribute and a
+    commented-out one begins `//` and is not collected. This is what makes an
+    item-level `#[cfg(test)] const ...` test-only without a module around it.
+    """
+    collected = []
+    index = line - 2
+    while index >= 0 and lines[index].lstrip().startswith("#["):
+        collected.append(lines[index].strip())
+        index -= 1
+    return "\n".join(collected)
+
+
+def imported_names(path: Path, code: str, blocks: list[tuple[int, int]]) -> list[Import]:
+    """Report the shouting-case names the file's `use` declarations bind.
+
+    A `use` that binds the name a derived declaration reads shadows any
+    declaration further out, and this scan cannot follow it out of the file, so
+    recording where each import is in scope is what lets the owner resolution
+    refuse rather than reach past it. A `self::` or `super::` path is skipped:
+    it re-binds an item from an enclosing module, which within one file is the
+    declaration resolution would have reached anyway. Glob imports bind nothing
+    nameable here, and a `super::super::` path that climbs out of the file is
+    treated as local; both are stated limits.
+    """
+    imports = []
+    for statement in USE_STATEMENT.finditer(code):
+        if LOCAL_USE.match(statement.group()) is not None:
+            continue
+        for match in IMPORTED_NAME.finditer(statement.group()):
+            imports.append(
+                Import(
+                    path=path,
+                    name=match.group("name"),
+                    scope=innermost_scope(statement.start(), blocks),
+                )
+            )
+    return imports
+
+
 def is_boundary_name(name: str) -> bool:
     return bool(BOUNDARY_TOKENS.intersection(name.split("_")))
 
@@ -419,11 +483,12 @@ def source_files(root: Path) -> list[Path]:
     return sorted(path for path in files if path.is_file())
 
 
-def inventory(root: Path) -> list[Bound]:
+def inventory(root: Path) -> tuple[list[Bound], list[Import]]:
     sources = {path: path.read_text(encoding="utf-8") for path in source_files(root)}
     blanked = {path: blank_non_code(text) for path, text in sources.items()}
     test_sources = test_only_sources(sources, blanked)
     bounds = []
+    imports = []
     for path, text in sources.items():
         code = blanked[path]
         # Scanning brace pairs costs a pass over the file, so it is paid only
@@ -440,10 +505,12 @@ def inventory(root: Path) -> list[Bound]:
         external = path in test_sources
         lines = text.splitlines()
         relative = path.relative_to(root)
+        imports.extend(imported_names(relative, code, blocks))
         for match in matches:
             name = match.group("name")
             line = text.count("\n", 0, match.start()) + 1
-            end = initializer_end(code, match.end())
+            declared = match.group("form") == "="
+            end = initializer_end(code, match.end()) if declared else match.end()
             annotation = lines[line - 2] if line > 1 else ""
             bounds.append(
                 Bound(
@@ -454,10 +521,12 @@ def inventory(root: Path) -> list[Bound]:
                     scope=innermost_scope(match.start(), blocks),
                     initializer=code[match.end() : end],
                     annotation=annotation,
-                    test_only=external or in_ranges(match.start(), ranges),
+                    test_only=external
+                    or in_ranges(match.start(), ranges)
+                    or requires_test(preceding_attributes(lines, line)),
                 )
             )
-    return bounds
+    return bounds, imports
 
 
 def is_enforced(bound: Bound) -> bool:
@@ -477,15 +546,23 @@ def declaration(bound: Bound) -> tuple[str, str, str | None] | None:
     return None
 
 
-def validate(bounds: list[Bound]) -> list[str]:
+def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
     failures = []
     enforced = [bound for bound in bounds if is_enforced(bound)]
     declarations: dict[tuple[Path, str], list[Bound]] = {}
     for bound in enforced:
         declarations.setdefault((bound.path, bound.name), []).append(bound)
+    bindings: dict[tuple[Path, str], list[Import]] = {}
+    for entry in imports:
+        bindings.setdefault((entry.path, entry.name), []).append(entry)
 
-    def depth(candidate: Bound) -> int:
+    def depth(candidate: Bound | Import) -> int:
         return -1 if candidate.scope is None else candidate.scope[0]
+
+    def in_scope(candidate: Bound | Import, bound: Bound) -> bool:
+        return candidate.scope is None or (
+            candidate.scope[0] <= bound.offset <= candidate.scope[1]
+        )
 
     def visible_owner(bound: Bound, source: str) -> Bound | None:
         """Resolve ``source`` as the Rust scope around ``bound`` would.
@@ -495,19 +572,29 @@ def validate(bounds: list[Bound]) -> list[str]:
         function never supplies an owner. The nearest enclosing declaration
         shadows the rest; two at the same depth would not compile, and resolve
         to neither here.
+
+        A `use` binding the same name from at least as near a block wins over
+        the declaration in Rust, and names an item outside this file, so it
+        leaves the owner unproven rather than letting resolution reach past it.
         """
         visible = [
             candidate
             for candidate in declarations.get((bound.path, source), ())
-            if candidate.scope is None
-            or candidate.scope[0] <= bound.offset <= candidate.scope[1]
+            if in_scope(candidate, bound)
         ]
         if not visible:
             return None
         nearest = [
             candidate for candidate in visible if depth(candidate) == max(map(depth, visible))
         ]
-        return nearest[0] if len(nearest) == 1 else None
+        if len(nearest) != 1:
+            return None
+        owner = nearest[0]
+        shadowed = any(
+            in_scope(binding, bound) and depth(binding) >= depth(owner)
+            for binding in bindings.get((bound.path, source), ())
+        )
+        return None if shadowed else owner
 
     def resolves_to_direct(bound: Bound, kind: str, seen: set[str]) -> bool:
         parsed = declaration(bound)
@@ -568,8 +655,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("."))
     arguments = parser.parse_args(argv)
-    bounds = inventory(arguments.root.resolve())
-    failures = validate(bounds)
+    bounds, imports = inventory(arguments.root.resolve())
+    failures = validate(bounds, imports)
     if failures:
         print("numeric-bound check FAILED:")
         for failure in failures:

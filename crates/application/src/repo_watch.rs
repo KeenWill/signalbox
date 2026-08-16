@@ -40,7 +40,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
-// numeric-bound: ceiling - protects durable check generations from provider-sized input
+// numeric-bound: tunable - admits the provider check-generation text this accepts
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.

@@ -226,6 +226,54 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertIn("MAX_DERIVED_BYTES", result.stdout)
         self.assertIn("invalid derived declaration", result.stdout)
 
+    def test_derived_escape_fails_when_an_import_shadows_the_source(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: ceiling - protects against oversized text\n"
+            "const MAX_BASE: usize = 1024;\n"
+            "mod inner {\n"
+            "    use other::MAX_BASE;\n"
+            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DERIVED_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
+    def test_initializer_free_associated_constant_is_enforced(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "trait Bounded {\n    const MAX_BYTES: usize;\n}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_BYTES", result.stdout)
+        self.assertIn("no numeric-bound declaration", result.stdout)
+
+    def test_item_level_test_configuration_is_inventoried_without_gating(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "#[cfg(test)]\nconst MAX_FIXTURE_BYTES: usize = 4;\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_external_child_of_an_inline_test_module_does_not_gate(self) -> None:
+        result = run_checker_tree(
+            {
+                ENFORCED_FILE: "#[cfg(test)]\nmod tests {\n    mod child;\n}\n",
+                ENFORCED_FILE.with_name("tests") / "child.rs": (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
     def test_test_module_bound_is_inventoried_without_gating(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
