@@ -802,7 +802,10 @@ of near-limit deliveries cannot retain far more than admission itself is allowed
 to; the oldest delivery is always read, so one body at the admission ceiling
 still drains. One drain visits a bounded number of pending pages and then
 re-arms its own wake, so a sustained stream is accelerated without holding the
-worker past an overdue full poll. A delivery whose processing fails is deferred
+worker past an overdue full poll. A terminal commit whose result is lost in
+transit is resolved by re-recording the same request, which reports the row
+already terminal or records it now, rather than leaving a durable disposition
+the shadow never accounted for. A delivery whose processing fails is deferred
 for the rest of that drain rather than failing it, so one persistently
 unprocessable receipt cannot pin the head of the queue and starve every later
 one; the attempt still reports the first such failure. A signature-valid

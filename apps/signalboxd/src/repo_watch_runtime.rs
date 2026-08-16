@@ -55,7 +55,8 @@ use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObli
 use signalbox_persistence::repo_watch_webhook::{
     PendingRepoWatchWebhookDelivery, PostgresRepoWatchWebhookStore, RepoWatchWebhookDeliveryKey,
     RepoWatchWebhookDisposition, RepoWatchWebhookParityCauseV1, RepoWatchWebhookPendingPageSize,
-    RepoWatchWebhookProjection, RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalRequest,
+    RepoWatchWebhookProjection, RepoWatchWebhookStoreError, RepoWatchWebhookTargetedQuery,
+    RepoWatchWebhookTerminalRequest,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -318,6 +319,7 @@ struct RepositoryWatchTask {
     webhook_work: Option<mpsc::Receiver<()>>,
     webhook_nudge: Option<mpsc::Sender<()>>,
     webhook_shadow: Option<WebhookShadowBaseline>,
+    webhook_pending_drained: bool,
     rules_activated: bool,
 }
 
@@ -375,6 +377,7 @@ impl RepositoryWatchTask {
             webhook_work,
             webhook_nudge,
             webhook_shadow: None,
+            webhook_pending_drained: true,
             rules_activated: false,
         })
     }
@@ -516,9 +519,21 @@ impl RepositoryWatchTask {
             // A poll that observes the same transition would otherwise advance
             // the cursor past them, and every one of them would then apply to
             // state that already contains it and record nothing.
-            self.process_webhook_deliveries().await?;
+            //
+            // Its failure is reported but not propagated: acceleration failing
+            // must not cancel the reconciliation sweep, or one delivery whose
+            // targeted request keeps failing would abort every scheduled poll.
+            let accelerated = self.process_webhook_deliveries().await;
+            if let Err(error) = &accelerated {
+                tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    cause_code = error.cause_code(),
+                    "repository-watch webhook pre-poll drain failed; polling continues"
+                );
+            }
             self.poll_and_commit().await?;
             self.process_webhook_deliveries().await?;
+            accelerated?;
             self.process_cutoffs().await?;
             self.process_dispatches().await
         }
@@ -563,6 +578,7 @@ impl RepositoryWatchTask {
                 .load_pending(&self.repository, page_size)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            self.webhook_pending_drained = deliveries.is_empty();
             let mut progressed = false;
             for delivery in &deliveries {
                 if deferred.contains(&delivery.key()) {
@@ -596,6 +612,9 @@ impl RepositoryWatchTask {
                 break;
             }
             if pages >= WEBHOOK_DRAIN_PAGE_LIMIT {
+                // More may remain behind this page, so the shadow this drain
+                // advanced still speaks for deliveries the next one will read.
+                self.webhook_pending_drained = false;
                 self.request_webhook_drain_continuation();
                 break;
             }
@@ -818,11 +837,24 @@ impl RepositoryWatchTask {
             outcome_code.map(str::to_owned),
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        self.webhook_store
+        match self
+            .webhook_store
             .record_terminal(pending.key(), &request)
             .await
-            .map(|_| ())
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)
+        {
+            Ok(_) => Ok(()),
+            // A commit whose result was lost in transit may already be durable,
+            // and the delivery would then never be loaded again. Re-recording
+            // the exact same request resolves which happened: it reports the
+            // row already terminal, or records it now.
+            Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => self
+                .webhook_store
+                .record_terminal(pending.key(), &request)
+                .await
+                .map(|_| ())
+                .map_err(|_| RepositoryWatchAttemptError::Persistence),
+            Err(_) => Err(RepositoryWatchAttemptError::Persistence),
+        }
     }
 
     /// Runs one delivery's targeted provider queries without writing anything.
@@ -1087,8 +1119,13 @@ impl RepositoryWatchTask {
                 self.poller.publish_freshness(cursor.generation());
                 // A full poll is the complete reconciliation sweep, so the
                 // cursor it commits authoritatively replaces everything the
-                // webhook stream had accumulated in memory.
-                self.webhook_shadow = None;
+                // webhook stream had accumulated in memory — but only once
+                // nothing admitted before it is still waiting. A delivery left
+                // pending by a bounded drain would otherwise apply to state
+                // this cursor already contains and record nothing.
+                if self.webhook_pending_drained {
+                    self.webhook_shadow = None;
+                }
                 Ok(())
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
