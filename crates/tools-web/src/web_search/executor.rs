@@ -38,7 +38,7 @@ pub(super) fn dynamic_success_field_boundary_may_collide(
 }
 
 pub(super) fn dynamic_success_payload_probe() -> Option<String> {
-    serde_json::to_string(&serde_json::json!({
+    canonical_json_string(serde_json::json!({
         "results": [
             RenderedSearchResult {
                 title: String::from(DYNAMIC_SUCCESS_VALUE_MARKERS[0]),
