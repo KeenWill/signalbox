@@ -711,7 +711,8 @@ pub enum ToolExecutionServiceOutcome {
     ObservationCommitted(Box<EndedToolAttempt>),
     /// The retained executor observation was already represented durably.
     ObservationAlreadyCommitted(ToolAttemptId),
-    /// A prior-process live attempt was classified without retry.
+    /// A prior-process live attempt or same-process executor failure was
+    /// classified without retry.
     CrashClassified(Box<ToolAttemptCrashOutcome>),
     /// The all-resolved continuation call committed atomically.
     ContinuationCheckpointed(ModelCallId),
