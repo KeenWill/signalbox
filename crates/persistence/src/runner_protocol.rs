@@ -3780,13 +3780,6 @@ impl RunnerProtocolStore {
         ))?;
         let stored_runner = runner_id(release.decode_column("runner_id")?);
         let stored_manifest = WorkspaceManifestId::from_uuid(release.decode_column("manifest_id")?);
-        if stored_runner != acknowledgement.runner()
-            || stored_manifest != acknowledgement.manifest_id()
-        {
-            return Err(RunnerProtocolStoreError::Domain(
-                RunnerDomainError::CorrelationMismatch,
-            ));
-        }
         let recorded = sqlx::query(
             "SELECT runner_id, manifest_id
                FROM runner_workspace_release_acknowledgement
@@ -3803,8 +3796,18 @@ impl RunnerProtocolStore {
                 runner_id(recorded.decode_column("runner_id")?),
                 WorkspaceManifestId::from_uuid(recorded.decode_column("manifest_id")?),
             );
+            if stored_runner != replay.runner() || stored_manifest != replay.manifest_id() {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
             transaction.rollback().await?;
             return exact_workspace_release_acknowledgement_replay(acknowledgement, replay);
+        }
+        if stored_runner != acknowledgement.runner()
+            || stored_manifest != acknowledgement.manifest_id()
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
         }
         let source_was_lost: bool = sqlx::query_scalar(
             "SELECT EXISTS (
