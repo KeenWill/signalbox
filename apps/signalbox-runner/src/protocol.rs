@@ -668,7 +668,6 @@ where
                         },
                     ));
                 }
-                let receipt = state.record_registration(resumed.registration_revision, digest)?;
                 let replay = apply_resume_directives(state, &inventory, &resumed.directives)?;
                 if let Some(replay) = replay {
                     let message = match replay {
@@ -679,6 +678,7 @@ where
                     };
                     send_message(&mut io, message).await?;
                 }
+                let receipt = state.record_registration(resumed.registration_revision, digest)?;
                 (
                     receipt,
                     EnrollmentOutcome::Resumed,
@@ -3173,6 +3173,48 @@ mod tests {
         );
         assert_eq!(observed_ready, Message::WorkspaceReady(expected_ready));
         assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    #[tokio::test]
+    async fn s32_resume_replay_write_failure_preserves_prior_registration_and_ready_payload() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_workspace_ready(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let expected_ready = workspace_ready();
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION + 1),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_workspace_directives(DirectiveAction::Resend),
+                })),
+            )
+            .await;
+            drop(hub_io);
+        };
+        let (failed, ()) = tokio::join!(runner, hub);
+        let failed = failed
+            .err()
+            .expect("transport loss prevents the ready replay from completing");
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the retained fixture remains enrolled");
+
+        assert!(matches!(failed, RunnerConnectionError::Write(_)));
+        assert_eq!(
+            receipt.registration_revision(),
+            positive(INITIAL_REGISTRATION_REVISION)
+        );
+        assert_eq!(state.reconnect_inventory(), &retained);
+        assert_eq!(state.retained_workspace_ready(), Some(&expected_ready));
     }
 
     #[tokio::test]
