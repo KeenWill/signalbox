@@ -1334,7 +1334,7 @@ fn pull_request_context(
             .map_err(|_| RepoWatchWebhookMappingError::InvalidField("pull_request.labels[].name"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let author = nullable_string_at(pull_request, &["user", "login"], "pull_request.user.login")?
+    let author = optional_text_at(pull_request, &["user", "login"], "pull_request.user.login")?
         .map(|login| {
             RepoWatchAuthorLogin::try_new(login.to_owned())
                 .map_err(|_| RepoWatchWebhookMappingError::InvalidField("pull_request.user.login"))
@@ -1557,13 +1557,17 @@ fn repository_at(
         .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
 }
 
-/// Reads a repository slug GitHub may omit or null at any step of `path`, as it
-/// does for `pull_request.head.repo` once a tracked fork is deleted.
-fn optional_repository_at(
-    root: &Map<String, Value>,
+/// Reads text GitHub may omit or null at any step of `path`.
+///
+/// The provider nulls whole intermediate objects, not just leaves:
+/// `pull_request.head.repo` once a tracked fork is deleted, and
+/// `pull_request.user` once an author's account is gone. The poll normalizer
+/// accepts both shapes, so decoding treats an absent or null step as absent.
+fn optional_text_at<'value>(
+    root: &'value Map<String, Value>,
     path: &[&str],
     field: &'static str,
-) -> Result<Option<RepositorySlug>, RepoWatchWebhookMappingError> {
+) -> Result<Option<&'value str>, RepoWatchWebhookMappingError> {
     let mut value = root.get(path[0]);
     for member in &path[1..] {
         let Some(current) = value.filter(|current| !current.is_null()) else {
@@ -1577,9 +1581,20 @@ fn optional_repository_at(
     let Some(current) = value.filter(|current| !current.is_null()) else {
         return Ok(None);
     };
-    let slug = current
+    current
         .as_str()
-        .ok_or(RepoWatchWebhookMappingError::InvalidField(field))?;
+        .map(Some)
+        .ok_or(RepoWatchWebhookMappingError::InvalidField(field))
+}
+
+fn optional_repository_at(
+    root: &Map<String, Value>,
+    path: &[&str],
+    field: &'static str,
+) -> Result<Option<RepositorySlug>, RepoWatchWebhookMappingError> {
+    let Some(slug) = optional_text_at(root, path, field)? else {
+        return Ok(None);
+    };
     RepositorySlug::try_new(slug.to_owned())
         .map(Some)
         .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
@@ -2444,6 +2459,69 @@ mod tests {
     }
 
     #[test]
+    fn a_later_delivery_applies_against_the_earlier_one_in_the_same_drain() {
+        let empty = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
+                .expect("empty repository state is canonical"),
+        );
+        let opened = mapped_patch(
+            "pull_request",
+            Some("opened"),
+            &pull_request_payload("opened", ""),
+        );
+        let RepoWatchObservationApplyV1::NeedsTargetedRefresh { observation, .. } =
+            apply_repo_watch_observation_patch_v1(&empty, &opened)
+                .expect("the opened delivery applies its delivered context")
+        else {
+            panic!("an opened PR must still request hydration")
+        };
+        let labeled = mapped_patch(
+            "pull_request",
+            Some("labeled"),
+            &pull_request_payload("labeled", "").replace(
+                r#""labels":[{"name":"ready"}]"#,
+                r#""labels":[{"name":"ready"},{"name":"urgent"}]"#,
+            ),
+        );
+
+        let outcome = apply_repo_watch_observation_patch_v1(&observation, &labeled)
+            .expect("the later delivery applies against the earlier observation");
+
+        let RepoWatchObservationApplyV1::Applied(current) = outcome else {
+            panic!("a label added after the opening must project")
+        };
+        let [applied] = current.state().pull_requests() else {
+            panic!("the opened pull request must remain")
+        };
+        assert_eq!(applied.context().labels().len(), 2);
+    }
+
+    #[test]
+    fn a_later_delivery_reaches_no_baseline_once_the_earlier_one_is_discarded() {
+        let empty = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
+                .expect("empty repository state is canonical"),
+        );
+        let labeled = mapped_patch(
+            "pull_request",
+            Some("labeled"),
+            &pull_request_payload("labeled", ""),
+        );
+
+        let outcome = apply_repo_watch_observation_patch_v1(&empty, &labeled)
+            .expect("a missing baseline is a disposition, not an internal error");
+
+        // What discarding the earlier delivery's observation would cost: the
+        // later delivery projects nothing and only asks for hydration.
+        let RepoWatchObservationApplyV1::NeedsTargetedRefresh { observation, .. } = outcome else {
+            panic!("a labeled delivery without a baseline must await hydration")
+        };
+        assert!(observation.state().pull_requests().is_empty());
+    }
+
+    #[test]
     fn missing_closed_pull_request_stays_refresh_only() {
         let previous = RepoWatchObservation::new(
             Vec::new(),
@@ -2471,6 +2549,24 @@ mod tests {
                 )
             }]
         );
+    }
+
+    #[test]
+    fn a_deleted_author_account_maps_without_an_author() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let payload = pull_request_payload("closed", "")
+            .replace(r#""user":{"login":"Octo-Cat"}"#, r#""user":null"#);
+        let patch = mapped_patch("pull_request", Some("closed"), &payload);
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a deleted author is a provider shape, not a mapping failure");
+
+        let RepoWatchObservationApplyV1::Applied(observation) = outcome else {
+            panic!("a closed delivery for a retained PR must apply")
+        };
+        let [applied] = observation.state().pull_requests() else {
+            panic!("the retained pull request must remain")
+        };
+        assert_eq!(applied.context().author(), None);
     }
 
     #[test]

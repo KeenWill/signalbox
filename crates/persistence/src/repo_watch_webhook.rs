@@ -522,6 +522,7 @@ impl PostgresRepoWatchWebhookStore {
         &self,
         repository: &RepositorySlug,
         page_size: RepoWatchWebhookPendingPageSize,
+        after_receipt: Option<NonZeroU64>,
     ) -> Result<Vec<PendingRepoWatchWebhookDelivery>, RepoWatchWebhookStoreError> {
         let mut transaction = self.pool.begin().await?;
         let headers = sqlx::query_as::<_, PendingHeaderRow>(
@@ -542,21 +543,18 @@ impl PostgresRepoWatchWebhookStore {
                 AND disposition.delivery_id = delivery.delivery_id
               WHERE delivery.repository = $1
                 AND disposition.delivery_id IS NULL
+                AND ($3::bigint IS NULL OR delivery.receipt_sequence > $3)
               ORDER BY delivery.receipt_sequence
               LIMIT $2",
         )
         .bind(repository.as_str())
         .bind(i64::from(page_size.get()))
+        .bind(after_receipt.map(|receipt| receipt.get() as i64))
         .fetch_all(&mut *transaction)
         .await?;
         let mut deliveries = Vec::with_capacity(headers.len());
         let mut retained_bytes = 0_usize;
         for header in headers {
-            // The oldest delivery is always read, so one body at the admission
-            // ceiling still drains instead of wedging the queue head.
-            if !deliveries.is_empty() && retained_bytes >= MAX_PENDING_PAGE_BYTES {
-                break;
-            }
             let hook_id = header.hook_id;
             let delivery_id = header.delivery_id;
             let body = sqlx::query_scalar::<_, Vec<u8>>(
@@ -571,6 +569,15 @@ impl PostgresRepoWatchWebhookStore {
             let Some(body) = body else {
                 continue;
             };
+            // The oldest delivery is always kept, so one body at the admission
+            // ceiling still drains instead of wedging the queue head. Every
+            // later body is discarded rather than allowed to overshoot, so the
+            // page retains no more than the ceiling states.
+            if !deliveries.is_empty()
+                && retained_bytes.saturating_add(body.len()) > MAX_PENDING_PAGE_BYTES
+            {
+                break;
+            }
             retained_bytes = retained_bytes.saturating_add(body.len());
             deliveries.push(decode_pending(header, body)?);
         }

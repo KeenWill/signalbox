@@ -457,7 +457,7 @@ async fn pending_delivery_survives_store_restart() -> Result<(), Box<dyn Error>>
 
     let restarted_store = PostgresRepoWatchWebhookStore::new(pool);
     let pending = restarted_store
-        .load_pending(&repository()?, pending_page_size())
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].key(), key);
@@ -521,7 +521,7 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
         .await?;
     assert_eq!(repeated, RepoWatchWebhookTerminalOutcome::AlreadyTerminal);
     let drained = store
-        .load_pending(&repository()?, pending_page_size())
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
     assert!(drained.is_empty());
     let projection_count: i64 =
@@ -546,7 +546,7 @@ async fn pending_page_stops_at_the_retained_byte_ceiling() -> Result<(), Box<dyn
     seed_sized_pending_deliveries(&store, admitted, LARGE_BODY_BYTES).await?;
 
     let page = store
-        .load_pending(&repository()?, pending_page_size())
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
 
     assert_eq!(page.len(), MAX_PENDING_PAGE_BYTES / LARGE_BODY_BYTES);
@@ -564,7 +564,7 @@ async fn one_body_above_the_page_ceiling_still_drains() -> Result<(), Box<dyn Er
     seed_sized_pending_deliveries(&store, 1, MAX_PENDING_PAGE_BYTES + 1).await?;
 
     let page = store
-        .load_pending(&repository()?, pending_page_size())
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
 
     assert_eq!(page.len(), 1);

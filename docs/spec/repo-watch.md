@@ -803,51 +803,65 @@ delivery. One pending page is bounded by both its row count and the exact
 payload bytes it may hold, and it reads those bodies one at a time, so a backlog
 of near-limit deliveries cannot retain far more than admission itself is allowed
 to; the oldest delivery is always read, so one body at the admission ceiling
-still drains. One drain visits a bounded number of pending pages and then
-re-arms its own wake, so a sustained stream is accelerated without holding the
-worker past an overdue full poll. A terminal commit whose result is lost in
-transit is resolved by re-recording the same request, which reports the row
-already terminal or records it now, rather than leaving a durable disposition
-the shadow never accounted for. A delivery whose processing fails is deferred
-for the rest of that drain rather than failing it, so one persistently
-unprocessable receipt cannot pin the head of the queue and starve every later
-one; the attempt still reports the first such failure. A signature-valid
-delivery whose event or action is outside the mapped set, including a broadly
-subscribed `workflow_job`, is still acknowledged successfully and is cheaply
-logged and recorded as ignored rather than treated as an intake failure.
+still drains, and every later body is discarded rather than allowed to
+overshoot, so a page retains no more than that ceiling. One drain visits a
+bounded number of pending pages and then re-arms its own wake, so a sustained
+stream is accelerated without holding the worker past an overdue full poll. A
+terminal commit whose result is lost in transit is resolved by re-recording the
+same request, which reports the row already terminal or records it now, rather
+than leaving a durable disposition the shadow never accounted for. A delivery
+whose processing fails is deferred for the rest of that drain rather than
+failing it, so one persistently unprocessable receipt cannot pin the head of the
+queue and starve every later one; the attempt still reports the first such
+failure. A signature-valid delivery whose event or action is outside the mapped
+set, including a broadly subscribed `workflow_job`, is still acknowledged
+successfully and is cheaply logged and recorded as ignored rather than treated
+as an intake failure.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.
 Instead, the repository's single serialized worker applies the closed guarded
 patch to the latest cursor in memory and runs the same
 `derive_repo_watch_events` differ with the same
-`RepoWatchEventContentIdentityV1` frontier used by polling. That baseline is
-cumulative and belongs to the repository task rather than to one drain: a
-projection that does not mutate the durable cursor still advances the
-observation and frontier the next delivery compares against, whether that
-delivery arrives in the same batch, in a later wake, or after another delivery
-was deferred. A delivery advances it only once its own terminal disposition is
-durable, so a failure between deriving and recording leaves the accumulated
-shadow exactly as it was.
+`RepoWatchEventContentIdentityV1` frontier used by polling. Occurrences of the
+families a delivery cannot observe — computed mergeability and aggregate check
+rollups — are not projected from a delivery at all, since a payload supplies
+neither and projecting one would invent a webhook-only row for a value only
+polling can produce. That baseline is cumulative and belongs to the repository
+task rather than to one drain: a projection that does not mutate the durable
+cursor still advances the observation and frontier the next delivery compares
+against, whether that delivery arrives in the same batch, in a later wake, or
+after another delivery was deferred. A delivery advances it only once its own
+terminal disposition is durable, so a failure between deriving and recording
+leaves the accumulated shadow exactly as it was.
 
 Only a full poll replaces that baseline, because only a full poll is the
-complete reconciliation sweep. A targeted query reconciles just the pull
-requests it names, so its commit is left to the cursor and the shadow is kept;
-the accepted cost is that what a targeted query learns reaches the shadow at the
-next full poll rather than immediately. Pending deliveries are drained before a
-full poll as well as after it, so a poll that observes the same transition as an
-already-admitted delivery cannot advance the cursor past it and leave the
-delivery applying to state that already contains it. A delivery's targeted
-provider queries run before anything is recorded, so a transient provider
-failure leaves it pending and retryable rather than terminal with a query that
-never ran; its terminal disposition is then recorded before the resulting cursor
-commit, so a failure between those two cannot make a retry re-derive projections
-against a cursor that has already moved past them. On daemon restart the
-baseline is re-seeded from the durable cursor, which is the same complete
-reconciliation a full poll performs. The divergence a re-seeding leaves is
-accepted rather than removed: a delivery projected against a freshly seeded
-baseline records `cross_drain_shadow_gap` on its projections, so the gap is
-explained in the parity view instead of being carried by a durable shadow
+complete reconciliation sweep, and only once nothing is still pending. The poll
+does not perform that handover itself: the worker cannot read the pending queue
+atomically with an admission committing on the listener, so a delivery admitted
+while the poll was fetching could otherwise be applied to a cursor that already
+contains its transition and be recorded as a duplicate. The poll marks the
+baseline superseded instead, and the first drain that finds its page empty
+performs the replacement, deciding both without an await between them. A
+targeted query reconciles just the pull requests it names, so its commit is left
+to the cursor and the shadow is kept; the accepted cost is that what a targeted
+query learns reaches the shadow at the next full poll rather than immediately.
+Pending deliveries are drained before a full poll as well as after it. That
+drain failing is reported and not propagated: acceleration is not allowed to
+cancel the reconciliation sweep, so one delivery whose targeted request keeps
+failing cannot abort every scheduled poll. A poll that observes the same
+transition as an already-admitted delivery cannot advance the cursor past it and
+leave the delivery applying to state that already contains it. A delivery's
+targeted provider queries run before anything is recorded, so a transient
+provider failure leaves it pending and retryable rather than terminal with a
+query that never ran; its terminal disposition is then recorded before the
+resulting cursor commit, so a failure between those two cannot make a retry
+re-derive projections against a cursor that has already moved past them. On
+daemon restart the baseline is re-seeded from the durable cursor, which is the
+same complete reconciliation a full poll performs. The divergence a re-seeding
+leaves is accepted rather than removed: a delivery projected against a freshly
+seeded baseline records `cross_drain_shadow_gap` on its projections, so the gap
+is explained in the parity view instead of being carried by a durable shadow
 cursor. `repo_watch_webhook_projection` records each resulting version-one
 content identity and event kind, and the cause of any divergence the producing
 delivery already knows, while `repo_watch_webhook_disposition` atomically
