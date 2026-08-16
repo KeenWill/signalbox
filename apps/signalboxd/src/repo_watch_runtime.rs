@@ -22,12 +22,12 @@ use sha2::{Digest, Sha256};
 use signalbox_application::{
     EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchCheckSuiteObservation, RepoWatchDifferFailureKind, RepoWatchDispatchService,
+    RepoWatchDispatchTransaction, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
@@ -525,7 +525,21 @@ impl RepositoryWatchTask {
             &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
-        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+        .map_err(|error| match error.kind() {
+            RepoWatchDifferFailureKind::EventConstruction => RepositoryWatchAttemptError::Differ,
+            // The frontier refuses on every later comparison too, so the cause
+            // code has to say the frontier stopped this repository rather than
+            // leave it indistinguishable from a one-observation differ defect.
+            RepoWatchDifferFailureKind::IdentityFrontier => {
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    cause_code = "repository_identity_frontier_exhausted",
+                    error = %error,
+                    "repository-watch identity frontier cannot assign another occurrence; every later comparison fails the same way"
+                );
+                RepositoryWatchAttemptError::IdentityFrontier
+            }
+        })?;
         let outcome = self
             .store
             .commit(
@@ -961,6 +975,7 @@ enum RepositoryWatchAttemptError {
     Normalization,
     PullRequestFetchAbandoned,
     Differ,
+    IdentityFrontier,
     Dispatch,
     Persistence,
     RetiredRuleIdentity,
@@ -981,6 +996,7 @@ impl RepositoryWatchAttemptError {
             Self::Normalization => "repository_state_invalid",
             Self::PullRequestFetchAbandoned => "repository_pull_request_fetch_abandoned",
             Self::Differ => "repository_differ_failed",
+            Self::IdentityFrontier => "repository_identity_frontier_exhausted",
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
