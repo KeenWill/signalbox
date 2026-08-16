@@ -235,6 +235,50 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("MAX_ATTEMPTS", result.stdout)
 
+    def test_aliased_numeric_type_is_enforced(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "type ByteCount = usize;\nconst MAX_INPUT_BYTES: ByteCount = 1024;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_INPUT_BYTES", result.stdout)
+
+    def test_chained_numeric_alias_is_enforced(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "type ByteCount = usize;\ntype Retained = ByteCount;\n"
+            "const MAX_INPUT_BYTES: Retained = 1024;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_INPUT_BYTES", result.stdout)
+
+    def test_non_numeric_alias_is_not_inventoried(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "type Label = &'static str;\nconst MAX_LABEL: Label = \"limit\";\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("0 enforced", result.stdout)
+
+    def test_derived_escape_fails_when_a_nested_local_import_shadows_the_source(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: tunable - controls the ordinary retained size\n"
+            "const MAX_BASE: usize = 64;\n"
+            "mod inner {\n"
+            "    use super::sibling::MAX_BASE;\n"
+            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_DERIVED_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
     def test_derived_escape_fails_on_a_qualified_repetition_of_the_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,

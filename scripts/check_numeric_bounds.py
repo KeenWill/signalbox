@@ -9,7 +9,8 @@ types count: a qualified path such as ``std::time::Duration`` and the signed
 spellings, so no accepted spelling carries an undeclared bound past the gate. A
 trait's associated constant counts even with no initializer, because the trait
 is where that bound's contract is stated and its implementors may sit outside
-the blocking scope entirely.
+the blocking scope entirely. A local ``type`` alias for a numeric type counts as
+that type, so renaming ``usize`` cannot carry a bound past the gate.
 
 Test-only modules are inventoried but do not gate because their constants
 describe fixtures, not runtime safety. A module written ``#[cfg(test)] mod
@@ -20,7 +21,10 @@ root, since where a file's own ``mod name;`` declarations resolve depends on how
 that file was reached: beneath its own stem for an ordinary child, beside it for
 one named by ``#[path]``, and under the enclosing inline module's name when the
 declaration sits inside a ``mod name { ... }`` block. Those three rules were
-checked against rustc rather than inferred.
+checked against rustc rather than inferred. An item gated in place — a
+``#[cfg(test)]`` constant, function, or ``impl`` — is test-only on the same
+footing as a module.
+
 The whole attribute run is read, so an intervening attribute and a compound
 ``cfg(all(test, not(windows)))`` both still count; ``cfg(any(test, ...))`` and
 ``cfg(not(test))`` do not, because those modules also compile without ``test``
@@ -86,6 +90,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 BOUNDARY_TOKENS = frozenset(
@@ -120,19 +125,64 @@ ENFORCED_ROOTS = (
 # listed beside the unsigned one: a spelling this pattern misses is an
 # undeclared bound the gate silently accepts.
 INTEGER_TYPE = r"[ui](?:8|16|32|64|128|size)"
-NUMERIC_TYPE = (
-    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*"
-    rf"(?:{INTEGER_TYPE}|f(?:32|64)|Duration|"
+TYPE_QUALIFIER = r"(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*"
+NUMERIC_TYPE_NAMES = (
+    rf"{INTEGER_TYPE}|f(?:32|64)|Duration|"
     r"NonZero(?:U8|U16|U32|U64|U128|Usize|I8|I16|I32|I64|I128|Isize)|"
-    rf"NonZero\s*<\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*{INTEGER_TYPE}\s*>)"
+    rf"NonZero\s*<\s*{TYPE_QUALIFIER}{INTEGER_TYPE}\s*>"
 )
-CONSTANT = re.compile(
-    rf"(?m)^(?P<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?const\s+"
-    rf"(?P<name>[A-Z][A-Z0-9_]*)\s*:\s*(?P<type>{NUMERIC_TYPE})\s*(?P<form>[=;])"
+ALIAS_DECLARATION = re.compile(
+    r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?type\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<target>[^;]+);"
 )
+
+
+@lru_cache(maxsize=None)
+def numeric_type_pattern(aliases: frozenset[str]) -> str:
+    """Build the type expression a numeric constant declaration must match."""
+    names = "|".join(sorted(re.escape(alias) for alias in aliases))
+    inner = f"{NUMERIC_TYPE_NAMES}|{names}" if aliases else NUMERIC_TYPE_NAMES
+    return rf"{TYPE_QUALIFIER}(?:{inner})"
+
+
+@lru_cache(maxsize=None)
+def constant_pattern(aliases: frozenset[str]) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?m)^(?P<indent>[ \t]*)(?:pub(?:\([^)]*\))?\s+)?const\s+"
+        rf"(?P<name>[A-Z][A-Z0-9_]*)\s*:\s*"
+        rf"(?P<type>{numeric_type_pattern(aliases)})\s*(?P<form>[=;])"
+    )
+
+
+def numeric_aliases(code: str) -> frozenset[str]:
+    """Report the file's `type Name = <numeric>;` aliases, following chains.
+
+    A local alias is a silent bypass otherwise: `type ByteCount = usize;` makes
+    a bound's declared type unrecognizable to a closed pattern. Chains settle by
+    repetition. An alias imported from another crate stays unresolved, which is
+    a stated limit rather than a claim.
+    """
+    declared = {
+        match.group("name"): match.group("target").strip()
+        for match in ALIAS_DECLARATION.finditer(code)
+    }
+    aliases: frozenset[str] = frozenset()
+    while True:
+        recognized = re.compile(rf"^{numeric_type_pattern(aliases)}$")
+        found = frozenset(
+            name for name, target in declared.items() if recognized.match(target)
+        )
+        if found <= aliases:
+            return aliases
+        aliases |= found
 USE_STATEMENT = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s[^;]*;")
-LOCAL_USE = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:self|super)\s*::")
-RENAMING_USE = re.compile(r"\bas\b")
+# Only a single-segment `self::`/`super::` import re-binds a name this scan
+# already resolves through enclosing scope. `use super::sibling::MAX;` and
+# `use super::MAX as OTHER;` both name something else and are recorded.
+LOCAL_USE = re.compile(
+    r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:self|super)\s*::\s*"
+    r"[A-Za-z_][A-Za-z0-9_]*\s*;"
+)
 # Unlike a reference in an initializer, an imported name is looked for through
 # its path, so this deliberately matches the qualified spelling too.
 IMPORTED_NAME = re.compile(r"\b(?P<name>[A-Z][A-Z0-9_]*)\b")
@@ -482,8 +532,7 @@ def imported_names(path: Path, code: str, blocks: list[tuple[int, int]]) -> list
     """
     imports = []
     for statement in USE_STATEMENT.finditer(code):
-        local = LOCAL_USE.match(statement.group()) is not None
-        if local and RENAMING_USE.search(statement.group()) is None:
+        if LOCAL_USE.match(statement.group()) is not None:
             continue
         for match in IMPORTED_NAME.finditer(statement.group()):
             imports.append(
@@ -520,7 +569,7 @@ def inventory(root: Path) -> tuple[list[Bound], list[Import]]:
         # where a boundary-named constant actually needs a scope.
         matches = [
             match
-            for match in CONSTANT.finditer(code)
+            for match in constant_pattern(numeric_aliases(code)).finditer(code)
             if is_boundary_name(match.group("name"))
         ]
         if not matches:
