@@ -389,8 +389,8 @@ async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn content_identity_migration_preserves_legacy_cursor_and_event() -> Result<(), Box<dyn Error>>
-{
+async fn content_identity_migration_carries_existing_cursor_and_event_to_version_one()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = postgres_before_content_identity().await?;
     let event = seed_legacy_repo_watch_event(&pool).await?;
 
@@ -429,7 +429,7 @@ async fn content_identity_migration_preserves_legacy_cursor_and_event() -> Resul
 
     assert_eq!(cursor_version, 2);
     assert_eq!(frontier, serde_json::json!([]));
-    assert_eq!(event_identity.0, 0);
+    assert_eq!(event_identity.0, 1);
     assert_eq!(event_identity.1.len(), 32);
     assert_eq!(event_identity.2, "poll");
     assert_eq!(

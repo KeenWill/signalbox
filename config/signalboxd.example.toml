@@ -324,17 +324,15 @@ allowed_origins = [
 # webhook_secret_file = "/home/wkg/.config/signalbox/github-webhook-secret"
 #
 # [[repository_watch.rules]]
-# id = "merge-forward-on-conflict"
+# id = "merge-forward-on-base-advance"
 # version = 1
 # singleton_per = "pull_request"
 # cooldown_seconds = 0
 #
 # [repository_watch.rules.matcher]
-# event_kinds = ["mergeable_state_changed"]
+# event_kinds = ["base_advanced"]
 # repo = "namespace/project"
-#
-# [repository_watch.rules.matcher.mergeable_state]
-# any_of = ["conflicting"]
+# head_branch_regex = "^agent/.+$"
 #
 # [[repository_watch.rules.actions]]
 # kind = "dispatch_session"
