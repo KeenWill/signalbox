@@ -750,6 +750,7 @@ fn provider_error_script() -> Script {
         exchange: ExchangeFacts::default(),
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         kind: ProviderErrorKind::ProviderInternal,
+        non_acceptance_proven: false,
         native: NativeErrorFacts::default(),
         usage: TokenUsage::unreported(),
     }))
