@@ -115,25 +115,32 @@ All requests produced by one call are one batch. Approval decisions are resolved
 in proposal order, and the turn parks on the earliest undecided request.
 Execution does not begin until the batch has no undecided approval. The next
 model round does not begin until every request has one durable logical
-resolution: executed, denied, or closed by turn end.
+resolution: executed, denied, closed by turn end, or — for a family that
+declares the pre-approval admissibility check below — closed inadmissible.
 
 **Committed unimplemented functionality — pre-approval admissibility.** A family
 may declare that a request is inadmissible on evidence available before any
 approval decision, and the instruction family declares one: a bundle outside the
 session's eligibility snapshot, specified by
 [workspace instructions](workspace-instructions.md#enumeration-preview-and-admission).
-Such a request resolves before approval through the preflight failure
-transaction, which mints its attempt and commits it terminal `KnownFailed` with
-the typed reason in the same transaction, creating no approval state, no judge
-call, and no executor work. The resolution is `executed` with a failure result —
-the attempt row is where the typed reason already lives, so this needs no fourth
-resolution kind and no result shape the projection does not already carry. A
-request resolved this way is not undecided, so the batch is not parked behind it
-and proposal order continues at the next request. Why this rather than deciding
-approval first: a delegated decision needs evidence the daemon can only build
-for a bundle the session may see, so asking a judge about an inadmissible
-request would mean either exposing metadata the session is not entitled to or
-sending an evidence-free prompt. No present family declares such a check.
+Such a request resolves before approval through a request-level transition that
+mints no attempt: it records a fourth durable logical resolution,
+`closed_inadmissible`, carrying the family's typed reason on the request itself,
+and creates no approval state, no judge call, no attempt row, and no executor
+work. It must be request-level, because a tool attempt names its issuing turn
+attempt and a batch parked on an undecided approval has no current turn attempt
+to name — minting one here would either orphan the attempt or force a turn
+attempt into existence under the approval-wait constraints. Storing the reason
+on the request instead is sound because nothing executed: there is no attempt
+history to explain, only a request that was never admissible. The projection
+renders it through the same provider-visible error object as any other typed
+failure, so no new result shape reaches a provider. A request resolved this way
+is not undecided, so the batch is not parked behind it and proposal order
+continues at the next request. Why this rather than deciding approval first: a
+delegated decision needs evidence the daemon can only build for a bundle the
+session may see, so asking a judge about an inadmissible request would mean
+either exposing metadata the session is not entitled to or sending an
+evidence-free prompt. No present family declares such a check.
 
 ## Approval policy and decision sources
 

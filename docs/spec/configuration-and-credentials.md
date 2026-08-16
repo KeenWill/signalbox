@@ -632,7 +632,20 @@ provider-safe reference, and startup rejects a configuration presenting a known
 root with a different reference before discovery or registration reuse runs. A
 reference is stable for the life of a root's stored evidence; changing one means
 retiring that root's registrations, not editing a value the durable rows already
-name. No present parser admits the table form; the bare-string form above is
+name.
+
+The association is a reservation in both directions, and for as long as any
+stored evidence names it. A reference retired with its root is not free for
+another: were root A removed and its former reference later assigned to root B,
+the within-configuration duplicate check would pass and so would the forward
+association, since B has its own `ConfiguredInstructionRootId` — while durable
+aliases and authority-qualified eligibility entries written for A still carry
+that reference. Authority-qualified pairs would become ambiguous, and
+root-removal revalidation would read B's live reference as authority to reread
+A's path. Startup therefore rejects assigning a reference that any retained
+registration, alias, or eligibility entry still names, whatever root it is
+offered for, and the reservation is released only when the last of that evidence
+is gone. No present parser admits the table form; the bare-string form above is
 what this build accepts, and a root without a reference cannot become
 provider-visible.
 

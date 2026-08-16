@@ -312,14 +312,28 @@ Activation is not the only entry point, so it cannot be the only checkpoint. A
 session whose turn was already active when the daemon stopped can be retained
 unchanged by startup recovery — a prepared call retried, an approval wait still
 parked — and no activation transaction runs for it, leaving its frozen snapshot
-authorizing a root the configuration has since dropped. Startup recovery
-therefore applies the same revalidation to every retained active turn's frozen
-snapshot before scheduling resumes, with the same two outcomes: entries whose
-root is gone are dropped with typed findings, and a retained turn holding an
-admitted entry whose root is gone fails closed. A turn that resumes has been
-revalidated, so no enumeration, preview, or already-approved read can reach a
-removed root's path afterwards. It may name a workspace-root bundle only when
-the target session has a complete discovery snapshot that used its fixed
+authorizing a root the configuration has since dropped. That snapshot cannot be
+edited: it is frozen for the turn and already authenticated by an immutable
+turn-start manifest, so dropping entries from it would either invalidate the
+stored eligibility hash or rewrite append-only history. Revocation at recovery
+is therefore applied at access, not to the record. Startup recovery marks every
+retained active turn whose snapshot names a root the live configuration no
+longer declares, before scheduling resumes, and the effect depends on what the
+turn has already done. If no entry under that root is admitted, the snapshot
+stands unchanged and authenticated while those entries are treated as revoked
+for the remainder of the turn: enumeration and preview omit them, and a read
+naming one is the ordinary `not_eligible` failure. If an entry under that root
+is already admitted, the turn fails closed, since its rendered bytes are already
+in the projection and no access-time check can retract them. Either way the
+historical snapshot, its hash, and its manifest are untouched, and no
+enumeration, preview, or already-approved read can reach a removed root's path
+after recovery.
+
+Revocation is confined to the affected turn. The next activation builds a fresh
+snapshot from live eligibility, where the dropped entries are simply absent, so
+the access-time rule is a bridge across one turn's frozen evidence rather than a
+second, parallel notion of eligibility. It may name a workspace-root bundle only
+when the target session has a complete discovery snapshot that used its fixed
 workspace binding as the workspace root and linked that exact registered
 identity as a candidate. A canonical-path match without that session-correlated
 discovery link is not authority. A mismatch is a typed rejection and exposes no
@@ -438,18 +452,21 @@ Version one returns at most 32 identities and 524,288 catalog-result bytes per
 page. Those bytes are compact UTF-8 JSON with object keys sorted by raw ASCII
 bytes, no insignificant whitespace, unsigned decimal integers without leading
 zeroes, and strings escaped by the canonical algorithm below. A description
-longer than 512 UTF-8 bytes is shortened at a character boundary and reports its
-full byte length plus truncation boundary. The cursor is the
-eligibility-snapshot hash plus the zero-based ordinal of the next item in
-canonical order, encoded as the exact opaque token the tool schema below fixes.
-Each page reports the snapshot's total item count and the returned ordinal
-range; the remaining count is derived from those rather than transmitted, as the
-closed success shape below fixes. It first shortens descriptions and then ends
-the page before an item that would exceed the byte bound; the cursor continues
-at that unreturned item, so budgeting never drops an identity. The registration
-path bounds guarantee that one minimally encoded item fits. An absent next
-cursor proves enumeration is complete; a cursor for another snapshot is a typed
-stale-cursor failure.
+longer than 512 UTF-8 bytes is shortened to the unique longest UTF-8 prefix
+whose byte length does not exceed 512, and reports its full byte length plus
+truncation boundary. The longest prefix, not merely some prefix ending at a
+character boundary: a shorter one would also satisfy a boundary rule while
+changing the serialized bytes, and therefore which item fits the page and what
+the next cursor names. The cursor is the eligibility-snapshot hash plus the
+zero-based ordinal of the next item in canonical order, encoded as the exact
+opaque token the tool schema below fixes. Each page reports the snapshot's total
+item count and the returned ordinal range; the remaining count is derived from
+those rather than transmitted, as the closed success shape below fixes. It first
+shortens descriptions and then ends the page before an item that would exceed
+the byte bound; the cursor continues at that unreturned item, so budgeting never
+drops an identity. The registration path bounds guarantee that one minimally
+encoded item fits. An absent next cursor proves enumeration is complete; a
+cursor for another snapshot is a typed stale-cursor failure.
 
 A catalog page carries repository-controlled strings too — `display_name`,
 `source`, `scope`, and `description` are all chosen by the repository — and
@@ -481,9 +498,10 @@ through six `#` bytes, then end of line or one ASCII space or tab. The returned
 heading records are in source order and contain the one-based line number,
 level, and heading text after removing leading and trailing spaces or tabs and
 an optional closing run of `#` bytes that is preceded by whitespace. A heading
-text longer than 512 UTF-8 bytes is shortened at a scalar boundary and reports
-its full byte length and truncation boundary. Setext headings, headings inside
-fenced blocks, and other Markdown constructs are not interpreted. Fence
+text longer than 512 UTF-8 bytes is shortened to the unique longest UTF-8 prefix
+whose byte length does not exceed 512, by the same rule descriptions use, and
+reports its full byte length and truncation boundary. Setext headings, headings
+inside fenced blocks, and other Markdown constructs are not interpreted. Fence
 recognition uses this version-one state machine over the normalized lines.
 Outside a fence, zero through three leading ASCII spaces followed by at least
 three identical backticks or tildes opens a fence. The remainder of a backtick
@@ -725,9 +743,14 @@ its session from the trusted tool-dispatch correlation.
   which is a request outcome rather than an argument error. A cursor naming the
   current snapshot is accepted only when its ordinal is at most `total`;
   anything greater is that same stale-cursor failure. The bound is `total`
-  rather than `total - 1` so that the ordinal one past the last item — the
-  cursor a full final page legitimately returns — yields an empty page instead
-  of an error. Stating the range closes the third outcome a hand-edited ordinal
+  rather than `total - 1` so that the ordinal one past the last item is accepted
+  and yields an empty page instead of an error. A page that exhausts the
+  snapshot never emits that cursor, though: a response whose returned items
+  reach `total` is complete and returns `next_cursor` of null, including when
+  the final page is exactly full, so no caller is ever sent back for an empty
+  page it could not have needed. Ordinal `total` is therefore reachable only
+  from a hand-edited cursor, where being accepted is better than being a
+  failure. Stating the range closes the third outcome a hand-edited ordinal
   would otherwise have: with it, `total - first_ordinal - returned` cannot
   underflow, and implementations cannot disagree between rejecting, returning an
   empty page, and failing internally. Its success shape is fixed below, because
@@ -811,11 +834,12 @@ varies.
 
 The trusted envelope and the untrusted strings are split by *level*, not
 duplicated: an item never carries a repository-controlled member directly, and
-the untrusted region never repeats a trusted one. Each element of `items` is one
-closed object whose members are exactly `bundle_id`, `kind`, `root`,
-`source_bytes`, and `source_sha256`, plus `root_id` when the authorizing root is
-`configured`. Every one of those is daemon-generated or a closed vocabulary, so
-a reader can address, order, and page a catalog without parsing untrusted text.
+the untrusted region repeats exactly one trusted member, `bundle_id`, as its
+correlation key and no other. Each element of `items` is one closed object whose
+members are exactly `bundle_id`, `kind`, `root`, `source_bytes`, and
+`source_sha256`, plus `root_id` when the authorizing root is `configured`. Every
+one of those is daemon-generated or a closed vocabulary, so a reader can
+address, order, and page a catalog without parsing untrusted text.
 
 The result's sixth top-level member is `untrusted`, the delimited region defined
 above. Its JSON object has one member, `items`, an array in the same canonical
@@ -1195,8 +1219,12 @@ and admissions unchanged.
 
 The durable rendered-content hash is SHA-256 over the exact bytes placed in
 prepared model input **after** wrappers, labels, and budget truncation. It is
-not the source-file hash. A manifest thus describes what the model saw when
-source and rendered bytes differ, and wrapper or budget changes remain visible.
+not the source-file hash. A manifest thus authenticates the projection that was
+prepared when source and rendered bytes differ, and wrapper or budget changes
+remain visible. It is evidence of preparation, not of delivery: a call that
+fails before provider spawn or send leaves a valid manifest behind although the
+model saw nothing, so an audit consumer asking what reached a model must read
+the model call's own state for proof that the send boundary was crossed.
 
 Overflow never silently drops an admitted bundle. If no nonempty valid rendering
 fits, preparation fails before provider spawn. Context pressure does not
