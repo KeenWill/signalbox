@@ -1,0 +1,203 @@
+//! Isolated adapters for UTF-8 text, JSON, and CSV bytes.
+
+mod csv_adapter;
+mod json_adapter;
+mod source;
+mod text_adapter;
+
+use std::{error::Error, str::FromStr};
+
+use signalbox_file_media_runtime::{
+    CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
+    FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProcessorFailure,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
+    ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
+};
+
+const PROVIDER_NAME: &str = "signalbox_text";
+const TEXT_READER_NAME: &str = "utf8_text";
+const JSON_READER_NAME: &str = "json";
+const CSV_READER_NAME: &str = "csv";
+const READER_REVISION: &str = "v1";
+const TEXT_MEDIA_TYPE: &str = "text/plain";
+const JSON_MEDIA_TYPE: &str = "application/json";
+const CSV_MEDIA_TYPE: &str = "text/csv";
+const TEXT_VIEW_NAME: &str = "text";
+const STRUCTURED_VIEW_NAME: &str = "structured";
+
+/// Maximum bytes one text-family adapter reads or returns.
+pub const MAX_TEXT_FAMILY_BYTES: u64 = 131_072;
+
+/// Compiled provider for the three version-one text-family readers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TextFamilyProvider;
+
+impl FileMediaProvider for TextFamilyProvider {
+    fn declaration(&self) -> FileMediaProviderDeclaration {
+        match text_family_declaration() {
+            Ok(declaration) => declaration,
+            Err(_) => std::process::abort(),
+        }
+    }
+
+    fn probe<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn signalbox_file_media_runtime::CancellationSignal,
+    ) -> FileMediaProviderFuture<'a, ProcessorProbeOutput> {
+        Box::pin(async move {
+            match reader.reader().as_str() {
+                TEXT_READER_NAME => text_adapter::probe(source, cancellation).await,
+                JSON_READER_NAME => json_adapter::probe(source, cancellation).await,
+                CSV_READER_NAME => csv_adapter::probe(source, cancellation).await,
+                _ => Err(ProcessorFailure::Protocol),
+            }
+        })
+    }
+
+    fn inspect<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        request: FileMediaProviderValidationRequest,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn signalbox_file_media_runtime::CancellationSignal,
+    ) -> FileMediaProviderFuture<'a, ProcessorValidationOutput> {
+        Box::pin(async move {
+            match reader.reader().as_str() {
+                TEXT_READER_NAME => text_adapter::inspect(request, source, cancellation).await,
+                JSON_READER_NAME => json_adapter::inspect(request, source, cancellation).await,
+                CSV_READER_NAME => csv_adapter::inspect(request, source, cancellation).await,
+                _ => Err(ProcessorFailure::Protocol),
+            }
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        request: FileMediaProviderReadRequest,
+        source: &'a dyn VerifiedBlobSource,
+        cancellation: &'a dyn signalbox_file_media_runtime::CancellationSignal,
+    ) -> FileMediaProviderFuture<'a, ProcessorReadOutput> {
+        Box::pin(async move {
+            match reader.reader().as_str() {
+                TEXT_READER_NAME => text_adapter::read(request, source, cancellation).await,
+                JSON_READER_NAME => json_adapter::read(request, source, cancellation).await,
+                CSV_READER_NAME => csv_adapter::read(request, source, cancellation).await,
+                _ => Err(ProcessorFailure::Protocol),
+            }
+        })
+    }
+}
+
+/// Builds the exact declaration registered by the text-family worker.
+pub fn text_family_declaration()
+-> Result<FileMediaProviderDeclaration, Box<dyn Error + Send + Sync>> {
+    let provider = FileReaderProviderName::try_new(PROVIDER_NAME)?;
+    let text = reader(
+        &provider,
+        TEXT_READER_NAME,
+        TEXT_MEDIA_TYPE,
+        text_view()?,
+        vec!["invalid_utf8", "nul_byte", "source_too_large"],
+        StreamingTextFallback::Enabled,
+    )?;
+    let json = reader(
+        &provider,
+        JSON_READER_NAME,
+        JSON_MEDIA_TYPE,
+        structured_view("Reads the complete JSON value as bounded structured data.")?,
+        vec![
+            "invalid_utf8",
+            "nul_byte",
+            "malformed_json",
+            "source_too_large",
+        ],
+        StreamingTextFallback::Disabled,
+    )?;
+    let csv = reader(
+        &provider,
+        CSV_READER_NAME,
+        CSV_MEDIA_TYPE,
+        structured_view("Reads a rectangular CSV table as headers and rows.")?,
+        vec![
+            "invalid_utf8",
+            "nul_byte",
+            "malformed_csv",
+            "source_too_large",
+            "row_limit_exceeded",
+            "column_limit_exceeded",
+        ],
+        StreamingTextFallback::Disabled,
+    )?;
+    Ok(FileMediaProviderDeclaration::try_new(
+        provider,
+        vec![text, json, csv],
+    )?)
+}
+
+fn reader(
+    provider: &FileReaderProviderName,
+    name: &str,
+    media_type: &str,
+    view: ReadViewDeclaration,
+    reasons: Vec<&str>,
+    fallback: StreamingTextFallback,
+) -> Result<ReaderDeclaration, Box<dyn Error + Send + Sync>> {
+    let reason_codes = reasons
+        .into_iter()
+        .map(ReasonCode::try_new)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ReaderDeclaration::try_new(ReaderDeclarationInput {
+        provider: provider.clone(),
+        reader: FileReaderName::try_new(name)?,
+        revision: FileReaderRevision::try_new(READER_REVISION)?,
+        media_types: vec![CanonicalMediaType::from_str(media_type)?],
+        probe: ProbeDeclaration::new(4_096, 1, 2, MAX_TEXT_FAMILY_BYTES),
+        views: vec![view],
+        reason_codes,
+        streaming_text_fallback: fallback,
+    })?)
+}
+
+fn text_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
+    Ok(ReadViewDeclaration::try_new(
+        ReadViewName::try_new(TEXT_VIEW_NAME)?,
+        String::from("Reads the complete file as exact UTF-8 text."),
+        empty_options_schema()?,
+        ReadAccessPattern::Streaming,
+        ReadViewBounds::Text {
+            source_bytes: MAX_TEXT_FAMILY_BYTES,
+            output_bytes: MAX_TEXT_FAMILY_BYTES as usize,
+        },
+    )?)
+}
+
+fn structured_view(description: &str) -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
+    Ok(ReadViewDeclaration::try_new(
+        ReadViewName::try_new(STRUCTURED_VIEW_NAME)?,
+        String::from(description),
+        empty_options_schema()?,
+        ReadAccessPattern::Streaming,
+        ReadViewBounds::Structured {
+            source_bytes: MAX_TEXT_FAMILY_BYTES,
+            output_bytes: MAX_TEXT_FAMILY_BYTES as usize,
+            depth: 64,
+            nodes: 100_000,
+            string_bytes: MAX_TEXT_FAMILY_BYTES as usize,
+        },
+    )?)
+}
+
+fn empty_options_schema() -> Result<CanonicalJsonObjectSchema, Box<dyn Error + Send + Sync>> {
+    Ok(CanonicalJsonObjectSchema::try_new(
+        r#"{"additionalProperties":false,"type":"object"}"#,
+    )?)
+}
+
+fn options_are_empty(options: &serde_json::Value) -> bool {
+    options.as_object().is_some_and(serde_json::Map::is_empty)
+}

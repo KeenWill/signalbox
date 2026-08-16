@@ -1,0 +1,86 @@
+use signalbox_file_media_runtime::{
+    CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
+    ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, VerifiedBlobSource,
+};
+
+use crate::{JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
+
+pub(crate) async fn probe(
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+) -> Result<ProcessorProbeOutput, ProcessorFailure> {
+    let prefix = source::read_probe_prefix(source, cancellation).await?;
+    let candidate = prefix
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| matches!(byte, b'{' | b'['));
+    if candidate {
+        Ok(ProcessorProbeOutput::Candidate {
+            media_type: String::from(JSON_MEDIA_TYPE),
+            strength: ProbeStrength::StructuralCandidate,
+        })
+    } else {
+        Ok(ProcessorProbeOutput::NoMatch)
+    }
+}
+
+pub(crate) async fn inspect(
+    request: FileMediaProviderValidationRequest,
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+) -> Result<ProcessorValidationOutput, ProcessorFailure> {
+    if request.media_type.as_str() != JSON_MEDIA_TYPE {
+        return Err(ProcessorFailure::Protocol);
+    }
+    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+        return Ok(malformed("source_too_large"));
+    };
+    let text = match source::checked_utf8(bytes) {
+        Ok(text) => text,
+        Err(reason) => return Ok(malformed(reason)),
+    };
+    if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+        return Ok(malformed("malformed_json"));
+    }
+    Ok(ProcessorValidationOutput::Validated {
+        media_type: String::from(JSON_MEDIA_TYPE),
+        evidence: request.evidence,
+        metadata_json: serde_json::json!({"bytes": text.len()}).to_string(),
+    })
+}
+
+pub(crate) async fn read(
+    request: FileMediaProviderReadRequest,
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+) -> Result<ProcessorReadOutput, ProcessorFailure> {
+    if request.view.as_str() != "structured" || !options_are_empty(&request.options) {
+        return Ok(ProcessorReadOutput::InvalidViewArguments);
+    }
+    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+        return Ok(ProcessorReadOutput::SourceTooLarge {
+            maximum_bytes: MAX_TEXT_FAMILY_BYTES,
+        });
+    };
+    let text = source::checked_utf8(bytes).map_err(|_| ProcessorFailure::Failed)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| ProcessorFailure::Failed)?;
+    let body_json = serde_json::to_string(&value).map_err(|_| ProcessorFailure::Failed)?;
+    if body_json.len() > MAX_TEXT_FAMILY_BYTES as usize {
+        return Ok(ProcessorReadOutput::OutputUnitTooLarge);
+    }
+    Ok(ProcessorReadOutput::Structured {
+        body_json,
+        truncated: false,
+        cursor: None,
+    })
+}
+
+fn malformed(reason: &str) -> ProcessorValidationOutput {
+    ProcessorValidationOutput::Malformed {
+        media_type: String::from(JSON_MEDIA_TYPE),
+        reason_code: String::from(reason),
+    }
+}

@@ -1,0 +1,35 @@
+pub(crate) fn utf8_text() -> Vec<u8> {
+    "alpha\nβeta\n".as_bytes().to_vec()
+}
+
+pub(crate) fn truncated_utf8() -> Vec<u8> {
+    vec![b'a', 0xe2, 0x82]
+}
+
+pub(crate) fn json_document() -> Vec<u8> {
+    br#"{"name":"fixture","values":[1,2,3]}"#.to_vec()
+}
+
+pub(crate) fn truncated_json() -> Vec<u8> {
+    br#"{"name":"fixture""#.to_vec()
+}
+
+pub(crate) fn csv_table() -> Vec<u8> {
+    b"name,value\nalpha,1\nbeta,2\n".to_vec()
+}
+
+pub(crate) fn truncated_csv() -> Vec<u8> {
+    b"name,value\nalpha,\"unterminated\n".to_vec()
+}
+
+pub(crate) fn row_bomb_csv() -> Vec<u8> {
+    let mut bytes = b"name,value\n".to_vec();
+    for _ in 0..10_001 {
+        bytes.extend_from_slice(b"a,1\n");
+    }
+    bytes
+}
+
+pub(crate) fn oversized(fill: u8) -> Vec<u8> {
+    vec![fill; signalbox_file_media_adapters_text::MAX_TEXT_FAMILY_BYTES as usize + 1]
+}
