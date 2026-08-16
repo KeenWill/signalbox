@@ -56,9 +56,9 @@ const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
 // separately instead of treating either as a path.
 // numeric-bound: not-a-bound - fixed GitHub contents response path-field count
 const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
-// numeric-bound: ceiling - protects response memory from oversized symlink targets
+// numeric-bound: tunable - the symlink target length this client accepts
 const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
-// numeric-bound: ceiling - protects response memory from oversized submodule URLs
+// numeric-bound: tunable - the submodule URL length this client accepts
 const MAX_REPOSITORY_SUBMODULE_URL_BYTES: usize = 8 * 1024;
 // numeric-bound: ceiling - budgets per-entry JSON overhead in the response ceiling
 const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
