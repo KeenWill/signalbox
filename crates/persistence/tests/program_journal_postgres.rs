@@ -592,3 +592,49 @@ async fn initial_sequence_state_must_match_empty_journal() -> Result<(), Box<dyn
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn sequence_state_cannot_be_primed_past_a_missing_frame() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE program_run_journal_sequence_state
+            SET last_position = 1, last_request_ordinal = 1
+          WHERE run_id = $1",
+    )
+    .bind(run.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO program_run_journal_entry (
+             run_id, journal_position, frame_direction, frame_kind,
+             request_ordinal, payload_inline
+         ) VALUES ($1, 2, 'request', 'now', 2, 'gap')",
+    )
+    .bind(run.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE program_run_journal_sequence_state
+            SET last_position = 2, last_request_ordinal = 2
+          WHERE run_id = $1",
+    )
+    .bind(run.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+
+    let commit = transaction.commit().await;
+
+    assert_trigger_error(
+        commit.expect_err("sequence counters cannot hide a missing frame"),
+        "program journal sequence state disagrees with committed frames",
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

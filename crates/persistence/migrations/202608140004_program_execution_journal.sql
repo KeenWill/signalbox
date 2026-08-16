@@ -385,6 +385,9 @@ DECLARE
     maximum_position numeric(20, 0);
     maximum_request numeric(20, 0);
     maximum_delivery numeric(20, 0);
+    position_count bigint;
+    request_count bigint;
+    delivery_count bigint;
 BEGIN
     SELECT *
       INTO sequence
@@ -392,15 +395,22 @@ BEGIN
      WHERE run_id = NEW.run_id;
     SELECT COALESCE(max(journal_position), 0),
            COALESCE(max(request_ordinal), 0),
-           COALESCE(max(delivery_ordinal), 0)
-      INTO maximum_position, maximum_request, maximum_delivery
+           COALESCE(max(delivery_ordinal), 0),
+           count(*),
+           count(request_ordinal),
+           count(delivery_ordinal)
+      INTO maximum_position, maximum_request, maximum_delivery,
+           position_count, request_count, delivery_count
       FROM program_run_journal_entry
      WHERE run_id = NEW.run_id;
 
     IF sequence.run_id IS NULL
        OR sequence.last_position <> maximum_position
        OR sequence.last_request_ordinal <> maximum_request
-       OR sequence.last_delivery_ordinal <> maximum_delivery THEN
+       OR sequence.last_delivery_ordinal <> maximum_delivery
+       OR position_count <> maximum_position
+       OR request_count <> maximum_request
+       OR delivery_count <> maximum_delivery THEN
         RAISE EXCEPTION
             'program journal sequence state disagrees with committed frames'
             USING ERRCODE = '23514';

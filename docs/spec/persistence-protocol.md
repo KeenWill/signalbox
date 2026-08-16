@@ -717,7 +717,7 @@ live in the schema instead:
   lock between the scheduler and enrollment locks, and enrollment insertion and
   loss-cursor completion take that same identity lock before they can publish
   the competing fact; and
-- the program-journal append-sequence trigger in migration `202608140002` takes
+- the program-journal append-sequence trigger in migration `202608140004` takes
   `FOR UPDATE` on the run's sequence row before admitting the next contiguous
   global and direction-specific ordinal.
 
