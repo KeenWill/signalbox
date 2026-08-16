@@ -53,10 +53,11 @@ evidence, durable audit shape, operator presentation, evaluation method, and
 shadow-to-live promotion path in an owner-accepted specification and
 implementing stack. The following related questions also require owner rulings:
 
-- **Corpus location and governance.** Whether recorded approval cases live in a
-  repository file, a project-owned artifact, evaluation rows, or another
-  admitted store remains deliberately undecided, together with access,
-  redaction, retention, deletion, and reproducibility rules.
+- **Corpus governance.** Approval corpora follow the identity, admitted storage
+  forms, digest, and cross-storage reproducibility contract owned by
+  [evaluation system](spec/eval-system.md#corpus-and-expectations). Which admitted
+  storage form this corpus uses remains undecided, together with access,
+  redaction, retention, and deletion rules.
 
 - **Promotion bounds.** The maximum false-allow rate, minimum acceptable
   improvement, minimum labeled case count, required slices, and statistical
@@ -81,6 +82,8 @@ implementing stack. The following related questions also require owner rulings:
 - **Configuration actor audit.** Whether source-control and deployment audit are
   sufficient provenance for threshold changes, or Signalbox needs an
   authenticated configuration-change command, remains open.
+
+### Further projection and summarization
 
 - **Projection and summarization beyond the implemented role mappings.**
   [Model-call execution](spec/model-call-execution.md) owns the implemented
