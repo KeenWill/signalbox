@@ -1109,7 +1109,7 @@ impl RepositoryWatchTask {
                     repository = %self.repository.as_str(),
                     cause_code = "repository_identity_frontier_exhausted",
                     error = %error,
-                    "repository-watch identity frontier cannot assign another occurrence; every later comparison fails the same way"
+                    "repository-watch identity frontier cannot assign another occurrence; an observation introducing no new stream can still succeed"
                 );
                 RepositoryWatchAttemptError::IdentityFrontier
             }
@@ -1787,8 +1787,45 @@ impl RepositoryWatchAttemptError {
         }
     }
 
+    /// Whether this failure should stop repository watching altogether.
+    ///
+    /// This is not "retrying cannot help". Returning `true` ends this
+    /// repository's task, and `run_repository_watch` answers a task that ends
+    /// before shutdown by aborting every other repository task and reporting
+    /// `RepositoryTaskExited`, which the runtime treats as a lifecycle defect.
+    /// The blast radius is therefore all repository watching, so only a
+    /// failure that indicts the configuration behind every task belongs here.
+    ///
+    /// A rule identity that no longer matches its durable record is such a
+    /// failure: the rules this daemon was started with no longer describe the
+    /// database, and continuing would dispatch against a stale contract.
+    ///
+    /// An exhausted identity frontier is not. `StreamLimit` refuses only an
+    /// observation that introduces a stream the frontier has never counted;
+    /// streams already counted keep advancing at the ceiling, so a later
+    /// observation that adds no new stream — the new label or reaction is
+    /// removed, say — succeeds. Stopping on it would let one repository's
+    /// transient over-limit observation disable every other repository's watch
+    /// until restart. The recorded `repository_identity_frontier_exhausted`
+    /// cause code is the operator's signal instead.
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
+        match self {
+            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity => true,
+            Self::Credential
+            | Self::Request
+            | Self::Rejected
+            | Self::ResponseTooLarge
+            | Self::InvalidResponse
+            | Self::InvalidEntityTag
+            | Self::MissingCachedResource
+            | Self::ResourceLimit
+            | Self::Normalization
+            | Self::PullRequestFetchAbandoned
+            | Self::Differ
+            | Self::IdentityFrontier
+            | Self::Dispatch
+            | Self::Persistence => false,
+        }
     }
 }
 
