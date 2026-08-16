@@ -626,12 +626,15 @@ repeatable-read transaction, so every reported fact comes from a single database
 snapshot and no two of them can disagree. That read is pure and acquires no lock
 any writer waits on: submitting input, starting or advancing a turn, recording
 an approval, and every review mutation proceed unimpeded while a snapshot is
-under construction. Snapshot construction consumes one unit from the shared
-pool-capacity budget. That budget admits at most eight concurrent snapshot
-readers and is also bounded to leave at least two configured connections outside
-snapshot work; a pool with fewer than three configured connections cannot start
-the process listener. Daemon shutdown cancels the capacity wait and releases its
-reservation.
+under construction.
+
+<a id="snapshot-reader-capacity"></a>
+
+Snapshot construction consumes one unit from the shared pool-capacity budget.
+That budget admits at most eight concurrent snapshot readers and is also bounded
+to leave at least two configured connections outside snapshot work; a pool with
+fewer than three configured connections cannot start the process listener.
+Daemon shutdown cancels the capacity wait and releases its reservation.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the
@@ -1754,10 +1757,9 @@ draws the same single unit. The session-metadata read is admitted on the same
 ground as the rest and not for its result size: it opens a transaction, fixes a
 repeatable-read snapshot, selects, and commits. The session-defaults read is the
 single-statement case; it returns its connection immediately and takes no
-admission. The exact admission formula—at most eight snapshot readers while
-leaving at least two configured connections outside snapshot work—is owned by
-this contract, and every request states its admission class before dispatch, so
-no read verb reaches the pool by omission.
+admission. The [snapshot-reader capacity budget](#snapshot-reader-capacity) owns
+the admission formula. Every request states its admission class before dispatch,
+so no read verb reaches the pool by omission.
 
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
