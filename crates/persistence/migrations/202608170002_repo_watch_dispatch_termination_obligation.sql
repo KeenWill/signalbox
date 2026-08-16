@@ -32,6 +32,41 @@ ALTER TABLE repo_watch_dispatch_batch
         ON UPDATE RESTRICT
         ON DELETE RESTRICT;
 
+-- A batch admitted before this migration carries no delivered-state record.
+-- NULL is already the honest answer for a fresh batch, which delivered its
+-- originating event. An obligation successor did not — it replayed a
+-- still-matching earlier event over collapsed current state — so leaving it NULL
+-- would read an achievement against still-current state as stale and redispatch
+-- converged work. Reconstruct those from committed history: the newest event for
+-- the target recorded no later than the batch was admitted. Ordering by
+-- recorded_at is unsound for a live admission, where a commit that started
+-- earlier may land later, but every transaction involved here committed before
+-- this migration began. The append-only guard is lifted only to fill a column
+-- that did not exist when these rows were written; no recorded fact changes.
+ALTER TABLE repo_watch_dispatch_batch
+    DISABLE TRIGGER repo_watch_dispatch_batch_is_append_only;
+
+UPDATE repo_watch_dispatch_batch AS batch
+   SET delivered_state_event_id = (
+        SELECT state.event_id
+          FROM repo_watch_event AS state
+          JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+         WHERE state.repository = origin.repository
+           AND state.pull_request_number = origin.pull_request_number
+           AND state.recorded_at <= batch.admitted_at
+         ORDER BY state.cursor_generation DESC,
+                  state.event_ordinal DESC
+         LIMIT 1
+   )
+ WHERE EXISTS (
+        SELECT 1
+          FROM repo_watch_dispatch_obligation AS obligation
+         WHERE obligation.settled_dispatch_id = batch.dispatch_id
+   );
+
+ALTER TABLE repo_watch_dispatch_batch
+    ENABLE TRIGGER repo_watch_dispatch_batch_is_append_only;
+
 CREATE FUNCTION repo_watch_stamp_dispatch_batch_delivered_state()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -106,8 +141,9 @@ AS $$
 $$;
 
 -- Owes one requeue for a terminating dispatch, or nothing when its delivered
--- state already converged. Separated from release so that the upgrade pass over
--- already-released batches replays exactly this predicate rather than a copy.
+-- state already converged. Separate from release so that the decision to owe and
+-- the decision to release are each readable on their own; the release loop below
+-- decides only which batches reach this.
 CREATE FUNCTION repo_watch_owe_dispatch_requeue(
     candidate_dispatch_id uuid,
     completed_session_id uuid
@@ -352,42 +388,6 @@ BEGIN
                    )
            )
         ON CONFLICT DO NOTHING;
-    END LOOP;
-END;
-$$;
-
--- Replacing the release function changes only future trigger executions, and a
--- terminal goal event does not fire its trigger again. A dispatch that released
--- non-converged under the superseded behavior — including the held batches
--- 202608140100_repo_watch_dispatch_release.sql released in its own data pass —
--- would otherwise lose exactly the work this migration retains.
---
--- Only historically blocked and user-stopped releases are replayed. A historical
--- achievement converged against the head that was current at its own
--- termination boundary, which this migration cannot reconstruct; comparing it
--- against migration-time state would requeue automation that already succeeded.
-DO $$
-DECLARE
-    released_dispatch record;
-BEGIN
-    FOR released_dispatch IN
-        SELECT DISTINCT action.dispatch_id, action.session_id
-          FROM repo_watch_dispatch_action AS action
-          JOIN repo_watch_dispatch_release AS released
-            ON released.dispatch_id = action.dispatch_id
-         WHERE (
-                SELECT current_goal.event_kind
-                  FROM goal_event AS current_goal
-                 WHERE current_goal.session_id = action.session_id
-                 ORDER BY current_goal.event_ordinal DESC
-                 LIMIT 1
-         ) IN ('blocked', 'user_stopped')
-         ORDER BY action.dispatch_id, action.session_id
-    LOOP
-        PERFORM repo_watch_owe_dispatch_requeue(
-            released_dispatch.dispatch_id,
-            released_dispatch.session_id
-        );
     END LOOP;
 END;
 $$;
